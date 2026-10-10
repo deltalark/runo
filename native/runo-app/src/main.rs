@@ -4,6 +4,7 @@ mod git;
 mod settings;
 mod settings_ui;
 mod store;
+mod stream;
 
 use agent::{Event, Handle, Target};
 use gpui_kit::assets::IconName;
@@ -103,6 +104,8 @@ struct RunoApp {
     tx: Sender<Event>,
     chat_scroll: ScrollHandle,
     stderr: HashMap<u64, Vec<String>>,
+    /// Parsers for Claude runs, which print stream-json rather than plain text.
+    streams: HashMap<u64, stream::ClaudeStream>,
     search: Entity<InputState>,
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
@@ -435,6 +438,7 @@ impl RunoApp {
             tx,
             chat_scroll: ScrollHandle::new(),
             stderr: HashMap::new(),
+            streams: HashMap::new(),
             search,
             prompt,
             new_task: cx.new(|cx| {
@@ -560,15 +564,32 @@ impl RunoApp {
     fn handle_event(&mut self, event: Event) {
         match event {
             Event::Line(Target::Session(id), line) => {
+                let updates = match self.streams.get_mut(&id) {
+                    Some(parser) => parser.feed(&line),
+                    None => vec![stream::Update::Text(line)],
+                };
+                let plain = !self.streams.contains_key(&id);
                 if let Some(session) = self.state.session_mut(id) {
-                    match session.messages.last_mut() {
-                        Some(m) if m.role == Role::Agent => {
-                            if !m.text.is_empty() {
-                                m.text.push('\n');
-                            }
-                            m.text.push_str(&line);
+                    for update in updates {
+                        if !matches!(session.messages.last(), Some(m) if m.role == Role::Agent) {
+                            session.messages.push(Message::new(Role::Agent, ""));
                         }
-                        _ => session.messages.push(Message::new(Role::Agent, line)),
+                        let Some(m) = session.messages.last_mut() else {
+                            continue;
+                        };
+                        match update {
+                            stream::Update::Text(text) => {
+                                if plain && !m.text.is_empty() {
+                                    m.text.push('\n');
+                                }
+                                m.text.push_str(&text);
+                            }
+                            stream::Update::Step(step) => m.steps.push(step),
+                            stream::Update::Summary(summary) => m.meta = summary,
+                            stream::Update::Error(error) => {
+                                session.messages.push(Message::new(Role::System, error))
+                            }
+                        }
                     }
                 }
                 if self.selected == Some(id) && autoscroll() {
@@ -592,14 +613,13 @@ impl RunoApp {
             }
             Event::Done(Target::Session(id), ok) => {
                 self.handles.remove(&Target::Session(id));
+                self.streams.remove(&id);
                 self.started.remove(&id);
                 if let Some(session) = self.state.session_mut(id) {
                     session.status = if ok { Status::Done } else { Status::Failed };
-                    if session
-                        .messages
-                        .last()
-                        .is_some_and(|m| m.role == Role::Agent && m.text.is_empty())
-                    {
+                    if session.messages.last().is_some_and(|m| {
+                        m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
+                    }) {
                         if ok {
                             if let Some(m) = session.messages.last_mut() {
                                 m.text = "(The agent finished without any output.)".into();
@@ -704,6 +724,9 @@ impl RunoApp {
         match agent::run_agent(Target::Session(id), &spec, &dir, self.tx.clone()) {
             Ok(handle) => {
                 session.status = Status::Working;
+                if provider == "claude" {
+                    self.streams.insert(id, stream::ClaudeStream::new(&dir));
+                }
                 self.handles.insert(Target::Session(id), handle);
                 self.started.insert(id, std::time::Instant::now());
             }
@@ -1855,6 +1878,14 @@ impl RunoApp {
                             }),
                     )
                     .when(!message.steps.is_empty(), |el| el.child(steps))
+                    .when(!message.meta.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(c_muted()))
+                                .child(message.meta.clone()),
+                        )
+                    })
                     .when(show_changes && !working, |el| {
                         el.child(self.changes_card(cx))
                     }),

@@ -28,6 +28,9 @@ pub struct Message {
     pub steps: Vec<String>,
     #[serde(default)]
     pub time: String,
+    /// Run summary shown under the reply, such as "12s · 3 turns · $0.04".
+    #[serde(default)]
+    pub meta: String,
 }
 
 impl Session {
@@ -74,6 +77,7 @@ impl Message {
             text: text.into(),
             steps: Vec::new(),
             time: String::new(),
+            meta: String::new(),
         }
     }
 

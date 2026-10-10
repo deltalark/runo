@@ -238,7 +238,16 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 "full" => "bypassPermissions",
                 other => other,
             };
-            args.extend([s("-p"), s("--permission-mode"), s(permission)]);
+            // Structured output lets the app show each tool step live instead of a wall of text.
+            args.extend([
+                s("-p"),
+                s("--output-format"),
+                s("stream-json"),
+                s("--verbose"),
+                s("--include-partial-messages"),
+                s("--permission-mode"),
+                s(permission),
+            ]);
             if !model.is_empty() {
                 args.extend([s("--model"), model]);
             }
@@ -558,7 +567,7 @@ mod arg_tests {
         assert_eq!(out[0], "env=from-env");
         assert_eq!(
             out[1],
-            "args=-p --permission-mode acceptEdits --model opus -- do it"
+            "args=-p --output-format stream-json --verbose --include-partial-messages --permission-mode acceptEdits --model opus -- do it"
         );
         // stderr from an agent stays out of the conversation stream.
         assert_eq!(err, ["oops"]);
@@ -613,6 +622,10 @@ mod arg_tests {
             ),
             [
                 "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
                 "--permission-mode",
                 "plan",
                 "--model",
@@ -624,7 +637,17 @@ mod arg_tests {
         );
         assert_eq!(
             args("claude", false, &[], &o, true),
-            ["-p", "--permission-mode", "acceptEdits", "--", "hi"]
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--permission-mode",
+                "acceptEdits",
+                "--",
+                "hi"
+            ]
         );
         let o = AgentOptions {
             effort: "high".into(),
@@ -643,6 +666,10 @@ mod arg_tests {
             ),
             [
                 "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
                 "--permission-mode",
                 "dontAsk",
                 "--effort",
