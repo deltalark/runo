@@ -17,21 +17,48 @@ pub struct Provider {
 }
 
 pub const PROVIDERS: [Provider; 3] = [
-    Provider { id: "claude", name: "Claude Code", bin: "claude", mark: "✳", color: 0xd9633f },
-    Provider { id: "codex", name: "Codex", bin: "codex", mark: "◆", color: 0x1767e8 },
-    Provider { id: "opencode", name: "OpenCode", bin: "opencode", mark: ">_", color: 0x258a5b },
+    Provider {
+        id: "claude",
+        name: "Claude Code",
+        bin: "claude",
+        mark: "✳",
+        color: 0xd9633f,
+    },
+    Provider {
+        id: "codex",
+        name: "Codex",
+        bin: "codex",
+        mark: "◆",
+        color: 0x1767e8,
+    },
+    Provider {
+        id: "opencode",
+        name: "OpenCode",
+        bin: "opencode",
+        mark: ">_",
+        color: 0x258a5b,
+    },
 ];
 
 pub fn provider(id: &str) -> &'static Provider {
-    PROVIDERS.iter().find(|p| p.id == id).unwrap_or(&PROVIDERS[0])
+    PROVIDERS
+        .iter()
+        .find(|p| p.id == id)
+        .unwrap_or(&PROVIDERS[0])
 }
 
 pub fn installed(bin: &str) -> bool {
-    let suffixes: &[&str] = if cfg!(windows) { &["", ".exe", ".cmd", ".bat"] } else { &[""] };
+    let suffixes: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
     std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths).any(|dir| {
-                suffixes.iter().any(|s| dir.join(format!("{bin}{s}")).is_file())
+                suffixes
+                    .iter()
+                    .any(|s| dir.join(format!("{bin}{s}")).is_file())
             })
         })
         .unwrap_or(false)
@@ -65,7 +92,11 @@ pub fn split_args(input: &str) -> Vec<String> {
 }
 
 fn list(input: &str) -> Vec<String> {
-    input.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect()
+    input
+        .split(',')
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
 }
 
 pub struct RunSpec<'a> {
@@ -226,8 +257,17 @@ impl Handle {
     }
 }
 
-pub fn run_agent(target: Target, spec: &RunSpec, dir: &str, tx: Sender<Event>) -> Result<Handle, String> {
-    let bin = if spec.opts.binary.trim().is_empty() { self::provider(spec.provider).bin } else { spec.opts.binary.trim() };
+pub fn run_agent(
+    target: Target,
+    spec: &RunSpec,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
+    let bin = if spec.opts.binary.trim().is_empty() {
+        self::provider(spec.provider).bin
+    } else {
+        spec.opts.binary.trim()
+    };
     let mut command = Command::new(bin);
     command.args(provider_args(spec));
     for line in spec.opts.env.lines() {
@@ -240,7 +280,12 @@ pub fn run_agent(target: Target, spec: &RunSpec, dir: &str, tx: Sender<Event>) -
     spawn(target, command, dir, tx)
 }
 
-pub fn run_shell(target: Target, line: &str, dir: &str, tx: Sender<Event>) -> Result<Handle, String> {
+pub fn run_shell(
+    target: Target,
+    line: &str,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
     let mut command = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.args(["/C", line]);
@@ -269,7 +314,12 @@ fn pump<R: Read + Send + 'static>(reader: R, target: Target, is_err: bool, tx: S
     });
 }
 
-fn spawn(target: Target, mut command: Command, dir: &str, tx: Sender<Event>) -> Result<Handle, String> {
+fn spawn(
+    target: Target,
+    mut command: Command,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
     let mut child = command
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -286,7 +336,10 @@ fn spawn(target: Target, mut command: Command, dir: &str, tx: Sender<Event>) -> 
     let child = Arc::new(Mutex::new(child));
     let waiter = child.clone();
     std::thread::spawn(move || loop {
-        let finished = waiter.lock().ok().and_then(|mut c| c.try_wait().ok().flatten());
+        let finished = waiter
+            .lock()
+            .ok()
+            .and_then(|mut c| c.try_wait().ok().flatten());
         if let Some(status) = finished {
             // Let the reader threads flush the final lines first.
             std::thread::sleep(Duration::from_millis(150));
@@ -306,7 +359,13 @@ mod tests {
     fn shell_streams_lines_then_done() {
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
-        run_shell(Target::Terminal(1), "echo hi && echo err 1>&2", dir.to_str().unwrap(), tx).unwrap();
+        run_shell(
+            Target::Terminal(1),
+            "echo hi && echo err 1>&2",
+            dir.to_str().unwrap(),
+            tx,
+        )
+        .unwrap();
         let mut lines = vec![];
         loop {
             match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -328,40 +387,137 @@ mod arg_tests {
     use std::collections::HashMap;
 
     fn sel(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
-    fn args(provider: &str, resume: bool, selections: &[(&str, &str)], opts: &AgentOptions, in_git: bool) -> Vec<String> {
+    fn args(
+        provider: &str,
+        resume: bool,
+        selections: &[(&str, &str)],
+        opts: &AgentOptions,
+        in_git: bool,
+    ) -> Vec<String> {
         let sel = sel(selections);
-        provider_args(&RunSpec { provider, prompt: "hi", resume, sel: &sel, opts, in_git })
+        provider_args(&RunSpec {
+            provider,
+            prompt: "hi",
+            resume,
+            sel: &sel,
+            opts,
+            in_git,
+        })
     }
 
     #[test]
     fn claude_args() {
         let o = AgentOptions::default();
         assert_eq!(
-            args("claude", true, &[("mode", "plan"), ("model", "opus")], &o, true),
-            ["-p", "--permission-mode", "plan", "--model", "opus", "--continue", "--", "hi"]
+            args(
+                "claude",
+                true,
+                &[("mode", "plan"), ("model", "opus")],
+                &o,
+                true
+            ),
+            [
+                "-p",
+                "--permission-mode",
+                "plan",
+                "--model",
+                "opus",
+                "--continue",
+                "--",
+                "hi"
+            ]
         );
-        assert_eq!(args("claude", false, &[], &o, true), ["-p", "--permission-mode", "acceptEdits", "--", "hi"]);
-        let o = AgentOptions { effort: "high".into(), allowed_tools: "Read, Edit".into(), add_dirs: "/a,/b".into(), extra_args: "--verbose".into(), ..Default::default() };
         assert_eq!(
-            args("claude", false, &[("mode", "dontAsk"), ("effort", "max")], &o, true),
-            ["-p", "--permission-mode", "dontAsk", "--effort", "max", "--allowed-tools", "Read,Edit", "--add-dir", "/a", "--add-dir", "/b", "--verbose", "--", "hi"]
+            args("claude", false, &[], &o, true),
+            ["-p", "--permission-mode", "acceptEdits", "--", "hi"]
+        );
+        let o = AgentOptions {
+            effort: "high".into(),
+            allowed_tools: "Read, Edit".into(),
+            add_dirs: "/a,/b".into(),
+            extra_args: "--verbose".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            args(
+                "claude",
+                false,
+                &[("mode", "dontAsk"), ("effort", "max")],
+                &o,
+                true
+            ),
+            [
+                "-p",
+                "--permission-mode",
+                "dontAsk",
+                "--effort",
+                "max",
+                "--allowed-tools",
+                "Read,Edit",
+                "--add-dir",
+                "/a",
+                "--add-dir",
+                "/b",
+                "--verbose",
+                "--",
+                "hi"
+            ]
         );
     }
 
     #[test]
     fn codex_args() {
         let o = AgentOptions::default();
-        assert_eq!(args("codex", false, &[], &o, true), ["exec", "--sandbox", "workspace-write", "hi"]);
-        assert_eq!(args("codex", false, &[("mode", "full")], &o, true), ["exec", "--sandbox", "danger-full-access", "hi"]);
-        let o = AgentOptions { profile: "work".into(), ..Default::default() };
         assert_eq!(
-            args("codex", true, &[("mode", "read-only"), ("model", "gpt-5.6-sol"), ("effort", "high"), ("tier", "priority"), ("approval", "never")], &o, false),
+            args("codex", false, &[], &o, true),
+            ["exec", "--sandbox", "workspace-write", "hi"]
+        );
+        assert_eq!(
+            args("codex", false, &[("mode", "full")], &o, true),
+            ["exec", "--sandbox", "danger-full-access", "hi"]
+        );
+        let o = AgentOptions {
+            profile: "work".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            args(
+                "codex",
+                true,
+                &[
+                    ("mode", "read-only"),
+                    ("model", "gpt-5.6-sol"),
+                    ("effort", "high"),
+                    ("tier", "priority"),
+                    ("approval", "never")
+                ],
+                &o,
+                false
+            ),
             [
-                "exec", "--sandbox", "read-only", "-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\"", "-c",
-                "approval_policy=\"never\"", "-p", "work", "--skip-git-repo-check", "resume", "--last", "hi"
+                "exec",
+                "--sandbox",
+                "read-only",
+                "-m",
+                "gpt-5.6-sol",
+                "-c",
+                "model_reasoning_effort=\"high\"",
+                "-c",
+                "service_tier=\"priority\"",
+                "-c",
+                "approval_policy=\"never\"",
+                "-p",
+                "work",
+                "--skip-git-repo-check",
+                "resume",
+                "--last",
+                "hi"
             ]
         );
     }
@@ -370,17 +526,48 @@ mod arg_tests {
     fn opencode_args() {
         let o = AgentOptions::default();
         assert_eq!(args("opencode", false, &[], &o, true), ["run", "hi"]);
-        assert_eq!(args("opencode", true, &[("mode", "plan")], &o, true), ["run", "--continue", "--agent", "plan", "hi"]);
-        let o = AgentOptions { variant: "high".into(), thinking: true, ..Default::default() };
         assert_eq!(
-            args("opencode", false, &[("mode", "auto"), ("model", "opencode/big-pickle"), ("agent", "build")], &o, true),
-            ["run", "-m", "opencode/big-pickle", "--agent", "build", "--variant", "high", "--thinking", "--auto", "hi"]
+            args("opencode", true, &[("mode", "plan")], &o, true),
+            ["run", "--continue", "--agent", "plan", "hi"]
+        );
+        let o = AgentOptions {
+            variant: "high".into(),
+            thinking: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            args(
+                "opencode",
+                false,
+                &[
+                    ("mode", "auto"),
+                    ("model", "opencode/big-pickle"),
+                    ("agent", "build")
+                ],
+                &o,
+                true
+            ),
+            [
+                "run",
+                "-m",
+                "opencode/big-pickle",
+                "--agent",
+                "build",
+                "--variant",
+                "high",
+                "--thinking",
+                "--auto",
+                "hi"
+            ]
         );
     }
 
     #[test]
     fn splits_quoted_args() {
-        assert_eq!(split_args(r#"--foo "a b" 'c d' e"#), ["--foo", "a b", "c d", "e"]);
+        assert_eq!(
+            split_args(r#"--foo "a b" 'c d' e"#),
+            ["--foo", "a b", "c d", "e"]
+        );
         assert!(split_args("   ").is_empty());
     }
 }

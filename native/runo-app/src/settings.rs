@@ -122,7 +122,11 @@ impl AppSettings {
 
     /// Push the values that hot paths read (colours, animation switch…) into statics.
     pub fn apply(&self) {
-        let accent = ACCENTS.iter().find(|(id, _, _)| *id == self.accent).map(|a| a.2).unwrap_or(ACCENTS[0].2);
+        let accent = ACCENTS
+            .iter()
+            .find(|(id, _, _)| *id == self.accent)
+            .map(|a| a.2)
+            .unwrap_or(ACCENTS[0].2);
         ACCENT.store(accent, Ordering::Relaxed);
         DIFF.store(
             match self.diff_colors.as_str() {
@@ -184,7 +188,11 @@ pub fn autoscroll() -> bool {
 }
 
 fn pick(light: u32, dark: u32) -> u32 {
-    if is_dark() { dark } else { light }
+    if is_dark() {
+        dark
+    } else {
+        light
+    }
 }
 
 fn mix(a: u32, b: u32, t: f32) -> u32 {
@@ -195,22 +203,50 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
     (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
 
-pub fn c_canvas() -> u32 { pick(0xffffff, 0x14171c) }
-pub fn c_sidebar() -> u32 { pick(0xf8f9fb, 0x181b21) }
-pub fn c_subtle() -> u32 { pick(0xf3f5f8, 0x20242b) }
-pub fn c_border() -> u32 { pick(0xe6eaf0, 0x2b303a) }
-pub fn c_text() -> u32 { pick(0x1b2433, 0xe7eaf0) }
-pub fn c_secondary() -> u32 { pick(0x5d6a7c, 0xa3aebe) }
-pub fn c_muted() -> u32 { pick(0x93a0b1, 0x6f7b8d) }
-pub fn c_term_bg() -> u32 { pick(0xfafbfc, 0x111419) }
+pub fn c_canvas() -> u32 {
+    pick(0xffffff, 0x14171c)
+}
+pub fn c_sidebar() -> u32 {
+    pick(0xf8f9fb, 0x181b21)
+}
+pub fn c_subtle() -> u32 {
+    pick(0xf3f5f8, 0x20242b)
+}
+pub fn c_border() -> u32 {
+    pick(0xe6eaf0, 0x2b303a)
+}
+pub fn c_text() -> u32 {
+    pick(0x1b2433, 0xe7eaf0)
+}
+pub fn c_secondary() -> u32 {
+    pick(0x5d6a7c, 0xa3aebe)
+}
+pub fn c_muted() -> u32 {
+    pick(0x93a0b1, 0x6f7b8d)
+}
+pub fn c_term_bg() -> u32 {
+    pick(0xfafbfc, 0x111419)
+}
 pub fn c_blue() -> u32 {
     let accent = ACCENT.load(Ordering::Relaxed);
-    if is_dark() { mix(accent, 0xffffff, 0.8) } else { accent }
+    if is_dark() {
+        mix(accent, 0xffffff, 0.8)
+    } else {
+        accent
+    }
 }
-pub fn c_selected() -> u32 { mix(c_blue(), c_canvas(), if is_dark() { 0.18 } else { 0.10 }) }
-pub fn c_green() -> u32 { pick(0x1f9d55, 0x3ccf7a) }
-pub fn c_amber() -> u32 { pick(0xf0a020, 0xf3b23f) }
-pub fn c_red() -> u32 { pick(0xd0454c, 0xf0686e) }
+pub fn c_selected() -> u32 {
+    mix(c_blue(), c_canvas(), if is_dark() { 0.18 } else { 0.10 })
+}
+pub fn c_green() -> u32 {
+    pick(0x1f9d55, 0x3ccf7a)
+}
+pub fn c_amber() -> u32 {
+    pick(0xf0a020, 0xf3b23f)
+}
+pub fn c_red() -> u32 {
+    pick(0xd0454c, 0xf0686e)
+}
 
 /// Text colour for added / removed lines, honouring the diff palette.
 pub fn c_add() -> u32 {
@@ -228,11 +264,19 @@ pub fn c_del() -> u32 {
     }
 }
 pub fn c_add_bg() -> u32 {
-    let strength = if DIFF.load(Ordering::Relaxed) == 2 { 0.28 } else { 0.14 };
+    let strength = if DIFF.load(Ordering::Relaxed) == 2 {
+        0.28
+    } else {
+        0.14
+    };
     mix(c_add(), c_canvas(), strength)
 }
 pub fn c_del_bg() -> u32 {
-    let strength = if DIFF.load(Ordering::Relaxed) == 2 { 0.28 } else { 0.14 };
+    let strength = if DIFF.load(Ordering::Relaxed) == 2 {
+        0.28
+    } else {
+        0.14
+    };
     mix(c_del(), c_canvas(), strength)
 }
 
@@ -245,10 +289,15 @@ pub fn notify(title: &str, body: &str) {
     let (title, body) = (title.replace('"', "'"), body.replace('"', "'"));
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("osascript")
-        .args(["-e", &format!("display notification \"{body}\" with title \"{title}\"")])
+        .args([
+            "-e",
+            &format!("display notification \"{body}\" with title \"{title}\""),
+        ])
         .spawn();
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("notify-send").args([&title, &body]).spawn();
+    let _ = std::process::Command::new("notify-send")
+        .args([&title, &body])
+        .spawn();
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = (title, body);
 }
@@ -281,7 +330,9 @@ pub struct Discovered {
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 fn frontmatter(text: &str, key: &str) -> Option<String> {
@@ -294,20 +345,32 @@ fn frontmatter(text: &str, key: &str) -> Option<String> {
             break;
         }
         if let Some(rest) = line.strip_prefix(&format!("{key}:")) {
-            return Some(rest.trim().trim_matches(|c| c == '"' || c == '\'').to_string());
+            return Some(
+                rest.trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_string(),
+            );
         }
     }
     None
 }
 
 fn scan_skills(dir: &Path, source: &'static str, out: &mut Vec<SkillInfo>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path().join("SKILL.md");
         if let Ok(text) = std::fs::read_to_string(&path) {
-            let name = frontmatter(&text, "name").unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
+            let name = frontmatter(&text, "name")
+                .unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
             let description = frontmatter(&text, "description").unwrap_or_default();
-            out.push(SkillInfo { name, description, path, source });
+            out.push(SkillInfo {
+                name,
+                description,
+                path,
+                source,
+            });
         }
     }
 }
@@ -316,15 +379,28 @@ fn scan_mcp(out: &mut Vec<McpInfo>) {
     let Some(home) = home() else { return };
     // Claude Code: user-scoped servers in ~/.claude.json
     let claude = home.join(".claude.json");
-    if let Some(value) = std::fs::read_to_string(&claude).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()) {
+    if let Some(value) = std::fs::read_to_string(&claude)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    {
         if let Some(servers) = value.get("mcpServers").and_then(|v| v.as_object()) {
             for (name, cfg) in servers {
-                let (transport, detail) = match (cfg.get("command").and_then(|v| v.as_str()), cfg.get("url").and_then(|v| v.as_str())) {
+                let (transport, detail) = match (
+                    cfg.get("command").and_then(|v| v.as_str()),
+                    cfg.get("url").and_then(|v| v.as_str()),
+                ) {
                     (Some(cmd), _) => ("stdio", cmd.to_string()),
                     (None, Some(url)) => ("http", url.to_string()),
                     _ => ("unknown", String::new()),
                 };
-                out.push(McpInfo { name: name.clone(), provider: "Claude", transport, enabled: true, detail, path: claude.clone() });
+                out.push(McpInfo {
+                    name: name.clone(),
+                    provider: "Claude",
+                    transport,
+                    enabled: true,
+                    detail,
+                    path: claude.clone(),
+                });
             }
         }
     }
@@ -334,7 +410,10 @@ fn scan_mcp(out: &mut Vec<McpInfo>) {
         let mut current: Option<McpInfo> = None;
         for line in text.lines() {
             let line = line.trim();
-            if let Some(header) = line.strip_prefix("[mcp_servers.").and_then(|h| h.strip_suffix(']')) {
+            if let Some(header) = line
+                .strip_prefix("[mcp_servers.")
+                .and_then(|h| h.strip_suffix(']'))
+            {
                 if header.contains('.') && !header.starts_with('"') {
                     continue; // sub-table such as `.env`
                 }
@@ -354,7 +433,11 @@ fn scan_mcp(out: &mut Vec<McpInfo>) {
                     out.push(done);
                 }
             } else if let Some(info) = current.as_mut() {
-                let value = |key: &str| line.strip_prefix(key).and_then(|r| r.trim_start().strip_prefix('=')).map(|v| v.trim().trim_matches('"').to_string());
+                let value = |key: &str| {
+                    line.strip_prefix(key)
+                        .and_then(|r| r.trim_start().strip_prefix('='))
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                };
                 if let Some(cmd) = value("command") {
                     info.detail = cmd;
                 } else if let Some(url) = value("url") {
@@ -373,24 +456,50 @@ fn scan_mcp(out: &mut Vec<McpInfo>) {
 }
 
 fn which(bin: &str) -> Option<PathBuf> {
-    let suffixes: &[&str] = if cfg!(windows) { &["", ".exe", ".cmd", ".bat"] } else { &[""] };
+    let suffixes: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
     std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
-        suffixes.iter().map(|s| dir.join(format!("{bin}{s}"))).find(|p| p.is_file())
+        suffixes
+            .iter()
+            .map(|s| dir.join(format!("{bin}{s}")))
+            .find(|p| p.is_file())
     })
 }
 
 pub fn discover(project_dir: Option<&str>) -> Discovered {
     let mut found = Discovered::default();
     if let Some(home) = home() {
-        scan_skills(&home.join(".claude").join("skills"), "claude", &mut found.skills);
-        scan_skills(&home.join(".agents").join("skills"), "agents", &mut found.skills);
-        scan_skills(&home.join(".codex").join("skills"), "codex", &mut found.skills);
+        scan_skills(
+            &home.join(".claude").join("skills"),
+            "claude",
+            &mut found.skills,
+        );
+        scan_skills(
+            &home.join(".agents").join("skills"),
+            "agents",
+            &mut found.skills,
+        );
+        scan_skills(
+            &home.join(".codex").join("skills"),
+            "codex",
+            &mut found.skills,
+        );
     }
     if let Some(dir) = project_dir {
-        scan_skills(&Path::new(dir).join(".claude").join("skills"), "project", &mut found.skills);
+        scan_skills(
+            &Path::new(dir).join(".claude").join("skills"),
+            "project",
+            &mut found.skills,
+        );
     }
     found.skills.sort_by(|a, b| a.name.cmp(&b.name));
     scan_mcp(&mut found.mcp);
-    found.provider_paths = crate::agent::PROVIDERS.iter().map(|p| (p.id, which(p.bin))).collect();
+    found.provider_paths = crate::agent::PROVIDERS
+        .iter()
+        .map(|p| (p.id, which(p.bin)))
+        .collect();
     found
 }

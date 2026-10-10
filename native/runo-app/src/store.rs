@@ -46,7 +46,12 @@ impl Session {
 
 impl Message {
     pub fn new(role: Role, text: impl Into<String>) -> Self {
-        Self { role, text: text.into(), steps: Vec::new(), time: String::new() }
+        Self {
+            role,
+            text: text.into(),
+            steps: Vec::new(),
+            time: String::new(),
+        }
     }
 }
 
@@ -111,7 +116,10 @@ impl State {
         for session in &mut state.sessions {
             if session.status == Status::Working {
                 session.status = Status::Failed;
-                session.messages.push(Message::new(Role::System, "Interrupted: Runo closed while this run was active."));
+                session.messages.push(Message::new(
+                    Role::System,
+                    "Interrupted: Runo closed while this run was active.",
+                ));
             }
         }
         state
@@ -147,21 +155,26 @@ impl State {
 impl State {
     /// Sample workspace shown until the first real project is added.
     pub fn demo() -> Self {
-        let project = |id: u64, name: &str| Project { id, name: name.into(), path: format!("/demo/{name}") };
-        let session = |id, project_id, title: &str, provider: &str, branch: &str, status, messages| Session {
+        let project = |id: u64, name: &str| Project {
             id,
-            project_id,
-            title: title.into(),
-            provider: provider.into(),
-            branch: branch.into(),
-            dir: String::new(),
-            isolated: true,
-            mode: default_mode(),
-            model: String::new(),
-            opts: HashMap::new(),
-            status,
-            messages,
+            name: name.into(),
+            path: format!("/demo/{name}"),
         };
+        let session =
+            |id, project_id, title: &str, provider: &str, branch: &str, status, messages| Session {
+                id,
+                project_id,
+                title: title.into(),
+                provider: provider.into(),
+                branch: branch.into(),
+                dir: String::new(),
+                isolated: true,
+                mode: default_mode(),
+                model: String::new(),
+                opts: HashMap::new(),
+                status,
+                messages,
+            };
         let nav = vec![
             Message { time: "10:24 AM".into(), ..Message::new(Role::User, "Refine the workspace navigation. Keep it compact, intuitive, and consistent across desktop platforms.") },
             Message {
@@ -180,13 +193,61 @@ impl State {
                 project(5, "botoxy"),
             ],
             sessions: vec![
-                session(11, 1, "Refine navigation", "claude", "feature/navigation", Status::Working, nav.clone()),
-                session(12, 1, "Search indexing", "codex", "feature/search", Status::Idle, nav.clone()),
-                session(13, 1, "Fix build warnings", "opencode", "chore/build", Status::Done, nav.clone()),
+                session(
+                    11,
+                    1,
+                    "Refine navigation",
+                    "claude",
+                    "feature/navigation",
+                    Status::Working,
+                    nav.clone(),
+                ),
+                session(
+                    12,
+                    1,
+                    "Search indexing",
+                    "codex",
+                    "feature/search",
+                    Status::Idle,
+                    nav.clone(),
+                ),
+                session(
+                    13,
+                    1,
+                    "Fix build warnings",
+                    "opencode",
+                    "chore/build",
+                    Status::Done,
+                    nav.clone(),
+                ),
                 session(21, 2, "main", "claude", "main", Status::Done, nav.clone()),
-                session(31, 3, "Scalping backtest", "claude", "indiana-scalping-backtest", Status::Done, nav.clone()),
-                session(41, 4, "Update dashboard", "codex", "feat/dashboard", Status::Done, nav.clone()),
-                session(51, 5, "Fix webhook retry", "opencode", "fix/webhooks", Status::Done, nav),
+                session(
+                    31,
+                    3,
+                    "Scalping backtest",
+                    "claude",
+                    "indiana-scalping-backtest",
+                    Status::Done,
+                    nav.clone(),
+                ),
+                session(
+                    41,
+                    4,
+                    "Update dashboard",
+                    "codex",
+                    "feat/dashboard",
+                    Status::Done,
+                    nav.clone(),
+                ),
+                session(
+                    51,
+                    5,
+                    "Fix webhook retry",
+                    "opencode",
+                    "fix/webhooks",
+                    Status::Done,
+                    nav,
+                ),
             ],
         }
     }

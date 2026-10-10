@@ -22,16 +22,33 @@ pub enum SettingsPage {
 
 impl SettingsPage {
     const GROUPS: [(&'static str, &'static [SettingsPage]); 3] = [
-        ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Keybindings]),
+        (
+            "App",
+            &[
+                SettingsPage::General,
+                SettingsPage::Appearance,
+                SettingsPage::Keybindings,
+            ],
+        ),
         (
             "Agents",
-            &[SettingsPage::Chat, SettingsPage::Providers, SettingsPage::Claude, SettingsPage::Codex, SettingsPage::OpenCode, SettingsPage::Mcp, SettingsPage::Skills],
+            &[
+                SettingsPage::Chat,
+                SettingsPage::Providers,
+                SettingsPage::Claude,
+                SettingsPage::Codex,
+                SettingsPage::OpenCode,
+                SettingsPage::Mcp,
+                SettingsPage::Skills,
+            ],
         ),
         ("Workspace", &[SettingsPage::Worktrees]),
     ];
 
     fn all() -> impl Iterator<Item = SettingsPage> {
-        Self::GROUPS.iter().flat_map(|(_, pages)| pages.iter().copied())
+        Self::GROUPS
+            .iter()
+            .flat_map(|(_, pages)| pages.iter().copied())
     }
 
     fn label(self) -> &'static str {
@@ -98,7 +115,12 @@ enum Ctl {
     Switch(bool, SetBool),
     Segment(Vec<(String, String)>, String, SetStr),
     Dropdown(Vec<(String, String)>, String, SetStr),
-    Text { key: String, value: String, placeholder: String, set: SetStr },
+    Text {
+        key: String,
+        value: String,
+        placeholder: String,
+        set: SetStr,
+    },
     Accent(String),
     Button(String, Action),
     Chip(String, u32),
@@ -119,11 +141,19 @@ struct Section {
 }
 
 fn section(title: &str, desc: &str, rows: Vec<Row>) -> Section {
-    Section { title: title.into(), desc: desc.into(), rows }
+    Section {
+        title: title.into(),
+        desc: desc.into(),
+        rows,
+    }
 }
 
 fn row(title: &str, desc: &str, ctl: Ctl) -> Row {
-    Row { title: title.into(), desc: desc.into(), ctl }
+    Row {
+        title: title.into(),
+        desc: desc.into(),
+        ctl,
+    }
 }
 
 fn switch_row(title: &str, desc: &str, on: bool, set: fn(&mut AppSettings, bool)) -> Row {
@@ -131,10 +161,21 @@ fn switch_row(title: &str, desc: &str, on: bool, set: fn(&mut AppSettings, bool)
 }
 
 fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
-    items.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect()
+    items
+        .iter()
+        .map(|(v, l)| (v.to_string(), l.to_string()))
+        .collect()
 }
 
-fn agent_text(pid: &'static str, st: &AppSettings, title: &str, desc: &str, placeholder: &str, get: fn(&AgentOptions) -> String, set: fn(&mut AgentOptions, String)) -> Row {
+fn agent_text(
+    pid: &'static str,
+    st: &AppSettings,
+    title: &str,
+    desc: &str,
+    placeholder: &str,
+    get: fn(&AgentOptions) -> String,
+    set: fn(&mut AgentOptions, String),
+) -> Row {
     row(
         title,
         desc,
@@ -147,15 +188,35 @@ fn agent_text(pid: &'static str, st: &AppSettings, title: &str, desc: &str, plac
     )
 }
 
-fn agent_choice(pid: &'static str, st: &AppSettings, title: &str, desc: &str, opts: Vec<(String, String)>, get: fn(&AgentOptions) -> String, set: fn(&mut AgentOptions, String)) -> Row {
-    row(title, desc, Ctl::Dropdown(opts, get(&st.agent(pid)), Rc::new(move |s, v| set(s.agents.entry(pid.to_string()).or_default(), v))))
+fn agent_choice(
+    pid: &'static str,
+    st: &AppSettings,
+    title: &str,
+    desc: &str,
+    opts: Vec<(String, String)>,
+    get: fn(&AgentOptions) -> String,
+    set: fn(&mut AgentOptions, String),
+) -> Row {
+    row(
+        title,
+        desc,
+        Ctl::Dropdown(
+            opts,
+            get(&st.agent(pid)),
+            Rc::new(move |s, v| set(s.agents.entry(pid.to_string()).or_default(), v)),
+        ),
+    )
 }
 
 fn list_values(choices: &[caps::Choice]) -> String {
     if choices.is_empty() {
         "None reported".into()
     } else {
-        choices.iter().map(|c| c.value.as_str()).collect::<Vec<_>>().join(", ")
+        choices
+            .iter()
+            .map(|c| c.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -164,31 +225,90 @@ fn detected_section(pid: &'static str) -> Section {
     let mut rows = vec![row(
         "Installed version",
         "Read from the CLI with --version.",
-        if caps.installed { Ctl::Chip(caps.version.clone(), 0) } else if caps.detected { Ctl::Chip("Not installed".into(), 1) } else { Ctl::Chip("Detecting…".into(), 2) },
+        if caps.installed {
+            Ctl::Chip(caps.version.clone(), 0)
+        } else if caps.detected {
+            Ctl::Chip("Not installed".into(), 1)
+        } else {
+            Ctl::Chip("Detecting…".into(), 2)
+        },
     )];
     if !caps.models.is_empty() {
-        let names: Vec<&str> = caps.models.iter().take(10).map(|m| m.choice.value.as_str()).collect();
+        let names: Vec<&str> = caps
+            .models
+            .iter()
+            .take(10)
+            .map(|m| m.choice.value.as_str())
+            .collect();
         let more = caps.models.len().saturating_sub(10);
-        rows.push(row("Models", &format!("{}{}", names.join(", "), if more > 0 { format!(" and {more} more") } else { String::new() }), Ctl::Chip(format!("{} found", caps.models.len()), 3)));
+        rows.push(row(
+            "Models",
+            &format!(
+                "{}{}",
+                names.join(", "),
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ),
+            Ctl::Chip(format!("{} found", caps.models.len()), 3),
+        ));
     }
     match pid {
         "claude" => {
-            rows.push(row("Permission modes", &list_values(&caps.modes), Ctl::Chip(format!("{}", caps.modes.len()), 3)));
-            rows.push(row("Effort levels", &list_values(&caps.efforts), Ctl::Chip(format!("{}", caps.efforts.len()), 3)));
+            rows.push(row(
+                "Permission modes",
+                &list_values(&caps.modes),
+                Ctl::Chip(format!("{}", caps.modes.len()), 3),
+            ));
+            rows.push(row(
+                "Effort levels",
+                &list_values(&caps.efforts),
+                Ctl::Chip(format!("{}", caps.efforts.len()), 3),
+            ));
         }
         "codex" => {
-            rows.push(row("Sandbox modes", &list_values(&caps.modes), Ctl::Chip(format!("{}", caps.modes.len()), 3)));
-            rows.push(row("Approval policies", &list_values(&caps.approvals), Ctl::Chip(format!("{}", caps.approvals.len()), 3)));
+            rows.push(row(
+                "Sandbox modes",
+                &list_values(&caps.modes),
+                Ctl::Chip(format!("{}", caps.modes.len()), 3),
+            ));
+            rows.push(row(
+                "Approval policies",
+                &list_values(&caps.approvals),
+                Ctl::Chip(format!("{}", caps.approvals.len()), 3),
+            ));
             if let Some(m) = caps.models.first() {
-                rows.push(row("Reasoning levels", &format!("{}: {}", m.choice.label, list_values(&m.efforts)), Ctl::Chip(format!("{}", m.efforts.len()), 3)));
+                rows.push(row(
+                    "Reasoning levels",
+                    &format!("{}: {}", m.choice.label, list_values(&m.efforts)),
+                    Ctl::Chip(format!("{}", m.efforts.len()), 3),
+                ));
                 if !m.tiers.is_empty() {
-                    rows.push(row("Speed tiers", &m.tiers.iter().map(|t| format!("{} ({})", t.label, t.value)).collect::<Vec<_>>().join(", "), Ctl::Chip(format!("{}", m.tiers.len()), 3)));
+                    rows.push(row(
+                        "Speed tiers",
+                        &m.tiers
+                            .iter()
+                            .map(|t| format!("{} ({})", t.label, t.value))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        Ctl::Chip(format!("{}", m.tiers.len()), 3),
+                    ));
                 }
             }
         }
         _ => {
-            rows.push(row("Agents", &list_values(&caps.agents), Ctl::Chip(format!("{}", caps.agents.len()), 3)));
-            rows.push(row("Permission styles", &list_values(&caps.modes), Ctl::Chip(format!("{}", caps.modes.len()), 3)));
+            rows.push(row(
+                "Agents",
+                &list_values(&caps.agents),
+                Ctl::Chip(format!("{}", caps.agents.len()), 3),
+            ));
+            rows.push(row(
+                "Permission styles",
+                &list_values(&caps.modes),
+                Ctl::Chip(format!("{}", caps.modes.len()), 3),
+            ));
         }
     }
     rows.push(row(
@@ -361,11 +481,23 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
 }
 
 impl RunoApp {
-    fn ensure_input(&mut self, key: &str, value: &str, placeholder: &str, set: SetStr, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+    fn ensure_input(
+        &mut self,
+        key: &str,
+        value: &str,
+        placeholder: &str,
+        set: SetStr,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
         if let Some(entity) = self.settings_inputs.get(key) {
             return entity.clone();
         }
-        let entity = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()).default_value(value.to_string()));
+        let entity = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder.to_string())
+                .default_value(value.to_string())
+        });
         let sub = cx.subscribe_in(&entity, window, move |_, input, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 let value = input.read(cx).value().to_string();
@@ -378,7 +510,13 @@ impl RunoApp {
         entity
     }
 
-    fn control(&mut self, ix: usize, ctl: Ctl, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn control(
+        &mut self,
+        ix: usize,
+        ctl: Ctl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match ctl {
             Ctl::Switch(on, set) => Switch::new(("setting-switch", ix))
                 .checked(on)
@@ -388,14 +526,37 @@ impl RunoApp {
                 })
                 .into_any_element(),
             Ctl::Segment(opts, current, set) => {
-                let mut group = div().flex().items_center().p(px(3.)).gap(px(2.)).rounded_lg().border_1().border_color(rgb(c_border())).bg(rgb(c_canvas()));
+                let mut group = div()
+                    .flex()
+                    .items_center()
+                    .p(px(3.))
+                    .gap(px(2.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(rgb(c_canvas()));
                 for (j, (value, label)) in opts.into_iter().enumerate() {
                     let selected = value == current;
                     let set = set.clone();
                     group = group.child(
-                        div().id(("setting-seg", ix * 16 + j)).h(px(28.)).px_3().flex().items_center().rounded_md().cursor_pointer().text_sm()
-                            .when(selected, |el| el.bg(rgb(c_selected())).text_color(rgb(c_blue())).font_weight(FontWeight::SEMIBOLD))
-                            .when(!selected, |el| el.text_color(rgb(c_secondary())).hover(|el| el.bg(rgb(c_subtle()))))
+                        div()
+                            .id(("setting-seg", ix * 16 + j))
+                            .h(px(28.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_sm()
+                            .when(selected, |el| {
+                                el.bg(rgb(c_selected()))
+                                    .text_color(rgb(c_blue()))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                            })
+                            .when(!selected, |el| {
+                                el.text_color(rgb(c_secondary()))
+                                    .hover(|el| el.bg(rgb(c_subtle())))
+                            })
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 let (set, value) = (set.clone(), value.clone());
                                 settings::update(cx, move |s| set(s, value));
@@ -408,15 +569,31 @@ impl RunoApp {
             Ctl::Dropdown(opts, current, set) => {
                 let key = format!("dd-{ix}");
                 let open = self.settings_menu.as_deref() == Some(key.as_str());
-                let label = opts.iter().find(|(v, _)| *v == current).map(|(_, l)| l.clone()).unwrap_or_else(|| current.clone());
+                let label = opts
+                    .iter()
+                    .find(|(v, _)| *v == current)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| current.clone());
                 let toggle_key = key.clone();
                 let mut list = div().v_flex().p_1();
                 for (j, (value, text)) in opts.iter().cloned().enumerate() {
                     let selected = value == current;
                     let set = set.clone();
                     list = list.child(
-                        div().id(("setting-dd-item", ix * 64 + j)).h(px(32.)).px_2().flex().items_center().justify_between().gap_3().rounded_md().cursor_pointer().text_sm()
-                            .when(selected, |el| el.bg(rgb(c_selected())).text_color(rgb(c_blue())))
+                        div()
+                            .id(("setting-dd-item", ix * 64 + j))
+                            .h(px(32.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_sm()
+                            .when(selected, |el| {
+                                el.bg(rgb(c_selected())).text_color(rgb(c_blue()))
+                            })
                             .hover(|el| el.bg(rgb(c_subtle())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.settings_menu = None;
@@ -424,35 +601,92 @@ impl RunoApp {
                                 settings::update(cx, move |s| set(s, value));
                             }))
                             .child(text)
-                            .when(selected, |el| el.child(icon(IconName::Check, 14., c_blue()))),
+                            .when(selected, |el| {
+                                el.child(icon(IconName::Check, 14., c_blue()))
+                            }),
                     );
                 }
-                div().relative()
+                div()
+                    .relative()
                     .child(
-                        div().id(("setting-dd", ix)).h(px(34.)).min_w(px(200.)).px_3().flex().items_center().justify_between().gap_3().rounded_lg().border_1().cursor_pointer().text_sm().bg(rgb(c_canvas()))
+                        div()
+                            .id(("setting-dd", ix))
+                            .h(px(34.))
+                            .min_w(px(200.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .rounded_lg()
+                            .border_1()
+                            .cursor_pointer()
+                            .text_sm()
+                            .bg(rgb(c_canvas()))
                             .border_color(rgb(if open { c_blue() } else { c_border() }))
                             .hover(|el| el.bg(rgb(c_subtle())))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.settings_menu = if this.settings_menu.as_deref() == Some(toggle_key.as_str()) { None } else { Some(toggle_key.clone()) };
+                                this.settings_menu =
+                                    if this.settings_menu.as_deref() == Some(toggle_key.as_str()) {
+                                        None
+                                    } else {
+                                        Some(toggle_key.clone())
+                                    };
                                 cx.notify();
                             }))
                             .child(label)
-                            .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 14., c_muted())),
+                            .child(icon(
+                                if open {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                },
+                                14.,
+                                c_muted(),
+                            )),
                     )
                     .when(open, |el| {
                         el.child(fade(
-                            div().absolute().top(px(40.)).right_0().min_w(px(220.)).max_h(px(320.)).rounded_xl().border_1().border_color(rgb(c_border())).bg(rgb(c_canvas())).shadow_lg().occlude()
-                                .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.settings_menu = None; cx.notify(); }))
-                                .child(div().id(("setting-dd-scroll", ix)).max_h(px(320.)).overflow_y_scroll().child(list)),
+                            div()
+                                .absolute()
+                                .top(px(40.))
+                                .right_0()
+                                .min_w(px(220.))
+                                .max_h(px(320.))
+                                .rounded_xl()
+                                .border_1()
+                                .border_color(rgb(c_border()))
+                                .bg(rgb(c_canvas()))
+                                .shadow_lg()
+                                .occlude()
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.settings_menu = None;
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .id(("setting-dd-scroll", ix))
+                                        .max_h(px(320.))
+                                        .overflow_y_scroll()
+                                        .child(list),
+                                ),
                             SharedString::from(format!("dd-pop-{ix}")),
                             140,
                         ))
                     })
                     .into_any_element()
             }
-            Ctl::Text { key, value, placeholder, set } => {
+            Ctl::Text {
+                key,
+                value,
+                placeholder,
+                set,
+            } => {
                 let input = self.ensure_input(&key, &value, &placeholder, set, window, cx);
-                div().w(px(340.)).child(Input::new(&input).bordered(true).h(px(34.))).into_any_element()
+                div()
+                    .w(px(340.))
+                    .child(Input::new(&input).bordered(true).h(px(34.)))
+                    .into_any_element()
             }
             Ctl::Accent(current) => {
                 let mut dots = div().flex().items_center().gap_2();
@@ -460,14 +694,28 @@ impl RunoApp {
                     let selected = *id == current;
                     let id = id.to_string();
                     dots = dots.child(
-                        div().id(("setting-accent", ix * 16 + j)).size(px(28.)).flex().items_center().justify_center().rounded_full().cursor_pointer().border_2()
-                            .border_color(if selected { rgb(*color).into() } else { gpui_kit::transparent_black() })
+                        div()
+                            .id(("setting-accent", ix * 16 + j))
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .border_2()
+                            .border_color(if selected {
+                                rgb(*color).into()
+                            } else {
+                                gpui_kit::transparent_black()
+                            })
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 let id = id.clone();
                                 settings::update(cx, move |s| s.accent = id);
                             }))
                             .child(div().size(px(18.)).rounded_full().bg(rgb(*color)))
-                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(*name).build(window, cx)),
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(*name).build(window, cx)
+                            }),
                     );
                 }
                 dots.into_any_element()
@@ -486,12 +734,38 @@ impl RunoApp {
                     2 => c_amber(),
                     _ => c_secondary(),
                 };
-                div().px_3().py_1().rounded_full().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(color)).bg(rgb(c_canvas())).border_1().border_color(rgb(c_border())).child(text).into_any_element()
+                div()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(color))
+                    .bg(rgb(c_canvas()))
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .child(text)
+                    .into_any_element()
             }
             Ctl::Keys(text) => {
                 let mut keys = div().flex().items_center().gap_1();
                 for part in text.split(' ') {
-                    keys = keys.child(div().min_w(px(26.)).h(px(26.)).px_2().flex().items_center().justify_center().rounded_md().border_1().border_color(rgb(c_border())).bg(rgb(c_canvas())).text_xs().font_weight(FontWeight::SEMIBOLD).child(part.to_string()));
+                    keys = keys.child(
+                        div()
+                            .min_w(px(26.))
+                            .h(px(26.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(c_border()))
+                            .bg(rgb(c_canvas()))
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(part.to_string()),
+                    );
                 }
                 keys.into_any_element()
             }
@@ -502,28 +776,84 @@ impl RunoApp {
         }
     }
 
-    fn settings_card(&mut self, sec: Section, counter: &mut usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut card = div().v_flex().rounded_xl().border_1().border_color(rgb(c_border())).bg(rgb(c_subtle())).overflow_hidden();
+    fn settings_card(
+        &mut self,
+        sec: Section,
+        counter: &mut usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut card = div()
+            .v_flex()
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(rgb(c_subtle()))
+            .overflow_hidden();
         let count = sec.rows.len();
         for (i, r) in sec.rows.into_iter().enumerate() {
             *counter += 1;
             let control = self.control(*counter, r.ctl, window, cx);
             card = card.child(
-                div().px_5().py_4().flex().items_center().justify_between().gap_8()
-                    .when(i + 1 < count, |el| el.border_b_1().border_color(rgb(c_border())))
+                div()
+                    .px_5()
+                    .py_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_8()
+                    .when(i + 1 < count, |el| {
+                        el.border_b_1().border_color(rgb(c_border()))
+                    })
                     .child(
-                        div().flex_1().min_w_0().v_flex().gap(px(3.))
-                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(rgb(c_text())).child(r.title))
-                            .when(!r.desc.is_empty(), |el| el.child(div().text_xs().text_color(rgb(c_secondary())).whitespace_normal().child(r.desc))),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(c_text()))
+                                    .child(r.title),
+                            )
+                            .when(!r.desc.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(c_secondary()))
+                                        .whitespace_normal()
+                                        .child(r.desc),
+                                )
+                            }),
                     )
                     .child(div().flex_none().child(control)),
             );
         }
-        div().v_flex().gap_3()
+        div()
+            .v_flex()
+            .gap_3()
             .child(
-                div().v_flex().gap(px(2.)).px_1()
-                    .child(div().text_base().font_weight(FontWeight::BOLD).text_color(rgb(c_text())).child(sec.title))
-                    .when(!sec.desc.is_empty(), |el| el.child(div().text_sm().text_color(rgb(c_secondary())).child(sec.desc))),
+                div()
+                    .v_flex()
+                    .gap(px(2.))
+                    .px_1()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(c_text()))
+                            .child(sec.title),
+                    )
+                    .when(!sec.desc.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(c_secondary()))
+                                .child(sec.desc),
+                        )
+                    }),
             )
             .child(card)
             .into_any_element()
@@ -532,93 +862,267 @@ impl RunoApp {
     fn settings_nav_item(&self, page: SettingsPage, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.settings_page == page;
         let lead: AnyElement = match page.agent() {
-            Some(id) => self.provider_badge(agent::provider(id), 20.).into_any_element(),
-            None => icon(page.icon(), 16., if selected { c_blue() } else { c_secondary() }).into_any_element(),
+            Some(id) => self
+                .provider_badge(agent::provider(id), 20.)
+                .into_any_element(),
+            None => icon(
+                page.icon(),
+                16.,
+                if selected { c_blue() } else { c_secondary() },
+            )
+            .into_any_element(),
         };
-        div().id(SharedString::from(format!("snav-{}", page.label()))).h(px(36.)).px_3().flex().items_center().gap_3().rounded_lg().cursor_pointer().text_sm()
-            .when(selected, |el| el.bg(rgb(c_selected())).text_color(rgb(c_blue())).font_weight(FontWeight::SEMIBOLD))
-            .when(!selected, |el| el.text_color(rgb(c_text())).hover(|el| el.bg(rgb(c_subtle()))))
+        div()
+            .id(SharedString::from(format!("snav-{}", page.label())))
+            .h(px(36.))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded_lg()
+            .cursor_pointer()
+            .text_sm()
+            .when(selected, |el| {
+                el.bg(rgb(c_selected()))
+                    .text_color(rgb(c_blue()))
+                    .font_weight(FontWeight::SEMIBOLD)
+            })
+            .when(!selected, |el| {
+                el.text_color(rgb(c_text()))
+                    .hover(|el| el.bg(rgb(c_subtle())))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_page = page;
                 this.settings_menu = None;
                 cx.notify();
             }))
-            .child(div().w(px(20.)).flex().items_center().justify_center().child(lead))
+            .child(
+                div()
+                    .w(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(lead),
+            )
             .child(page.label())
     }
 
-    pub(crate) fn settings_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn settings_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let st = cx.global::<AppSettings>().clone();
         let data = self.discovered.clone().unwrap_or_default();
         let query = self.settings_search.read(cx).value().trim().to_lowercase();
 
         // Navigation
-        let mut nav = div().w(px(252.)).flex_none().h_full().v_flex().p_3().border_r_1().border_color(rgb(c_border())).bg(rgb(c_sidebar()));
-        let mut groups = div().id("settings-nav").flex_1().min_h_0().overflow_y_scroll().v_flex().gap_4();
+        let mut nav = div()
+            .w(px(252.))
+            .flex_none()
+            .h_full()
+            .v_flex()
+            .p_3()
+            .border_r_1()
+            .border_color(rgb(c_border()))
+            .bg(rgb(c_sidebar()));
+        let mut groups = div()
+            .id("settings-nav")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .v_flex()
+            .gap_4();
         for (title, pages) in SettingsPage::GROUPS.iter() {
-            let mut group = div().v_flex().gap(px(2.)).child(div().px_3().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(c_muted())).child(title.to_uppercase()));
+            let mut group = div().v_flex().gap(px(2.)).child(
+                div()
+                    .px_3()
+                    .pb_1()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(c_muted()))
+                    .child(title.to_uppercase()),
+            );
             for page in pages.iter() {
                 group = group.child(self.settings_nav_item(*page, cx));
             }
             groups = groups.child(group);
         }
         nav = nav.child(groups).child(
-            div().pt_2().border_t_1().border_color(rgb(c_border())).child(
-                div().id("settings-back").h(px(38.)).px_3().flex().items_center().gap_3().rounded_lg().cursor_pointer().text_sm().text_color(rgb(c_secondary())).hover(|el| el.bg(rgb(c_subtle())))
-                    .on_click(cx.listener(|this, _, _, cx| { this.view = View::Session; cx.notify(); }))
-                    .child(icon(IconName::ArrowLeft, 16., c_secondary()))
-                    .child("Back to workspace"),
-            ),
+            div()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(c_border()))
+                .child(
+                    div()
+                        .id("settings-back")
+                        .h(px(38.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(rgb(c_secondary()))
+                        .hover(|el| el.bg(rgb(c_subtle())))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.view = View::Session;
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::ArrowLeft, 16., c_secondary()))
+                        .child("Back to workspace"),
+                ),
         );
 
         // Content
         let mut counter = 0usize;
         let (title, subtitle, sections): (String, String, Vec<Section>) = if query.is_empty() {
-            (self.settings_page.label().into(), self.settings_page.subtitle().into(), page_sections(self.settings_page, &st, &data))
+            (
+                self.settings_page.label().into(),
+                self.settings_page.subtitle().into(),
+                page_sections(self.settings_page, &st, &data),
+            )
         } else {
             let mut found = Vec::new();
             for page in SettingsPage::all() {
                 for sec in page_sections(page, &st, &data) {
-                    let rows: Vec<Row> = sec.rows.into_iter().filter(|r| r.title.to_lowercase().contains(&query) || r.desc.to_lowercase().contains(&query)).collect();
+                    let rows: Vec<Row> = sec
+                        .rows
+                        .into_iter()
+                        .filter(|r| {
+                            r.title.to_lowercase().contains(&query)
+                                || r.desc.to_lowercase().contains(&query)
+                        })
+                        .collect();
                     if !rows.is_empty() {
-                        found.push(Section { title: format!("{}  ›  {}", page.label(), sec.title), desc: String::new(), rows });
+                        found.push(Section {
+                            title: format!("{}  ›  {}", page.label(), sec.title),
+                            desc: String::new(),
+                            rows,
+                        });
                     }
                 }
             }
-            ("Search results".into(), format!("Matches for “{query}” across all settings."), found)
+            (
+                "Search results".into(),
+                format!("Matches for “{query}” across all settings."),
+                found,
+            )
         };
-        let mut body = div().max_w(px(920.)).mx_auto().px_10().py_8().v_flex().gap_8().child(
-            div().v_flex().gap_1()
-                .child(div().text_3xl().font_weight(FontWeight::BOLD).text_color(rgb(c_text())).child(title.clone()))
-                .child(div().text_sm().text_color(rgb(c_secondary())).child(subtitle)),
-        );
+        let mut body = div()
+            .max_w(px(920.))
+            .mx_auto()
+            .px_10()
+            .py_8()
+            .v_flex()
+            .gap_8()
+            .child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_3xl()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(c_text()))
+                            .child(title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(c_secondary()))
+                            .child(subtitle),
+                    ),
+            );
         if sections.is_empty() {
-            body = body.child(div().text_sm().text_color(rgb(c_muted())).child("No settings match your search."));
+            body = body.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(c_muted()))
+                    .child("No settings match your search."),
+            );
         }
         for sec in sections {
             body = body.child(self.settings_card(sec, &mut counter, window, cx));
         }
 
-        let header = div().h(px(52.)).flex_none().px_8().flex().items_center().justify_between().border_b_1().border_color(rgb(c_border()))
+        let header = div()
+            .h(px(52.))
+            .flex_none()
+            .px_8()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(c_border()))
             .child(
-                div().flex().items_center().gap_2().text_sm()
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
                     .child(div().text_color(rgb(c_muted())).child("Settings"))
                     .child(icon(IconName::ChevronRight, 14., c_muted()))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(c_text())).child(if query.is_empty() { self.settings_page.label().to_string() } else { "Search".to_string() })),
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
+                            .child(if query.is_empty() {
+                                self.settings_page.label().to_string()
+                            } else {
+                                "Search".to_string()
+                            }),
+                    ),
             )
             .child(
-                div().w(px(300.)).h(px(34.)).px_3().flex().items_center().gap_2().rounded_lg().border_1().border_color(rgb(c_border())).bg(rgb(c_subtle()))
+                div()
+                    .w(px(300.))
+                    .h(px(34.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(rgb(c_subtle()))
                     .child(icon(IconName::Search, 14., c_muted()))
-                    .child(Input::new(&self.settings_search).appearance(false).h(px(30.))),
+                    .child(
+                        Input::new(&self.settings_search)
+                            .appearance(false)
+                            .h(px(30.)),
+                    ),
             );
 
-        let main = div().flex_1().min_w_0().h_full().v_flex().child(header).child(
-            fade(
-                div().id("settings-scroll").flex_1().min_h_0().overflow_y_scroll().child(body),
-                SharedString::from(format!("settings-page-{}", if query.is_empty() { self.settings_page.label() } else { "search" })),
+        let main = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .v_flex()
+            .child(header)
+            .child(fade(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body),
+                SharedString::from(format!(
+                    "settings-page-{}",
+                    if query.is_empty() {
+                        self.settings_page.label()
+                    } else {
+                        "search"
+                    }
+                )),
                 220,
-            ),
-        );
-        div().size_full().flex().child(nav).child(main).into_any_element()
+            ));
+        div()
+            .size_full()
+            .flex()
+            .child(nav)
+            .child(main)
+            .into_any_element()
     }
 }
