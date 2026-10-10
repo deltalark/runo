@@ -108,6 +108,36 @@ pub struct RunSpec<'a> {
     pub opts: &'a AgentOptions,
     /// Whether the working directory is a git repository.
     pub in_git: bool,
+    /// Claude Code conversation id for this session; empty for sessions saved before ids.
+    pub session_id: &'a str,
+}
+
+/// A random version-4 UUID, for naming a Claude Code conversation up front.
+pub fn new_uuid() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        hasher.write_usize(i);
+        chunk.copy_from_slice(&hasher.finish().to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 fn provider_args(spec: &RunSpec) -> Vec<String> {
@@ -222,8 +252,13 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 args.extend([s("--fallback-model"), opts.fallback_model.clone()]);
             }
             args.extend(split_args(&opts.extra_args));
-            if spec.resume {
-                args.push(s("--continue"));
+            match (spec.resume, spec.session_id.is_empty()) {
+                // Pin the conversation to this session: `--continue` would pick up whatever
+                // conversation ran last in the folder, which may belong to another session.
+                (true, false) => args.extend([s("--resume"), spec.session_id.to_string()]),
+                (false, false) => args.extend([s("--session-id"), spec.session_id.to_string()]),
+                (true, true) => args.push(s("--continue")),
+                (false, true) => {}
             }
             // Several Claude flags are variadic; `--` keeps them from swallowing the prompt.
             args.push(s("--"));
@@ -408,7 +443,144 @@ mod arg_tests {
             sel: &sel,
             opts,
             in_git,
+            session_id: "",
         })
+    }
+
+    #[test]
+    fn claude_pins_follow_ups_to_its_own_conversation() {
+        let sel = HashMap::new();
+        let o = AgentOptions::default();
+        let spec = |resume, session_id| RunSpec {
+            provider: "claude",
+            prompt: "hi",
+            resume,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id,
+        };
+        let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
+        let first = provider_args(&spec(false, id));
+        assert!(first.windows(2).any(|w| w == ["--session-id", id]));
+        assert!(!first.contains(&"--continue".to_string()));
+        let next = provider_args(&spec(true, id));
+        assert!(next.windows(2).any(|w| w == ["--resume", id]));
+        assert!(!next.contains(&"--continue".to_string()));
+        // The prompt always comes last, after `--`.
+        assert_eq!(&next[next.len() - 2..], ["--", "hi"]);
+    }
+
+    #[test]
+    fn uuids_are_v4_and_distinct() {
+        let a = new_uuid();
+        let b = new_uuid();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12]
+        );
+        assert!(parts[2].starts_with('4'));
+        assert!(matches!(
+            parts[3].chars().next(),
+            Some('8' | '9' | 'a' | 'b')
+        ));
+        assert!(a.chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn provider_lookup_falls_back_to_claude() {
+        assert_eq!(provider("codex").name, "Codex");
+        assert_eq!(provider("nope").id, "claude");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_gets_env_args_and_reports_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("runo-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-agent");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho \"env=$RUNO_T\"\necho \"args=$*\"\necho oops 1>&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sel = sel(&[("model", "opus")]);
+        let o = AgentOptions {
+            binary: script.to_string_lossy().into_owned(),
+            env: " RUNO_T = from-env \nNOT_A_PAIR\n=ignored".into(),
+            ..Default::default()
+        };
+        let spec = RunSpec {
+            provider: "claude",
+            prompt: "do it",
+            resume: false,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "",
+        };
+        run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), tx).unwrap();
+        let (mut out, mut err) = (vec![], vec![]);
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Line(_, l) => out.push(l),
+                Event::Err(_, l) => err.push(l),
+                Event::Done(target, ok) => {
+                    assert!(target == Target::Session(5));
+                    assert!(!ok);
+                    break;
+                }
+            }
+        }
+        assert_eq!(out[0], "env=from-env");
+        assert_eq!(
+            out[1],
+            "args=-p --permission-mode acceptEdits --model opus -- do it"
+        );
+        // stderr from an agent stays out of the conversation stream.
+        assert_eq!(err, ["oops"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_binary_is_an_error_not_a_panic() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let sel = HashMap::new();
+        let o = AgentOptions {
+            binary: "/definitely/not/a/runo/binary".into(),
+            ..Default::default()
+        };
+        let spec = RunSpec {
+            provider: "claude",
+            prompt: "hi",
+            resume: false,
+            sel: &sel,
+            opts: &o,
+            in_git: false,
+            session_id: "",
+        };
+        let error = run_agent(Target::Session(1), &spec, "/", tx).err().unwrap();
+        assert!(error.contains("could not start"));
+    }
+
+    #[test]
+    fn kill_stops_a_running_command() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = std::env::temp_dir();
+        let handle = run_shell(Target::Terminal(7), "sleep 30", dir.to_str().unwrap(), tx).unwrap();
+        handle.kill();
+        loop {
+            if let Event::Done(_, ok) = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                assert!(!ok);
+                break;
+            }
+        }
     }
 
     #[test]

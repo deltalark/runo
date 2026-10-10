@@ -87,15 +87,7 @@ pub const ACCENTS: [(&str, &str, u32); 7] = [
 ];
 
 fn settings_path() -> PathBuf {
-    let home = std::env::var_os("RUNO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|home| PathBuf::from(home).join(".runo"))
-        })
-        .unwrap_or_else(|| PathBuf::from(".runo"));
-    home.join("settings.json")
+    crate::store::data_dir().join("settings.json")
 }
 
 impl AppSettings {
@@ -104,20 +96,11 @@ impl AppSettings {
     }
 
     pub fn load() -> Self {
-        std::fs::read_to_string(settings_path())
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+        crate::store::read_json_or_backup(&settings_path())
     }
 
     pub fn save(&self) {
-        let path = settings_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
-        }
+        crate::store::write_json(&settings_path(), self);
     }
 
     /// Push the values that hot paths read (colours, animation switch…) into statics.
@@ -375,8 +358,7 @@ fn scan_skills(dir: &Path, source: &'static str, out: &mut Vec<SkillInfo>) {
     }
 }
 
-fn scan_mcp(out: &mut Vec<McpInfo>) {
-    let Some(home) = home() else { return };
+fn scan_mcp(home: &Path, out: &mut Vec<McpInfo>) {
     // Claude Code: user-scoped servers in ~/.claude.json
     let claude = home.join(".claude.json");
     if let Some(value) = std::fs::read_to_string(&claude)
@@ -496,10 +478,136 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
         );
     }
     found.skills.sort_by(|a, b| a.name.cmp(&b.name));
-    scan_mcp(&mut found.mcp);
+    if let Some(home) = home() {
+        scan_mcp(&home, &mut found.mcp);
+    }
     found.provider_paths = crate::agent::PROVIDERS
         .iter()
         .map(|p| (p.id, which(p.bin)))
         .collect();
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{frontmatter, mix, scan_mcp, scan_skills, AppSettings};
+    use std::path::PathBuf;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("runo-settings-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn partial_settings_keep_defaults() {
+        let s: AppSettings =
+            serde_json::from_str(r#"{"theme":"dark","agents":{"claude":{"effort":"high"}}}"#)
+                .unwrap();
+        assert_eq!(s.theme, "dark");
+        assert!(s.send_on_enter && s.confirm_delete && s.animations);
+        assert_eq!(s.default_provider, "claude");
+        assert_eq!(s.agent("claude").effort, "high");
+        assert_eq!(s.agent("codex").effort, "");
+    }
+
+    #[test]
+    fn colour_mixing() {
+        assert_eq!(mix(0xffffff, 0x000000, 1.0), 0xffffff);
+        assert_eq!(mix(0xffffff, 0x000000, 0.0), 0x000000);
+        assert_eq!(mix(0xff0000, 0x0000ff, 0.5), 0x800080);
+    }
+
+    #[test]
+    fn reads_skill_frontmatter() {
+        let text = "---\nname: Review\ndescription: \"Checks diffs\"\n---\nbody\nname: ignored";
+        assert_eq!(frontmatter(text, "name").as_deref(), Some("Review"));
+        assert_eq!(
+            frontmatter(text, "description").as_deref(),
+            Some("Checks diffs")
+        );
+        assert_eq!(frontmatter(text, "missing"), None);
+        assert_eq!(frontmatter("no frontmatter", "name"), None);
+
+        let dir = temp("skills");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a/SKILL.md"), text).unwrap();
+        std::fs::create_dir_all(dir.join("plain")).unwrap();
+        std::fs::write(dir.join("plain/SKILL.md"), "just text").unwrap();
+        std::fs::create_dir_all(dir.join("empty")).unwrap();
+        let mut found = Vec::new();
+        scan_skills(&dir, "claude", &mut found);
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(
+            found.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Review", "plain"]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn finds_mcp_servers_in_claude_and_codex_configs() {
+        let home = temp("mcp");
+        std::fs::write(
+            home.join(".claude.json"),
+            r#"{"mcpServers":{"files":{"command":"npx"},"remote":{"url":"https://x.dev/mcp"},"odd":{}}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(
+            home.join(".codex/config.toml"),
+            "model = \"x\"\n[mcp_servers.docs]\ncommand = \"docs-mcp\"\n[mcp_servers.docs.env]\nKEY = \"v\"\n[mcp_servers.web]\nurl = \"https://w.dev\"\nenabled = false\n[profiles.work]\nmodel = \"y\"\n",
+        )
+        .unwrap();
+        let mut found = Vec::new();
+        scan_mcp(&home, &mut found);
+        let summary: Vec<(String, &str, &str, bool, String)> = found
+            .iter()
+            .map(|m| {
+                (
+                    m.name.clone(),
+                    m.provider,
+                    m.transport,
+                    m.enabled,
+                    m.detail.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "docs".to_string(),
+                    "Codex",
+                    "stdio",
+                    true,
+                    "docs-mcp".to_string()
+                ),
+                (
+                    "files".to_string(),
+                    "Claude",
+                    "stdio",
+                    true,
+                    "npx".to_string()
+                ),
+                ("odd".to_string(), "Claude", "unknown", true, String::new()),
+                (
+                    "remote".to_string(),
+                    "Claude",
+                    "http",
+                    true,
+                    "https://x.dev/mcp".to_string()
+                ),
+                (
+                    "web".to_string(),
+                    "Codex",
+                    "http",
+                    false,
+                    "https://w.dev".to_string()
+                ),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
 }

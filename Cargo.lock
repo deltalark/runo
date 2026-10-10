@@ -5610,6 +5610,7 @@ dependencies = [
 name = "runo-native"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gpui-kit",
  "serde",
  "serde_json",
