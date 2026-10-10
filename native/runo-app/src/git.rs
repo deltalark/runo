@@ -166,6 +166,41 @@ pub fn tracked_files(dir: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Copy git-ignored files that match the repository's `.worktreeinclude` patterns
+/// (gitignore syntax, e.g. `.env` or `config/*.local.json`) into a new worktree, so
+/// it has the local secrets and config a fresh checkout lacks. Returns the files copied.
+pub fn copy_included(repo: &str, worktree: &str) -> Result<Vec<String>, String> {
+    let include = Path::new(repo).join(".worktreeinclude");
+    if !include.is_file() {
+        return Ok(Vec::new());
+    }
+    let include = include.to_string_lossy().into_owned();
+    let listed = |extra: &[&str]| -> Result<Vec<String>, String> {
+        let mut args = vec!["ls-files", "--others", "--ignored"];
+        args.extend_from_slice(extra);
+        Ok(git(repo, &args)?.lines().map(str::to_string).collect())
+    };
+    // Only files that git ignores qualify: tracked files are already in the worktree.
+    let ignored: std::collections::HashSet<String> =
+        listed(&["--exclude-standard"])?.into_iter().collect();
+    let mut copied = Vec::new();
+    for path in listed(&[&format!("--exclude-from={include}")])? {
+        if !ignored.contains(&path) {
+            continue;
+        }
+        let dest = Path::new(worktree).join(&path);
+        if dest.exists() {
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(Path::new(repo).join(&path), &dest).map_err(|e| format!("{path}: {e}"))?;
+        copied.push(path);
+    }
+    Ok(copied)
+}
+
 /// Throw away the working-tree and staged changes to one file. Files that are new
 /// since the last commit are deleted.
 pub fn discard(dir: &str, path: &str) -> Result<(), String> {
@@ -587,5 +622,37 @@ index 1..2 100644
         assert_eq!((s.upstream, s.ahead), (true, 1));
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn worktreeinclude_copies_matching_ignored_files() {
+        let repo = repo("include");
+        let dir = repo.to_str().unwrap();
+        std::fs::write(repo.join(".gitignore"), ".env\n*.log\nsecrets/\n").unwrap();
+        std::fs::write(repo.join(".worktreeinclude"), ".env\nsecrets/\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join(".env"), "KEY=1").unwrap();
+        std::fs::write(repo.join("debug.log"), "noise").unwrap();
+        std::fs::create_dir_all(repo.join("secrets")).unwrap();
+        std::fs::write(repo.join("secrets/key.pem"), "pem").unwrap();
+        // Untracked but not ignored: the user's own work, never copied.
+        std::fs::write(repo.join("draft.txt"), "wip").unwrap();
+
+        let wt = add_worktree(dir, "include-test").unwrap();
+        let mut copied = copy_included(dir, &wt).unwrap();
+        copied.sort();
+        assert_eq!(copied, [".env", "secrets/key.pem"]);
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&wt).join(".env")).unwrap(),
+            "KEY=1"
+        );
+        assert!(!Path::new(&wt).join("debug.log").exists());
+        assert!(!Path::new(&wt).join("draft.txt").exists());
+        // Running again leaves existing files alone.
+        assert!(copy_included(dir, &wt).unwrap().is_empty());
+        remove_worktree(dir, &wt).unwrap();
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

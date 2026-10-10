@@ -53,6 +53,8 @@ pub struct AppSettings {
     pub autoscroll: bool,
     pub default_mode: String,
     pub default_provider: String,
+    /// Shell command run in every new worktree, e.g. `npm install`.
+    pub worktree_setup: String,
 }
 
 impl Default for AppSettings {
@@ -70,6 +72,7 @@ impl Default for AppSettings {
             autoscroll: true,
             default_mode: "edit".into(),
             default_provider: "claude".into(),
+            worktree_setup: String::new(),
         }
     }
 }
