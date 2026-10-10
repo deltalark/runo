@@ -54,7 +54,11 @@ fn store() -> &'static RwLock<HashMap<String, Caps>> {
 }
 
 pub fn get(provider: &str) -> Caps {
-    store().read().ok().and_then(|m| m.get(provider).cloned()).unwrap_or_default()
+    store()
+        .read()
+        .ok()
+        .and_then(|m| m.get(provider).cloned())
+        .unwrap_or_default()
 }
 
 /// True once after discovery finished, so the UI can repaint.
@@ -104,11 +108,18 @@ fn pretty(value: &str) -> String {
         }
     }
     let mut chars = out.chars();
-    chars.next().map(|f| f.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+    chars
+        .next()
+        .map(|f| f.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
 }
 
 fn choice(value: &str) -> Choice {
-    Choice { value: value.to_string(), label: pretty(value), desc: String::new() }
+    Choice {
+        value: value.to_string(),
+        label: pretty(value),
+        desc: String::new(),
+    }
 }
 
 /// The text of one option in `--help`: from its flag line up to the next flag line.
@@ -132,24 +143,34 @@ fn flag_block(help: &str, flag: &str) -> String {
     block
 }
 
-fn between<'a>(text: &'a str, open: char, close: char) -> Option<&'a str> {
+fn between(text: &str, open: char, close: char) -> Option<&str> {
     let start = text.find(open)? + 1;
     let end = text[start..].find(close)? + start;
     Some(&text[start..end])
 }
 
 fn quoted(text: &str, quote: char) -> Vec<String> {
-    text.split(quote).enumerate().filter(|(i, _)| i % 2 == 1).map(|(_, s)| s.to_string()).collect()
+    text.split(quote)
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|(_, s)| s.to_string())
+        .collect()
 }
 
 fn claude() -> Caps {
     let version = run("claude", &["--version"]);
     if version.trim().is_empty() {
-        return Caps { detected: true, ..Default::default() };
+        return Caps {
+            detected: true,
+            ..Default::default()
+        };
     }
     let help = run("claude", &["--help"]);
     let mode_block = flag_block(&help, "--permission-mode").replace('\n', " ");
-    let modes = quoted(mode_block.split("choices:").nth(1).unwrap_or(""), '"').iter().map(|v| choice(v)).collect();
+    let modes = quoted(mode_block.split("choices:").nth(1).unwrap_or(""), '"')
+        .iter()
+        .map(|v| choice(v))
+        .collect();
     let effort_block = flag_block(&help, "--effort").replace('\n', " ");
     let efforts = between(&effort_block, '(', ')')
         .map(|list| list.split(',').map(|v| choice(v.trim())).collect())
@@ -158,7 +179,10 @@ fn claude() -> Caps {
     let models = quoted(&model_block, '\'')
         .into_iter()
         .filter(|v| !v.contains(' '))
-        .map(|alias| ModelInfo { choice: choice(&alias), ..Default::default() })
+        .map(|alias| ModelInfo {
+            choice: choice(&alias),
+            ..Default::default()
+        })
         .collect();
     Caps {
         installed: true,
@@ -174,13 +198,25 @@ fn claude() -> Caps {
 fn codex() -> Caps {
     let version = run("codex", &["--version"]);
     if version.trim().is_empty() {
-        return Caps { detected: true, ..Default::default() };
+        return Caps {
+            detected: true,
+            ..Default::default()
+        };
     }
     let exec_help = run("codex", &["exec", "--help"]).replace("\r", "");
     let sandbox_block = flag_block(&exec_help, "--sandbox").replace('\n', " ");
-    let modes = between(sandbox_block.split("possible values:").nth(1).map(|s| format!("[{s}")).as_deref().unwrap_or(""), '[', ']')
-        .map(|list| list.split(',').map(|v| choice(v.trim())).collect())
-        .unwrap_or_default();
+    let modes = between(
+        sandbox_block
+            .split("possible values:")
+            .nth(1)
+            .map(|s| format!("[{s}"))
+            .as_deref()
+            .unwrap_or(""),
+        '[',
+        ']',
+    )
+    .map(|list| list.split(',').map(|v| choice(v.trim())).collect())
+    .unwrap_or_default();
 
     let top_help = run("codex", &["--help"]);
     let mut approvals = Vec::new();
@@ -194,7 +230,11 @@ fn codex() -> Caps {
             let t = line.trim();
             if let Some(rest) = t.strip_prefix("- ") {
                 let (name, desc) = rest.split_once(':').unwrap_or((rest, ""));
-                approvals.push(Choice { value: name.trim().to_string(), label: pretty(name.trim()), desc: desc.trim().to_string() });
+                approvals.push(Choice {
+                    value: name.trim().to_string(),
+                    label: pretty(name.trim()),
+                    desc: desc.trim().to_string(),
+                });
             } else if t.starts_with('-') && !t.starts_with("- ") {
                 break;
             }
@@ -205,16 +245,29 @@ fn codex() -> Caps {
     let mut models: Vec<(i64, ModelInfo)> = Vec::new();
     let cache = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|h| std::path::PathBuf::from(h).join(".codex").join("models_cache.json"))
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join(".codex")
+                .join("models_cache.json")
+        })
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    if let Some(list) = cache.as_ref().and_then(|v| v.get("models")).and_then(|m| m.as_array()) {
+    if let Some(list) = cache
+        .as_ref()
+        .and_then(|v| v.get("models"))
+        .and_then(|m| m.as_array())
+    {
         for m in list {
             if m.get("visibility").and_then(|v| v.as_str()) != Some("list") {
                 continue;
             }
-            let Some(slug) = m.get("slug").and_then(|v| v.as_str()) else { continue };
-            let name = m.get("display_name").and_then(|v| v.as_str()).unwrap_or(slug);
+            let Some(slug) = m.get("slug").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let name = m
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(slug);
             let desc = m.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let pick = |key: &str, id_key: &str, name_key: &str| -> Vec<Choice> {
                 m.get(key)
@@ -225,8 +278,16 @@ fn codex() -> Caps {
                                 let id = e.get(id_key)?.as_str()?;
                                 Some(Choice {
                                     value: id.to_string(),
-                                    label: e.get(name_key).and_then(|n| n.as_str()).map(str::to_string).unwrap_or_else(|| pretty(id)),
-                                    desc: e.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+                                    label: e
+                                        .get(name_key)
+                                        .and_then(|n| n.as_str())
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| pretty(id)),
+                                    desc: e
+                                        .get("description")
+                                        .and_then(|d| d.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
                                 })
                             })
                             .collect()
@@ -236,7 +297,11 @@ fn codex() -> Caps {
             models.push((
                 m.get("priority").and_then(|p| p.as_i64()).unwrap_or(999),
                 ModelInfo {
-                    choice: Choice { value: slug.to_string(), label: name.to_string(), desc: desc.to_string() },
+                    choice: Choice {
+                        value: slug.to_string(),
+                        label: name.to_string(),
+                        desc: desc.to_string(),
+                    },
                     efforts: pick("supported_reasoning_levels", "effort", "effort"),
                     tiers: pick("service_tiers", "id", "name"),
                 },
@@ -246,7 +311,11 @@ fn codex() -> Caps {
     models.sort_by_key(|(p, _)| *p);
     Caps {
         installed: true,
-        version: version.trim().trim_start_matches("codex-cli").trim().to_string(),
+        version: version
+            .trim()
+            .trim_start_matches("codex-cli")
+            .trim()
+            .to_string(),
         models: models.into_iter().map(|(_, m)| m).collect(),
         modes,
         approvals,
@@ -258,34 +327,73 @@ fn codex() -> Caps {
 fn opencode() -> Caps {
     let version = run("opencode", &["--version"]);
     if version.trim().is_empty() {
-        return Caps { detected: true, ..Default::default() };
+        return Caps {
+            detected: true,
+            ..Default::default()
+        };
     }
     let models = run("opencode", &["models"])
         .lines()
         .map(str::trim)
         .filter(|l| l.contains('/') && !l.contains(' '))
-        .map(|l| ModelInfo { choice: Choice { value: l.to_string(), label: l.to_string(), desc: String::new() }, ..Default::default() })
+        .map(|l| ModelInfo {
+            choice: Choice {
+                value: l.to_string(),
+                label: l.to_string(),
+                desc: String::new(),
+            },
+            ..Default::default()
+        })
         .collect();
     // `opencode agent list` prints `name (primary|subagent)` followed by a JSON permission dump.
     let agents = run("opencode", &["agent", "list"])
         .lines()
-        .filter(|l| !l.starts_with(' ') && !l.is_empty() && !l.starts_with('[') && !l.starts_with(']'))
-        .filter(|l| !["compaction", "summary", "title"].iter().any(|hidden| l.starts_with(hidden)))
+        .filter(|l| {
+            !l.starts_with(' ') && !l.is_empty() && !l.starts_with('[') && !l.starts_with(']')
+        })
+        .filter(|l| {
+            !["compaction", "summary", "title"]
+                .iter()
+                .any(|hidden| l.starts_with(hidden))
+        })
         .filter_map(|l| {
             let (name, kind) = l.split_once(" (")?;
-            Some(Choice { value: name.to_string(), label: pretty(name), desc: kind.trim_end_matches(')').to_string() })
+            Some(Choice {
+                value: name.to_string(),
+                label: pretty(name),
+                desc: kind.trim_end_matches(')').to_string(),
+            })
         })
         .collect();
     let run_help = run("opencode", &["run", "--help"]);
     let mut modes = Vec::new();
     if run_help.contains("--auto") {
-        modes.push(Choice { value: "auto".into(), label: "Auto-approve".into(), desc: "Approve permissions that are not explicitly denied".into() });
+        modes.push(Choice {
+            value: "auto".into(),
+            label: "Auto-approve".into(),
+            desc: "Approve permissions that are not explicitly denied".into(),
+        });
     }
-    Caps { installed: true, version: version.trim().to_string(), models, modes, agents, detected: true, ..Default::default() }
+    Caps {
+        installed: true,
+        version: version.trim().to_string(),
+        models,
+        modes,
+        agents,
+        detected: true,
+        ..Default::default()
+    }
 }
 
 fn with_default(label: &str, mut rest: Vec<Choice>) -> Vec<Choice> {
-    rest.insert(0, Choice { value: String::new(), label: label.to_string(), desc: String::new() });
+    rest.insert(
+        0,
+        Choice {
+            value: String::new(),
+            label: label.to_string(),
+            desc: String::new(),
+        },
+    );
     rest
 }
 
@@ -296,21 +404,41 @@ pub fn controls(provider: &str, sel: &HashMap<String, String>) -> Vec<Control> {
     let mut out = Vec::new();
     let model_choices: Vec<Choice> = caps.models.iter().map(|m| m.choice.clone()).collect();
     if !model_choices.is_empty() {
-        out.push(Control { id: "model", label: "Model".into(), choices: with_default("Default", model_choices) });
+        out.push(Control {
+            id: "model",
+            label: "Model".into(),
+            choices: with_default("Default", model_choices),
+        });
     }
     // Effort / tier follow the selected model, or the first listed one when none is chosen.
-    let current = caps.models.iter().find(|m| m.choice.value == value("model")).or_else(|| caps.models.first());
+    let current = caps
+        .models
+        .iter()
+        .find(|m| m.choice.value == value("model"))
+        .or_else(|| caps.models.first());
     let efforts = match current {
         Some(m) if !m.efforts.is_empty() => m.efforts.clone(),
         _ => caps.efforts.clone(),
     };
     if !efforts.is_empty() {
-        let label = if provider == "codex" { "Reasoning" } else { "Effort" };
-        out.push(Control { id: "effort", label: label.into(), choices: with_default("Default", efforts) });
+        let label = if provider == "codex" {
+            "Reasoning"
+        } else {
+            "Effort"
+        };
+        out.push(Control {
+            id: "effort",
+            label: label.into(),
+            choices: with_default("Default", efforts),
+        });
     }
     if let Some(m) = current {
         if !m.tiers.is_empty() {
-            out.push(Control { id: "tier", label: "Speed".into(), choices: with_default("Standard", m.tiers.clone()) });
+            out.push(Control {
+                id: "tier",
+                label: "Speed".into(),
+                choices: with_default("Standard", m.tiers.clone()),
+            });
         }
     }
     if !caps.modes.is_empty() {
@@ -319,13 +447,25 @@ pub fn controls(provider: &str, sel: &HashMap<String, String>) -> Vec<Control> {
             "opencode" => "Permissions",
             _ => "Permission",
         };
-        out.push(Control { id: "mode", label: label.into(), choices: with_default("Default", caps.modes.clone()) });
+        out.push(Control {
+            id: "mode",
+            label: label.into(),
+            choices: with_default("Default", caps.modes.clone()),
+        });
     }
     if !caps.approvals.is_empty() {
-        out.push(Control { id: "approval", label: "Approval".into(), choices: with_default("Default", caps.approvals.clone()) });
+        out.push(Control {
+            id: "approval",
+            label: "Approval".into(),
+            choices: with_default("Default", caps.approvals.clone()),
+        });
     }
     if !caps.agents.is_empty() {
-        out.push(Control { id: "agent", label: "Agent".into(), choices: with_default("Default", caps.agents.clone()) });
+        out.push(Control {
+            id: "agent",
+            label: "Agent".into(),
+            choices: with_default("Default", caps.agents.clone()),
+        });
     }
     out
 }
@@ -344,7 +484,16 @@ mod tests {
         if !caps.installed {
             return;
         }
-        println!("claude {} modes={:?} efforts={:?} models={:?}", caps.version, names(&caps.modes), names(&caps.efforts), caps.models.iter().map(|m| m.choice.value.as_str()).collect::<Vec<_>>());
+        println!(
+            "claude {} modes={:?} efforts={:?} models={:?}",
+            caps.version,
+            names(&caps.modes),
+            names(&caps.efforts),
+            caps.models
+                .iter()
+                .map(|m| m.choice.value.as_str())
+                .collect::<Vec<_>>()
+        );
         assert!(caps.modes.iter().any(|m| m.value == "plan"));
         assert!(caps.efforts.iter().any(|m| m.value == "high"));
         assert!(!caps.models.is_empty());
@@ -356,7 +505,16 @@ mod tests {
         if !caps.installed {
             return;
         }
-        println!("codex {} modes={:?} approvals={:?} models={:?}", caps.version, names(&caps.modes), names(&caps.approvals), caps.models.iter().map(|m| (m.choice.value.as_str(), m.efforts.len(), m.tiers.len())).collect::<Vec<_>>());
+        println!(
+            "codex {} modes={:?} approvals={:?} models={:?}",
+            caps.version,
+            names(&caps.modes),
+            names(&caps.approvals),
+            caps.models
+                .iter()
+                .map(|m| (m.choice.value.as_str(), m.efforts.len(), m.tiers.len()))
+                .collect::<Vec<_>>()
+        );
         assert!(caps.modes.iter().any(|m| m.value == "read-only"));
         assert!(caps.approvals.iter().any(|m| m.value == "never"));
     }
@@ -367,7 +525,13 @@ mod tests {
         if !caps.installed {
             return;
         }
-        println!("opencode {} models={} agents={:?} modes={:?}", caps.version, caps.models.len(), names(&caps.agents), names(&caps.modes));
+        println!(
+            "opencode {} models={} agents={:?} modes={:?}",
+            caps.version,
+            caps.models.len(),
+            names(&caps.agents),
+            names(&caps.modes)
+        );
         assert!(!caps.models.is_empty());
     }
 }

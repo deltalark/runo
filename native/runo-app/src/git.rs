@@ -47,7 +47,9 @@ pub fn sanitize_branch(input: &str) -> String {
             }
         })
         .collect();
-    cleaned.trim_matches(|c| c == '-' || c == '/' || c == '.').to_string()
+    cleaned
+        .trim_matches(|c| c == '-' || c == '/' || c == '.')
+        .to_string()
 }
 
 /// Create `<repo-parent>/.runo-worktrees/<repo-name>/<branch>` on a new (or existing) branch.
@@ -69,7 +71,12 @@ pub fn add_worktree(repo: &str, branch: &str) -> Result<String, String> {
     let dest_str = dest.to_string_lossy().into_owned();
     let exists = git(
         repo,
-        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .is_ok();
     if exists {
@@ -104,7 +111,12 @@ pub fn changes(dir: &str) -> Vec<Change> {
             continue;
         }
         let code = line[..2].trim().to_string();
-        let path = line[3..].rsplit(" -> ").next().unwrap_or("").trim_matches('"').to_string();
+        let path = line[3..]
+            .rsplit(" -> ")
+            .next()
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_string();
         let (added, removed) = if code == "??" {
             let lines = std::fs::read_to_string(Path::new(dir).join(&path))
                 .map(|t| t.lines().count())
@@ -141,9 +153,12 @@ pub fn file_diff(dir: &str, path: &str) -> String {
 }
 
 pub fn tracked_files(dir: &str) -> Vec<String> {
-    git(dir, &["ls-files", "--cached", "--others", "--exclude-standard"])
-        .map(|out| out.lines().take(2000).map(str::to_string).collect())
-        .unwrap_or_default()
+    git(
+        dir,
+        &["ls-files", "--cached", "--others", "--exclude-standard"],
+    )
+    .map(|out| out.lines().take(2000).map(str::to_string).collect())
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -151,7 +166,12 @@ mod tests {
     use super::*;
 
     fn sh(dir: &Path, args: &[&str]) {
-        let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
         assert!(status.success());
     }
 
