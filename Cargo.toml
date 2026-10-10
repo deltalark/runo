@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["native/runo-app"]
+exclude = ["vendor/portable-pty"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# The desktop shell spends most of its time in long-lived Rust services (PTY,
+# search, git, persistence and provider adapters).  Optimize those paths as one
+# unit for production builds instead of using Cargo's throughput-oriented
+# defaults.  Thin LTO keeps release builds practical while still optimizing
+# across crate boundaries.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = "symbols"
+
+# Keep profiling builds representative of release performance while retaining
+# symbols for Instruments, perf and flamegraph.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"

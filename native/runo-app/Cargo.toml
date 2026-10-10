@@ -1,0 +1,15 @@
+[package]
+name = "runo-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Runo's native GPUI desktop client"
+
+[[bin]]
+name = "runo-native"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = "0.7.1"
+serde.workspace = true
+serde_json.workspace = true
