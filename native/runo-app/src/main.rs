@@ -65,6 +65,7 @@ fn bind_keys(cx: &mut App) {
 enum View {
     Session,
     NewSession,
+    Inbox,
     AllSessions,
     Worktrees,
     Settings,
@@ -117,6 +118,9 @@ struct RunoApp {
     new_isolated: bool,
     expanded: Vec<u64>,
     confirm_delete: Option<u64>,
+    /// The session title is being edited in the header.
+    renaming: bool,
+    rename: Entity<InputState>,
     /// Changed file waiting for a second click before its changes are thrown away.
     confirm_discard: Option<String>,
     commit_msg: Entity<InputState>,
@@ -374,6 +378,18 @@ impl RunoApp {
                 this.run_terminal(line, cx);
             }
         });
+        let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
+        let rename_sub = cx.subscribe_in(&rename, window, |this, input, event, _, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    let title = input.read(cx).value().trim().to_string();
+                    this.finish_rename(Some(title));
+                }
+                InputEvent::Blur => this.finish_rename(None),
+                _ => {}
+            }
+            cx.notify();
+        });
         let commit_msg = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let commit_sub = cx.subscribe_in(&commit_msg, window, |this, _, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -465,6 +481,8 @@ impl RunoApp {
                 .unwrap_or(0),
             new_isolated: true,
             confirm_delete: None,
+            renaming: false,
+            rename: rename.clone(),
             confirm_discard: None,
             commit_msg: commit_msg.clone(),
             sync: git::Sync::default(),
@@ -482,6 +500,7 @@ impl RunoApp {
                 prompt_sub,
                 settings_search_sub,
                 commit_sub,
+                rename_sub,
             ],
         };
         // The New session form previews the branch and enables Start as you type.
@@ -575,6 +594,13 @@ impl RunoApp {
 
     fn select(&mut self, id: u64) {
         self.selected = Some(id);
+        self.renaming = false;
+        if let Some(session) = self.state.session_mut(id) {
+            if session.unread {
+                session.unread = false;
+                self.save();
+            }
+        }
         self.view = View::Session;
         self.selected_file = None;
         self.diff.clear();
@@ -642,8 +668,10 @@ impl RunoApp {
                 self.handles.remove(&Target::Session(id));
                 self.streams.remove(&id);
                 self.started.remove(&id);
+                let on_screen = self.selected == Some(id) && self.view == View::Session;
                 if let Some(session) = self.state.session_mut(id) {
                     session.status = if ok { Status::Done } else { Status::Failed };
+                    session.unread = !on_screen;
                     if session.messages.last().is_some_and(|m| {
                         m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
                     }) {
@@ -823,6 +851,58 @@ impl RunoApp {
                 handle.kill();
             }
         }
+    }
+
+    fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self.current().map(|s| s.title.clone()) else {
+            return;
+        };
+        self.renaming = true;
+        self.rename.update(cx, |input, cx| {
+            input.set_value(title, window, cx);
+            input.focus(window, cx);
+        });
+    }
+
+    /// Save the new title, or with `None` just leave rename mode.
+    fn finish_rename(&mut self, title: Option<String>) {
+        if !self.renaming {
+            return;
+        }
+        self.renaming = false;
+        let Some(title) = title.filter(|t| !t.is_empty()) else {
+            return;
+        };
+        if let Some(id) = self.selected {
+            if let Some(session) = self.state.session_mut(id) {
+                session.title = title;
+            }
+            self.save();
+        }
+    }
+
+    fn toggle_pin(&mut self, id: u64) {
+        if let Some(session) = self.state.session_mut(id) {
+            session.pinned = !session.pinned;
+            self.save();
+        }
+    }
+
+    fn toggle_archive(&mut self, id: u64) {
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        session.archived = !session.archived;
+        let (archived, title) = (session.archived, session.title.clone());
+        self.save();
+        self.info = Some((
+            if archived {
+                format!("Archived “{title}”. Find it under All sessions.")
+            } else {
+                format!("Restored “{title}”.")
+            },
+            std::time::Instant::now(),
+        ));
     }
 
     /// Commit every change in the session folder. An empty message falls back to the
@@ -1031,6 +1111,9 @@ impl RunoApp {
             messages: Vec::new(),
             agent_session: String::new(),
             conversation_start: 0,
+            pinned: false,
+            archived: false,
+            unread: false,
         });
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
@@ -1334,7 +1417,7 @@ impl RunoApp {
                 if selected { c_blue() } else { c_secondary() },
             ))
             .child(div().flex_1().child(label))
-            .when(count > 0, |el| {
+            .when(count > 0 && view != View::Inbox, |el| {
                 el.child(
                     div()
                         .text_xs()
@@ -1342,14 +1425,62 @@ impl RunoApp {
                         .child(count.to_string()),
                 )
             })
+            .when(count > 0 && view == View::Inbox, |el| {
+                el.child(
+                    div()
+                        .min_w(px(20.))
+                        .h(px(18.))
+                        .px_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(rgb(c_blue()))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_canvas()))
+                        .child(count.to_string()),
+                )
+            })
+    }
+
+    /// Small icon button shown on hover over a row.
+    fn row_action(
+        &self,
+        id: impl Into<ElementId>,
+        name: IconName,
+        tip: &'static str,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .size(px(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .bg(rgb(c_canvas()))
+            .border_1()
+            .border_color(rgb(c_border()))
+            .cursor_pointer()
+            .hover(|el| el.bg(rgb(c_subtle())))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+            })
+            .on_click(on_click)
+            .child(icon(name, 13., c_secondary()))
     }
 
     fn session_row(&self, session: &Session, cx: &mut Context<Self>) -> impl IntoElement {
         let id = session.id;
         let provider = agent::provider(&session.provider);
         let selected = self.selected == Some(id) && self.view == View::Session;
+        let unread = session.unread;
+        let pinned = session.pinned;
         div()
             .id(("session", id as usize))
+            .relative()
+            .group("session-row")
             .ml_3()
             .mr_1()
             .px_2()
@@ -1373,11 +1504,22 @@ impl RunoApp {
                     .v_flex()
                     .child(
                         div()
-                            .truncate()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(c_text()))
-                            .child(session.title.clone()),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted())))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(if unread {
+                                        FontWeight::BOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
+                                    .text_color(rgb(c_text()))
+                                    .child(session.title.clone()),
+                            ),
                     )
                     .child(
                         div()
@@ -1402,7 +1544,52 @@ impl RunoApp {
                             }),
                     ),
             )
-            .child(self.status_dot(session.status, ("dot", id as usize), 8.))
+            .child(if unread {
+                div()
+                    .size(px(8.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgb(c_blue()))
+                    .into_any_element()
+            } else {
+                self.status_dot(session.status, ("dot", id as usize), 8.)
+            })
+            .child(
+                div()
+                    .absolute()
+                    .right(px(4.))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .opacity(0.)
+                    .group_hover("session-row", |el| el.opacity(1.))
+                    .child(self.row_action(
+                        ("pin", id as usize),
+                        if pinned {
+                            IconName::PinOff
+                        } else {
+                            IconName::Pin
+                        },
+                        if pinned { "Unpin" } else { "Pin to top" },
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_pin(id);
+                            cx.notify();
+                        }),
+                    ))
+                    .child(self.row_action(
+                        ("archive", id as usize),
+                        IconName::Archive,
+                        "Archive",
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_archive(id);
+                            cx.notify();
+                        }),
+                    )),
+            )
             .animated(
                 SharedString::from(format!("row-in-{id}")),
                 Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()),
@@ -1420,7 +1607,7 @@ impl RunoApp {
                 .state
                 .sessions
                 .iter()
-                .filter(|s| s.project_id == pid)
+                .filter(|s| s.project_id == pid && !s.archived)
                 .filter(|s| {
                     filter.is_empty()
                         || s.title.to_lowercase().contains(&filter)
@@ -1428,6 +1615,8 @@ impl RunoApp {
                         || project.name.to_lowercase().contains(&filter)
                 })
                 .collect();
+            let mut sessions = sessions;
+            sessions.sort_by_key(|s| !s.pinned);
             if !filter.is_empty() && sessions.is_empty() {
                 continue;
             }
@@ -1596,9 +1785,23 @@ impl RunoApp {
                     .child(icon(IconName::Plus, 16., c_text()))
                     .child(div().flex_1().child("New session")),
             )
+            .child(
+                self.nav_item(
+                    "inbox",
+                    IconName::BellDot,
+                    "Inbox",
+                    self.state
+                        .sessions
+                        .iter()
+                        .filter(|s| s.unread && !s.archived)
+                        .count(),
+                    View::Inbox,
+                    cx,
+                ),
+            )
             .child(self.nav_item(
                 "all-sessions",
-                IconName::Inbox,
+                IconName::Layers,
                 "All sessions",
                 self.state.sessions.len(),
                 View::AllSessions,
@@ -2025,13 +2228,46 @@ impl RunoApp {
                             .v_flex()
                             .gap_1()
                             .min_w_0()
-                            .child(
+                            .child(if self.renaming {
                                 div()
-                                    .truncate()
-                                    .text_2xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(session.title.clone()),
-                            )
+                                    .w(px(420.))
+                                    .child(Input::new(&self.rename).bordered(true).h(px(38.)))
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .id("session-title")
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w_0()
+                                    .cursor_pointer()
+                                    .group("title")
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            "Click to rename",
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.start_rename(window, cx);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_2xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .child(session.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .opacity(0.)
+                                            .group_hover("title", |el| el.opacity(1.))
+                                            .child(icon(IconName::Pencil, 15., c_muted())),
+                                    )
+                                    .into_any_element()
+                            })
                             .child(
                                 div()
                                     .flex()
@@ -2895,14 +3131,23 @@ impl RunoApp {
             .into_any_element()
     }
 
-    fn list_view(&self, worktrees_only: bool, cx: &mut Context<Self>) -> AnyElement {
-        let mut rows = div().v_flex().gap_2();
-        for session in self
+    fn list_view(&self, kind: View, cx: &mut Context<Self>) -> AnyElement {
+        let worktrees_only = kind == View::Worktrees;
+        let mut sessions: Vec<&Session> = self
             .state
             .sessions
             .iter()
-            .filter(|s| !worktrees_only || s.isolated)
-        {
+            .filter(|s| match kind {
+                View::Inbox => s.unread && !s.archived,
+                View::Worktrees => s.isolated,
+                _ => true,
+            })
+            .collect();
+        // Live sessions first, archived ones last.
+        sessions.sort_by_key(|s| (s.archived, !s.pinned));
+        let mut rows = div().v_flex().gap_2();
+        let mut archived_header = false;
+        for (i, session) in sessions.iter().enumerate() {
             let id = session.id;
             let provider = agent::provider(&session.provider);
             let project = self
@@ -2912,9 +3157,22 @@ impl RunoApp {
                 .find(|p| p.id == session.project_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_default();
-            rows = rows.child(
+            if session.archived && !archived_header && kind == View::AllSessions {
+                archived_header = true;
+                rows = rows.child(
+                    div()
+                        .mt_4()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_secondary()))
+                        .child("Archived"),
+                );
+            }
+            let (archived, pinned, unread) = (session.archived, session.pinned, session.unread);
+            rows = rows.child(stagger(
                 div()
                     .id(("row", id as usize))
+                    .group("list-row")
                     .p_3()
                     .flex()
                     .items_center()
@@ -2923,6 +3181,7 @@ impl RunoApp {
                     .border_1()
                     .border_color(rgb(c_border()))
                     .cursor_pointer()
+                    .when(archived, |el| el.opacity(0.7))
                     .hover(|el| el.bg(rgb(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select(id);
@@ -2936,10 +3195,24 @@ impl RunoApp {
                             .v_flex()
                             .child(
                                 div()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(session.title.clone()),
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .when(pinned, |el| {
+                                        el.child(icon(IconName::Pin, 12., c_muted()))
+                                    })
+                                    .when(unread, |el| {
+                                        el.child(
+                                            div().size(px(7.)).rounded_full().bg(rgb(c_blue())),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(session.title.clone()),
+                                    ),
                             )
                             .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
                                 if worktrees_only && !self.demo {
@@ -2953,6 +3226,46 @@ impl RunoApp {
                         div()
                             .flex()
                             .items_center()
+                            .gap_1()
+                            .opacity(0.)
+                            .group_hover("list-row", |el| el.opacity(1.))
+                            .when(!archived, |el| {
+                                el.child(self.row_action(
+                                    ("list-pin", id as usize),
+                                    if pinned {
+                                        IconName::PinOff
+                                    } else {
+                                        IconName::Pin
+                                    },
+                                    if pinned { "Unpin" } else { "Pin to top" },
+                                    cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_pin(id);
+                                        cx.notify();
+                                    }),
+                                ))
+                            })
+                            .child(self.row_action(
+                                ("list-archive", id as usize),
+                                if archived {
+                                    IconName::ArchiveRestore
+                                } else {
+                                    IconName::Archive
+                                },
+                                if archived { "Restore" } else { "Archive" },
+                                cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_archive(id);
+                                    cx.notify();
+                                }),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .w(px(84.))
+                            .flex()
+                            .items_center()
+                            .justify_end()
                             .gap_2()
                             .text_xs()
                             .text_color(rgb(c_secondary()))
@@ -2964,21 +3277,47 @@ impl RunoApp {
                             )
                             .child(Self::status_label(session.status)),
                     ),
-            );
+                SharedString::from(format!("list-{}-{id}", kind as u8)),
+                i,
+            ));
         }
-        if self.state.sessions.is_empty() {
+        if sessions.is_empty() {
             rows = rows.child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(c_muted()))
-                    .child("Nothing here yet."),
+                    .py_10()
+                    .v_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon(
+                        if kind == View::Inbox {
+                            IconName::Inbox
+                        } else {
+                            IconName::Layers
+                        },
+                        28.,
+                        c_muted(),
+                    ))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(
+                        if kind == View::Inbox {
+                            "You're all caught up"
+                        } else {
+                            "Nothing here yet"
+                        },
+                    ))
+                    .child(div().text_xs().text_color(rgb(c_muted())).child(
+                        if kind == View::Inbox {
+                            "Sessions that finish while you're elsewhere land here."
+                        } else {
+                            "Start a session to see it here."
+                        },
+                    )),
             );
         }
         self.page(
-            if worktrees_only {
-                "Worktrees"
-            } else {
-                "All sessions"
+            match kind {
+                View::Inbox => "Inbox",
+                View::Worktrees => "Worktrees",
+                _ => "All sessions",
             },
             rows,
         )
@@ -3870,8 +4209,9 @@ impl Render for RunoApp {
         let center = match self.view {
             View::Session => self.session_view(cx),
             View::NewSession => self.new_session_view(cx),
-            View::AllSessions => self.list_view(false, cx),
-            View::Worktrees => self.list_view(true, cx),
+            View::Inbox => self.list_view(View::Inbox, cx),
+            View::AllSessions => self.list_view(View::AllSessions, cx),
+            View::Worktrees => self.list_view(View::Worktrees, cx),
             View::Settings => self.settings_view(window, cx),
         };
         // The side panel needs room; on narrow windows it starts hidden (toggle in the header).
@@ -3935,6 +4275,8 @@ impl Render for RunoApp {
                 if this.menu.is_some() || this.settings_menu.is_some() {
                     this.menu = None;
                     this.settings_menu = None;
+                } else if this.renaming {
+                    this.renaming = false;
                 } else if this.confirm_delete.is_some() {
                     this.confirm_delete = None;
                 } else if this.notice.is_some() {
