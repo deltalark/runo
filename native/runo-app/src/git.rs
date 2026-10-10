@@ -166,6 +166,84 @@ pub fn tracked_files(dir: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Throw away the working-tree and staged changes to one file. Files that are new
+/// since the last commit are deleted.
+pub fn discard(dir: &str, path: &str) -> Result<(), String> {
+    if git(dir, &["cat-file", "-e", &format!("HEAD:{path}")]).is_ok() {
+        git(
+            dir,
+            &[
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                path,
+            ],
+        )
+        .map(|_| ())
+    } else {
+        git(
+            dir,
+            &["rm", "-q", "--cached", "--ignore-unmatch", "--", path],
+        )?;
+        match std::fs::remove_file(Path::new(dir).join(path)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Stage everything and commit it. Returns the short hash of the new commit.
+pub fn commit_all(dir: &str, message: &str) -> Result<String, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Write a commit message first.".into());
+    }
+    git(dir, &["add", "-A"])?;
+    git(dir, &["commit", "-q", "-m", message])?;
+    git(dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string())
+}
+
+/// How the branch relates to its remote.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Sync {
+    /// The remote to push to, empty when the repository has none.
+    pub remote: String,
+    /// Whether the branch already tracks a remote branch.
+    pub upstream: bool,
+    /// Commits that are not on the remote yet.
+    pub ahead: usize,
+}
+
+pub fn sync_state(dir: &str) -> Sync {
+    let remotes = git(dir, &["remote"]).unwrap_or_default();
+    let remote = if remotes.lines().any(|r| r == "origin") {
+        "origin".to_string()
+    } else {
+        remotes.lines().next().unwrap_or("").to_string()
+    };
+    let count = |args: &[&str]| {
+        git(dir, args)
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+    };
+    let upstream_ahead = count(&["rev-list", "--count", "@{u}..HEAD"]);
+    let ahead = match upstream_ahead {
+        Some(n) => n,
+        // No upstream yet: count the commits no remote branch has.
+        None if !remote.is_empty() => {
+            count(&["rev-list", "--count", "HEAD", "--not", "--remotes"]).unwrap_or(0)
+        }
+        None => 0,
+    };
+    Sync {
+        remote,
+        upstream: upstream_ahead.is_some(),
+        ahead,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LineKind {
     Hunk,
@@ -453,5 +531,61 @@ index 1..2 100644
         remove_worktree(repo_str, &dir).unwrap();
         assert!(!Path::new(&dir).exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discard_commit_and_sync() {
+        let repo = repo("ship");
+        let dir = repo.to_str().unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        assert_eq!(sync_state(dir), Sync::default());
+
+        // A modified tracked file goes back to its committed text, even when staged.
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        sh(&repo, &["add", "a.txt"]);
+        discard(dir, "a.txt").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        // New files are removed, staged or not.
+        std::fs::write(repo.join("new.txt"), "x").unwrap();
+        std::fs::write(repo.join("staged.txt"), "x").unwrap();
+        sh(&repo, &["add", "staged.txt"]);
+        discard(dir, "new.txt").unwrap();
+        discard(dir, "staged.txt").unwrap();
+        assert!(changes(dir).is_empty());
+
+        assert!(commit_all(dir, "  ").is_err());
+        std::fs::write(repo.join("b.txt"), "b").unwrap();
+        let hash = commit_all(dir, "Add b").unwrap();
+        assert!(!hash.is_empty());
+        assert!(changes(dir).is_empty());
+
+        // With a remote but no upstream, unpushed commits are counted.
+        let remote = repo.with_extension("remote");
+        let _ = std::fs::remove_dir_all(&remote);
+        sh(
+            Path::new("."),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        sh(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        let s = sync_state(dir);
+        assert_eq!(
+            (s.remote.as_str(), s.upstream, s.ahead),
+            ("origin", false, 2)
+        );
+        sh(&repo, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(repo.join("c.txt"), "c").unwrap();
+        commit_all(dir, "Add c").unwrap();
+        let s = sync_state(dir);
+        assert_eq!((s.upstream, s.ahead), (true, 1));
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&remote);
     }
 }

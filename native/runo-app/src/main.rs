@@ -117,6 +117,10 @@ struct RunoApp {
     new_isolated: bool,
     expanded: Vec<u64>,
     confirm_delete: Option<u64>,
+    /// Changed file waiting for a second click before its changes are thrown away.
+    confirm_discard: Option<String>,
+    commit_msg: Entity<InputState>,
+    sync: git::Sync,
     notice: Option<String>,
     /// A short confirmation (not an error) shown in the status bar.
     info: Option<(String, std::time::Instant)>,
@@ -370,6 +374,13 @@ impl RunoApp {
                 this.run_terminal(line, cx);
             }
         });
+        let commit_msg = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
+        let commit_sub = cx.subscribe_in(&commit_msg, window, |this, _, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.commit(window, cx);
+                cx.notify();
+            }
+        });
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("What would you like to change?")
@@ -454,6 +465,9 @@ impl RunoApp {
                 .unwrap_or(0),
             new_isolated: true,
             confirm_delete: None,
+            confirm_discard: None,
+            commit_msg: commit_msg.clone(),
+            sync: git::Sync::default(),
             notice: None,
             info: None,
             mono_font: cx.theme().mono_font_family.clone(),
@@ -462,7 +476,13 @@ impl RunoApp {
             panel_wide: None,
             started: HashMap::new(),
             stopping: Default::default(),
-            _subscriptions: vec![search_sub, term_sub, prompt_sub, settings_search_sub],
+            _subscriptions: vec![
+                search_sub,
+                term_sub,
+                prompt_sub,
+                settings_search_sub,
+                commit_sub,
+            ],
         };
         // The New session form previews the branch and enables Start as you type.
         let repaint = |_: &mut Self,
@@ -520,6 +540,11 @@ impl RunoApp {
             self.files = self.changes.iter().map(|c| c.path.clone()).collect();
             self.selected_file = Some(self.changes[0].path.clone());
             self.diff = DEMO_DIFF.to_string();
+            self.sync = git::Sync {
+                remote: "origin".into(),
+                upstream: true,
+                ahead: 2,
+            };
             return;
         }
         if !self.dir_is_git {
@@ -531,6 +556,7 @@ impl RunoApp {
         }
         self.changes = git::changes(&dir);
         self.files = git::tracked_files(&dir);
+        self.sync = git::sync_state(&dir);
         if let Some(file) = self.selected_file.clone() {
             if self.changes.iter().any(|c| c.path == file) {
                 self.diff = git::file_diff(&dir, &file);
@@ -554,6 +580,7 @@ impl RunoApp {
         self.diff.clear();
         self.preview = None;
         self.confirm_delete = None;
+        self.confirm_discard = None;
         self.notice = None;
         self.info = None;
         self.menu = None;
@@ -796,6 +823,64 @@ impl RunoApp {
                 handle.kill();
             }
         }
+    }
+
+    /// Commit every change in the session folder. An empty message falls back to the
+    /// session title.
+    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.demo_guard(cx) {
+            return;
+        }
+        let Some((dir, title)) = self.current().map(|s| (s.dir.clone(), s.title.clone())) else {
+            return;
+        };
+        let typed = self.commit_msg.read(cx).value().trim().to_string();
+        let message = if typed.is_empty() { title } else { typed };
+        match git::commit_all(&dir, &message) {
+            Ok(hash) => {
+                self.commit_msg
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.notice = None;
+                self.info = Some((
+                    format!("Committed {hash}: {message}"),
+                    std::time::Instant::now(),
+                ));
+                self.refresh();
+            }
+            Err(error) => self.notice = Some(format!("Commit failed: {error}")),
+        }
+    }
+
+    fn discard(&mut self, path: &str) {
+        self.confirm_discard = None;
+        if self.demo {
+            return;
+        }
+        let Some(dir) = self.current().map(|s| s.dir.clone()) else {
+            return;
+        };
+        match git::discard(&dir, path) {
+            Ok(()) => {
+                self.info = Some((format!("Discarded {path}."), std::time::Instant::now()));
+                self.refresh();
+            }
+            Err(error) => self.notice = Some(format!("Could not discard {path}: {error}")),
+        }
+    }
+
+    /// Push the branch, then optionally open a pull request with `gh`. Output goes to
+    /// the Terminal so progress and links stay visible.
+    fn ship(&mut self, open_pr: bool, cx: &mut Context<Self>) {
+        let remote = self.sync.remote.clone();
+        if remote.is_empty() {
+            self.notice = Some("This repository has no remote to push to.".into());
+            return;
+        }
+        let mut line = format!("git push -u {remote} HEAD");
+        if open_pr {
+            line.push_str(" && gh pr create --fill");
+        }
+        self.run_terminal(line, cx);
     }
 
     fn run_terminal(&mut self, line: String, cx: &mut Context<Self>) {
@@ -3031,9 +3116,11 @@ impl RunoApp {
         for (i, change) in self.changes.iter().enumerate() {
             let path = change.path.clone();
             let selected = self.selected_file.as_deref() == Some(change.path.as_str());
+            let confirming = self.confirm_discard.as_deref() == Some(change.path.as_str());
             list = list.child(stagger(
                 div()
                     .id(("chg", i))
+                    .group("change-row")
                     .h(px(38.))
                     .px_3()
                     .flex()
@@ -3068,18 +3155,95 @@ impl RunoApp {
                             .text_color(rgb(c_text()))
                             .child(change.path.clone()),
                     )
-                    .child(
+                    .child(if confirming {
+                        let (keep, gone) = (change.path.clone(), change.path.clone());
                         div()
-                            .text_sm()
-                            .text_color(rgb(c_add()))
-                            .child(format!("+{}", change.added)),
-                    )
-                    .child(
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id(("discard-yes", i))
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(c_canvas()))
+                                    .bg(rgb(c_red()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.discard(&gone);
+                                        cx.notify();
+                                    }))
+                                    .child("Discard"),
+                            )
+                            .child(
+                                div()
+                                    .id(("discard-no", i))
+                                    .px_2()
+                                    .py(px(3.))
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(c_secondary()))
+                                    .cursor_pointer()
+                                    .hover(|el| el.bg(rgb(c_subtle())))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        if this.confirm_discard.as_deref() == Some(keep.as_str()) {
+                                            this.confirm_discard = None;
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child("Keep"),
+                            )
+                            .into_any_element()
+                    } else {
+                        let ask = change.path.clone();
                         div()
-                            .text_sm()
-                            .text_color(rgb(c_del()))
-                            .child(format!("−{}", change.removed)),
-                    ),
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(c_add()))
+                                    .child(format!("+{}", change.added)),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(c_del()))
+                                    .child(format!("−{}", change.removed)),
+                            )
+                            .child(
+                                div()
+                                    .id(("discard", i))
+                                    .size(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .opacity(0.)
+                                    .group_hover("change-row", |el| el.opacity(1.))
+                                    .hover(|el| el.bg(rgb(c_subtle())))
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            "Discard changes to this file",
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.confirm_discard = Some(ask.clone());
+                                        cx.notify();
+                                    }))
+                                    .child(icon(IconName::Undo2, 13., c_muted())),
+                            )
+                            .into_any_element()
+                    }),
                 SharedString::from(format!("chg-{}-{}", self.selected.unwrap_or(0), i)),
                 i,
             ));
@@ -3142,6 +3306,7 @@ impl RunoApp {
                             })),
                     ),
             )
+            .child(self.ship_bar(cx))
             .child(if self.changes.is_empty() {
                 div()
                     .flex_1()
@@ -3155,7 +3320,7 @@ impl RunoApp {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("No changes yet"),
+                            .child("No uncommitted changes"),
                     )
                     .child(
                         div()
@@ -3257,6 +3422,109 @@ impl RunoApp {
                 )
             })
             .into_any_element()
+    }
+
+    /// Commit box and push / pull request actions for the session branch.
+    fn ship_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_changes = !self.changes.is_empty();
+        let sync = &self.sync;
+        let busy = self
+            .selected
+            .is_some_and(|id| self.handles.contains_key(&Target::Terminal(id)));
+        let status = if sync.remote.is_empty() {
+            "No remote".to_string()
+        } else if sync.ahead > 0 {
+            format!(
+                "{} unpushed commit{}",
+                sync.ahead,
+                if sync.ahead == 1 { "" } else { "s" }
+            )
+        } else if sync.upstream {
+            format!("Up to date with {}", sync.remote)
+        } else {
+            "Not pushed yet".to_string()
+        };
+        let can_push = !sync.remote.is_empty() && !busy && (sync.ahead > 0 || !sync.upstream);
+        let can_pr = !sync.remote.is_empty() && !busy;
+        div()
+            .v_flex()
+            .gap_2()
+            .when(has_changes, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Input::new(&self.commit_msg).bordered(true).h(px(32.))),
+                        )
+                        .child(
+                            self.button("commit", "Commit", true)
+                                .h(px(32.))
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        "Stage and commit every change. An empty message uses the session title.",
+                                    )
+                                    .build(window, cx)
+                                })
+                                .child(icon(IconName::GitCommitHorizontal, 14., c_canvas()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.commit(window, cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon(IconName::GitBranch, 13., c_muted()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(rgb(c_secondary()))
+                            .child(status),
+                    )
+                    .child(
+                        self.button("push", "Push", false)
+                            .h(px(28.))
+                            .text_xs()
+                            .when(!can_push, |el| el.opacity(0.45))
+                            .child(icon(IconName::CloudUpload, 13., c_secondary()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if can_push {
+                                    this.ship(false, cx);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button("create-pr", "Create PR", false)
+                            .h(px(28.))
+                            .text_xs()
+                            .when(!can_pr, |el| el.opacity(0.45))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Push the branch and open a pull request with the GitHub CLI (gh).",
+                                )
+                                .build(window, cx)
+                            })
+                            .child(icon(IconName::GitPullRequestCreate, 13., c_secondary()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if can_pr {
+                                    this.ship(true, cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 
     fn browser_tab(&self, cx: &mut Context<Self>) -> AnyElement {
