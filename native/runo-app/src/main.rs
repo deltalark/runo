@@ -43,6 +43,22 @@ const DEMO_DIFF: &str = "@@ -42,13 +42,20 @@ impl NavItem {
 +    items: Vec<NavItem>,
  }";
 
+actions!(
+    runo,
+    [NewSession, OpenSettings, StopAgent, TogglePanel, Dismiss]
+);
+
+/// Global shortcuts. `secondary` is ⌘ on macOS and Ctrl elsewhere.
+fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("secondary-n", NewSession, Some("Runo")),
+        KeyBinding::new("secondary-,", OpenSettings, Some("Runo")),
+        KeyBinding::new("secondary-.", StopAgent, Some("Runo")),
+        KeyBinding::new("secondary-b", TogglePanel, Some("Runo")),
+        KeyBinding::new("escape", Dismiss, Some("Runo")),
+    ]);
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum View {
@@ -99,7 +115,19 @@ struct RunoApp {
     expanded: Vec<u64>,
     confirm_delete: Option<u64>,
     notice: Option<String>,
+    /// A short confirmation (not an error) shown in the status bar.
+    info: Option<(String, std::time::Instant)>,
     mono_font: SharedString,
+    /// Whether the right-hand Changes / Files / Terminal panel is shown.
+    show_panel: bool,
+    /// Root focus, so global shortcuts work before any input has been clicked.
+    focus: FocusHandle,
+    /// Last window-width class seen, so the panel auto-hides once when the window narrows.
+    panel_wide: Option<bool>,
+    /// When each running agent started, for the elapsed-time label.
+    started: HashMap<u64, std::time::Instant>,
+    /// Sessions the user asked to stop, so their exit is not reported as an error.
+    stopping: std::collections::HashSet<u64>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -231,6 +259,33 @@ fn plain_files(dir: &str) -> Vec<String> {
     out
 }
 
+/// Colour for a git status letter: added, deleted, renamed, otherwise modified.
+fn change_color(status: &str) -> u32 {
+    match status.chars().next() {
+        Some('A') => c_green(),
+        Some('D') => c_red(),
+        Some('R') | Some('C') => c_blue(),
+        _ => c_amber(),
+    }
+}
+
+/// The platform's command modifier, as shown in shortcut hints.
+pub(crate) const MOD_KEY: &str = if cfg!(target_os = "macos") {
+    "⌘"
+} else {
+    "Ctrl+"
+};
+
+/// `42s`, `3:07`, `1:02:09`.
+fn elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}:{:02}", secs / 60, secs % 60),
+        _ => format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60),
+    }
+}
+
 fn icon(name: IconName, size: f32, color: u32) -> Icon {
     Icon::new(name).size(px(size)).text_color(rgb(color))
 }
@@ -239,13 +294,34 @@ impl RunoApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         caps::refresh();
         let (tx, rx) = channel::<Event>();
+        let mut ticks = 0u32;
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(Duration::from_millis(80))
                 .await;
+            ticks = ticks.wrapping_add(1);
             let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             if events.is_empty() {
-                if caps::take_updated() && this.update(cx, |_, cx| cx.notify()).is_err() {
+                // Repaint about once a second while agents run, for their elapsed time.
+                let tick = ticks.is_multiple_of(12);
+                let repaint = caps::take_updated();
+                // Every ~2s, re-read git status for the session being watched while its
+                // agent works, so the Changes panel fills in as files are edited.
+                let rescan = ticks.is_multiple_of(25);
+                let alive = this.update(cx, |this, cx| {
+                    let watching = this.view == View::Session
+                        && this
+                            .selected
+                            .is_some_and(|id| this.started.contains_key(&id));
+                    if rescan && watching && !this.demo {
+                        this.refresh();
+                        cx.notify();
+                    } else if repaint || (tick && (!this.started.is_empty() || this.info.is_some()))
+                    {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
                     break;
                 }
                 continue;
@@ -305,6 +381,11 @@ impl RunoApp {
                     } else {
                         *secondary
                     }
+                }
+                // Repaint so the send button reflects whether there is anything to send.
+                InputEvent::Change => {
+                    cx.notify();
+                    false
                 }
                 _ => false,
             };
@@ -370,10 +451,44 @@ impl RunoApp {
             new_isolated: true,
             confirm_delete: None,
             notice: None,
+            info: None,
             mono_font: cx.theme().mono_font_family.clone(),
+            show_panel: true,
+            focus: cx.focus_handle(),
+            panel_wide: None,
+            started: HashMap::new(),
+            stopping: Default::default(),
             _subscriptions: vec![search_sub, term_sub, prompt_sub, settings_search_sub],
         };
+        // The New session form previews the branch and enables Start as you type.
+        let repaint = |_: &mut Self,
+                       _: &Entity<InputState>,
+                       event: &InputEvent,
+                       _: &mut Window,
+                       cx: &mut Context<Self>| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        };
+        let branch_sub = cx.subscribe_in(&app.branch, window, repaint);
+        let task_sub =
+            cx.subscribe_in(
+                &app.new_task,
+                window,
+                |this, _, event, window, cx| match event {
+                    InputEvent::Change => cx.notify(),
+                    InputEvent::PressEnter {
+                        secondary: true, ..
+                    } => {
+                        this.create_session(window, cx);
+                        cx.notify();
+                    }
+                    _ => {}
+                },
+            );
+        app._subscriptions.extend([branch_sub, task_sub]);
         app.refresh();
+        window.focus(&app.focus, cx);
         app
     }
 
@@ -436,6 +551,7 @@ impl RunoApp {
         self.preview = None;
         self.confirm_delete = None;
         self.notice = None;
+        self.info = None;
         self.menu = None;
         self.refresh();
         self.chat_scroll.scroll_to_bottom();
@@ -476,6 +592,7 @@ impl RunoApp {
             }
             Event::Done(Target::Session(id), ok) => {
                 self.handles.remove(&Target::Session(id));
+                self.started.remove(&id);
                 if let Some(session) = self.state.session_mut(id) {
                     session.status = if ok { Status::Done } else { Status::Failed };
                     if session
@@ -517,9 +634,13 @@ impl RunoApp {
                             errors
                         };
                         let log = tail.join("\n");
-                        let mut text =
-                            String::from("The agent stopped with an error or was stopped.");
-                        if !log.trim().is_empty() {
+                        let stopped = self.stopping.remove(&id);
+                        let mut text = String::from(if stopped {
+                            "Stopped."
+                        } else {
+                            "The agent stopped with an error."
+                        });
+                        if !log.trim().is_empty() && !stopped {
                             text.push_str(&format!(
                                 "\n```text\n{}\n```",
                                 log.replace("```", "'''")
@@ -540,8 +661,14 @@ impl RunoApp {
                     self.refresh();
                 }
             }
-            Event::Done(Target::Terminal(id), _) => {
+            Event::Done(Target::Terminal(id), ok) => {
                 self.handles.remove(&Target::Terminal(id));
+                if !ok {
+                    self.terminal
+                        .entry(id)
+                        .or_default()
+                        .push("[exited with an error]".into());
+                }
                 if self.selected == Some(id) {
                     self.refresh();
                 }
@@ -578,6 +705,7 @@ impl RunoApp {
             Ok(handle) => {
                 session.status = Status::Working;
                 self.handles.insert(Target::Session(id), handle);
+                self.started.insert(id, std::time::Instant::now());
             }
             Err(error) => {
                 session.status = Status::Failed;
@@ -618,9 +746,30 @@ impl RunoApp {
         self.start_agent(id, text, &opts);
     }
 
+    /// Load a file of the current session into the Files preview.
+    fn open_preview(&mut self, path: &str) {
+        if self.demo {
+            self.preview = Some((path.to_string(), "(demo data)".into()));
+        } else if let Some(dir) = self.current().map(|s| s.dir.clone()) {
+            let text = std::fs::read_to_string(std::path::Path::new(&dir).join(path))
+                .unwrap_or_else(|_| "(binary, deleted or unreadable file)".into());
+            self.preview = Some((
+                path.to_string(),
+                text.lines().take(1500).collect::<Vec<_>>().join("\n"),
+            ));
+        }
+    }
+
+    fn open_settings(&mut self) {
+        self.view = View::Settings;
+        let dir = self.current().filter(|_| !self.demo).map(|s| s.dir.clone());
+        self.discovered = Some(settings::discover(dir.as_deref()));
+    }
+
     fn stop(&mut self) {
         if let Some(id) = self.selected {
             if let Some(handle) = self.handles.get(&Target::Session(id)) {
+                self.stopping.insert(id);
                 handle.kill();
             }
         }
@@ -823,8 +972,8 @@ impl RunoApp {
 
     fn status_color(status: Status) -> u32 {
         match status {
-            Status::Idle => c_amber(),
-            Status::Working => c_green(),
+            Status::Idle => c_muted(),
+            Status::Working => c_blue(),
             Status::Done => c_green(),
             Status::Failed => c_red(),
         }
@@ -870,10 +1019,13 @@ impl RunoApp {
             .child(label.into())
     }
 
-    fn icon_button(&self, id: &'static str, name: IconName) -> Stateful<Div> {
+    fn icon_button(&self, id: &'static str, name: IconName, tip: &'static str) -> Stateful<Div> {
         div()
             .id(id)
-            .size(px(38.))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+            })
+            .size(px(36.))
             .flex()
             .items_center()
             .justify_center()
@@ -939,6 +1091,11 @@ impl RunoApp {
             .flex()
             .items_center()
             .justify_center()
+            .bg(rgb(settings::mix(
+                provider.color,
+                c_canvas(),
+                if is_dark() { 0.22 } else { 0.12 },
+            )))
             .text_color(rgb(provider.color))
             .font_weight(FontWeight::BOLD)
             .child(provider.mark)
@@ -952,6 +1109,8 @@ impl RunoApp {
             .and_then(|s| self.state.projects.iter().find(|p| p.id == s.project_id))
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "No project".into());
+        let branch = self.current().map(|s| s.branch.clone()).unwrap_or_default();
+        let running = self.started.len();
         div()
             .h(px(46.))
             .flex_none()
@@ -980,8 +1139,33 @@ impl RunoApp {
                             .gap_1()
                             .text_color(rgb(c_secondary()))
                             .child(project)
-                            .child(icon(IconName::ChevronDown, 14., c_muted())),
-                    ),
+                            .when(!branch.is_empty(), |el| {
+                                el.child(div().text_color(rgb(c_muted())).child("/"))
+                                    .child(icon(IconName::GitBranch, 13., c_muted()))
+                                    .child(branch)
+                            }),
+                    )
+                    .when(running > 0, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_2()
+                                .py(px(2.))
+                                .rounded_full()
+                                .bg(rgb(c_selected()))
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(c_blue()))
+                                .child(self.status_dot(Status::Working, "title-running", 6.))
+                                .child(if running == 1 {
+                                    "1 agent running".to_string()
+                                } else {
+                                    format!("{running} agents running")
+                                }),
+                        )
+                    }),
             )
             .child(if self.view == View::Settings {
                 div().w(px(280.)).into_any_element()
@@ -1029,10 +1213,10 @@ impl RunoApp {
             .when(selected, |el| el.bg(rgb(c_selected())))
             .hover(|el| el.bg(rgb(c_subtle())))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.view = view;
                 if view == View::Settings {
-                    let dir = this.current().filter(|_| !this.demo).map(|s| s.dir.clone());
-                    this.discovered = Some(settings::discover(dir.as_deref()));
+                    this.open_settings();
+                } else {
+                    this.view = view;
                 }
                 cx.notify();
             }))
@@ -1089,10 +1273,25 @@ impl RunoApp {
                     )
                     .child(
                         div()
-                            .truncate()
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .text_xs()
                             .text_color(rgb(c_muted()))
-                            .child(session.branch.clone()),
+                            .child(div().min_w_0().truncate().child(session.branch.clone()))
+                            .when(session.status == Status::Working, |el| {
+                                el.child(div().flex_none().text_color(rgb(c_blue())).child(
+                                    match self.started.get(&id) {
+                                        Some(t) => format!("· {}", elapsed(t.elapsed())),
+                                        None => "· Working".into(),
+                                    },
+                                ))
+                            })
+                            .when(session.status == Status::Failed, |el| {
+                                el.child(
+                                    div().flex_none().text_color(rgb(c_red())).child("· Failed"),
+                                )
+                            }),
                     ),
             )
             .child(self.status_dot(session.status, ("dot", id as usize), 8.))
@@ -1162,6 +1361,35 @@ impl RunoApp {
                             .text_color(rgb(c_text()))
                             .child(project.name.clone()),
                     )
+                    .when(!open && !sessions.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(c_muted()))
+                                .child(sessions.len().to_string()),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("project-new", pid as usize))
+                            .p(px(3.))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|el| el.bg(rgb(c_border())))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "New session in this project",
+                                )
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.new_project = Some(pid);
+                                this.view = View::NewSession;
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::Plus, 14., c_muted())),
+                    )
                     .child(icon(
                         if open {
                             IconName::ChevronDown
@@ -1173,6 +1401,16 @@ impl RunoApp {
                     )),
             );
             if open || !filter.is_empty() {
+                if sessions.is_empty() {
+                    projects = projects.child(
+                        div()
+                            .ml(px(38.))
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(c_muted()))
+                            .child("No sessions yet"),
+                    );
+                }
                 for session in sessions {
                     projects = projects.child(self.session_row(session, cx));
                 }
@@ -1320,7 +1558,7 @@ impl RunoApp {
                         div()
                             .size(px(32.))
                             .rounded_full()
-                            .bg(rgb(0x6b7686))
+                            .bg(rgb(c_blue()))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1409,7 +1647,11 @@ impl RunoApp {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{} files changed", self.changes.len())),
+                            .child(format!(
+                                "{} file{} changed",
+                                self.changes.len(),
+                                if self.changes.len() == 1 { "" } else { "s" }
+                            )),
                     )
                     .child(
                         div()
@@ -1484,30 +1726,43 @@ impl RunoApp {
                 i,
             ));
         }
+        let is_system = message.role == Role::System;
+        let copy_text = message.text.clone();
+        let avatar = match message.role {
+            Role::Agent => self
+                .provider_badge(provider, 32.)
+                .rounded_full()
+                .into_any_element(),
+            Role::System => div()
+                .size(px(32.))
+                .flex_none()
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(settings::mix(c_red(), c_canvas(), 0.14)))
+                .child(icon(IconName::TriangleAlert, 15., c_red()))
+                .into_any_element(),
+            Role::User => div()
+                .size(px(32.))
+                .flex_none()
+                .rounded_full()
+                .bg(rgb(c_border()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(color))
+                .child("You")
+                .into_any_element(),
+        };
         div()
             .id(("message", index))
+            .group("message")
             .flex()
             .gap_3()
-            .child(
-                div()
-                    .size(px(34.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(rgb(if is_user { 0xd9dee5 } else { c_canvas() }))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(color))
-                    .child(if is_user {
-                        "You".to_string()
-                    } else if message.role == Role::System {
-                        "!".to_string()
-                    } else {
-                        provider.mark.to_string()
-                    }),
-            )
+            .child(avatar)
             .child(
                 div()
                     .flex_1()
@@ -1532,6 +1787,38 @@ impl RunoApp {
                                         .text_color(rgb(c_muted()))
                                         .child(message.time.clone()),
                                 )
+                            })
+                            .when(!message.text.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .id(("copy", index))
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .px_2()
+                                        .py(px(2.))
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(c_muted()))
+                                        .opacity(0.)
+                                        .group_hover("message", |el| el.opacity(1.))
+                                        .hover(|el| {
+                                            el.bg(rgb(c_subtle())).text_color(rgb(c_text()))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_text.clone(),
+                                            ));
+                                            this.info = Some((
+                                                "Copied to the clipboard.".into(),
+                                                std::time::Instant::now(),
+                                            ));
+                                            cx.notify();
+                                        }))
+                                        .child(icon(IconName::Copy, 12., c_muted()))
+                                        .child("Copy"),
+                                )
                             }),
                     )
                     .child(
@@ -1543,11 +1830,15 @@ impl RunoApp {
                             .when(is_user, |el| {
                                 el.px_4().py_3().rounded_xl().bg(rgb(c_subtle()))
                             })
-                            .text_color(rgb(if message.role == Role::System {
-                                c_red()
-                            } else {
-                                c_text()
-                            }))
+                            .when(is_system, |el| {
+                                el.px_4()
+                                    .py_3()
+                                    .rounded_xl()
+                                    .border_1()
+                                    .border_color(rgb(settings::mix(c_red(), c_canvas(), 0.35)))
+                                    .bg(rgb(settings::mix(c_red(), c_canvas(), 0.06)))
+                            })
+                            .text_color(rgb(c_text()))
                             .child(if message.text.is_empty() {
                                 working_indicator().into_any_element()
                             } else {
@@ -1583,6 +1874,7 @@ impl RunoApp {
         let working = self.handles.contains_key(&Target::Session(session.id));
         let id = session.id;
         let confirming = self.confirm_delete == Some(id);
+        let isolated = session.isolated;
         let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
         let mut list = div().v_flex().gap_5().px_8().py_5();
         if let Some(first) = session.messages.first().filter(|m| !m.time.is_empty()) {
@@ -1593,7 +1885,7 @@ impl RunoApp {
                     .justify_center()
                     .text_xs()
                     .text_color(rgb(c_muted()))
-                    .child(format!("Today, {}", first.time)),
+                    .child(format!("Started at {}", first.time)),
             );
         }
         for (i, message) in session.messages.iter().enumerate() {
@@ -1649,40 +1941,94 @@ impl RunoApp {
                                     .child(icon(IconName::GitBranch, 14., c_muted()))
                                     .child(session.branch.clone())
                                     .child(self.status_dot(session.status, "hdr-dot", 7.))
-                                    .child(Self::status_label(session.status)),
+                                    .child(match self.started.get(&id).filter(|_| working) {
+                                        Some(start) => {
+                                            format!("Working · {}", elapsed(start.elapsed()))
+                                        }
+                                        None => Self::status_label(session.status).to_string(),
+                                    }),
                             ),
                     )
                     .child(
                         div()
                             .flex()
+                            .flex_none()
+                            .items_center()
                             .gap_2()
                             .when(working, |el| {
-                                el.child(self.icon_button("stop", IconName::Pause).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.stop();
-                                        cx.notify();
-                                    }),
-                                ))
+                                el.child(
+                                    self.button("stop", "Stop", false)
+                                        .h(px(36.))
+                                        .text_color(rgb(c_red()))
+                                        .child(icon(IconName::CircleStop, 15., c_red()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.stop();
+                                            cx.notify();
+                                        })),
+                                )
                             })
-                            .child(if confirming {
-                                self.button("delete", "Delete session & worktree", false)
+                            .child(
+                                self.icon_button(
+                                    "toggle-panel",
+                                    if self.show_panel {
+                                        IconName::PanelRightClose
+                                    } else {
+                                        IconName::PanelRightOpen
+                                    },
+                                    if self.show_panel {
+                                        "Hide changes panel"
+                                    } else {
+                                        "Show changes panel"
+                                    },
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.show_panel = !this.show_panel;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .when(confirming, |el| {
+                                el.child(
+                                    self.button("cancel-delete", "Cancel", false)
+                                        .h(px(36.))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.confirm_delete = None;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    self.button(
+                                        "delete",
+                                        if isolated && !self.demo && remove_worktree() {
+                                            "Delete session & worktree"
+                                        } else {
+                                            "Delete session"
+                                        },
+                                        false,
+                                    )
+                                    .h(px(36.))
                                     .border_color(rgb(c_red()))
                                     .text_color(rgb(c_red()))
-                                    .h(px(38.))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.delete_session(id);
-                                        cx.notify();
-                                    }))
-                            } else {
-                                self.icon_button("delete", IconName::Ellipsis).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        if confirm_delete() {
-                                            this.confirm_delete = Some(id);
-                                        } else {
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
                                             this.delete_session(id);
-                                        }
-                                        cx.notify();
-                                    }),
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            })
+                            .when(!confirming, |el| {
+                                el.child(
+                                    self.icon_button("delete", IconName::Trash, "Delete session")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if confirm_delete() {
+                                                this.confirm_delete = Some(id);
+                                            } else {
+                                                this.delete_session(id);
+                                            }
+                                            cx.notify();
+                                        })),
                                 )
                             }),
                     ),
@@ -1842,6 +2188,7 @@ impl RunoApp {
         };
         let sid = session.id;
         let isolated = session.isolated;
+        let empty_prompt = self.prompt.read(cx).value().trim().is_empty();
         let sel = session.selections();
         let controls = caps::controls(&session.provider, &sel);
         let mut popup: Option<(String, AnyElement)> = None;
@@ -1944,7 +2291,9 @@ impl RunoApp {
                     if current.is_empty() {
                         control.choices[0].label.clone()
                     } else {
-                        current.clone()
+                        agent::generic_mode_label(&current)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| current.clone())
                     }
                 });
             chips = chips.child(
@@ -2010,7 +2359,14 @@ impl RunoApp {
                                     .justify_center()
                                     .rounded_lg()
                                     .cursor_pointer()
-                                    .bg(rgb(if working { c_muted() } else { c_text() }))
+                                    .bg(rgb(if working || empty_prompt {
+                                        c_muted()
+                                    } else {
+                                        c_text()
+                                    }))
+                                    .when(!working && !empty_prompt, |el| {
+                                        el.hover(|el| el.bg(rgb(c_blue())))
+                                    })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.send_message(window, cx);
                                         cx.notify();
@@ -2047,44 +2403,115 @@ impl RunoApp {
                                 "Project directory"
                             }),
                     )
-                    .child(
-                        if self.state.session(sid).is_some()
-                            && cx.global::<AppSettings>().send_on_enter
-                        {
-                            "↵ to send  ·  ⇧↵ new line"
-                        } else {
-                            "⌘↵ to send  ·  ↵ new line"
-                        },
-                    ),
+                    .child(if cx.global::<AppSettings>().send_on_enter {
+                        "↵ to send  ·  ⇧↵ new line".to_string()
+                    } else {
+                        format!("{MOD_KEY}↵ to send  ·  ↵ new line")
+                    }),
             )
             .into_any_element()
     }
 
     fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tip = |key: String, text: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .text_sm()
+                .text_color(rgb(c_secondary()))
+                .child(
+                    div()
+                        .min_w(px(64.))
+                        .h(px(24.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .bg(rgb(c_subtle()))
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child(key),
+                )
+                .child(text)
+        };
+        let has_projects = !self.state.projects.is_empty();
         div()
             .flex_1()
             .v_flex()
             .items_center()
             .justify_center()
-            .gap_3()
+            .gap_5()
+            .px_8()
             .child(
                 div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("No session selected"),
+                    .size(px(56.))
+                    .rounded_2xl()
+                    .bg(rgb(c_selected()))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(IconName::Bot, 28., c_blue())),
             )
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(c_secondary()))
-                    .child("Start a session to run an agent in its own worktree."),
+                    .v_flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::BOLD)
+                            .child(if has_projects {
+                                "Start a session"
+                            } else {
+                                "Add your first project"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(420.))
+                            .text_center()
+                            .text_sm()
+                            .text_color(rgb(c_secondary()))
+                            .child(if has_projects {
+                                "Give an agent a task. It works in its own git worktree, so several can run side by side without colliding."
+                            } else {
+                                "Pick any folder on this computer. Git repositories get an isolated worktree for every session."
+                            }),
+                    ),
             )
             .child(
-                self.button("empty-new", "New session", true)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.view = View::NewSession;
-                        cx.notify();
-                    })),
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        self.button("empty-new", "New session", true)
+                            .child(icon(IconName::Plus, 14., c_canvas()))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.view = View::NewSession;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button("empty-add", "Add project", false)
+                            .child(icon(IconName::FolderPlus, 14., c_secondary()))
+                            .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .mt_4()
+                    .v_flex()
+                    .gap_2()
+                    .child(tip(format!("{MOD_KEY}N"), "New session"))
+                    .child(tip(format!("{MOD_KEY},"), "Settings"))
+                    .child(tip(format!("{MOD_KEY}B"), "Show or hide the changes panel"))
+                    .child(tip(format!("{MOD_KEY}."), "Stop the running agent")),
             )
     }
 
@@ -2107,6 +2534,34 @@ impl RunoApp {
     }
 
     fn new_session_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let label = |t: &'static str| {
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(c_muted()))
+                .child(t)
+        };
+        let card = |id: (&'static str, usize), selected: bool| {
+            div()
+                .id(id)
+                .flex_1()
+                .min_w(px(180.))
+                .p_3()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_xl()
+                .border_1()
+                .cursor_pointer()
+                .when(selected, |el| {
+                    el.border_color(rgb(c_blue())).bg(rgb(c_selected()))
+                })
+                .when(!selected, |el| {
+                    el.border_color(rgb(c_border()))
+                        .hover(|el| el.bg(rgb(c_subtle())))
+                })
+        };
+
         let mut projects = div().flex().flex_wrap().gap_2();
         for (i, project) in self.state.projects.iter().enumerate() {
             let pid = project.id;
@@ -2122,47 +2577,206 @@ impl RunoApp {
                 })),
             );
         }
+        projects = projects.child(
+            self.button("add-proj", "Add project…", false)
+                .h(px(32.))
+                .child(icon(IconName::FolderPlus, 14., c_secondary()))
+                .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
+        );
+
         let mut providers = div().flex().flex_wrap().gap_2();
         for (i, p) in agent::PROVIDERS.iter().enumerate() {
-            let label = if agent::installed(p.bin) {
-                format!("{}  {}", p.mark, p.name)
+            let caps = caps::get(p.id);
+            let installed = agent::installed(p.bin);
+            let detail = if !installed {
+                format!("{} not found on PATH", p.bin)
+            } else if caps.version.is_empty() {
+                "Installed".to_string()
             } else {
-                format!("{}  {} (not installed)", p.mark, p.name)
+                format!("v{}", caps.version.trim_start_matches('v'))
             };
             providers = providers.child(
-                self.chip(("pv", i), label, self.new_provider == i)
+                card(("pv", i), self.new_provider == i)
+                    .when(!installed, |el| el.opacity(0.6))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.new_provider = i;
                         cx.notify();
-                    })),
+                    }))
+                    .child(self.provider_badge(p, 30.))
+                    .child(
+                        div()
+                            .v_flex()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(p.name),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(if installed { c_muted() } else { c_red() }))
+                                    .child(detail),
+                            ),
+                    ),
             );
         }
-        let label = |t: &'static str| {
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(c_muted()))
-                .child(t)
+
+        let project = self
+            .new_project
+            .and_then(|id| self.state.projects.iter().find(|p| p.id == id));
+        let is_git = self.demo || project.is_some_and(|p| git::is_repo(&p.path));
+        let isolated = self.new_isolated && is_git;
+        let typed = git::sanitize_branch(&self.branch.read(cx).value());
+        let branch = if typed.is_empty() {
+            format!("runo/session-{}", self.state.next_id + 1)
+        } else {
+            typed
         };
-        self.page(
-            "New session",
-            div().v_flex().gap_3()
-                .child(label("PROJECT"))
-                .child(div().flex().items_center().gap_2().child(projects).child(self.button("add-proj", "Add project…", false).on_click(cx.listener(|this, _, _, cx| this.pick_project(cx)))))
-                .child(label("AGENT"))
-                .child(providers)
-                .child(label("WORKTREE"))
+        let where_to = match project {
+            None => "Add a project to start.".to_string(),
+            Some(p) if isolated => format!(
+                "Creates branch {branch} in {}",
+                git::worktree_path(&p.path, &branch).display()
+            ),
+            Some(p) if is_git => format!("Runs on the current branch, directly in {}", p.path),
+            Some(p) => format!("Runs directly in {}", p.path),
+        };
+        let provider = &agent::PROVIDERS[self.new_provider];
+        let task_empty = self.new_task.read(cx).value().trim().is_empty();
+        let ready = project.is_some() && !task_empty;
+
+        let mode = |id: usize, title: &'static str, desc: &'static str, on: bool| {
+            card(("iso", id), on)
+                .child(icon(
+                    if id == 0 {
+                        IconName::GitBranchPlus
+                    } else {
+                        IconName::Folder
+                    },
+                    18.,
+                    if on { c_blue() } else { c_secondary() },
+                ))
                 .child(
-                    div().flex().items_center().gap_2()
-                        .child(self.chip(("iso", 0), "Isolated worktree".into(), self.new_isolated).on_click(cx.listener(|this, _, _, cx| { this.new_isolated = true; cx.notify(); })))
-                        .child(self.chip(("iso", 1), "Project directory".into(), !self.new_isolated).on_click(cx.listener(|this, _, _, cx| { this.new_isolated = false; cx.notify(); }))),
+                    div()
+                        .v_flex()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(div().text_xs().text_color(rgb(c_muted())).child(desc)),
                 )
-                .when(!self.demo && self.new_project.and_then(|id| self.state.projects.iter().find(|p| p.id == id)).is_some_and(|p| !git::is_repo(&p.path)), |el| el.child(div().text_sm().text_color(rgb(c_secondary())).child("This folder is not a git repository: the agent will run directly in it, and diffs are unavailable.")))
-                .when(self.new_isolated, |el| el.child(Input::new(&self.branch).bordered(true).h(px(36.))))
-                .child(label("TASK"))
-                .child(Textarea::new(&self.new_task).bordered(true).h(px(120.)))
-                .child(div().flex().child(self.button("start", "Start session", true).on_click(cx.listener(|this, _, window, cx| { this.create_session(window, cx); cx.notify(); })))),
-        )
+        };
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .overflow_y_scrollbar()
+            .child(
+                div()
+                    .max_w(px(780.))
+                    .mx_auto()
+                    .p_8()
+                    .v_flex()
+                    .gap_4()
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("New session"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(c_secondary()))
+                                    .child("Pick a project and an agent, then describe the task."),
+                            ),
+                    )
+                    .child(label("PROJECT"))
+                    .child(projects)
+                    .child(label("AGENT"))
+                    .child(providers)
+                    .child(label("WHERE IT RUNS"))
+                    .child(if is_git {
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                mode(0, "Isolated worktree", "Its own branch and folder", self.new_isolated)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.new_isolated = true;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                mode(1, "Project directory", "Your checkout, current branch", !self.new_isolated)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.new_isolated = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(c_secondary()))
+                            .child("This folder is not a git repository, so the agent runs directly in it and diffs are unavailable.")
+                            .into_any_element()
+                    })
+                    .when(isolated, |el| {
+                        el.child(Input::new(&self.branch).bordered(true).h(px(36.)))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_xs()
+                            .text_color(rgb(c_secondary()))
+                            .child(icon(IconName::Info, 13., c_muted()))
+                            .child(div().min_w_0().truncate().child(where_to)),
+                    )
+                    .child(label("TASK"))
+                    .child(Textarea::new(&self.new_task).bordered(true).h(px(140.)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                self.button(
+                                    "start",
+                                    if isolated {
+                                        format!("Start {} on {branch}", provider.name)
+                                    } else {
+                                        format!("Start {}", provider.name)
+                                    },
+                                    true,
+                                )
+                                .when(!ready, |el| el.opacity(0.5))
+                                .child(icon(IconName::ArrowRight, 14., c_canvas()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.create_session(window, cx);
+                                    cx.notify();
+                                })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(c_muted()))
+                                    .child(format!("{MOD_KEY}↵ to start")),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn list_view(&self, worktrees_only: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -2293,56 +2907,36 @@ impl RunoApp {
     }
 
     fn diff_lines(&self) -> impl IntoElement {
-        let mut col = div().v_flex().font_family(self.mono_font.clone()).text_xs();
-        let (mut old_no, mut new_no) = (0usize, 0usize);
-        for (i, line) in self.diff.lines().take(1500).enumerate() {
-            if line.starts_with("diff ")
-                || line.starts_with("index ")
-                || line.starts_with("--- ")
-                || line.starts_with("+++ ")
-                || line.starts_with("new file")
-                || line.starts_with("deleted file")
-            {
-                continue;
-            }
-            if line.starts_with("@@") {
-                let nums: Vec<usize> = line
-                    .split(|c: char| !c.is_ascii_digit())
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                old_no = nums.first().copied().unwrap_or(1);
-                new_no = nums.get(2).copied().unwrap_or(1);
+        use git::LineKind;
+        let mut col = div()
+            .v_flex()
+            .py_1()
+            .font_family(self.mono_font.clone())
+            .text_xs();
+        for (i, row) in git::diff_rows(&self.diff)
+            .into_iter()
+            .take(1500)
+            .enumerate()
+        {
+            if row.kind == LineKind::Hunk {
                 col = col.child(
                     div()
                         .id(("dl", i))
+                        .mt_1()
                         .px_3()
-                        .py(px(2.))
+                        .py(px(3.))
                         .text_color(rgb(c_blue()))
-                        .bg(rgb(c_subtle()))
+                        .bg(rgb(c_selected()))
                         .whitespace_nowrap()
-                        .child(line.to_string()),
+                        .child(row.text),
                 );
                 continue;
             }
-            let (bg, mark, num) = if line.starts_with('+') {
-                let n = new_no;
-                new_no += 1;
-                (Some(c_add_bg()), "+", n)
-            } else if line.starts_with('-') {
-                let n = old_no;
-                old_no += 1;
-                (Some(c_del_bg()), "−", n)
-            } else {
-                let n = new_no;
-                old_no += 1;
-                new_no += 1;
-                (None, " ", n)
-            };
-            let color = match mark {
-                "+" => c_add(),
-                "−" => c_del(),
-                _ => c_secondary(),
+            let (bg, mark, color) = match row.kind {
+                LineKind::Added => (Some(c_add_bg()), "+", c_add()),
+                LineKind::Removed => (Some(c_del_bg()), "−", c_del()),
+                LineKind::Note => (None, "", c_muted()),
+                _ => (None, " ", c_text()),
             };
             col = col.child(
                 div()
@@ -2352,12 +2946,12 @@ impl RunoApp {
                     .when_some(bg, |el, bg| el.bg(rgb(bg)))
                     .child(
                         div()
-                            .w(px(40.))
+                            .w(px(44.))
                             .flex_none()
                             .px_2()
                             .text_right()
                             .text_color(rgb(c_muted()))
-                            .child(num.to_string()),
+                            .child(row.number.map(|n| n.to_string()).unwrap_or_default()),
                     )
                     .child(
                         div()
@@ -2369,8 +2963,9 @@ impl RunoApp {
                     .child(
                         div()
                             .whitespace_nowrap()
-                            .text_color(rgb(if mark == " " { c_text() } else { color }))
-                            .child(line.get(1..).unwrap_or("").to_string()),
+                            .text_color(rgb(color))
+                            .when(row.kind == LineKind::Note, |el| el.italic())
+                            .child(row.text),
                     ),
             );
         }
@@ -2396,16 +2991,6 @@ impl RunoApp {
             .changes
             .iter()
             .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-        let base = self
-            .current()
-            .map(|s| {
-                if self.demo {
-                    "main".to_string()
-                } else {
-                    s.branch.clone()
-                }
-            })
-            .unwrap_or_default();
         let mut list = div()
             .v_flex()
             .rounded_xl()
@@ -2440,11 +3025,7 @@ impl RunoApp {
                             .w(px(16.))
                             .text_xs()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(if change.status == "A" {
-                                c_green()
-                            } else {
-                                c_amber()
-                            }))
+                            .text_color(rgb(change_color(&change.status)))
                             .child(change.status.clone()),
                     )
                     .child(
@@ -2515,32 +3096,42 @@ impl RunoApp {
                             ),
                     )
                     .child(
-                        div()
-                            .id("compare")
-                            .h(px(32.))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(rgb(c_border()))
-                            .text_sm()
-                            .cursor_pointer()
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                        self.button("refresh-changes", "Refresh", false)
+                            .h(px(30.))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Re-read git status. Changes are compared with the last commit.",
+                                )
+                                .build(window, cx)
+                            })
+                            .child(icon(IconName::RefreshCw, 13., c_secondary()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.refresh();
                                 cx.notify();
-                            }))
-                            .child(format!("Compare with {base}"))
-                            .child(icon(IconName::ChevronDown, 12., c_muted())),
+                            })),
                     ),
             )
             .child(if self.changes.is_empty() {
                 div()
-                    .text_sm()
-                    .text_color(rgb(c_muted()))
-                    .child("No changes yet.")
+                    .flex_1()
+                    .v_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .py_10()
+                    .child(icon(IconName::GitCompare, 28., c_muted()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("No changes yet"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(c_muted()))
+                            .child("Files the agent edits show up here as it works."),
+                    )
                     .into_any_element()
             } else {
                 div()
@@ -2612,23 +3203,25 @@ impl RunoApp {
                                         .gap_2()
                                         .text_xs()
                                         .text_color(rgb(c_secondary()))
-                                        .child(icon(IconName::CircleCheck, 16., c_green()))
+                                        .child(icon(IconName::GitCompare, 14., c_muted()))
                                         .child(format!(
-                                            "{} files{}",
+                                            "{} file{} changed",
                                             self.changes.len(),
-                                            if self.demo {
-                                                "  ·  Build passed  ·  0.97s"
-                                            } else {
-                                                ""
-                                            }
+                                            if self.changes.len() == 1 { "" } else { "s" }
                                         )),
                                 )
-                                .child(self.button("review", "Review changes  →", true).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.refresh();
-                                        cx.notify();
-                                    }),
-                                )),
+                                .child(
+                                    self.button("open-file", "Open file", false)
+                                        .h(px(30.))
+                                        .child(icon(IconName::ArrowUpRight, 13., c_secondary()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(path) = this.selected_file.clone() {
+                                                this.open_preview(&path);
+                                                this.right_tab = RightTab::Files;
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
                         ),
                 )
             })
@@ -2669,16 +3262,7 @@ impl RunoApp {
                     .text_color(rgb(c_secondary()))
                     .hover(|el| el.bg(rgb(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.demo {
-                            this.preview = Some((p.clone(), "(demo data)".into()));
-                        } else if let Some(dir) = this.current().map(|s| s.dir.clone()) {
-                            let text = std::fs::read_to_string(std::path::Path::new(&dir).join(&p))
-                                .unwrap_or_else(|_| "(binary or unreadable file)".into());
-                            this.preview = Some((
-                                p.clone(),
-                                text.lines().take(1500).collect::<Vec<_>>().join("\n"),
-                            ));
-                        }
+                        this.open_preview(&p);
                         cx.notify();
                     }))
                     .child(icon(IconName::File, 14., c_muted()))
@@ -2753,6 +3337,8 @@ impl RunoApp {
 
     fn terminal_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.selected.unwrap_or(0);
+        let running = self.handles.contains_key(&Target::Terminal(id));
+        let has_output = self.terminal.get(&id).is_some_and(|l| !l.is_empty());
         let mut log = div()
             .v_flex()
             .font_family(self.mono_font.clone())
@@ -2762,6 +3348,7 @@ impl RunoApp {
         if self.cli_tab {
             for p in agent::PROVIDERS.iter() {
                 let ok = agent::installed(p.bin);
+                let version = caps::get(p.id).version;
                 log = log.child(
                     div()
                         .flex()
@@ -2769,11 +3356,24 @@ impl RunoApp {
                         .child(div().w(px(90.)).child(p.bin))
                         .child(
                             div()
+                                .w(px(90.))
                                 .text_color(rgb(if ok { c_green() } else { c_red() }))
                                 .child(if ok { "installed" } else { "not found" }),
-                        ),
+                        )
+                        .child(div().text_color(rgb(c_muted())).child(version)),
                 );
             }
+        } else if !has_output {
+            let dir = self
+                .current()
+                .map(|s| s.dir.clone())
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| "the session folder".into());
+            log = log.child(
+                div()
+                    .text_color(rgb(c_muted()))
+                    .child(format!("Commands run in {dir}. Output streams here.")),
+            );
         } else if let Some(lines) = self.terminal.get(&id) {
             let text: Vec<&str> = lines
                 .iter()
@@ -2819,10 +3419,38 @@ impl RunoApp {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .text_sm()
+                            .text_xs()
                             .text_color(rgb(c_secondary()))
-                            .child("zsh")
-                            .child(icon(IconName::ChevronDown, 12., c_muted())),
+                            .when(running, |el| {
+                                el.child(self.status_dot(Status::Working, "term-running", 6.))
+                                    .child("Running")
+                                    .child(
+                                        self.button("term-stop", "Stop", false)
+                                            .h(px(26.))
+                                            .px_2()
+                                            .text_xs()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if let Some(h) =
+                                                    this.handles.get(&Target::Terminal(id))
+                                                {
+                                                    h.kill();
+                                                }
+                                                cx.notify();
+                                            })),
+                                    )
+                            })
+                            .when(!running && !self.cli_tab && has_output, |el| {
+                                el.child(
+                                    self.button("term-clear", "Clear", false)
+                                        .h(px(26.))
+                                        .px_2()
+                                        .text_xs()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.terminal.remove(&id);
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
                     ),
             )
             .child(fade(
@@ -2947,11 +3575,76 @@ impl Render for RunoApp {
             View::Worktrees => self.list_view(true, cx),
             View::Settings => self.settings_view(window, cx),
         };
-        let show_right = self.view == View::Session && self.current().is_some();
-        let status = self.notice.clone().or_else(|| self.demo.then(|| "Demo data. Start a session or use the folder button to add a real project folder.".to_string()));
+        // The side panel needs room; on narrow windows it starts hidden (toggle in the header).
+        let wide = window.viewport_size().width >= px(1180.);
+        if self.panel_wide != Some(wide) {
+            self.panel_wide = Some(wide);
+            self.show_panel = wide;
+        }
+        let show_right = self.view == View::Session && self.current().is_some() && self.show_panel;
+        if self
+            .info
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(3))
+        {
+            self.info = None;
+        }
+        let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
+            (notice.clone(), c_red(), Some(IconName::CircleAlert))
+        } else if let Some((info, _)) = &self.info {
+            (info.clone(), c_blue(), Some(IconName::Check))
+        } else if self.demo {
+            (
+                "Sample workspace. Add a project folder to start a real session.".to_string(),
+                c_muted(),
+                Some(IconName::Info),
+            )
+        } else {
+            (String::new(), c_muted(), None)
+        };
+        let running = self.started.len();
+        let summary = match (self.state.sessions.len(), running) {
+            (0, _) => String::new(),
+            (n, 0) => format!("{n} session{}", if n == 1 { "" } else { "s" }),
+            (n, r) => format!(
+                "{n} session{}  ·  {r} running",
+                if n == 1 { "" } else { "s" }
+            ),
+        };
         let root = div()
             .size_full()
             .v_flex()
+            .key_context("Runo")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &NewSession, _, cx| {
+                this.view = View::NewSession;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                this.open_settings();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &StopAgent, _, cx| {
+                this.stop();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &TogglePanel, _, cx| {
+                this.show_panel = !this.show_panel;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
+                if this.menu.is_some() || this.settings_menu.is_some() {
+                    this.menu = None;
+                    this.settings_menu = None;
+                } else if this.confirm_delete.is_some() {
+                    this.confirm_delete = None;
+                } else if this.notice.is_some() {
+                    this.notice = None;
+                } else if this.view != View::Session {
+                    this.view = View::Session;
+                }
+                cx.notify();
+            }))
             .bg(rgb(c_canvas()))
             .text_color(rgb(c_text()))
             .font_family(cx.theme().font_family.clone())
@@ -2986,27 +3679,46 @@ impl Render for RunoApp {
                     .border_color(rgb(c_border()))
                     .bg(rgb(c_canvas()))
                     .text_xs()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.notice = None;
-                        cx.notify();
-                    }))
+                    .gap_4()
                     .child(fade(
                         div()
-                            .text_color(rgb(if self.notice.is_some() {
-                                c_red()
-                            } else {
-                                c_muted()
-                            }))
-                            .child(status.clone().unwrap_or_default()),
-                        SharedString::from(format!("status-{}", status.unwrap_or_default())),
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_center()
+                            .gap_2()
+                            .text_color(rgb(status_color))
+                            .when_some(status_icon, |el, i| el.child(icon(i, 13., status_color)))
+                            .child(div().truncate().child(status.clone()))
+                            .when(self.notice.is_some(), |el| {
+                                el.child(
+                                    div()
+                                        .id("dismiss-notice")
+                                        .px_1()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .hover(|el| el.bg(rgb(c_subtle())))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.notice = None;
+                                            cx.notify();
+                                        }))
+                                        .child(icon(IconName::X, 12., c_muted())),
+                                )
+                            }),
+                        SharedString::from(format!("status-{status}")),
                         300,
                     ))
                     .child(
                         div()
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap_2()
                             .text_color(rgb(c_secondary()))
+                            .when(!summary.is_empty(), |el| {
+                                el.child(summary)
+                                    .child(div().text_color(rgb(c_border())).child("|"))
+                            })
                             .child(div().size(px(7.)).rounded_full().bg(rgb(c_green())))
                             .child("Local environment"),
                     ),
@@ -3018,6 +3730,7 @@ impl Render for RunoApp {
 fn main() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
+        bind_keys(cx);
         let settings = AppSettings::load();
         settings.apply();
         cx.set_global(settings);

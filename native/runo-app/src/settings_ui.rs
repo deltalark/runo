@@ -71,7 +71,7 @@ impl SettingsPage {
         match self {
             Self::General => "Alerts, motion and how deleting works.",
             Self::Appearance => "Theme, accent color and how diffs are colored.",
-            Self::Keybindings => "The shortcuts Runo responds to.",
+            Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere.",
             Self::Chat => "How the composer behaves and what new sessions start with.",
             Self::Providers => "The agent CLIs on this machine and what each one supports.",
             Self::Claude => "Everything Runo can pass to the claude CLI, plus what it detected.",
@@ -360,11 +360,24 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Diff colors", "Colorblind uses blue and orange instead of green and red. High contrast uses stronger tints.", Ctl::Segment(options(&[("default", "Default"), ("colorblind", "Colorblind"), ("contrast", "High contrast")]), st.diff_colors.clone(), Rc::new(|s, v| s.diff_colors = v))),
             ]),
         ],
-        SettingsPage::Keybindings => vec![section("Composer", "These shortcuts are fixed for now.", vec![
-            row("Send message", "Switch to ⌘/Ctrl+Enter in Chat settings.", Ctl::Keys(if st.send_on_enter { "Enter".into() } else { "⌘ Enter".into() })),
-            row("New line", "Insert a line break in the composer.", Ctl::Keys(if st.send_on_enter { "Shift Enter".into() } else { "Enter".into() })),
-            row("Copy selection", "Works in the conversation, terminal output and file previews.", Ctl::Keys("⌘ C".into())),
-        ])],
+        SettingsPage::Keybindings => {
+            let m = MOD_KEY.trim_end_matches('+');
+            vec![
+                section("Workspace", "Available everywhere in the window.", vec![
+                    row("New session", "Open the New session form.", Ctl::Keys(format!("{m} N"))),
+                    row("Settings", "Open this screen.", Ctl::Keys(format!("{m} ,"))),
+                    row("Changes panel", "Show or hide the Changes, Files and Terminal panel.", Ctl::Keys(format!("{m} B"))),
+                    row("Stop agent", "Stop the agent running in the selected session.", Ctl::Keys(format!("{m} ."))),
+                    row("Close", "Close a menu, cancel a delete, or go back to the workspace.", Ctl::Keys("Esc".into())),
+                ]),
+                section("Composer", "Change the send key in Chat settings.", vec![
+                    row("Send message", "Sends the prompt to the session's agent.", Ctl::Keys(if st.send_on_enter { "Enter".into() } else { format!("{m} Enter") })),
+                    row("New line", "Insert a line break in the composer.", Ctl::Keys(if st.send_on_enter { "Shift Enter".into() } else { "Enter".into() })),
+                    row("Start session", "In the New session form.", Ctl::Keys(format!("{m} Enter"))),
+                    row("Copy selection", "Works in the conversation, terminal output and file previews.", Ctl::Keys(format!("{m} C"))),
+                ]),
+            ]
+        }
         SettingsPage::Chat => vec![
             section("Composer", "What the composer does with what you type.", vec![
                 row("Send message with", "The other key inserts a new line.", Ctl::Segment(options(&[("enter", "Enter"), ("cmd", "⌘ / Ctrl Enter")]), if st.send_on_enter { "enter".into() } else { "cmd".into() }, Rc::new(|s, v| s.send_on_enter = v == "enter"))),
