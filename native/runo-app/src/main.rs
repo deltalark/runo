@@ -554,13 +554,17 @@ impl RunoApp {
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
-        let resume = session.messages.iter().any(|m| m.role == Role::Agent);
+        let resume = session.has_conversation();
+        if session.provider == "claude" && !resume {
+            session.agent_session = agent::new_uuid();
+        }
         session
             .messages
-            .push(Message::new(Role::User, prompt.clone()));
-        session.messages.push(Message::new(Role::Agent, ""));
+            .push(Message::now(Role::User, prompt.clone()));
+        session.messages.push(Message::now(Role::Agent, ""));
         let (provider, dir) = (session.provider.clone(), session.dir.clone());
         let sel = session.selections();
+        let agent_session = session.agent_session.clone();
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: &prompt,
@@ -568,6 +572,7 @@ impl RunoApp {
             sel: &sel,
             opts,
             in_git: git::is_repo(&dir),
+            session_id: &agent_session,
         };
         match agent::run_agent(Target::Session(id), &spec, &dir, self.tx.clone()) {
             Ok(handle) => {
@@ -767,6 +772,8 @@ impl RunoApp {
             )]),
             status: Status::Idle,
             messages: Vec::new(),
+            agent_session: String::new(),
+            conversation_start: 0,
         });
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
@@ -1858,10 +1865,7 @@ impl RunoApp {
                     items,
                     move |this, i| {
                         if let Some(s) = this.state.session_mut(sid) {
-                            s.provider = agent::PROVIDERS[i].id.into();
-                            s.opts.clear();
-                            s.model.clear();
-                            s.mode.clear();
+                            s.switch_provider(agent::PROVIDERS[i].id);
                         }
                         this.save();
                     },
@@ -3012,7 +3016,7 @@ impl Render for RunoApp {
 }
 
 fn main() {
-    application().with_assets(assets::Assets).run(|cx| {
+    application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         let settings = AppSettings::load();
         settings.apply();

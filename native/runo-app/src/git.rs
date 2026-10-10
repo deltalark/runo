@@ -93,7 +93,7 @@ pub fn remove_worktree(repo: &str, dir: &str) -> Result<(), String> {
 
 pub fn changes(dir: &str) -> Vec<Change> {
     let mut numstat = std::collections::HashMap::new();
-    if let Ok(out) = git(dir, &["diff", "HEAD", "--numstat"]) {
+    if let Ok(out) = git(dir, &["diff", "HEAD", "--numstat", "--no-renames"]) {
         for line in out.lines() {
             let mut parts = line.splitn(3, '\t');
             if let (Some(a), Some(r), Some(path)) = (parts.next(), parts.next(), parts.next()) {
@@ -173,6 +173,102 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    fn repo(name: &str) -> std::path::PathBuf {
+        let repo = std::env::temp_dir().join(format!("runo-git-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q"]);
+        sh(&repo, &["config", "user.email", "t@t"]);
+        sh(&repo, &["config", "user.name", "t"]);
+        repo
+    }
+
+    #[test]
+    fn branch_names_are_sanitized() {
+        assert_eq!(
+            sanitize_branch("  Fix the login bug! "),
+            "Fix-the-login-bug"
+        );
+        assert_eq!(sanitize_branch("feature/nav"), "feature/nav");
+        assert_eq!(sanitize_branch("/.weird-/"), "weird");
+        assert_eq!(sanitize_branch("ünïcode"), "n-code");
+        assert_eq!(sanitize_branch(""), "");
+    }
+
+    #[test]
+    fn non_repositories_are_detected() {
+        let dir = std::env::temp_dir().join(format!("runo-git-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The temp dir itself could sit inside a repository on some machines; only assert
+        // the parts that hold either way.
+        let d = dir.to_str().unwrap();
+        if !is_repo(d) {
+            assert!(changes(d).is_empty());
+            assert!(tracked_files(d).is_empty());
+            assert_eq!(current_branch(d), "");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deletions_renames_and_spaces() {
+        let repo = repo("kinds");
+        std::fs::write(repo.join("gone.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("old name.txt"), "1\n2\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "init"]);
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        sh(&repo, &["mv", "old name.txt", "new name.txt"]);
+        let dir = repo.to_str().unwrap();
+        let found = changes(dir);
+        let gone = found.iter().find(|c| c.path == "gone.txt").unwrap();
+        assert_eq!(
+            (gone.status.as_str(), gone.added, gone.removed),
+            ("D", 0, 3)
+        );
+        let renamed = found.iter().find(|c| c.path == "new name.txt").unwrap();
+        assert_eq!(renamed.status, "R");
+        assert_eq!(renamed.added, 2, "renames count as the new file's lines");
+        assert!(file_diff(dir, "gone.txt").contains("-b"));
+        let files = tracked_files(dir);
+        assert!(files.contains(&"new name.txt".to_string()));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn fresh_repository_without_commits() {
+        let repo = repo("fresh");
+        std::fs::write(repo.join("first.txt"), "hello\n").unwrap();
+        let dir = repo.to_str().unwrap();
+        assert!(is_repo(dir));
+        let found = changes(dir);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].status.as_str(), found[0].added), ("A", 1));
+        assert!(file_diff(dir, "first.txt").contains("+hello"));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn worktree_on_an_existing_branch() {
+        let repo = repo("existing");
+        std::fs::write(repo.join("a"), "a\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "init"]);
+        sh(&repo, &["branch", "topic"]);
+        let r = repo.to_str().unwrap();
+        let dir = add_worktree(r, "topic").unwrap();
+        assert_eq!(current_branch(&dir), "topic");
+        assert!(dir.contains(".runo-worktrees"));
+        remove_worktree(r, &dir).unwrap();
+        let _ = std::fs::remove_dir_all(
+            repo.parent()
+                .unwrap()
+                .join(".runo-worktrees")
+                .join(repo.file_name().unwrap()),
+        );
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]
