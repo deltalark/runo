@@ -138,6 +138,8 @@ struct RunoApp {
     new_isolated: bool,
     expanded: Vec<u64>,
     confirm_delete: Option<u64>,
+    /// Tasks waiting for their worktree setup command to finish.
+    pending_start: HashMap<u64, String>,
     /// The quick-open palette, while open, and what each of its rows leads to.
     palette: Option<Entity<CommandState>>,
     palette_jumps: Vec<Vec<Jump>>,
@@ -362,7 +364,7 @@ impl RunoApp {
             }
             let alive = this.update(cx, |this, cx| {
                 for event in events {
-                    this.handle_event(event);
+                    this.handle_event(event, cx);
                 }
                 cx.notify();
             });
@@ -504,6 +506,7 @@ impl RunoApp {
                 .unwrap_or(0),
             new_isolated: true,
             confirm_delete: None,
+            pending_start: HashMap::new(),
             palette: None,
             palette_jumps: Vec::new(),
             renaming: false,
@@ -639,7 +642,7 @@ impl RunoApp {
         self.chat_scroll.scroll_to_bottom();
     }
 
-    fn handle_event(&mut self, event: Event) {
+    fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Line(Target::Session(id), line) => {
                 let updates = match self.streams.get_mut(&id) {
@@ -768,6 +771,18 @@ impl RunoApp {
                         .entry(id)
                         .or_default()
                         .push("[exited with an error]".into());
+                }
+                if let Some(task) = self.pending_start.remove(&id) {
+                    if !ok {
+                        self.terminal.entry(id).or_default().push(
+                            "Setup failed; starting the agent anyway so you can fix it together."
+                                .into(),
+                        );
+                    }
+                    if let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) {
+                        let opts = cx.global::<AppSettings>().agent(&provider);
+                        self.start_agent(id, task, &opts);
+                    }
                 }
                 if self.selected == Some(id) {
                     self.refresh();
@@ -1252,6 +1267,7 @@ impl RunoApp {
         let typed = git::sanitize_branch(&self.branch.read(cx).value());
         let is_git = git::is_repo(&project.path);
         let isolated = self.new_isolated && is_git;
+        let mut setup_log = Vec::new();
         let (branch, dir) = if !is_git {
             ("local folder".to_string(), project.path.clone())
         } else if isolated {
@@ -1261,7 +1277,22 @@ impl RunoApp {
                 typed
             };
             match git::add_worktree(&project.path, &branch) {
-                Ok(dir) => (branch, dir),
+                Ok(dir) => {
+                    match git::copy_included(&project.path, &dir) {
+                        Ok(copied) if !copied.is_empty() => {
+                            setup_log.push(format!(
+                                "Copied {} file{} from .worktreeinclude: {}",
+                                copied.len(),
+                                if copied.len() == 1 { "" } else { "s" },
+                                copied.join(", ")
+                            ));
+                        }
+                        Ok(_) => {}
+                        Err(error) => setup_log
+                            .push(format!("Could not copy .worktreeinclude files: {error}")),
+                    }
+                    (branch, dir)
+                }
                 Err(error) => {
                     self.notice = Some(format!("Could not create worktree: {error}"));
                     return;
@@ -1306,6 +1337,30 @@ impl RunoApp {
             self.expanded.push(project.id);
         }
         self.select(id);
+        if !setup_log.is_empty() {
+            self.terminal.entry(id).or_default().extend(setup_log);
+        }
+        let setup = cx.global::<AppSettings>().worktree_setup.trim().to_string();
+        if isolated && !setup.is_empty() {
+            // The agent waits for setup; it starts when the command finishes.
+            self.pending_start.insert(id, task);
+            self.run_terminal(setup, cx);
+            if !self.handles.contains_key(&Target::Terminal(id)) {
+                if let Some(task) = self.pending_start.remove(&id) {
+                    let provider = self.state.session(id).map(|s| s.provider.clone());
+                    let opts = cx
+                        .global::<AppSettings>()
+                        .agent(&provider.unwrap_or_default());
+                    self.start_agent(id, task, &opts);
+                }
+            } else {
+                self.info = Some((
+                    "Running the worktree setup command first.".into(),
+                    std::time::Instant::now(),
+                ));
+            }
+            return;
+        }
         let opts = cx
             .global::<AppSettings>()
             .agent(agent::PROVIDERS[self.new_provider].id);
@@ -2394,6 +2449,38 @@ impl RunoApp {
         for (i, message) in session.messages.iter().enumerate() {
             let show = Some(i) == last_agent && !self.changes.is_empty();
             list = list.child(self.message_view(i, message, provider, show, working, cx));
+        }
+        if let Some(task) = self.pending_start.get(&session.id) {
+            list = list.child(
+                div()
+                    .p_4()
+                    .v_flex()
+                    .gap_2()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(rgb(c_subtle()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(icon(IconName::Loader, 14., c_blue()))
+                            .child("Preparing the worktree"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(c_secondary()))
+                            .child(format!(
+                                "The setup command is running in the Terminal. {} starts on “{}” when it finishes.",
+                                provider.name,
+                                task.lines().next().unwrap_or_default()
+                            )),
+                    ),
+            );
         }
         div()
             .flex_1()

@@ -352,6 +352,18 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Confirm before deleting", "Ask for a second click before deleting a session.", st.confirm_delete, |s, v| s.confirm_delete = v),
                 switch_row("Remove worktree with session", "Also delete the session's git worktree when the session is deleted. Uncommitted changes in it are lost.", st.remove_worktree_on_delete, |s, v| s.remove_worktree_on_delete = v),
             ]),
+            section("New worktrees", "Prepare each isolated worktree before the agent starts. Ignored files listed in the repository's .worktreeinclude (gitignore patterns, such as .env) are copied in automatically.", vec![
+                row(
+                    "Setup command",
+                    "Runs in the new worktree's Terminal, for example npm install. Leave empty to skip.",
+                    Ctl::Text {
+                        key: "worktree_setup".into(),
+                        value: st.worktree_setup.clone(),
+                        placeholder: "None".into(),
+                        set: Rc::new(|s, v| s.worktree_setup = v),
+                    },
+                ),
+            ]),
         ],
         SettingsPage::Appearance => vec![
             section("Theme", "System follows your OS appearance.", vec![
