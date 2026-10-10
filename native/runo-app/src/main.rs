@@ -21,7 +21,7 @@ use settings_ui::SettingsPage;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
-use store::{Message, Project, Role, Session, State, Status};
+use store::{Message, Note, Project, Role, Session, State, Status};
 
 const DEMO_DIFF: &str = "@@ -42,13 +42,20 @@ impl NavItem {
      impl NavItem {
@@ -138,6 +138,9 @@ struct RunoApp {
     new_isolated: bool,
     expanded: Vec<u64>,
     confirm_delete: Option<u64>,
+    /// Diff line a review note is being written for: path, line number, code.
+    note_at: Option<(String, usize, String)>,
+    note_input: Entity<InputState>,
     /// Tasks waiting for their worktree setup command to finish.
     pending_start: HashMap<u64, String>,
     /// The quick-open palette, while open, and what each of its rows leads to.
@@ -415,6 +418,17 @@ impl RunoApp {
             }
             cx.notify();
         });
+        let note_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Leave a note for the agent, then Enter")
+        });
+        let note_sub = cx.subscribe_in(&note_input, window, |this, input, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                let text = input.read(cx).value().trim().to_string();
+                input.update(cx, |input, cx| input.set_value("", window, cx));
+                this.add_note(text);
+                cx.notify();
+            }
+        });
         let commit_msg = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let commit_sub = cx.subscribe_in(&commit_msg, window, |this, _, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -506,6 +520,8 @@ impl RunoApp {
                 .unwrap_or(0),
             new_isolated: true,
             confirm_delete: None,
+            note_at: None,
+            note_input: note_input.clone(),
             pending_start: HashMap::new(),
             palette: None,
             palette_jumps: Vec::new(),
@@ -529,6 +545,7 @@ impl RunoApp {
                 settings_search_sub,
                 commit_sub,
                 rename_sub,
+                note_sub,
             ],
         };
         // The New session form previews the branch and enables Start as you type.
@@ -623,6 +640,7 @@ impl RunoApp {
     fn select(&mut self, id: u64) {
         self.selected = Some(id);
         self.renaming = false;
+        self.note_at = None;
         if let Some(session) = self.state.session_mut(id) {
             if session.unread {
                 session.unread = false;
@@ -1080,6 +1098,61 @@ impl RunoApp {
             .into_any_element()
     }
 
+    fn add_note(&mut self, text: String) {
+        let Some((path, line, code)) = self.note_at.take() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        if let Some(id) = self.selected {
+            if let Some(session) = self.state.session_mut(id) {
+                session.notes.push(Note {
+                    path,
+                    line,
+                    code,
+                    text,
+                });
+            }
+            self.save();
+        }
+    }
+
+    fn remove_note(&mut self, index: usize) {
+        if let Some(id) = self.selected {
+            if let Some(session) = self.state.session_mut(id) {
+                if index < session.notes.len() {
+                    session.notes.remove(index);
+                }
+            }
+            self.save();
+        }
+    }
+
+    /// Send every review note to the agent as one follow-up.
+    fn send_notes(&mut self, cx: &mut Context<Self>) {
+        if self.demo_guard(cx) {
+            return;
+        }
+        let Some(id) = self.selected else { return };
+        if self.handles.contains_key(&Target::Session(id)) {
+            self.notice =
+                Some("The agent is still working. Send the notes when it finishes.".into());
+            return;
+        }
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        if session.notes.is_empty() {
+            return;
+        }
+        let prompt = store::notes_prompt(&session.notes);
+        session.notes.clear();
+        let provider = session.provider.clone();
+        let opts = cx.global::<AppSettings>().agent(&provider);
+        self.start_agent(id, prompt, &opts);
+    }
+
     fn toggle_pin(&mut self, id: u64) {
         if let Some(session) = self.state.session_mut(id) {
             session.pinned = !session.pinned;
@@ -1329,6 +1402,7 @@ impl RunoApp {
             pinned: false,
             archived: false,
             unread: false,
+            notes: Vec::new(),
         });
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
@@ -3632,8 +3706,20 @@ impl RunoApp {
             .child(label)
     }
 
-    fn diff_lines(&self) -> impl IntoElement {
+    fn diff_lines(&self, cx: &mut Context<Self>) -> impl IntoElement {
         use git::LineKind;
+        let path = self.selected_file.clone().unwrap_or_default();
+        let notes: Vec<(usize, Note)> = self
+            .current()
+            .map(|s| {
+                s.notes
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .filter(|(_, n)| n.path == path)
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut col = div()
             .v_flex()
             .py_1()
@@ -3664,12 +3750,28 @@ impl RunoApp {
                 LineKind::Note => (None, "", c_muted()),
                 _ => (None, " ", c_text()),
             };
+            let line = row.number.unwrap_or(0);
+            let can_note = row.kind != LineKind::Note && row.number.is_some();
+            let code = format!("{mark}{}", row.text);
+            let target = (path.clone(), line, code);
+            let writing = self.note_at.as_ref() == Some(&target);
             col = col.child(
                 div()
                     .id(("dl", i))
+                    .group("diff-line")
                     .flex()
                     .min_h(px(19.))
                     .when_some(bg, |el, bg| el.bg(rgb(bg)))
+                    .when(can_note, |el| {
+                        el.cursor_pointer()
+                            .hover(|el| el.bg(rgb(c_selected())))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.note_at = Some(target.clone());
+                                this.note_input
+                                    .update(cx, |input, cx| input.focus(window, cx));
+                                cx.notify();
+                            }))
+                    })
                     .child(
                         div()
                             .w(px(44.))
@@ -3688,12 +3790,92 @@ impl RunoApp {
                     )
                     .child(
                         div()
+                            .flex_1()
                             .whitespace_nowrap()
                             .text_color(rgb(color))
                             .when(row.kind == LineKind::Note, |el| el.italic())
                             .child(row.text),
-                    ),
+                    )
+                    .when(can_note, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .px_2()
+                                .opacity(0.)
+                                .group_hover("diff-line", |el| el.opacity(1.))
+                                .child(icon(IconName::MessageSquarePlus, 12., c_blue())),
+                        )
+                    }),
             );
+            for (index, note) in notes
+                .iter()
+                .filter(|(_, n)| n.line == line && can_note && n.code.starts_with(mark))
+            {
+                let index = *index;
+                col = col.child(
+                    div()
+                        .mx_2()
+                        .my_1()
+                        .ml(px(58.))
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .bg(rgb(c_canvas()))
+                        .font_family(cx.theme().font_family.clone())
+                        .child(icon(IconName::MessageSquareText, 13., c_blue()))
+                        .child(div().flex_1().text_xs().child(note.text.clone()))
+                        .child(
+                            div()
+                                .id(("note-x", index))
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|el| el.bg(rgb(c_subtle())))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.remove_note(index);
+                                    cx.notify();
+                                }))
+                                .child(icon(IconName::X, 12., c_muted())),
+                        ),
+                );
+            }
+            if writing {
+                col = col.child(
+                    div()
+                        .ml(px(58.))
+                        .mr_2()
+                        .my_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .font_family(cx.theme().font_family.clone())
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Input::new(&self.note_input).bordered(true).h(px(30.))),
+                        )
+                        .child(
+                            div()
+                                .id("note-cancel")
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(rgb(c_secondary()))
+                                .hover(|el| el.bg(rgb(c_subtle())))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.note_at = None;
+                                    cx.notify();
+                                }))
+                                .child("Cancel"),
+                        ),
+                );
+            }
         }
         col
     }
@@ -3940,8 +4122,10 @@ impl RunoApp {
                     )
                     .into_any_element()
             } else {
+                // Scroll areas take their full max height, so size it to the rows.
                 div()
-                    .max_h(px(170.))
+                    .flex_none()
+                    .h(px((self.changes.len() as f32 * 38. + 2.).min(170.)))
                     .overflow_y_scrollbar()
                     .child(list)
                     .into_any_element()
@@ -3985,7 +4169,7 @@ impl RunoApp {
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_y_scrollbar()
-                                .child(self.diff_lines()),
+                                .child(self.diff_lines(cx)),
                             SharedString::from(format!(
                                 "diff-{}-{}",
                                 self.selected.unwrap_or(0),
@@ -4056,9 +4240,57 @@ impl RunoApp {
         };
         let can_push = !sync.remote.is_empty() && !busy && (sync.ahead > 0 || !sync.upstream);
         let can_pr = !sync.remote.is_empty() && !busy;
+        let notes = self.current().map(|s| s.notes.len()).unwrap_or(0);
         div()
             .v_flex()
             .gap_2()
+            .when(notes > 0, |el| {
+                el.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_lg()
+                        .bg(rgb(c_selected()))
+                        .child(icon(IconName::MessageSquareText, 14., c_blue()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(rgb(c_text()))
+                                .child(format!(
+                                    "{notes} review note{}",
+                                    if notes == 1 { "" } else { "s" }
+                                )),
+                        )
+                        .child(
+                            self.button("clear-notes", "Clear", false)
+                                .h(px(28.))
+                                .text_xs()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(id) = this.selected {
+                                        if let Some(s) = this.state.session_mut(id) {
+                                            s.notes.clear();
+                                        }
+                                        this.save();
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            self.button("send-notes", "Send to agent", true)
+                                .h(px(28.))
+                                .text_xs()
+                                .child(icon(IconName::ArrowUp, 13., c_canvas()))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.send_notes(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .when(has_changes, |el| {
                 el.child(
                     div()
@@ -4559,6 +4791,8 @@ impl Render for RunoApp {
                     this.settings_menu = None;
                 } else if this.renaming {
                     this.renaming = false;
+                } else if this.note_at.is_some() {
+                    this.note_at = None;
                 } else if this.confirm_delete.is_some() {
                     this.confirm_delete = None;
                 } else if this.notice.is_some() {

@@ -137,6 +137,35 @@ pub struct Session {
     /// The agent finished while this session was not on screen.
     #[serde(default)]
     pub unread: bool,
+    /// Review notes left on diff lines, waiting to be sent to the agent.
+    #[serde(default)]
+    pub notes: Vec<Note>,
+}
+
+/// A review comment on one line of the session's diff.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct Note {
+    pub path: String,
+    pub line: usize,
+    /// The diff line as shown, with its +/− marker, so the agent sees what was meant.
+    pub code: String,
+    pub text: String,
+}
+
+/// One follow-up prompt that asks the agent to address every note.
+pub fn notes_prompt(notes: &[Note]) -> String {
+    let mut out = String::from("Please address these review notes on your changes:\n");
+    for (i, note) in notes.iter().enumerate() {
+        out.push_str(&format!(
+            "\n{}. `{}:{}`: {}\n   On the line `{}`\n",
+            i + 1,
+            note.path,
+            note.line,
+            note.text.trim(),
+            note.code.trim()
+        ));
+    }
+    out
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -265,6 +294,7 @@ impl State {
                 pinned: false,
                 archived: false,
                 unread: false,
+                notes: Vec::new(),
             };
         let nav = vec![
             Message { time: "10:24 AM".into(), ..Message::new(Role::User, "Refine the workspace navigation. Keep it compact, intuitive, and consistent across desktop platforms.") },
@@ -481,5 +511,27 @@ mod tests {
     fn stamped_messages_have_a_time() {
         assert!(Message::now(Role::User, "x").time.contains(':'));
         assert!(Message::new(Role::User, "x").time.is_empty());
+    }
+
+    #[test]
+    fn notes_become_one_prompt() {
+        let notes = vec![
+            Note {
+                path: "src/a.rs".into(),
+                line: 12,
+                code: "+    let x = 1;  ".into(),
+                text: "Name this better".into(),
+            },
+            Note {
+                path: "b.css".into(),
+                line: 3,
+                code: "−color: red;".into(),
+                text: " Keep red here ".into(),
+            },
+        ];
+        assert_eq!(
+            notes_prompt(&notes),
+            "Please address these review notes on your changes:\n\n1. `src/a.rs:12`: Name this better\n   On the line `+    let x = 1;`\n\n2. `b.css:3`: Keep red here\n   On the line `−color: red;`\n"
+        );
     }
 }
