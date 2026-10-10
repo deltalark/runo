@@ -255,7 +255,7 @@ impl State {
             Message {
                 time: "10:24 AM".into(),
                 steps: vec!["Explored 8 files".into(), "Updated 4 files".into(), "Build passed · 0.97s".into()],
-                ..Message::new(Role::Agent, "I've simplified the sidebar and given your workspace more breathing room.\n\nWhat changed\n•  Projects and sessions in one sidebar\n•  Clearer running and review states\n•  Consistent keyboard navigation\n\nReady for your review.")
+                ..Message::new(Role::Agent, "I've simplified the sidebar and given your workspace more breathing room.\n\n**What changed**\n\n- Projects and sessions in one sidebar\n- Clearer running and review states\n- Consistent keyboard navigation\n\nReady for your review.")
             },
         ];
         State {

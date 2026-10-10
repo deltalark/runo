@@ -178,7 +178,7 @@ fn pick(light: u32, dark: u32) -> u32 {
     }
 }
 
-fn mix(a: u32, b: u32, t: f32) -> u32 {
+pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     let ch = |shift: u32| {
         let (x, y) = (((a >> shift) & 0xff) as f32, ((b >> shift) & 0xff) as f32);
         ((x * t + y * (1.0 - t)).round() as u32) & 0xff

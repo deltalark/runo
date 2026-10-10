@@ -52,19 +52,24 @@ pub fn sanitize_branch(input: &str) -> String {
         .to_string()
 }
 
-/// Create `<repo-parent>/.runo-worktrees/<repo-name>/<branch>` on a new (or existing) branch.
-pub fn add_worktree(repo: &str, branch: &str) -> Result<String, String> {
+/// Where an isolated session's worktree lives: `<repo-parent>/.runo-worktrees/<repo>/<branch>`.
+pub fn worktree_path(repo: &str, branch: &str) -> std::path::PathBuf {
     let repo_path = Path::new(repo);
     let name = repo_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
-    let dest = repo_path
+    repo_path
         .parent()
         .unwrap_or(repo_path)
         .join(".runo-worktrees")
         .join(name)
-        .join(branch.replace('/', "-"));
+        .join(branch.replace('/', "-"))
+}
+
+/// Create the session worktree on a new (or existing) branch.
+pub fn add_worktree(repo: &str, branch: &str) -> Result<String, String> {
+    let dest = worktree_path(repo, branch);
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
@@ -161,6 +166,101 @@ pub fn tracked_files(dir: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LineKind {
+    Hunk,
+    Added,
+    Removed,
+    Context,
+    /// Lines such as `\ No newline at end of file`.
+    Note,
+}
+
+/// One displayable row of a unified diff, with the line number to show beside it
+/// (the new file's number, or the old file's for removed lines).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DiffRow {
+    pub kind: LineKind,
+    pub number: Option<usize>,
+    pub text: String,
+}
+
+/// Start lines of a hunk header such as `@@ -12,7 +12,9 @@ fn x()`. A count may be
+/// omitted (`@@ -1 +1,3 @@`), so the numbers are read per side, not by position.
+fn hunk_starts(header: &str) -> Option<(usize, usize)> {
+    let mut parts = header.trim_start_matches('@').split_whitespace();
+    let start = |side: &str, sign: char| -> Option<usize> {
+        side.strip_prefix(sign)?.split(',').next()?.parse().ok()
+    };
+    let old = start(parts.next()?, '-')?;
+    let new = start(parts.next()?, '+')?;
+    Some((old, new))
+}
+
+/// Turn `git diff` output into rows, dropping file headers.
+pub fn diff_rows(diff: &str) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+    let (mut old, mut new) = (0usize, 0usize);
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            if let Some((o, n)) = hunk_starts(line) {
+                (old, new) = (o, n);
+            }
+            in_hunk = true;
+            rows.push(DiffRow {
+                kind: LineKind::Hunk,
+                number: None,
+                text: line.to_string(),
+            });
+            continue;
+        }
+        if !in_hunk {
+            // `diff --git`, `index`, `---`, `+++`, `new file mode`… before the first hunk.
+            continue;
+        }
+        if line.starts_with("diff --git") {
+            in_hunk = false;
+            continue;
+        }
+        let text = line.get(1..).unwrap_or("").to_string();
+        let row = match line.chars().next() {
+            Some('+') => {
+                new += 1;
+                DiffRow {
+                    kind: LineKind::Added,
+                    number: Some(new - 1),
+                    text,
+                }
+            }
+            Some('-') => {
+                old += 1;
+                DiffRow {
+                    kind: LineKind::Removed,
+                    number: Some(old - 1),
+                    text,
+                }
+            }
+            Some('\\') => DiffRow {
+                kind: LineKind::Note,
+                number: None,
+                text: line.to_string(),
+            },
+            _ => {
+                old += 1;
+                new += 1;
+                DiffRow {
+                    kind: LineKind::Context,
+                    number: Some(new - 1),
+                    text,
+                }
+            }
+        };
+        rows.push(row);
+    }
+    rows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +283,57 @@ mod tests {
         sh(&repo, &["config", "user.email", "t@t"]);
         sh(&repo, &["config", "user.name", "t"]);
         repo
+    }
+
+    #[test]
+    fn diff_rows_number_each_side() {
+        let diff = "diff --git a/m.rs b/m.rs
+index 1..2 100644
+--- a/m.rs
++++ b/m.rs
+@@ -1 +1,3 @@
+-fn main() {}
++fn main() {
++    hi();
++}
+\\ No newline at end of file
+@@ -10,3 +12,3 @@ impl X {
+ keep
+-old
++new
+ 
+";
+        let rows = diff_rows(diff);
+        let shown: Vec<(LineKind, Option<usize>, &str)> = rows
+            .iter()
+            .map(|r| (r.kind, r.number, r.text.as_str()))
+            .collect();
+        use LineKind::*;
+        assert_eq!(
+            shown,
+            [
+                (Hunk, None, "@@ -1 +1,3 @@"),
+                (Removed, Some(1), "fn main() {}"),
+                (Added, Some(1), "fn main() {"),
+                (Added, Some(2), "    hi();"),
+                (Added, Some(3), "}"),
+                (Note, None, "\\ No newline at end of file"),
+                (Hunk, None, "@@ -10,3 +12,3 @@ impl X {"),
+                (Context, Some(12), "keep"),
+                (Removed, Some(11), "old"),
+                (Added, Some(13), "new"),
+                (Context, Some(14), ""),
+            ]
+        );
+        assert_eq!(hunk_starts("@@ -0,0 +1 @@"), Some((0, 1)));
+        assert_eq!(hunk_starts("@@ garbage @@"), None);
+        assert!(diff_rows("").is_empty());
+    }
+
+    #[test]
+    fn worktree_paths_sit_beside_the_repository() {
+        let p = worktree_path("/code/app", "feature/nav");
+        assert_eq!(p, Path::new("/code/.runo-worktrees/app/feature-nav"));
     }
 
     #[test]

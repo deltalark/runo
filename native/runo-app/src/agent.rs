@@ -99,6 +99,17 @@ fn list(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Display name for Runo's provider-neutral permission levels (Settings > Chat), which
+/// each agent maps to its closest mode when launched.
+pub fn generic_mode_label(mode: &str) -> Option<&'static str> {
+    match mode {
+        "edit" => Some("Auto edit"),
+        "plan" => Some("Plan only"),
+        "full" => Some("Full access"),
+        _ => None,
+    }
+}
+
 pub struct RunSpec<'a> {
     pub provider: &'a str,
     pub prompt: &'a str,
@@ -488,6 +499,12 @@ mod arg_tests {
             Some('8' | '9' | 'a' | 'b')
         ));
         assert!(a.chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generic_modes_have_labels() {
+        assert_eq!(generic_mode_label("edit"), Some("Auto edit"));
+        assert_eq!(generic_mode_label("acceptEdits"), None);
     }
 
     #[test]
