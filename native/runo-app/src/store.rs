@@ -128,6 +128,15 @@ pub struct Session {
     /// starts a new conversation, so earlier replies must not trigger a resume.
     #[serde(default)]
     pub conversation_start: usize,
+    /// Pinned sessions sort to the top of their project.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Archived sessions leave the sidebar but stay under All sessions.
+    #[serde(default)]
+    pub archived: bool,
+    /// The agent finished while this session was not on screen.
+    #[serde(default)]
+    pub unread: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -253,6 +262,9 @@ impl State {
                 messages,
                 agent_session: String::new(),
                 conversation_start: 0,
+                pinned: false,
+                archived: false,
+                unread: false,
             };
         let nav = vec![
             Message { time: "10:24 AM".into(), ..Message::new(Role::User, "Refine the workspace navigation. Keep it compact, intuitive, and consistent across desktop platforms.") },
@@ -262,7 +274,7 @@ impl State {
                 ..Message::new(Role::Agent, "I've simplified the sidebar and given your workspace more breathing room.\n\n**What changed**\n\n- Projects and sessions in one sidebar\n- Clearer running and review states\n- Consistent keyboard navigation\n\nReady for your review.")
             },
         ];
-        State {
+        let mut state = State {
             next_id: 100,
             projects: vec![
                 project(1, "runo-native"),
@@ -328,7 +340,11 @@ impl State {
                     nav,
                 ),
             ],
-        }
+        };
+        // Show the inbox and pinning in the demo.
+        state.sessions[1].unread = true;
+        state.sessions[2].pinned = true;
+        state
     }
 }
 
