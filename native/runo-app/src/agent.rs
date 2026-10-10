@@ -47,6 +47,19 @@ pub fn provider(id: &str) -> &'static Provider {
         .unwrap_or(&PROVIDERS[0])
 }
 
+/// Whether the agent can run: its configured executable exists, or with none
+/// configured, its default command is on PATH.
+pub fn available(bin: &str, configured: &str) -> bool {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        installed(bin)
+    } else if configured.contains(std::path::MAIN_SEPARATOR) {
+        std::path::Path::new(configured).is_file()
+    } else {
+        installed(configured)
+    }
+}
+
 pub fn installed(bin: &str) -> bool {
     let suffixes: &[&str] = if cfg!(windows) {
         &["", ".exe", ".cmd", ".bat"]
@@ -607,6 +620,14 @@ mod arg_tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn configured_binaries_count_as_available() {
+        assert!(available("definitely-not-a-real-agent", "/bin/sh"));
+        assert!(!available("sh", "/no/such/agent"));
+        assert!(available("definitely-not-a-real-agent", "sh"));
+        assert!(!available("definitely-not-a-real-agent", " "));
     }
 
     #[test]

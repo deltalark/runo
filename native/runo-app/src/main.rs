@@ -136,6 +136,11 @@ struct RunoApp {
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
+    /// Race mode in the New session form, and the agents picked for it.
+    race_mode: bool,
+    /// Change counts (files, added, removed) of each session racing the selected one.
+    race_stats: HashMap<u64, (usize, usize, usize)>,
+    new_race: Vec<usize>,
     expanded: Vec<u64>,
     confirm_delete: Option<u64>,
     /// Diff line a review note is being written for: path, line number, code.
@@ -519,6 +524,9 @@ impl RunoApp {
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
                 .unwrap_or(0),
             new_isolated: true,
+            race_mode: false,
+            race_stats: HashMap::new(),
+            new_race: Vec::new(),
             confirm_delete: None,
             note_at: None,
             note_input: note_input.clone(),
@@ -621,6 +629,23 @@ impl RunoApp {
         self.changes = git::changes(&dir);
         self.files = git::tracked_files(&dir);
         self.sync = git::sync_state(&dir);
+        self.race_stats.clear();
+        if let Some(race) = self.current().map(|s| s.race).filter(|r| *r != 0) {
+            let others: Vec<(u64, String)> = self
+                .state
+                .sessions
+                .iter()
+                .filter(|s| s.race == race)
+                .map(|s| (s.id, s.dir.clone()))
+                .collect();
+            for (id, dir) in others {
+                let changes = git::changes(&dir);
+                let (a, r) = changes
+                    .iter()
+                    .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
+                self.race_stats.insert(id, (changes.len(), a, r));
+            }
+        }
         if let Some(file) = self.selected_file.clone() {
             if self.changes.iter().any(|c| c.path == file) {
                 self.diff = git::file_diff(&dir, &file);
@@ -1336,41 +1361,102 @@ impl RunoApp {
             self.notice = Some("Describe the task first.".into());
             return;
         }
-        let id = self.state.next_id();
         let typed = git::sanitize_branch(&self.branch.read(cx).value());
         let is_git = git::is_repo(&project.path);
-        let isolated = self.new_isolated && is_git;
+        let racing = self.racing() && is_git;
+        let providers: Vec<usize> = if racing {
+            self.new_race.clone()
+        } else {
+            vec![self.new_provider]
+        };
+        let mut created = Vec::new();
+        let race_base = if typed.is_empty() {
+            format!("runo/race-{}", self.state.next_id + 1)
+        } else {
+            typed.clone()
+        };
+        for provider in providers {
+            let branch = if racing {
+                format!("{race_base}-{}", agent::PROVIDERS[provider].id)
+            } else {
+                typed.clone()
+            };
+            let isolated = (self.new_isolated || racing) && is_git;
+            match self.spawn_session(&project, provider, &branch, isolated, is_git, &task, cx) {
+                Ok(id) => created.push(id),
+                Err(error) => {
+                    self.notice = Some(error);
+                    break;
+                }
+            }
+        }
+        let Some(&first) = created.first() else {
+            return;
+        };
+        if created.len() > 1 {
+            for &id in &created {
+                if let Some(session) = self.state.session_mut(id) {
+                    session.race = first;
+                }
+            }
+            self.save();
+        }
+        self.new_task
+            .update(cx, |t, cx| t.set_value("", window, cx));
+        self.branch.update(cx, |b, cx| b.set_value("", window, cx));
+        if !self.expanded.contains(&project.id) {
+            self.expanded.push(project.id);
+        }
+        // Starting each one selects it; land on the first.
+        for &id in &created {
+            self.select(id);
+            self.launch(id, task.clone(), cx);
+        }
+        self.select(first);
+    }
+
+    /// Whether the New session form will race several agents.
+    fn racing(&self) -> bool {
+        self.race_mode && self.new_race.len() > 1
+    }
+
+    /// Create one session (and its worktree) without starting the agent.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_session(
+        &mut self,
+        project: &Project,
+        provider: usize,
+        typed_branch: &str,
+        isolated: bool,
+        is_git: bool,
+        task: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        let id = self.state.next_id();
         let mut setup_log = Vec::new();
         let (branch, dir) = if !is_git {
             ("local folder".to_string(), project.path.clone())
         } else if isolated {
-            let branch = if typed.is_empty() {
+            let branch = if typed_branch.is_empty() {
                 format!("runo/session-{id}")
             } else {
-                typed
+                typed_branch.to_string()
             };
-            match git::add_worktree(&project.path, &branch) {
-                Ok(dir) => {
-                    match git::copy_included(&project.path, &dir) {
-                        Ok(copied) if !copied.is_empty() => {
-                            setup_log.push(format!(
-                                "Copied {} file{} from .worktreeinclude: {}",
-                                copied.len(),
-                                if copied.len() == 1 { "" } else { "s" },
-                                copied.join(", ")
-                            ));
-                        }
-                        Ok(_) => {}
-                        Err(error) => setup_log
-                            .push(format!("Could not copy .worktreeinclude files: {error}")),
-                    }
-                    (branch, dir)
-                }
+            let dir = git::add_worktree(&project.path, &branch)
+                .map_err(|error| format!("Could not create worktree: {error}"))?;
+            match git::copy_included(&project.path, &dir) {
+                Ok(copied) if !copied.is_empty() => setup_log.push(format!(
+                    "Copied {} file{} from .worktreeinclude: {}",
+                    copied.len(),
+                    if copied.len() == 1 { "" } else { "s" },
+                    copied.join(", ")
+                )),
+                Ok(_) => {}
                 Err(error) => {
-                    self.notice = Some(format!("Could not create worktree: {error}"));
-                    return;
+                    setup_log.push(format!("Could not copy .worktreeinclude files: {error}"))
                 }
             }
+            (branch, dir)
         } else {
             (git::current_branch(&project.path), project.path.clone())
         };
@@ -1385,7 +1471,7 @@ impl RunoApp {
             id,
             project_id: project.id,
             title,
-            provider: agent::PROVIDERS[self.new_provider].id.into(),
+            provider: agent::PROVIDERS[provider].id.into(),
             branch,
             dir,
             isolated,
@@ -1403,42 +1489,64 @@ impl RunoApp {
             archived: false,
             unread: false,
             notes: Vec::new(),
+            race: 0,
         });
-        self.new_task
-            .update(cx, |t, cx| t.set_value("", window, cx));
-        self.branch.update(cx, |b, cx| b.set_value("", window, cx));
-        if !self.expanded.contains(&project.id) {
-            self.expanded.push(project.id);
-        }
-        self.select(id);
         if !setup_log.is_empty() {
             self.terminal.entry(id).or_default().extend(setup_log);
         }
+        Ok(id)
+    }
+
+    /// Start a new session's agent, after the worktree setup command when there is one.
+    /// The session must be selected, since setup runs in its Terminal.
+    fn launch(&mut self, id: u64, task: String, cx: &mut Context<Self>) {
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        let (isolated, provider) = (session.isolated, session.provider.clone());
         let setup = cx.global::<AppSettings>().worktree_setup.trim().to_string();
         if isolated && !setup.is_empty() {
-            // The agent waits for setup; it starts when the command finishes.
             self.pending_start.insert(id, task);
             self.run_terminal(setup, cx);
-            if !self.handles.contains_key(&Target::Terminal(id)) {
-                if let Some(task) = self.pending_start.remove(&id) {
-                    let provider = self.state.session(id).map(|s| s.provider.clone());
-                    let opts = cx
-                        .global::<AppSettings>()
-                        .agent(&provider.unwrap_or_default());
-                    self.start_agent(id, task, &opts);
-                }
-            } else {
+            if self.handles.contains_key(&Target::Terminal(id)) {
                 self.info = Some((
                     "Running the worktree setup command first.".into(),
                     std::time::Instant::now(),
                 ));
+                return;
             }
+            // The command could not start; go straight to the agent.
+            let Some(task) = self.pending_start.remove(&id) else {
+                return;
+            };
+            let opts = cx.global::<AppSettings>().agent(&provider);
+            self.start_agent(id, task, &opts);
             return;
         }
-        let opts = cx
-            .global::<AppSettings>()
-            .agent(agent::PROVIDERS[self.new_provider].id);
+        let opts = cx.global::<AppSettings>().agent(&provider);
         self.start_agent(id, task, &opts);
+    }
+
+    /// Keep one session of a race: archive the others.
+    fn keep_racer(&mut self, keep: u64) {
+        let Some(race) = self.state.session(keep).map(|s| s.race).filter(|r| *r != 0) else {
+            return;
+        };
+        let mut archived = 0;
+        for session in self.state.sessions.iter_mut() {
+            if session.race == race && session.id != keep && !session.archived {
+                session.archived = true;
+                archived += 1;
+            }
+        }
+        self.save();
+        self.info = Some((
+            format!(
+                "Kept this one and archived {archived} other{}.",
+                if archived == 1 { "" } else { "s" }
+            ),
+            std::time::Instant::now(),
+        ));
     }
 
     fn delete_session(&mut self, id: u64) {
@@ -2498,6 +2606,118 @@ impl RunoApp {
             )
     }
 
+    /// The sessions racing on the same task, to compare and keep one.
+    fn race_strip(&self, session: &Session, cx: &mut Context<Self>) -> impl IntoElement {
+        let racers: Vec<&Session> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.race == session.race)
+            .collect();
+        let me = session.id;
+        let mut chips = div().flex().flex_wrap().gap_2();
+        for racer in &racers {
+            let id = racer.id;
+            let provider = agent::provider(&racer.provider);
+            let current = id == me;
+            let changes = if current {
+                let (a, r) = self
+                    .changes
+                    .iter()
+                    .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
+                Some((self.changes.len(), a, r))
+            } else {
+                self.race_stats.get(&id).copied()
+            };
+            chips = chips.child(
+                div()
+                    .id(("racer", id as usize))
+                    .px_3()
+                    .py(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .cursor_pointer()
+                    .when(current, |el| {
+                        el.border_color(rgb(c_blue())).bg(rgb(c_selected()))
+                    })
+                    .when(!current, |el| {
+                        el.border_color(rgb(c_border()))
+                            .hover(|el| el.bg(rgb(c_subtle())))
+                    })
+                    .when(racer.archived, |el| el.opacity(0.5))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select(id);
+                        cx.notify();
+                    }))
+                    .child(self.provider_badge(provider, 18.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(provider.name),
+                    )
+                    .child(self.status_dot(racer.status, ("racer-dot", id as usize), 7.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(c_secondary()))
+                            .child(Self::status_label(racer.status)),
+                    )
+                    .when_some(changes, |el, (files, a, r)| {
+                        el.child(div().text_xs().text_color(rgb(c_muted())).child(format!(
+                            "{files} file{} · +{a} −{r}",
+                            if files == 1 { "" } else { "s" }
+                        )))
+                    }),
+            );
+        }
+        let others = racers.iter().filter(|s| s.id != me && !s.archived).count();
+        div()
+            .p_3()
+            .v_flex()
+            .gap_2()
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(rgb(c_subtle()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon(IconName::Swords, 14., c_blue()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("Race between {} agents", racers.len())),
+                    )
+                    .when(others > 0, |el| {
+                        el.child(
+                            self.button("keep-racer", "Keep this one", false)
+                                .h(px(28.))
+                                .text_xs()
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        "Archive the other agents' sessions. Their worktrees stay until you delete them.",
+                                    )
+                                    .build(window, cx)
+                                })
+                                .child(icon(IconName::Trophy, 13., c_secondary()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.keep_racer(me);
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+            .child(chips)
+    }
+
     fn session_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(session) = self.current() else {
             return self.empty_state(cx).into_any_element();
@@ -2509,6 +2729,9 @@ impl RunoApp {
         let isolated = session.isolated;
         let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
         let mut list = div().v_flex().gap_5().px_8().py_5();
+        if session.race != 0 {
+            list = list.child(self.race_strip(session, cx));
+        }
         if let Some(first) = session.messages.first().filter(|m| !m.time.is_empty()) {
             list = list.child(
                 div()
@@ -3284,7 +3507,7 @@ impl RunoApp {
         let mut providers = div().flex().flex_wrap().gap_2();
         for (i, p) in agent::PROVIDERS.iter().enumerate() {
             let caps = caps::get(p.id);
-            let installed = agent::installed(p.bin);
+            let installed = agent::available(p.bin, &cx.global::<AppSettings>().agent(p.id).binary);
             let detail = if !installed {
                 format!("{} not found on PATH", p.bin)
             } else if caps.version.is_empty() {
@@ -3292,13 +3515,38 @@ impl RunoApp {
             } else {
                 format!("v{}", caps.version.trim_start_matches('v'))
             };
+            let picked = if self.race_mode {
+                self.new_race.contains(&i)
+            } else {
+                self.new_provider == i
+            };
             providers = providers.child(
-                card(("pv", i), self.new_provider == i)
+                card(("pv", i), picked)
                     .when(!installed, |el| el.opacity(0.6))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.new_provider = i;
+                        if this.race_mode {
+                            if let Some(pos) = this.new_race.iter().position(|p| *p == i) {
+                                this.new_race.remove(pos);
+                            } else {
+                                this.new_race.push(i);
+                                this.new_race.sort();
+                            }
+                        } else {
+                            this.new_provider = i;
+                        }
                         cx.notify();
                     }))
+                    .when(self.race_mode, |el| {
+                        el.child(icon(
+                            if picked {
+                                IconName::SquareCheck
+                            } else {
+                                IconName::Square
+                            },
+                            16.,
+                            if picked { c_blue() } else { c_muted() },
+                        ))
+                    })
                     .child(self.provider_badge(p, 30.))
                     .child(
                         div()
@@ -3325,15 +3573,33 @@ impl RunoApp {
             .new_project
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id));
         let is_git = self.demo || project.is_some_and(|p| git::is_repo(&p.path));
-        let isolated = self.new_isolated && is_git;
+        let racing = self.racing() && is_git;
+        let isolated = (self.new_isolated || racing) && is_git;
         let typed = git::sanitize_branch(&self.branch.read(cx).value());
-        let branch = if typed.is_empty() {
+        let branch = if racing {
+            format!(
+                "{}-*",
+                if typed.is_empty() {
+                    format!("runo/race-{}", self.state.next_id + 1)
+                } else {
+                    typed
+                }
+            )
+        } else if typed.is_empty() {
             format!("runo/session-{}", self.state.next_id + 1)
         } else {
             typed
         };
         let where_to = match project {
             None => "Add a project to start.".to_string(),
+            Some(_) if racing => format!(
+                "Each agent gets its own worktree and branch: {}",
+                self.new_race
+                    .iter()
+                    .map(|i| branch.replace('*', agent::PROVIDERS[*i].id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Some(p) if isolated => format!(
                 "Creates branch {branch} in {}",
                 git::worktree_path(&p.path, &branch).display()
@@ -3343,7 +3609,7 @@ impl RunoApp {
         };
         let provider = &agent::PROVIDERS[self.new_provider];
         let task_empty = self.new_task.read(cx).value().trim().is_empty();
-        let ready = project.is_some() && !task_empty;
+        let ready = project.is_some() && !task_empty && (!self.race_mode || racing);
 
         let mode = |id: usize, title: &'static str, desc: &'static str, on: bool| {
             card(("iso", id), on)
@@ -3399,10 +3665,65 @@ impl RunoApp {
                     )
                     .child(label("PROJECT"))
                     .child(projects)
-                    .child(label("AGENT"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(label("AGENT"))
+                            .when(is_git, |el| {
+                                el.child(
+                                    div()
+                                        .id("race-toggle")
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_xs()
+                                        .text_color(rgb(if self.race_mode {
+                                            c_blue()
+                                        } else {
+                                            c_secondary()
+                                        }))
+                                        .hover(|el| el.bg(rgb(c_subtle())))
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                "Run the same task on several agents, each in its own worktree, then keep the best result.",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.race_mode = !this.race_mode;
+                                            if this.race_mode && this.new_race.is_empty() {
+                                                this.new_race.push(this.new_provider);
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(icon(
+                                            IconName::Swords,
+                                            13.,
+                                            if self.race_mode { c_blue() } else { c_secondary() },
+                                        ))
+                                        .child(if self.race_mode {
+                                            "Racing: pick two or more"
+                                        } else {
+                                            "Race several agents"
+                                        }),
+                                )
+                            }),
+                    )
                     .child(providers)
                     .child(label("WHERE IT RUNS"))
-                    .child(if is_git {
+                    .child(if racing {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(c_secondary()))
+                            .child("Racing always uses isolated worktrees, one per agent.")
+                            .into_any_element()
+                    } else if is_git {
                         div()
                             .flex()
                             .gap_2()
@@ -3451,7 +3772,9 @@ impl RunoApp {
                             .child(
                                 self.button(
                                     "start",
-                                    if isolated {
+                                    if racing {
+                                        format!("Race {} agents on {branch}", self.new_race.len())
+                                    } else if isolated {
                                         format!("Start {} on {branch}", provider.name)
                                     } else {
                                         format!("Start {}", provider.name)
@@ -4488,7 +4811,7 @@ impl RunoApp {
             .gap(px(2.));
         if self.cli_tab {
             for p in agent::PROVIDERS.iter() {
-                let ok = agent::installed(p.bin);
+                let ok = agent::available(p.bin, &cx.global::<AppSettings>().agent(p.id).binary);
                 let version = caps::get(p.id).version;
                 log = log.child(
                     div()

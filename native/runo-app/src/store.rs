@@ -140,6 +140,9 @@ pub struct Session {
     /// Review notes left on diff lines, waiting to be sent to the agent.
     #[serde(default)]
     pub notes: Vec<Note>,
+    /// Sessions started together on one task share the id of the first one; 0 if none.
+    #[serde(default)]
+    pub race: u64,
 }
 
 /// A review comment on one line of the session's diff.
@@ -295,6 +298,7 @@ impl State {
                 archived: false,
                 unread: false,
                 notes: Vec::new(),
+                race: 0,
             };
         let nav = vec![
             Message { time: "10:24 AM".into(), ..Message::new(Role::User, "Refine the workspace navigation. Keep it compact, intuitive, and consistent across desktop platforms.") },
