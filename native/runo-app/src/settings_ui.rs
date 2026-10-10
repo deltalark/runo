@@ -364,6 +364,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             let m = MOD_KEY.trim_end_matches('+');
             vec![
                 section("Workspace", "Available everywhere in the window.", vec![
+                    row("Quick open", "Jump to any session, file or command.", Ctl::Keys(format!("{m} K"))),
                     row("New session", "Open the New session form.", Ctl::Keys(format!("{m} N"))),
                     row("Settings", "Open this screen.", Ctl::Keys(format!("{m} ,"))),
                     row("Changes panel", "Show or hide the Changes, Files and Terminal panel.", Ctl::Keys(format!("{m} B"))),

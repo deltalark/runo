@@ -9,6 +9,7 @@ mod stream;
 use agent::{Event, Handle, Target};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
+use gpui_kit::component::command::{Command, CommandGroup, CommandItem, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::text::TextView;
@@ -46,7 +47,14 @@ const DEMO_DIFF: &str = "@@ -42,13 +42,20 @@ impl NavItem {
 
 actions!(
     runo,
-    [NewSession, OpenSettings, StopAgent, TogglePanel, Dismiss]
+    [
+        NewSession,
+        OpenSettings,
+        StopAgent,
+        TogglePanel,
+        Dismiss,
+        QuickOpen
+    ]
 );
 
 /// Global shortcuts. `secondary` is ⌘ on macOS and Ctrl elsewhere.
@@ -57,6 +65,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-.", StopAgent, Some("Runo")),
         KeyBinding::new("secondary-b", TogglePanel, Some("Runo")),
         KeyBinding::new("escape", Dismiss, Some("Runo")),
+        KeyBinding::new("secondary-k", QuickOpen, Some("Runo")),
+        KeyBinding::new("secondary-p", QuickOpen, Some("Runo")),
     ]);
 }
 
@@ -69,6 +79,16 @@ enum View {
     AllSessions,
     Worktrees,
     Settings,
+}
+
+/// What a quick-open entry does when chosen.
+#[derive(Clone)]
+enum Jump {
+    /// Handled by the entry's own Action.
+    Action,
+    View(View),
+    Session(u64),
+    File(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,6 +138,9 @@ struct RunoApp {
     new_isolated: bool,
     expanded: Vec<u64>,
     confirm_delete: Option<u64>,
+    /// The quick-open palette, while open, and what each of its rows leads to.
+    palette: Option<Entity<CommandState>>,
+    palette_jumps: Vec<Vec<Jump>>,
     /// The session title is being edited in the header.
     renaming: bool,
     rename: Entity<InputState>,
@@ -481,6 +504,8 @@ impl RunoApp {
                 .unwrap_or(0),
             new_isolated: true,
             confirm_delete: None,
+            palette: None,
+            palette_jumps: Vec::new(),
             renaming: false,
             rename: rename.clone(),
             confirm_discard: None,
@@ -879,6 +904,165 @@ impl RunoApp {
             }
             self.save();
         }
+    }
+
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.close_palette(window, cx);
+            return;
+        }
+        self.menu = None;
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        state.update(cx, |s, cx| s.focus(window, cx));
+        self.palette = Some(state);
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        window.focus(&self.focus, cx);
+    }
+
+    fn palette_jump(&mut self, jump: Jump, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        match jump {
+            Jump::Action => {}
+            Jump::View(view) => self.view = view,
+            Jump::Session(id) => self.select(id),
+            Jump::File(path) => {
+                self.view = View::Session;
+                self.show_panel = true;
+                self.open_preview(&path);
+                self.right_tab = RightTab::Files;
+            }
+        }
+    }
+
+    /// The palette's rows: commands, then sessions, then files of the open session.
+    fn palette_view(&mut self, state: Entity<CommandState>, cx: &mut Context<Self>) -> AnyElement {
+        let mut jumps: Vec<Vec<Jump>> = Vec::new();
+        let mut commands = CommandGroup::new().label("Commands");
+        let mut command_jumps = Vec::new();
+        let actions: [(&str, IconName, Box<dyn Action>); 4] = [
+            ("New session", IconName::Plus, Box::new(NewSession)),
+            ("Open settings", IconName::Settings, Box::new(OpenSettings)),
+            (
+                "Toggle the Changes panel",
+                IconName::PanelRightOpen,
+                Box::new(TogglePanel),
+            ),
+            (
+                "Stop the running agent",
+                IconName::CircleStop,
+                Box::new(StopAgent),
+            ),
+        ];
+        for (label, name, action) in actions {
+            commands = commands.item(CommandItem::new().label(label).icon(name).action(action));
+            command_jumps.push(Jump::Action);
+        }
+        for (label, name, view) in [
+            ("Go to Inbox", IconName::BellDot, View::Inbox),
+            ("Go to All sessions", IconName::Layers, View::AllSessions),
+            ("Go to Worktrees", IconName::GitBranch, View::Worktrees),
+        ] {
+            commands = commands.item(CommandItem::new().label(label).icon(name));
+            command_jumps.push(Jump::View(view));
+        }
+        jumps.push(command_jumps);
+
+        let mut sessions = CommandGroup::new().label("Sessions");
+        let mut session_jumps = Vec::new();
+        for session in self.state.sessions.iter().filter(|s| !s.archived) {
+            let project = self
+                .state
+                .projects
+                .iter()
+                .find(|p| p.id == session.project_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            sessions = sessions.item(
+                CommandItem::new()
+                    .label(format!("{}  ·  {project}", session.title))
+                    .icon(IconName::MessageSquare)
+                    .keywords([session.branch.clone(), session.provider.clone()]),
+            );
+            session_jumps.push(Jump::Session(session.id));
+        }
+        jumps.push(session_jumps);
+
+        let mut files = CommandGroup::new().label("Files in this session");
+        let mut file_jumps = Vec::new();
+        if self.view == View::Session && self.current().is_some() {
+            for path in self.files.iter().take(3000) {
+                files = files.item(CommandItem::new().label(path.clone()).icon(IconName::File));
+                file_jumps.push(Jump::File(path.clone()));
+            }
+        }
+        jumps.push(file_jumps);
+        self.palette_jumps = jumps;
+
+        let this = cx.entity().downgrade();
+        let cancel = this.clone();
+        div()
+            .id("palette-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .justify_center()
+            .pt(px(110.))
+            .bg(gpui_kit::black().opacity(0.28))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.close_palette(window, cx);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id("palette")
+                    .w(px(640.))
+                    .h_auto()
+                    .max_h(px(520.))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(rgb(c_canvas()))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        Command::new(&state)
+                            .group(commands)
+                            .group(sessions)
+                            .group(files)
+                            .bordered(false)
+                            .max_h(px(440.))
+                            .placeholder("Jump to a session, file or command…")
+                            .on_confirm(move |ix, window, cx| {
+                                let _ = this.update(cx, |this, cx| {
+                                    let jump = this
+                                        .palette_jumps
+                                        .get(ix.section)
+                                        .and_then(|g| g.get(ix.row))
+                                        .cloned();
+                                    if let Some(jump) = jump {
+                                        this.palette_jump(jump, window, cx);
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .on_cancel(move |window, cx| {
+                                let _ = cancel.update(cx, |this, cx| {
+                                    this.close_palette(window, cx);
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .animated(
+                "palette-in",
+                Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
+                |el, delta| el.opacity(delta),
+            )
+            .into_any_element()
     }
 
     fn toggle_pin(&mut self, id: u64) {
@@ -4250,11 +4434,20 @@ impl Render for RunoApp {
                 if n == 1 { "" } else { "s" }
             ),
         };
+        let palette = self
+            .palette
+            .clone()
+            .map(|state| self.palette_view(state, cx));
         let root = div()
             .size_full()
+            .relative()
             .v_flex()
             .key_context("Runo")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &QuickOpen, window, cx| {
+                this.open_palette(window, cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &NewSession, _, cx| {
                 this.view = View::NewSession;
                 cx.notify();
@@ -4271,8 +4464,10 @@ impl Render for RunoApp {
                 this.show_panel = !this.show_panel;
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &Dismiss, _, cx| {
-                if this.menu.is_some() || this.settings_menu.is_some() {
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
+                if this.palette.is_some() {
+                    this.close_palette(window, cx);
+                } else if this.menu.is_some() || this.settings_menu.is_some() {
                     this.menu = None;
                     this.settings_menu = None;
                 } else if this.renaming {
@@ -4363,7 +4558,8 @@ impl Render for RunoApp {
                             .child(div().size(px(7.)).rounded_full().bg(rgb(c_green())))
                             .child("Local environment"),
                     ),
-            );
+            )
+            .children(palette);
         fade(root, "app-root", 450)
     }
 }
