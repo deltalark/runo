@@ -1,6 +1,7 @@
 mod agent;
 mod caps;
 mod git;
+mod history;
 mod settings;
 mod settings_ui;
 mod store;
@@ -77,6 +78,7 @@ enum View {
     NewSession,
     Inbox,
     AllSessions,
+    History,
     Worktrees,
     Settings,
 }
@@ -138,6 +140,8 @@ struct RunoApp {
     new_isolated: bool,
     /// Race mode in the New session form, and the agents picked for it.
     race_mode: bool,
+    /// Past Claude and Codex conversations found on this machine.
+    history: Vec<history::Past>,
     /// Change counts (files, added, removed) of each session racing the selected one.
     race_stats: HashMap<u64, (usize, usize, usize)>,
     new_race: Vec<usize>,
@@ -525,6 +529,7 @@ impl RunoApp {
                 .unwrap_or(0),
             new_isolated: true,
             race_mode: false,
+            history: Vec::new(),
             race_stats: HashMap::new(),
             new_race: Vec::new(),
             confirm_delete: None,
@@ -1527,6 +1532,204 @@ impl RunoApp {
         self.start_agent(id, task, &opts);
     }
 
+    fn open_history(&mut self) {
+        self.view = View::History;
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            self.history = history::scan(std::path::Path::new(&home));
+        }
+    }
+
+    /// The Runo project a folder belongs to: the project itself or one of its worktrees.
+    fn project_for(&self, dir: &str) -> Option<&Project> {
+        self.state.projects.iter().find(|p| {
+            dir == p.path
+                || std::path::Path::new(dir).starts_with(
+                    git::worktree_path(&p.path, "x")
+                        .parent()
+                        .unwrap_or(std::path::Path::new("/")),
+                )
+        })
+    }
+
+    /// Open a past CLI conversation as a Runo session; the next message resumes it.
+    fn resume_past(&mut self, past: history::Past, cx: &mut Context<Self>) {
+        if !std::path::Path::new(&past.cwd).is_dir() {
+            self.notice = Some(format!("{} no longer exists.", past.cwd));
+            return;
+        }
+        if let Some(existing) = self
+            .state
+            .sessions
+            .iter()
+            .find(|s| s.agent_session == past.id && s.provider == past.provider)
+        {
+            let id = existing.id;
+            self.select(id);
+            return;
+        }
+        let project_id = match self.project_for(&past.cwd).map(|p| p.id) {
+            Some(id) => id,
+            None => {
+                let id = self.state.next_id();
+                let name = std::path::Path::new(&past.cwd)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| past.cwd.clone());
+                self.state.projects.push(Project {
+                    id,
+                    name,
+                    path: past.cwd.clone(),
+                });
+                id
+            }
+        };
+        let id = self.state.next_id();
+        let provider = agent::provider(past.provider);
+        let branch = if git::is_repo(&past.cwd) {
+            git::current_branch(&past.cwd)
+        } else {
+            "local folder".into()
+        };
+        self.state.sessions.push(Session {
+            id,
+            project_id,
+            title: past.title.clone(),
+            provider: past.provider.into(),
+            branch,
+            dir: past.cwd.clone(),
+            isolated: false,
+            mode: String::new(),
+            model: String::new(),
+            opts: std::collections::HashMap::from([(
+                "mode".to_string(),
+                cx.global::<AppSettings>().default_mode.clone(),
+            )]),
+            status: Status::Idle,
+            messages: vec![Message::now(
+                Role::Agent,
+                format!(
+                    "Picked up the {} conversation “{}” from {}. Earlier messages stay in {}; send a message to continue it.",
+                    provider.name,
+                    past.title,
+                    history::ago(past.modified),
+                    provider.name
+                ),
+            )],
+            agent_session: past.id.clone(),
+            conversation_start: 0,
+            pinned: false,
+            archived: false,
+            unread: false,
+            notes: Vec::new(),
+            race: 0,
+        });
+        if !self.expanded.contains(&project_id) {
+            self.expanded.push(project_id);
+        }
+        self.save();
+        self.select(id);
+    }
+
+    fn history_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut rows = div().v_flex().gap_2();
+        for (i, past) in self.history.iter().enumerate().take(200) {
+            let provider = agent::provider(past.provider);
+            let place = match self.project_for(&past.cwd) {
+                Some(p) if p.path == past.cwd => p.name.clone(),
+                Some(p) => format!("{} · worktree", p.name),
+                None => past.cwd.clone(),
+            };
+            let open = self
+                .state
+                .sessions
+                .iter()
+                .any(|s| s.agent_session == past.id && s.provider == past.provider);
+            let item = past.clone();
+            rows = rows.child(stagger(
+                div()
+                    .id(("past", i))
+                    .p_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.resume_past(item.clone(), cx);
+                        cx.notify();
+                    }))
+                    .child(self.provider_badge(provider, 26.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(past.title.clone()),
+                            )
+                            .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
+                                format!(
+                                    "{}  ·  {place}  ·  {}",
+                                    provider.name,
+                                    history::ago(past.modified)
+                                ),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(rgb(c_blue()))
+                            .child(if open { "Open" } else { "Resume" })
+                            .child(icon(IconName::ArrowRight, 12., c_blue())),
+                    ),
+                SharedString::from(format!("past-{i}")),
+                i.min(12),
+            ));
+        }
+        if self.history.is_empty() {
+            rows = rows.child(
+                div()
+                    .py_10()
+                    .v_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon(IconName::RotateCcwClock, 28., c_muted()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("No past conversations found"),
+                    )
+                    .child(div().text_xs().text_color(rgb(c_muted())).child(
+                        "Claude Code and Codex conversations from this machine show up here.",
+                    )),
+            );
+        }
+        self.page(
+            "History",
+            div()
+                .v_flex()
+                .gap_3()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(c_secondary()))
+                        .child("Conversations Claude Code and Codex ran on this machine, inside or outside Runo. Pick one to continue it as a session."),
+                )
+                .child(rows),
+        )
+    }
+
     /// Keep one session of a race: archive the others.
     fn keep_racer(&mut self, keep: u64) {
         let Some(race) = self.state.session(keep).map(|s| s.race).filter(|r| *r != 0) else {
@@ -1827,6 +2030,8 @@ impl RunoApp {
             .on_click(cx.listener(move |this, _, _, cx| {
                 if view == View::Settings {
                     this.open_settings();
+                } else if view == View::History {
+                    this.open_history();
                 } else {
                     this.view = view;
                 }
@@ -2234,6 +2439,14 @@ impl RunoApp {
                 "Worktrees",
                 self.state.sessions.iter().filter(|s| s.isolated).count(),
                 View::Worktrees,
+                cx,
+            ))
+            .child(self.nav_item(
+                "history",
+                IconName::RotateCcwClock,
+                "History",
+                0,
+                View::History,
                 cx,
             ))
             .child(
@@ -5037,6 +5250,7 @@ impl Render for RunoApp {
             View::NewSession => self.new_session_view(cx),
             View::Inbox => self.list_view(View::Inbox, cx),
             View::AllSessions => self.list_view(View::AllSessions, cx),
+            View::History => self.history_view(cx),
             View::Worktrees => self.list_view(View::Worktrees, cx),
             View::Settings => self.settings_view(window, cx),
         };

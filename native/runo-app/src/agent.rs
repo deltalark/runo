@@ -208,7 +208,13 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             }
             args.extend(split_args(&opts.extra_args));
             if spec.resume {
-                args.extend([s("resume"), s("--last")]);
+                // A known conversation id resumes exactly that one; `--last` is the
+                // newest in the folder, which may belong to another session.
+                if spec.session_id.is_empty() {
+                    args.extend([s("resume"), s("--last")]);
+                } else {
+                    args.extend([s("resume"), spec.session_id.to_string()]);
+                }
             }
             args.push(spec.prompt.to_string());
         }
@@ -478,6 +484,25 @@ mod arg_tests {
             in_git,
             session_id: "",
         })
+    }
+
+    #[test]
+    fn codex_resumes_a_known_conversation_by_id() {
+        let sel = HashMap::new();
+        let o = AgentOptions::default();
+        let run = |session_id| {
+            provider_args(&RunSpec {
+                provider: "codex",
+                prompt: "hi",
+                resume: true,
+                sel: &sel,
+                opts: &o,
+                in_git: true,
+                session_id,
+            })
+        };
+        assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
+        assert!(run("").ends_with(&["resume".into(), "--last".into(), "hi".into()]));
     }
 
     #[test]
