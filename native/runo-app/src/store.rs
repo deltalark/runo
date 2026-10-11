@@ -105,10 +105,10 @@ impl Session {
 impl Session {
     /// Whether the current agent already replied, so the next prompt continues its conversation.
     pub fn has_conversation(&self) -> bool {
-        self.messages
-            .iter()
-            .skip(self.conversation_start)
-            .any(|m| m.role == Role::Agent && !m.text.is_empty())
+        self.messages.iter().skip(self.conversation_start).any(|m| {
+            (m.role == Role::Agent && !m.text.is_empty())
+                || (m.role == Role::System && m.meta.starts_with("cli:"))
+        })
     }
 
     /// Switch to another agent CLI. Its options and conversation start fresh.

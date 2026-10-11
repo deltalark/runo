@@ -92,7 +92,104 @@ pub const PROVIDERS: [Provider; 10] = [
 /// Whether the CLI keeps its own conversation that a follow-up can resume. Others get
 /// the recent conversation written into each follow-up prompt instead.
 pub fn resumes(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex" | "opencode")
+    matches!(
+        provider,
+        "claude"
+            | "codex"
+            | "opencode"
+            | "gemini"
+            | "qwen"
+            | "cursor"
+            | "copilot"
+            | "amp"
+            | "droid"
+    )
+}
+
+/// CLIs that take a conversation id chosen by Runo on the first run.
+pub fn names_conversation(provider: &str) -> bool {
+    matches!(provider, "claude" | "gemini" | "qwen")
+}
+
+/// CLIs whose JSON output carries the conversation id, read by `json_line`.
+pub fn reports_conversation(provider: &str) -> bool {
+    matches!(provider, "cursor" | "droid" | "amp" | "opencode")
+}
+
+/// What one line of JSON output from `cursor`, `droid`, `amp` or `opencode` holds.
+#[derive(Debug, Default, PartialEq)]
+pub struct JsonLine {
+    pub conversation: Option<String>,
+    pub text: Option<String>,
+    /// Final answer text, used only when no text arrived before it.
+    pub result: Option<String>,
+    pub steps: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// Read one line of an agent's JSON output; `None` when the line is not JSON.
+pub fn json_line(line: &str) -> Option<JsonLine> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    let mut out = JsonLine {
+        conversation: ["session_id", "sessionID", "sessionId", "thread_id"]
+            .iter()
+            .find_map(|k| v[*k].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        ..Default::default()
+    };
+    let kind = v["type"].as_str().unwrap_or("");
+    match kind {
+        "result" => {
+            if v["is_error"] == true {
+                out.error = v["result"]
+                    .as_str()
+                    .or(v["error"].as_str())
+                    .map(str::to_string);
+            } else {
+                out.result = v["result"].as_str().map(str::to_string);
+            }
+        }
+        "assistant" => {
+            for block in v["message"]["content"].as_array().into_iter().flatten() {
+                match block["type"].as_str().unwrap_or("") {
+                    "text" => {
+                        let t = block["text"].as_str().unwrap_or("");
+                        if !t.trim().is_empty() {
+                            out.text = Some(match out.text.take() {
+                                Some(prev) => format!("{prev}\n{t}"),
+                                None => t.to_string(),
+                            });
+                        }
+                    }
+                    "tool_use" => out.steps.push(format!(
+                        "Used {}",
+                        block["name"].as_str().unwrap_or("a tool")
+                    )),
+                    _ => {}
+                }
+            }
+        }
+        // OpenCode: {"type":"text","part":{"text":…}} and {"type":"tool_use","part":{"tool":…}}.
+        "text" => out.text = v["part"]["text"].as_str().map(str::to_string),
+        "tool_use" => {
+            if let Some(tool) = v["part"]["tool"].as_str() {
+                out.steps.push(format!("Used {tool}"));
+            }
+        }
+        "error" => {
+            out.error = v["error"]["message"]
+                .as_str()
+                .or(v["error"].as_str())
+                .or(v["message"].as_str())
+                .map(str::to_string)
+        }
+        _ => {}
+    }
+    Some(out)
 }
 
 pub fn provider(id: &str) -> &'static Provider {
@@ -292,7 +389,10 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             args.push(spec.prompt.to_string());
         }
         "cursor" => {
-            args.extend([s("-p"), s("--output-format"), s("text")]);
+            args.extend([s("-p"), s("--output-format"), s("json")]);
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("--resume"), spec.session_id.to_string()]);
+            }
             if matches!(mode.as_str(), "" | "edit" | "full") {
                 args.push(s("--force"));
             }
@@ -315,6 +415,14 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             for dir in list(&opts.add_dirs) {
                 args.extend([s("--include-directories"), dir]);
             }
+            if !spec.session_id.is_empty() {
+                let flag = if spec.resume {
+                    "--resume"
+                } else {
+                    "--session-id"
+                };
+                args.extend([s(flag), spec.session_id.to_string()]);
+            }
             args.extend(split_args(&opts.extra_args));
             args.extend([s("-p"), with_images(spec)]);
         }
@@ -328,18 +436,28 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             for dir in list(&opts.add_dirs) {
                 args.extend([s("--add-dir"), dir]);
             }
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("--resume"), spec.session_id.to_string()]);
+            }
             args.extend(split_args(&opts.extra_args));
             args.extend([s("-p"), with_images(spec)]);
         }
         "amp" => {
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("threads"), s("continue"), spec.session_id.to_string()]);
+            }
             if mode != "plan" {
                 args.push(s("--dangerously-allow-all"));
             }
+            args.push(s("--stream-json"));
             args.extend(split_args(&opts.extra_args));
             args.extend([s("-x"), with_images(spec)]);
         }
         "droid" => {
-            args.push(s("exec"));
+            args.extend([s("exec"), s("-o"), s("json")]);
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("-s"), spec.session_id.to_string()]);
+            }
             match mode.as_str() {
                 "plan" => {}
                 "full" => args.extend([s("--auto"), s("high")]),
@@ -359,9 +477,15 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             args.extend([s("-p"), with_images(spec)]);
         }
         "opencode" => {
-            args.push(s("run"));
+            args.extend([s("run"), s("--format"), s("json")]);
             if spec.resume {
-                args.push(s("--continue"));
+                // A known id resumes exactly this session's conversation; `--continue` is the
+                // newest in the folder, which may belong to another session.
+                if spec.session_id.is_empty() {
+                    args.push(s("--continue"));
+                } else {
+                    args.extend([s("-s"), spec.session_id.to_string()]);
+                }
             }
             if !model.is_empty() {
                 args.extend([s("-m"), model]);
@@ -461,6 +585,11 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
 /// Agents whose own interactive CLI can open the same conversation the chat uses, so
 /// the Chat and CLI views of a session can be swapped without sending anything.
 pub fn has_cli_view(provider: &str) -> bool {
+    resumes(provider)
+}
+
+/// Whether Runo can read the CLI's saved conversation to show CLI turns in the chat.
+pub fn imports_cli_turns(provider: &str) -> bool {
     matches!(provider, "claude" | "codex")
 }
 
@@ -468,6 +597,63 @@ pub fn has_cli_view(provider: &str) -> bool {
 /// the same model, mode and tools as the chat. `spec.resume` picks up the conversation
 /// in `spec.session_id`; otherwise a new one starts (named up front for Claude Code).
 pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
+    let s = |v: &str| v.to_string();
+    let id = spec.session_id.to_string();
+    let model = spec
+        .sel
+        .get("model")
+        .cloned()
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| spec.opts.model_override.clone());
+    let with_model = |mut args: Vec<String>, flag: &str| {
+        if !model.is_empty() {
+            args.extend([s(flag), model.clone()]);
+        }
+        args.extend(split_args(&spec.opts.extra_args));
+        args
+    };
+    let resume = spec.resume && !id.is_empty();
+    match spec.provider {
+        "gemini" | "qwen" => {
+            let flag = if spec.resume {
+                "--resume"
+            } else {
+                "--session-id"
+            };
+            let mut args = with_model(Vec::new(), "-m");
+            if !id.is_empty() {
+                args.extend([s(flag), id]);
+            }
+            return args;
+        }
+        "cursor" | "copilot" | "droid" => {
+            let flag = if spec.provider == "copilot" {
+                "--model"
+            } else {
+                "-m"
+            };
+            let mut args = with_model(Vec::new(), flag);
+            if resume {
+                args.extend([s("--resume"), id]);
+            }
+            return args;
+        }
+        "opencode" => {
+            let mut args = with_model(Vec::new(), "-m");
+            if resume {
+                args.extend([s("-s"), id]);
+            }
+            return args;
+        }
+        "amp" => {
+            return if resume {
+                vec![s("threads"), s("continue"), id]
+            } else {
+                Vec::new()
+            };
+        }
+        _ => {}
+    }
     let args = provider_args(spec);
     match spec.provider {
         "codex" => {
@@ -1149,10 +1335,21 @@ mod arg_tests {
     #[test]
     fn opencode_args() {
         let o = AgentOptions::default();
-        assert_eq!(args("opencode", false, &[], &o, true), ["run", "hi"]);
+        assert_eq!(
+            args("opencode", false, &[], &o, true),
+            ["run", "--format", "json", "hi"]
+        );
         assert_eq!(
             args("opencode", true, &[("mode", "plan")], &o, true),
-            ["run", "--continue", "--agent", "plan", "hi"]
+            [
+                "run",
+                "--format",
+                "json",
+                "--continue",
+                "--agent",
+                "plan",
+                "hi"
+            ]
         );
         let o = AgentOptions {
             variant: "high".into(),
@@ -1173,6 +1370,8 @@ mod arg_tests {
             ),
             [
                 "run",
+                "--format",
+                "json",
                 "-m",
                 "opencode/big-pickle",
                 "--agent",
@@ -1183,6 +1382,54 @@ mod arg_tests {
                 "--auto",
                 "hi"
             ]
+        );
+    }
+
+    #[test]
+    fn json_output_gives_text_steps_and_the_conversation_id() {
+        let cursor = json_line(r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"c-1"}"#).unwrap();
+        assert_eq!(cursor.conversation.as_deref(), Some("c-1"));
+        assert_eq!(cursor.result.as_deref(), Some("Done."));
+        let amp = json_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hi"},{"type":"tool_use","name":"Bash"}]},"session_id":"T-9"}"#).unwrap();
+        assert_eq!(amp.text.as_deref(), Some("Hi"));
+        assert_eq!(amp.steps, vec!["Used Bash"]);
+        assert_eq!(amp.conversation.as_deref(), Some("T-9"));
+        let open =
+            json_line(r#"{"type":"text","sessionID":"ses_1","part":{"text":"Yes"}}"#).unwrap();
+        assert_eq!(
+            (open.text.as_deref(), open.conversation.as_deref()),
+            (Some("Yes"), Some("ses_1"))
+        );
+        assert_eq!(json_line("plain text"), None);
+        // Each CLI is given the conversation it should continue.
+        let o = AgentOptions::default();
+        let sel = std::collections::HashMap::new();
+        let spec = |provider, resume| RunSpec {
+            provider,
+            prompt: "hi",
+            resume,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "id-1",
+            images: &[],
+            memory: None,
+        };
+        let has = |p, resume, pair: [&str; 2]| {
+            provider_args(&spec(p, resume))
+                .windows(2)
+                .any(|w| w == pair)
+        };
+        assert!(has("gemini", false, ["--session-id", "id-1"]));
+        assert!(has("gemini", true, ["--resume", "id-1"]));
+        assert!(has("qwen", true, ["--resume", "id-1"]));
+        assert!(has("cursor", true, ["--resume", "id-1"]));
+        assert!(has("copilot", true, ["--resume", "id-1"]));
+        assert!(has("droid", true, ["-s", "id-1"]));
+        assert!(has("opencode", true, ["-s", "id-1"]));
+        assert_eq!(
+            &provider_args(&spec("amp", true))[..3],
+            ["threads", "continue", "id-1"]
         );
     }
 

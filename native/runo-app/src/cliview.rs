@@ -27,14 +27,43 @@ fn home() -> PathBuf {
         .unwrap_or_default()
 }
 
-/// The divider's meta: `cli:<provider>:<turns>`.
-fn divider_meta(provider: &str, turns: usize) -> String {
-    format!("cli:{provider}:{turns}")
+/// The divider's meta: `cli:<provider>:<turns>`, with `-` when the turns stay in the
+/// agent's own history because Runo can't read it.
+fn divider_meta(provider: &str, turns: Option<usize>) -> String {
+    match turns {
+        Some(n) => format!("cli:{provider}:{n}"),
+        None => format!("cli:{provider}:-"),
+    }
 }
 
-fn parse_divider(meta: &str) -> Option<(&str, usize)> {
+fn parse_divider(meta: &str) -> Option<(&str, Option<usize>)> {
     let mut parts = meta.strip_prefix("cli:")?.split(':');
-    Some((parts.next()?, parts.next()?.parse().ok()?))
+    let provider = parts.next()?;
+    let turns = parts.next()?;
+    Some((
+        provider,
+        if turns == "-" {
+            None
+        } else {
+            Some(turns.parse().ok()?)
+        },
+    ))
+}
+
+/// Why a session can't show its CLI view without losing context, if it can't.
+pub(crate) fn cli_blocker(session: &Session) -> Option<String> {
+    let name = agent::provider(&session.provider).name;
+    if !agent::has_cli_view(&session.provider) {
+        return Some(format!(
+            "{name}'s CLI can't reopen a conversation by id, so there is no CLI view: switching would lose context or cost tokens."
+        ));
+    }
+    let knows_id = agent::imports_cli_turns(&session.provider)
+        || agent::names_conversation(&session.provider)
+        || !session.agent_session.is_empty();
+    (!knows_id).then(|| {
+        format!("Send the first message in Chat so Runo learns {name}'s conversation id. Then the CLI can open the same conversation.")
+    })
 }
 
 impl RunoApp {
@@ -47,11 +76,8 @@ impl RunoApp {
             return;
         }
         if cli {
-            if !agent::has_cli_view(&session.provider) {
-                let name = agent::provider(&session.provider).name;
-                self.notice = Some(format!(
-                    "{name} has no CLI view yet: its CLI can't reopen this conversation, so switching would cost tokens."
-                ));
+            if let Some(reason) = cli_blocker(session) {
+                self.notice = Some(reason);
                 return;
             }
             if self.handles.contains_key(&Target::Session(id)) {
@@ -69,6 +95,16 @@ impl RunoApp {
                 return;
             }
             self.view_changed = Some((id, std::time::Instant::now()));
+            // A prompt queued while the CLI was open goes now.
+            let next = self
+                .state
+                .session_mut(id)
+                .filter(|s| !s.queue.is_empty())
+                .map(|s| (s.queue.remove(0), s.provider.clone()));
+            if let Some((prompt, provider)) = next {
+                let opts = cx.global::<AppSettings>().agent(&provider);
+                self.start_turn(id, prompt, Vec::new(), &opts);
+            }
         }
         self.save();
         cx.notify();
@@ -93,8 +129,17 @@ impl RunoApp {
                 conversation = found;
             }
         }
-        let mut transcript = history::transcript(&home, &provider, &conversation);
-        let resume = transcript.is_some();
+        let imports = agent::imports_cli_turns(&provider);
+        let mut transcript = if imports {
+            history::transcript(&home, &provider, &conversation)
+        } else {
+            None
+        };
+        let resume = if imports {
+            transcript.is_some()
+        } else {
+            session.has_conversation() && !conversation.is_empty()
+        };
         if !resume && session.has_conversation() && !self.demo {
             // Opening a fresh CLI would drop the context; refuse rather than lose it.
             if let Some(s) = self.state.session_mut(id) {
@@ -106,7 +151,7 @@ impl RunoApp {
             ));
             return;
         }
-        if provider == "claude" && !resume {
+        if agent::names_conversation(&provider) && !resume {
             // A new conversation, named up front so the chat can resume it later.
             conversation = agent::new_uuid();
             transcript = None;
@@ -240,7 +285,16 @@ impl RunoApp {
             }
             None => (history::transcript(&home, &run.provider, &conversation), 0),
         };
+        let name = agent::provider(&run.provider).name;
         let Some(path) = path else {
+            if !agent::imports_cli_turns(&run.provider) {
+                // The turns live in the agent's own history; mark where the CLI was used.
+                let mut divider = Message::now(Role::System, format!("Used {name}'s CLI"));
+                divider.meta = divider_meta(&run.provider, None);
+                if let Some(s) = self.state.session_mut(id) {
+                    s.messages.push(divider);
+                }
+            }
             return;
         };
         let mut turns = history::turns(&run.provider, &history::read_from(&path, offset));
@@ -248,10 +302,9 @@ impl RunoApp {
         if turns.is_empty() {
             return;
         }
-        let name = agent::provider(&run.provider).name;
         let time = chrono::Local::now().format("%-I:%M %p").to_string();
         let mut divider = Message::now(Role::System, format!("Worked in {name}'s CLI"));
-        divider.meta = divider_meta(&run.provider, prompts);
+        divider.meta = divider_meta(&run.provider, Some(prompts));
         let prefix = format!("{}/", dir.trim_end_matches('/'));
         for m in &mut turns {
             m.time = time.clone();
@@ -330,7 +383,8 @@ impl RunoApp {
     /// The segmented Chat / CLI switch in the session header.
     pub(crate) fn view_toggle(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let id = session.id;
-        let supported = agent::has_cli_view(&session.provider);
+        let blocker = cli_blocker(session);
+        let supported = blocker.is_none();
         let name = agent::provider(&session.provider).name;
         let option = |key: &'static str, glyph: IconName, label: &'static str, on: bool| {
             let active = session.cli == on;
@@ -369,10 +423,9 @@ impl RunoApp {
             .border_color(rgb(c_border()))
             .when(!supported, |el| el.opacity(0.5))
             .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(if supported {
-                    format!("Same conversation, two views. Switching is free: nothing is sent to {name}. Ctrl+Shift+M")
-                } else {
-                    format!("{name}'s CLI can't reopen this conversation yet, so there is no CLI view.")
+                gpui_kit::component::tooltip::Tooltip::new(match &blocker {
+                    None => format!("Same conversation, two views. Switching is free: nothing is sent to {name}. Ctrl+Shift+M"),
+                    Some(reason) => reason.clone(),
                 })
                 .build(window, cx)
             })
@@ -487,15 +540,21 @@ impl RunoApp {
                             .bg(rgb(c_raised()))
                             .text_size(px(12.))
                             .child(icon(IconName::SquareTerminal, 13., c_secondary()))
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("Worked in {}'s CLI", provider.name)),
-                            )
-                            .child(div().text_color(rgb(c_muted())).child(format!(
-                                "{turns} turn{} · same conversation",
-                                if turns == 1 { "" } else { "s" }
-                            ))),
+                            .child(div().font_weight(FontWeight::MEDIUM).child(format!(
+                                "{} {}'s CLI",
+                                if turns.is_some() { "Worked in" } else { "Used" },
+                                provider.name
+                            )))
+                            .child(div().text_color(rgb(c_muted())).child(match turns {
+                                Some(n) => format!(
+                                    "{n} turn{} · same conversation",
+                                    if n == 1 { "" } else { "s" }
+                                ),
+                                None => format!(
+                                    "same conversation · its turns are in {}'s own history",
+                                    provider.name
+                                ),
+                            })),
                     )
                     .child(line()),
                 SharedString::from(format!("cli-div-rise-{index}")),
@@ -514,8 +573,12 @@ mod tests {
     #[test]
     fn dividers_round_trip() {
         assert_eq!(
-            parse_divider(&divider_meta("claude", 3)),
-            Some(("claude", 3))
+            parse_divider(&divider_meta("claude", Some(3))),
+            Some(("claude", Some(3)))
+        );
+        assert_eq!(
+            parse_divider(&divider_meta("gemini", None)),
+            Some(("gemini", None))
         );
         assert_eq!(parse_divider("switch:claude:codex:1:20"), None);
     }

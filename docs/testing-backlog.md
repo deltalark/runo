@@ -1,0 +1,97 @@
+# Testing backlog
+
+These are things that are built but not yet verified end to end. Runo's cloud test environment is Linux under Xvfb, with only the real Claude Code CLI installed. Codex and npm are fakes, and Gemini is a wrapper around Claude Code. Anything that needs another agent CLI, another operating system, a desktop compositor or a real account is listed here.
+
+Each item says what to do and what should happen. Tick it off with the date and the version tested.
+
+## 1. Agents other than Claude Code
+
+Runo has never run any of these CLIs for real. Their flags come from each vendor's documentation, checked on 2026-10-11.
+
+| Agent | What to test | Expected |
+| --- | --- | --- |
+| Codex | Chat: two turns, then ask "what did I ask first?" | The second turn runs `codex exec … resume <id>` and remembers the first |
+| Codex | CLI view: switch Chat → CLI → Chat, do one turn in the CLI | The TUI opens with `codex resume <id>` on the same conversation, and the CLI turn appears in chat under the divider |
+| Codex | First chat turn in a new session | Runo finds the conversation id from `~/.codex/sessions` (newest rollout in the folder) |
+| Gemini CLI | Chat: two turns | The first turn sends `--session-id <uuid>` and the second `--resume <uuid>`, and the context is kept |
+| Gemini CLI | CLI view | `gemini --resume <uuid>` opens the same chat. Coming back shows "Used Gemini's CLI", and the next chat turn knows what happened in the CLI |
+| Qwen Code | Same two checks as Gemini | Same results (`--session-id` / `--resume`) |
+| Cursor CLI | Chat with `--output-format json` | The reply text shows, `session_id` is saved, and the next turn sends `--resume <id>` |
+| Cursor CLI | CLI view | `cursor-agent --resume <id>` opens the same chat |
+| Copilot CLI | Chat | After the first turn, the session id is picked up from the newest folder in `~/.copilot/session-state/`, and the next turn sends `--resume <id>` |
+| Copilot CLI | Two Copilot sessions running at once | Each keeps its own id. The newest-folder lookup could pick the wrong one, so watch for that |
+| Copilot CLI | CLI view | `copilot --resume <id>` opens the same session |
+| Amp | Chat with `--stream-json` | Text and tool steps show, the thread id (`T-…`) is saved, and the next turn runs `amp threads continue <id> -x …` |
+| Amp | CLI view | `amp threads continue <id>` opens the same thread |
+| Droid | Chat with `droid exec -o json` | The reply text shows, `session_id` is saved, and the next turn sends `-s <id>` |
+| Droid | CLI view | `droid --resume <id>` opens the same session |
+| OpenCode | Chat with `run --format json` | Text from `{"type":"text","part":{"text":…}}` shows (this event shape is inferred from the source), `sessionID` is saved, and the next turn sends `-s <id>` |
+| OpenCode | CLI view | `opencode -s <id>` opens the same session |
+| Grok CLI | Chat | Not wired for resume yet: its docs don't say how to learn the session id. Context is still sent in the prompt. Check that it still works |
+| All of the above | Model, effort and permission chips | Each chip changes the run as expected |
+| All of the above | Switching agents mid-session (handoff dialog) | Cost shown, brief carried over, new agent continues the task |
+| All of the above | Memory server | Only Claude Code and Codex get it. Check that the others ignore `.runo/memory.md` without errors |
+
+## 2. CLI view (Chat ↔ CLI)
+
+Tested with real Claude Code only: Chat → CLI → Chat → CLI, `/cost` unchanged by switching, CLI turns imported, `/exit` returns to Chat.
+
+| What to test | Expected |
+| --- | --- |
+| Real keyboard typing and pasting a long prompt into the Claude Code TUI | Nothing is dropped. In automated tests, very fast synthetic typing lost text |
+| Mouse in the TUI (clicking, selecting, scrolling inside the agent UI) | Runo does not forward mouse events yet. Decide whether to add this |
+| Resizing the window and toggling the side panels while in the CLI | The TUI reflows to the new size |
+| Switching to Chat while the CLI shows a permission prompt or is mid-answer | The switch is refused with a notice, and nothing is lost |
+| Quitting Runo while the CLI is busy, then reopening | The CLI reopens on the same conversation, and the turns made before quitting are imported |
+| Default view set to CLI, then creating a new Claude Code or Codex session | It opens in the CLI with the task as the first prompt |
+| A queued chat prompt while the CLI is open | It is queued, then sent as soon as you switch back to Chat |
+| IME and non-Latin input in the TUI | Characters arrive correctly |
+| macOS: Cmd+C and Cmd+V in the CLI | Copies the screen and pastes |
+| Ctrl+Shift+M from inside the CLI | Switches to Chat |
+
+## 3. Operating systems and look
+
+| Area | What to test | Expected |
+| --- | --- | --- |
+| Glass on macOS | Off, Subtle, Frosted and Clear | The desktop shows through, blurred |
+| Glass on Windows 11 | The same four styles | Acrylic blur. Xvfb in the cloud cannot show transparency |
+| Glass on Linux (KDE and GNOME, X11 and Wayland) | The same four styles | Transparent where the compositor supports it, and a clean opaque fallback where it doesn't |
+| macOS title bar | Traffic lights, the 80px left inset, and tabs starting at the main column | No overlap |
+| Windows | PTY shells (ConPTY), `pwsh`, paths with `\`, agent CLIs on PATH | Terminals and agents run |
+| HiDPI and multiple monitors | Moving the window between screens | Text stays crisp and the terminal grid resizes |
+| Light theme | The tour, switch dialog, CLI banner, popups and settings tree | They read well in light mode |
+
+## 4. First-run tour
+
+| What to test | Expected |
+| --- | --- |
+| A true first install on macOS and Windows | The tour starts once, and Skip or Done stops it for good |
+| Small windows (1024×700) | Cards stay on screen and spotlights line up |
+| Replay from Settings › General and from the palette | It starts again from step 1 |
+
+## 5. Popups, updates and notifications
+
+| What to test | Expected |
+| --- | --- |
+| Real `claude update`, `opencode upgrade` and `cursor update`, and npm for the others | "Update now" upgrades the CLI, and the version refreshes. Only a fake npm has been used |
+| An update check with no network | No popup and no error spam |
+| Desktop notifications on macOS, Linux and Windows | Notifications appear when an agent finishes or fails |
+| Keep the computer awake (caffeinate, systemd-inhibit) | The machine doesn't sleep while agents run, and sleeps again afterwards |
+| Permission popups from three sessions at once | Each answer reaches the right session |
+
+## 6. Git and GitHub
+
+| What to test | Expected |
+| --- | --- |
+| Commit, push and Create PR on a real GitHub repo with `gh` signed in | A PR opens with the message |
+| The Pull requests page with a real account | PRs and runs list, and links open |
+| The worktree setup command and `.worktreeinclude` | The setup runs first, and ignored files are copied in |
+| Racing agents on one task with real CLIs | Each agent runs in its own worktree, and picking a winner works |
+| Deleting a session together with its worktree | The worktree and branch are removed |
+
+## 7. Memory
+
+| What to test | Expected |
+| --- | --- |
+| Codex with the memory MCP server (`-c mcp_servers.runo_memory…`) | Codex can call `read_memory`, `search_history` and `save_note`. Only Claude Code has been verified |
+| A large history (hundreds of sessions) | `search_history` stays fast and returns at most 20 results |
