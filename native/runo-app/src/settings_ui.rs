@@ -13,10 +13,8 @@ pub enum SettingsPage {
     Keybindings,
     Chat,
     Providers,
-    Claude,
-    Codex,
-    OpenCode,
-    MoreAgents,
+    /// One agent's settings, by provider id. Installed agents are listed under Providers.
+    Agent(&'static str),
     Mcp,
     Skills,
     Hooks,
@@ -39,10 +37,6 @@ impl SettingsPage {
             &[
                 SettingsPage::Chat,
                 SettingsPage::Providers,
-                SettingsPage::Claude,
-                SettingsPage::Codex,
-                SettingsPage::OpenCode,
-                SettingsPage::MoreAgents,
                 SettingsPage::Mcp,
                 SettingsPage::Skills,
                 SettingsPage::Hooks,
@@ -51,21 +45,12 @@ impl SettingsPage {
         ("Workspace", &[SettingsPage::Worktrees]),
     ];
 
+    /// Every page, including each agent's, for searching.
     fn all() -> impl Iterator<Item = SettingsPage> {
         Self::GROUPS
             .iter()
             .flat_map(|(_, pages)| pages.iter().copied())
-    }
-
-    /// The page this one is listed under in the navigation tree.
-    fn parent(self) -> Option<SettingsPage> {
-        match self {
-            SettingsPage::Claude
-            | SettingsPage::Codex
-            | SettingsPage::OpenCode
-            | SettingsPage::MoreAgents => Some(SettingsPage::Providers),
-            _ => None,
-        }
+            .chain(agent::PROVIDERS.iter().map(|p| SettingsPage::Agent(p.id)))
     }
 
     fn label(self) -> &'static str {
@@ -76,10 +61,7 @@ impl SettingsPage {
             Self::Keybindings => "Keybindings",
             Self::Chat => "Chat",
             Self::Providers => "Providers",
-            Self::Claude => "Claude Code",
-            Self::Codex => "Codex",
-            Self::OpenCode => "OpenCode",
-            Self::MoreAgents => "More agents",
+            Self::Agent(id) => agent::provider(id).name,
             Self::Mcp => "MCP",
             Self::Skills => "Skills",
             Self::Hooks => "Hooks",
@@ -94,11 +76,11 @@ impl SettingsPage {
             Self::Terminal => "Text size, font, scrolling and mouse behavior in the terminal panel and agent CLIs.",
             Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere.",
             Self::Chat => "How the composer behaves and what new sessions start with.",
-            Self::Providers => "The agent CLIs on this machine and what each one supports.",
-            Self::Claude => "Everything Runo can pass to the claude CLI, plus what it detected.",
-            Self::Codex => "Everything Runo can pass to codex exec, plus what it detected.",
-            Self::OpenCode => "Everything Runo can pass to opencode run, plus what it detected.",
-            Self::MoreAgents => "Cursor, Gemini, Copilot, Amp, Droid, Qwen Code and Grok. Runo maps its permission levels onto each CLI's flags.",
+            Self::Providers => "The agent CLIs on this machine. Pick one to change its settings, or install another.",
+            Self::Agent("claude") => "Everything Runo can pass to the claude CLI, plus what it detected.",
+            Self::Agent("codex") => "Everything Runo can pass to codex exec, plus what it detected.",
+            Self::Agent("opencode") => "Everything Runo can pass to opencode run, plus what it detected.",
+            Self::Agent(_) => "What Runo detected from this CLI and what it passes on every run. Runo maps its permission levels onto the CLI's own flags.",
             Self::Mcp => "MCP servers found across your agents' config files.",
             Self::Skills => "Agent skills discovered in project, personal and agent folders.",
             Self::Hooks => "Commands Claude Code runs on agent events, and the config files behind them.",
@@ -108,9 +90,7 @@ impl SettingsPage {
 
     fn agent(self) -> Option<&'static str> {
         match self {
-            Self::Claude => Some("claude"),
-            Self::Codex => Some("codex"),
-            Self::OpenCode => Some("opencode"),
+            Self::Agent(id) => Some(id),
             _ => None,
         }
     }
@@ -152,6 +132,8 @@ enum Ctl {
     Keys(String),
     /// Open the file in Runo's editor, or reveal it.
     Edit(PathBuf),
+    /// A version chip and a chevron, for rows that open another page.
+    Open(String),
     /// An MCP server: share it with Runo's sessions (key, shared), plus Edit and Reveal.
     Mcp(Option<(String, bool)>, PathBuf),
 }
@@ -160,6 +142,8 @@ struct Row {
     title: String,
     desc: String,
     ctl: Ctl,
+    /// Clicking the row opens this page.
+    open: Option<SettingsPage>,
 }
 
 struct Section {
@@ -181,6 +165,7 @@ fn row(title: &str, desc: &str, ctl: Ctl) -> Row {
         title: title.into(),
         desc: desc.into(),
         ctl,
+        open: None,
     }
 }
 
@@ -491,31 +476,42 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
         ],
         SettingsPage::Providers => {
-            let mut rows = Vec::new();
+            let (mut installed, mut available) = (Vec::new(), Vec::new());
             for p in agent::PROVIDERS.iter() {
                 let path = data.provider_paths.iter().find(|(id, _)| *id == p.id).and_then(|(_, path)| path.clone());
                 let caps = caps::get(p.id);
-                rows.push(row(
-                    p.name,
-                    &path.map(|p| p.display().to_string()).unwrap_or_else(|| format!("`{}` was not found on PATH", p.bin)),
-                    if caps.installed {
-                        Ctl::Chip(caps.version.clone(), 0)
-                    } else {
-                        let pid = p.id;
-                        Ctl::Button("Install…".into(), Rc::new(move |this, _| this.ask_install(pid)))
-                    },
-                ));
+                if caps.installed {
+                    let mut r = row(p.name, &path.map(|p| tilde(&p)).unwrap_or_default(), Ctl::Open(caps.version.clone()));
+                    r.open = Some(SettingsPage::Agent(p.id));
+                    installed.push(r);
+                } else {
+                    let pid = p.id;
+                    available.push(row(
+                        p.name,
+                        &if caps.detected { format!("`{}` isn't installed on this computer.", p.bin) } else { "Checking whether it's installed…".into() },
+                        if caps.detected {
+                            Ctl::Button("Install…".into(), Rc::new(move |this, _| this.ask_install(pid)))
+                        } else {
+                            Ctl::Chip("Detecting…".into(), 2)
+                        },
+                    ));
+                }
             }
-            vec![
-                section("Agent CLIs", "Runo drives the agent CLIs on your computer. Missing ones can be installed from here with each vendor's official installer.", rows),
-                section("Detection", "Models, modes and reasoning levels come from the CLIs themselves.", vec![row(
-                    "Re-detect all agents",
-                    "Run detection again, for example after installing or updating a CLI.",
-                    Ctl::Button("Re-detect".into(), Rc::new(|_, _| caps::refresh())),
-                )]),
-            ]
+            let mut sections = Vec::new();
+            if !installed.is_empty() {
+                sections.push(section("Installed", "Pick an agent to change its model, flags and environment. Installed agents are also listed under Providers on the left.", installed));
+            }
+            if !available.is_empty() {
+                sections.push(section("More agents", "Install any of these with the vendor's official installer. Once installed it appears in the list above and in the sidebar.", available));
+            }
+            sections.push(section("Detection", "Models, modes and reasoning levels come from the CLIs themselves.", vec![row(
+                "Re-detect all agents",
+                "Run detection again, for example after installing or updating a CLI.",
+                Ctl::Button("Re-detect".into(), Rc::new(|_, _| caps::refresh())),
+            )]));
+            sections
         }
-        SettingsPage::Claude => vec![
+        SettingsPage::Agent("claude") => vec![
             detected_section("claude"),
             launch_section("claude", st, "Model alias or full name, used when the session has none selected."),
             section("Behavior", "Passed to claude on every run.", vec![
@@ -527,7 +523,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 agent_choice("claude", st, "Default effort", "How much thinking Claude does when the composer has none selected.", std::iter::once(("".to_string(), "Default".to_string())).chain(caps::get("claude").efforts.iter().map(|c| (c.value.clone(), c.label.clone()))).collect(), |o| o.effort.clone(), |o, v| o.effort = v),
             ]),
         ],
-        SettingsPage::Codex => vec![
+        SettingsPage::Agent("codex") => vec![
             detected_section("codex"),
             launch_section("codex", st, "Any model your account supports. Empty uses the model in ~/.codex/config.toml."),
             section("Behavior", "Passed to codex exec on every run.", vec![
@@ -536,7 +532,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 agent_choice("codex", st, "Default reasoning", "model_reasoning_effort when the composer has none selected.", std::iter::once(("".to_string(), "Default".to_string())).chain(caps::get("codex").models.first().map(|m| m.efforts.clone()).unwrap_or_default().iter().map(|c| (c.value.clone(), c.label.clone()))).collect(), |o| o.effort.clone(), |o, v| o.effort = v),
             ]),
         ],
-        SettingsPage::OpenCode => vec![
+        SettingsPage::Agent("opencode") => vec![
             detected_section("opencode"),
             launch_section("opencode", st, "In provider/model form, for example opencode/big-pickle."),
             section("Behavior", "Passed to opencode run on every run.", vec![
@@ -545,18 +541,10 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Show thinking", "Include thinking blocks in the output (--thinking).", Ctl::Switch(st.agent("opencode").thinking, Rc::new(|s, v| s.agents.entry("opencode".into()).or_default().thinking = v))),
             ]),
         ],
-        SettingsPage::MoreAgents => {
-            let mut sections = Vec::new();
-            for p in agent::PROVIDERS.iter().skip(3) {
-                let mut detected = detected_section(p.id);
-                detected.title = p.name.to_string();
-                sections.push(detected);
-                let mut launch = launch_section(p.id, st, "Passed with the CLI's model flag.");
-                launch.title = format!("{} launch", p.name);
-                sections.push(launch);
-            }
-            sections
-        }
+        SettingsPage::Agent(id) => vec![
+            detected_section(id),
+            launch_section(id, st, "Passed with the CLI's model flag."),
+        ],
         SettingsPage::Mcp => {
             let mut sections = Vec::new();
             let shared = data
@@ -1013,6 +1001,26 @@ impl RunoApp {
                     )
                     .into_any_element()
             }
+            Ctl::Open(version) => div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .when(!version.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .px_2()
+                            .py(px(2.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(c_border()))
+                            .bg(rgb(c_raised()))
+                            .text_xs()
+                            .text_color(rgb(c_green()))
+                            .child(version),
+                    )
+                })
+                .child(icon(IconName::ChevronRight, 14., c_muted()))
+                .into_any_element(),
             Ctl::Edit(path) => {
                 let exists = path.exists();
                 let edit = path.clone();
@@ -1060,8 +1068,20 @@ impl RunoApp {
         for (i, r) in sec.rows.into_iter().enumerate() {
             *counter += 1;
             let control = self.control(*counter, r.ctl, window, cx);
+            let open = r.open;
             card = card.child(
                 div()
+                    .id(("setting-row", *counter))
+                    .when_some(open, |el, page| {
+                        el.cursor_pointer()
+                            .hover(|el| el.bg(tint(c_active())))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.settings_page = page;
+                                this.settings_search
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                cx.notify();
+                            }))
+                    })
                     .px_5()
                     .py_4()
                     .flex()
@@ -1221,11 +1241,16 @@ impl RunoApp {
             while i < pages.len() {
                 let page = pages[i];
                 items = items.child(self.settings_nav_item(page, cx));
-                let children: Vec<SettingsPage> = pages[i + 1..]
-                    .iter()
-                    .copied()
-                    .take_while(|p| p.parent() == Some(page))
-                    .collect();
+                // Installed agents hang off Providers.
+                let children: Vec<SettingsPage> = if page == SettingsPage::Providers {
+                    agent::PROVIDERS
+                        .iter()
+                        .filter(|p| caps::get(p.id).installed)
+                        .map(|p| SettingsPage::Agent(p.id))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 if !children.is_empty() {
                     let last = children.len() - 1;
                     let mut sub = div().ml(px(24.)).v_flex().gap(px(2.));
@@ -1262,7 +1287,6 @@ impl RunoApp {
                         );
                     }
                     items = items.child(sub);
-                    i += children.len();
                 }
                 i += 1;
             }
