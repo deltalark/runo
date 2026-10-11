@@ -403,7 +403,7 @@ impl RunoApp {
                     self.notice = Some(format!("Could not write a commit message: {first}"));
                 }
             }
-        } else {
+        } else if !self.handle_browser_job(&key, result.clone()) {
             self.handle_job(key, result);
         }
     }
