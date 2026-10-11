@@ -63,6 +63,10 @@ pub struct AppSettings {
     pub quick_commands: String,
     /// Group the sidebar by status (Pinned, Working, Needs review, Done) instead of project.
     pub group_by_status: bool,
+    /// Translucent window over a blurred desktop: "off", "subtle", "frosted" or "clear".
+    pub glass: String,
+    /// Cards, menus and dialogs are translucent too.
+    pub glass_cards: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -100,6 +104,8 @@ impl Default for AppSettings {
             quick_commands: "Test = cargo test\nBuild = cargo build\nStatus = git status --short"
                 .into(),
             group_by_status: false,
+            glass: "off".into(),
+            glass_cards: true,
         }
     }
 }
@@ -150,6 +156,8 @@ impl AppSettings {
             Ordering::Relaxed,
         );
         ANIMATIONS.store(self.animations, Ordering::Relaxed);
+        GLASS.store(glass_alpha(&self.glass), Ordering::Relaxed);
+        GLASS_CARDS.store(self.glass_cards, Ordering::Relaxed);
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
@@ -171,6 +179,9 @@ pub fn update(cx: &mut App, f: impl FnOnce(&mut AppSettings)) {
 // ---------- live palette ----------
 
 static DARK: AtomicBool = AtomicBool::new(false);
+/// Opacity of the window background in glass mode (255 when glass is off).
+static GLASS: AtomicU8 = AtomicU8::new(255);
+static GLASS_CARDS: AtomicBool = AtomicBool::new(true);
 static ACCENT: AtomicU32 = AtomicU32::new(0x3b5bdb);
 static DIFF: AtomicU8 = AtomicU8::new(0);
 static ANIMATIONS: AtomicBool = AtomicBool::new(true);
@@ -204,6 +215,60 @@ pub fn remove_worktree() -> bool {
 }
 pub fn autoscroll() -> bool {
     AUTOSCROLL.load(Ordering::Relaxed)
+}
+
+/// Window opacity for each glass style.
+pub fn glass_alpha(style: &str) -> u8 {
+    match style {
+        "subtle" => 225,
+        "frosted" => 190,
+        "clear" => 150,
+        _ => 255,
+    }
+}
+
+pub fn glass_on() -> bool {
+    GLASS.load(Ordering::Relaxed) < 255
+}
+
+fn with_alpha(color: u32, alpha: u8) -> Rgba {
+    rgba((color << 8) | alpha as u32)
+}
+
+/// The window's base surface: see-through in glass mode.
+pub fn glass_fill(color: u32) -> Rgba {
+    with_alpha(color, GLASS.load(Ordering::Relaxed))
+}
+
+/// Sidebars, title and status bars: a light tint over the base surface in glass mode.
+pub fn pane(color: u32) -> Rgba {
+    if glass_on() {
+        with_alpha(color, 110)
+    } else {
+        rgb(color)
+    }
+}
+
+/// Dialogs, menus and popups floating over the app.
+pub fn float(color: u32) -> Rgba {
+    if glass_on() && GLASS_CARDS.load(Ordering::Relaxed) {
+        with_alpha(color, 222)
+    } else {
+        rgb(color)
+    }
+}
+
+/// The edge of a floating surface: a soft light rim in glass mode, like frosted glass.
+pub fn float_edge() -> Rgba {
+    if glass_on() && GLASS_CARDS.load(Ordering::Relaxed) {
+        if is_dark() {
+            rgba(0xffffff26)
+        } else {
+            rgba(0xffffffb3)
+        }
+    } else {
+        rgb(c_border())
+    }
 }
 
 fn pick(light: u32, dark: u32) -> u32 {

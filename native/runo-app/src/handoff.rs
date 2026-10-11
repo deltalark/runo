@@ -472,8 +472,8 @@ impl RunoApp {
             .p_6()
             .rounded_2xl()
             .border_1()
-            .border_color(rgb(c_border()))
-            .bg(rgb(c_canvas()))
+            .border_color(float_edge())
+            .bg(float(c_canvas()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
