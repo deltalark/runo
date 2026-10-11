@@ -76,6 +76,10 @@ fn parse_divider(meta: &str) -> Option<(&str, Option<usize>)> {
 /// Why a session can't show its CLI view without losing context, if it can't.
 pub(crate) fn cli_blocker(session: &Session) -> Option<String> {
     let name = agent::provider(&session.provider).name;
+    if session.cove {
+        // The conversation files live inside the VM, where the CLI view can't read them yet.
+        return Some("The CLI view isn't available for sessions that run in Cove yet.".into());
+    }
     if !agent::has_cli_view(&session.provider) {
         return Some(format!(
             "{name}'s CLI can't reopen a conversation by id, so there is no CLI view: switching would lose context or cost tokens."

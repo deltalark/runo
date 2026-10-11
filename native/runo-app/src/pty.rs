@@ -43,6 +43,7 @@ fn now_ms() -> u64 {
 }
 
 impl Shell {
+    #[cfg_attr(not(test), allow(dead_code))]
     /// Start the user's login shell in `dir`. `wake` is called (at most once per
     /// repaint) when there is new output, and once more when the shell exits.
     pub fn spawn(
