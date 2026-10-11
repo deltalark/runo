@@ -636,8 +636,8 @@ impl RunoApp {
                     .map(|(v, path)| (path.to_string_lossy().into_owned(), v))
                     .next();
                 let why = match &use_copy {
-                    Some((path, version)) => format!(
-                        "{why} You also have {} {} at {path}. Runo can switch to it and keep that one updated.",
+                    Some((_, version)) => format!(
+                        "{why} Or switch to the {} {} you already have.",
                         p.name,
                         version_parts(version)
                             .iter()
@@ -651,6 +651,14 @@ impl RunoApp {
                     provider,
                     blocked(updater::Failure {
                         why,
+                        own_copy: npm_package(provider).map(|_| {
+                            self.updates
+                                .iter()
+                                .find(|u| u.provider == provider)
+                                .map(|u| u.latest.clone())
+                                .filter(|v| !v.is_empty())
+                                .unwrap_or_else(|| "latest".into())
+                        }),
                         command,
                         use_copy,
                         needs_you: true,
@@ -1320,7 +1328,33 @@ impl RunoApp {
         let bid = |name: &str| (SharedString::from(format!("{tag}-{name}")), n);
         let mut primary_used = false;
         let mut row = div().flex().flex_wrap().gap_2();
+        if let Some(version) = failure.own_copy.clone() {
+            let first = !primary_used;
+            primary_used = true;
+            row = row.child(
+                self.button(
+                    bid("own"),
+                    if version == "latest" {
+                        "Install for Runo".to_string()
+                    } else {
+                        format!("Install {version} for Runo")
+                    },
+                    first,
+                )
+                .h(px(26.))
+                .child(icon(
+                    IconName::Download,
+                    12.,
+                    if first { c_canvas() } else { c_secondary() },
+                ))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.install_own_copy(provider, cx);
+                    cx.notify();
+                })),
+            );
+        }
         if let Some((path, version)) = failure.use_copy.clone() {
+            let first = !primary_used;
             primary_used = true;
             let label = format!(
                 "Switch to {}",
@@ -1330,56 +1364,37 @@ impl RunoApp {
                     .collect::<Vec<_>>()
                     .join(".")
             );
-            row = row.child(
-                self.button(bid("use"), label, true)
-                    .h(px(26.))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let path = path.clone();
-                        settings::update(cx, |s| {
-                            let mut options = s.agent(provider);
-                            options.binary = path;
-                            s.agents.insert(provider.into(), options);
-                        });
-                        caps::refresh();
-                        this.update_runs.remove(provider);
-                        let behind = this
-                            .updates
-                            .iter()
-                            .any(|u| u.provider == provider && is_newer(&u.latest, &version));
-                        if behind && !install {
-                            // That copy is older than the latest too: update it now.
-                            for u in this.updates.iter_mut().filter(|u| u.provider == provider) {
-                                u.current = version.clone();
-                            }
-                            this.run_update(provider, false, cx);
-                        } else {
-                            for u in this.updates.iter_mut().filter(|u| u.provider == provider) {
-                                u.latest = version.clone();
-                            }
-                            let mut run = UpdateRun::new(install, String::new());
-                            run.finished = Some(std::time::Instant::now());
-                            this.update_runs.insert(provider, run);
+            row = row.child(self.button(bid("use"), label, first).h(px(26.)).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    let path = path.clone();
+                    settings::update(cx, |s| {
+                        let mut options = s.agent(provider);
+                        options.binary = path;
+                        s.agents.insert(provider.into(), options);
+                    });
+                    caps::refresh();
+                    this.update_runs.remove(provider);
+                    let behind = this
+                        .updates
+                        .iter()
+                        .any(|u| u.provider == provider && is_newer(&u.latest, &version));
+                    if behind && !install {
+                        // That copy is older than the latest too: update it now.
+                        for u in this.updates.iter_mut().filter(|u| u.provider == provider) {
+                            u.current = version.clone();
                         }
-                        cx.notify();
-                    })),
-            );
-        }
-        if let Some(version) = failure.own_copy.clone() {
-            let first = !primary_used;
-            primary_used = true;
-            row = row.child(
-                self.button(bid("own"), format!("Install {version} for Runo"), first)
-                    .h(px(26.))
-                    .child(icon(
-                        IconName::Download,
-                        12.,
-                        if first { c_canvas() } else { c_secondary() },
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.install_own_copy(provider, cx);
-                        cx.notify();
-                    })),
-            );
+                        this.run_update(provider, false, cx);
+                    } else {
+                        for u in this.updates.iter_mut().filter(|u| u.provider == provider) {
+                            u.latest = version.clone();
+                        }
+                        let mut run = UpdateRun::new(install, String::new());
+                        run.finished = Some(std::time::Instant::now());
+                        this.update_runs.insert(provider, run);
+                    }
+                    cx.notify();
+                }),
+            ));
         }
         if failure.force {
             primary_used = true;
