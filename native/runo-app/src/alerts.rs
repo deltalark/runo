@@ -28,8 +28,12 @@ pub(crate) struct UpdateRun {
     /// How far the updater's own messages say it got (downloading, installing, done).
     pub phase: f32,
     pub finished: Option<std::time::Instant>,
-    /// Why it failed, in plain words, and the full log the tool wrote, if it named one.
-    pub failed: Option<(String, Option<String>)>,
+    /// Why it failed or is waiting on the person, and what they can do.
+    pub failed: Option<updater::Failure>,
+    /// The command that runs, as the person could type it.
+    pub command: String,
+    /// Where the updated CLI lands, when the updater says (npm with a prefix).
+    pub installs_to: Option<std::path::PathBuf>,
 }
 
 impl UpdateRun {
@@ -42,7 +46,16 @@ impl UpdateRun {
             phase: 0.,
             finished: None,
             failed: None,
+            command: String::new(),
+            installs_to: None,
         }
+    }
+
+    /// A card that waits on the person instead of running anything.
+    pub(crate) fn blocked(install: bool, failure: updater::Failure) -> Self {
+        let mut run = UpdateRun::new(install, String::new());
+        run.failed = Some(failure);
+        run
     }
 
     pub(crate) fn running(&self) -> bool {
@@ -59,47 +72,8 @@ pub(crate) fn log_path(output: &str) -> Option<String> {
 }
 
 /// Why an update or install failed, in words a person can act on.
+/// The general case; `updater::explain` handles the errors it recognises first.
 pub(crate) fn failure_summary(output: &str) -> String {
-    let has = |s: &str| output.contains(s);
-    let path_after = |marker: &str| {
-        output.lines().find_map(|l| {
-            let (_, rest) = l.split_once(marker)?;
-            Some(rest.trim().trim_matches(['\'', '"']).to_string())
-        })
-    };
-    if has("EACCES") {
-        return "npm can't write to its global folder. Run `npm config set prefix ~/.npm-global` in a terminal, add ~/.npm-global/bin to your PATH, then try again.".into();
-    }
-    if has("ENOTEMPTY") {
-        let folder = output
-            .lines()
-            .find(|l| l.contains("ENOTEMPTY") && l.contains(" -> "))
-            // npm renames the old copy to a temporary ".name-xxxx" folder; that leftover
-            // folder is what blocks the next update.
-            .and_then(|l| l.split('\'').nth(3))
-            .unwrap_or("the folder npm names in the log");
-        return format!("An earlier npm update left a half-finished copy behind. Delete {folder} and try again.");
-    }
-    if has("EEXIST") {
-        let file = path_after("File exists:").unwrap_or_else(|| "a file".into());
-        return format!("{file} is in the way, probably from installing this agent another way. Remove it, then try again.");
-    }
-    if has("ETARGET") || has("E404") {
-        return "npm can't find that version yet. It may still be publishing, so try again in a few minutes.".into();
-    }
-    if [
-        "ENOTFOUND",
-        "ETIMEDOUT",
-        "ECONNRESET",
-        "ECONNREFUSED",
-        "EAI_AGAIN",
-    ]
-    .iter()
-    .any(|code| has(code))
-    {
-        return "Couldn't reach the package registry. Check your connection, then try again."
-            .into();
-    }
     let noise = |l: &str| {
         let l = l.trim();
         l.is_empty()
@@ -376,33 +350,6 @@ pub(crate) fn npm_package(provider: &str) -> Option<&'static str> {
     })
 }
 
-/// The command that updates an agent: its own updater when it has one, else npm.
-pub(crate) fn update_command(provider: &str, bin: &str) -> Option<Vec<String>> {
-    let own = |args: &[&str]| {
-        std::iter::once(bin.to_string())
-            .chain(args.iter().map(|a| a.to_string()))
-            .collect()
-    };
-    Some(match provider {
-        "claude" => own(&["update"]),
-        "opencode" => own(&["upgrade"]),
-        "cursor" => own(&["update"]),
-        _ => {
-            let package = npm_package(provider)?;
-            // `--loglevel http` makes npm print each download as it happens, so the
-            // update card has live progress to show.
-            vec![
-                "npm".into(),
-                "install".into(),
-                "-g".into(),
-                format!("{package}@latest"),
-                "--loglevel".into(),
-                "http".into(),
-            ]
-        }
-    })
-}
-
 /// The numeric parts of a version such as "v2.1.296 (Claude Code)" or "codex-cli 0.50.1".
 fn version_parts(v: &str) -> Vec<u64> {
     let start = v.find(|c: char| c.is_ascii_digit()).unwrap_or(v.len());
@@ -505,24 +452,115 @@ impl RunoApp {
         }
     }
 
-    pub(crate) fn run_update(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+    /// Update the exact copy of an agent Runo runs, the way it was installed. When that
+    /// isn't safe (another app owns it, it's busy), the card explains instead.
+    pub(crate) fn run_update(
+        &mut self,
+        provider: &'static str,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) {
         let p = agent::provider(provider);
-        let configured = cx.global::<AppSettings>().agent(provider).binary;
-        let bin = if configured.trim().is_empty() {
-            p.bin.to_string()
-        } else {
-            configured.trim().to_string()
-        };
-        let Some(args) = update_command(provider, &bin) else {
+        let bin = caps::binary(p);
+        let blocked = |failure: updater::Failure| UpdateRun::blocked(false, failure);
+        let Some(runs) = updater::resolve(&bin) else {
+            self.update_runs.insert(
+                provider,
+                blocked(updater::Failure {
+                    why: format!("Runo can't find `{bin}` any more. Re-detect agents in Settings, or set its path there."),
+                    needs_you: true,
+                    ..Default::default()
+                }),
+            );
+            cx.notify();
             return;
         };
-        let mut cmd = std::process::Command::new(&args[0]);
-        cmd.args(&args[1..]);
-        self.update_runs.insert(
-            provider,
-            UpdateRun::new(false, format!("Starting {}…", args.join(" "))),
-        );
-        run_streaming(format!("update:{provider}"), cmd, self.tx.clone());
+        let busy = self
+            .started
+            .keys()
+            .filter(|id| {
+                self.state
+                    .session(**id)
+                    .is_some_and(|s| s.provider == provider)
+            })
+            .count();
+        if busy > 0 && !force {
+            self.update_runs.insert(
+                provider,
+                blocked(updater::Failure {
+                    why: format!(
+                        "{} is working in {busy} session{} right now. Updating replaces its files, which can break those runs. Update when they finish, or update anyway.",
+                        p.name,
+                        if busy == 1 { "" } else { "s" }
+                    ),
+                    needs_you: true,
+                    force: true,
+                    ..Default::default()
+                }),
+            );
+            cx.notify();
+            return;
+        }
+        let real = std::fs::canonicalize(&runs).unwrap_or_else(|_| runs.clone());
+        match updater::plan(provider, p.name, &runs, &real) {
+            updater::Plan::Manual { why, command } => {
+                // Offer a newer copy that's already on this computer, if there is one.
+                // Another copy newer than this one (it gets updated after switching).
+                let current = self
+                    .updates
+                    .iter()
+                    .find(|u| u.provider == provider)
+                    .map(|u| u.current.clone())
+                    .unwrap_or_default();
+                let mut copies: Vec<(String, std::path::PathBuf)> =
+                    updater::other_copies(p.bin, &runs)
+                        .into_iter()
+                        .take(4)
+                        .map(|path| (updater::version_of(&path), path))
+                        .filter(|(v, _)| !v.is_empty() && is_newer(v, &current))
+                        .collect();
+                copies.sort_by_key(|(v, _)| std::cmp::Reverse(version_parts(v)));
+                let use_copy = copies
+                    .into_iter()
+                    .map(|(v, path)| (path.to_string_lossy().into_owned(), v))
+                    .next();
+                let why = match &use_copy {
+                    Some((path, version)) => format!(
+                        "{why} You also have {} {} at {path}. Runo can switch to it and keep that one updated.",
+                        p.name,
+                        version_parts(version)
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    ),
+                    None => why,
+                };
+                self.update_runs.insert(
+                    provider,
+                    blocked(updater::Failure {
+                        why,
+                        command,
+                        use_copy,
+                        needs_you: true,
+                        ..Default::default()
+                    }),
+                );
+            }
+            updater::Plan::Run {
+                program,
+                installs_to,
+            } => {
+                let mut cmd = std::process::Command::new(&program[0]);
+                cmd.args(&program[1..]);
+                let shown = program.join(" ");
+                let mut run = UpdateRun::new(false, format!("Running {shown}…"));
+                run.command = shown;
+                run.installs_to = installs_to;
+                self.update_runs.insert(provider, run);
+                run_streaming(format!("update:{provider}"), cmd, self.tx.clone());
+            }
+        }
         cx.notify();
     }
 
@@ -578,7 +616,11 @@ impl RunoApp {
                 .collect();
             return true;
         }
-        let Some(provider) = key.strip_prefix("update:") else {
+        let (provider, verified) = if let Some(p) = key.strip_prefix("update-check:") {
+            (p, Some(result.clone().unwrap_or_default()))
+        } else if let Some(p) = key.strip_prefix("update:") {
+            (p, None)
+        } else {
             return false;
         };
         let Some(provider) = agent::PROVIDERS
@@ -589,28 +631,81 @@ impl RunoApp {
             return true;
         };
         let name = agent::provider(provider).name;
-        match result {
-            Ok(_) => {
-                let latest = self
-                    .updates
-                    .iter()
-                    .find(|u| u.provider == provider)
-                    .map(|u| u.latest.clone())
+        let latest = self
+            .updates
+            .iter()
+            .find(|u| u.provider == provider)
+            .map(|u| u.latest.clone())
+            .unwrap_or_default();
+        if let Some(found) = verified {
+            // The updater said it worked: check the copy Runo actually runs.
+            let Some(run) = self.update_runs.get_mut(provider) else {
+                return true;
+            };
+            if !found.is_empty() && is_newer(&latest, &found) {
+                let runs = updater::resolve(&caps::binary(agent::provider(provider)))
+                    .map(|p| p.display().to_string())
                     .unwrap_or_default();
+                let fresh = run
+                    .installs_to
+                    .as_ref()
+                    .filter(|p| p.is_file())
+                    .map(|p| (p.display().to_string(), updater::version_of(p)))
+                    .filter(|(_, v)| !v.is_empty() && !is_newer(&latest, v));
+                run.failed = Some(updater::Failure {
+                    why: format!(
+                        "The update finished, but Runo still runs {runs}, which is {}. Another copy comes first on your PATH.{}",
+                        version_parts(&found)
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join("."),
+                        if fresh.is_some() {
+                            " Switch Runo to the new copy below."
+                        } else {
+                            ""
+                        }
+                    ),
+                    use_copy: fresh,
+                    needs_you: true,
+                    ..Default::default()
+                });
+            } else {
                 // The card turns into a success badge, then hides itself.
-                if let Some(run) = self.update_runs.get_mut(provider) {
-                    run.finished = Some(std::time::Instant::now());
-                }
+                run.finished = Some(std::time::Instant::now());
                 self.state.log(0, format!("Updated {name} to {latest}"));
                 caps::refresh();
             }
-            Err(error) => {
-                // The card stays and says what went wrong, with the log and a retry.
-                let summary = failure_summary(&error);
-                self.state
-                    .log(0, format!("Updating {name} failed: {summary}"));
+            return true;
+        }
+        match result {
+            Ok(_) => {
                 if let Some(run) = self.update_runs.get_mut(provider) {
-                    run.failed = Some((summary, log_path(&error)));
+                    run.line = "Checking the version Runo runs now…".into();
+                    run.phase = 0.97;
+                }
+                let bin = caps::binary(agent::provider(provider));
+                let mut check = std::process::Command::new(&bin);
+                check.arg("--version");
+                agent::oneshot(
+                    format!("update-check:{provider}"),
+                    check,
+                    &std::env::temp_dir().to_string_lossy(),
+                    self.tx.clone(),
+                );
+            }
+            Err(error) => {
+                // The card stays and says what went wrong, and what to do about it.
+                let command = self
+                    .update_runs
+                    .get(provider)
+                    .map(|r| r.command.clone())
+                    .unwrap_or_default();
+                let failure = updater::explain(&error, &command);
+                self.state
+                    .log(0, format!("Updating {name} failed: {}", failure.why));
+                if let Some(run) = self.update_runs.get_mut(provider) {
+                    run.failed = Some(failure);
                 }
             }
         }
@@ -816,8 +911,11 @@ impl RunoApp {
                     div().flex().child(update_done_badge(n, "Updated")),
                 ),
                 Some(_) if failed.is_some() => {
-                    let (why, log) = failed.clone().unwrap_or_default();
-                    (why, self.failure_actions(("up", n), id, log, false, cx))
+                    let failure = failed.clone().unwrap_or_default();
+                    (
+                        failure.why.clone(),
+                        self.failure_actions(("up", n), id, failure, false, cx),
+                    )
                 }
                 Some(run) => (
                     format!("Updating from {current} to {latest}."),
@@ -832,9 +930,9 @@ impl RunoApp {
                             self.button(("up-now", n), "Update now", true)
                                 .h(px(26.))
                                 .child(icon(IconName::Download, 12., c_canvas()))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.run_update(id, cx)),
-                                ),
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.run_update(id, false, cx)
+                                })),
                         )
                         .child({
                             let later = key.clone();
@@ -849,7 +947,11 @@ impl RunoApp {
             };
             let card = self.alert_card(
                 SharedString::from(format!("alert-{key}")),
-                if failed.is_some() { c_red() } else { c_green() },
+                match &failed {
+                    Some(f) if f.needs_you => c_amber(),
+                    Some(_) => c_red(),
+                    None => c_green(),
+                },
                 if done {
                     IconName::CircleCheck
                 } else if failed.is_some() {
@@ -859,6 +961,8 @@ impl RunoApp {
                 },
                 if done {
                     "Update complete"
+                } else if failed.as_ref().is_some_and(|f| f.needs_you) {
+                    "Update needs you"
                 } else if failed.is_some() {
                     "Update failed"
                 } else if run.is_some() {
@@ -903,8 +1007,11 @@ impl RunoApp {
                     ),
                     div().flex().child(update_done_badge(n, "Installed")),
                 )
-            } else if let Some((why, log)) = run.failed.clone() {
-                (why, self.failure_actions(("in", n), id, log, true, cx))
+            } else if let Some(failure) = run.failed.clone() {
+                (
+                    failure.why.clone(),
+                    self.failure_actions(("in", n), id, failure, true, cx),
+                )
             } else {
                 (
                     "Downloading and setting up the CLI.".to_string(),
@@ -1004,56 +1111,122 @@ impl RunoApp {
         Some(stack.into_any_element())
     }
 
-    /// Retry, the full log when the tool wrote one, and dismiss, for a failed run.
+    /// What the person can do about a failed or blocked run: switch to a newer copy, copy
+    /// a command, update anyway, retry, read the log, or dismiss.
     fn failure_actions(
         &self,
         id: (&'static str, usize),
         provider: &'static str,
-        log: Option<String>,
+        failure: updater::Failure,
         install: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let (tag, n) = id;
-        div()
-            .flex()
-            .gap_2()
-            .child(
-                self.button(
-                    (SharedString::from(format!("{tag}-retry")), n),
-                    "Try again",
-                    true,
-                )
-                .h(px(26.))
-                .child(icon(IconName::RotateCw, 12., c_canvas()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.update_runs.remove(provider);
-                    if install {
-                        this.run_install(provider, cx);
-                    } else {
-                        this.run_update(provider, cx);
-                    }
-                })),
-            )
-            .when_some(log, |el, log| {
-                el.child(
-                    self.button(
-                        (SharedString::from(format!("{tag}-log")), n),
-                        "View log",
-                        false,
-                    )
+        let bid = |name: &str| (SharedString::from(format!("{tag}-{name}")), n);
+        let mut primary_used = false;
+        let mut row = div().flex().flex_wrap().gap_2();
+        if let Some((path, version)) = failure.use_copy.clone() {
+            primary_used = true;
+            let label = format!(
+                "Switch to {}",
+                version_parts(&version)
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".")
+            );
+            row = row.child(
+                self.button(bid("use"), label, true)
+                    .h(px(26.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let path = path.clone();
+                        settings::update(cx, |s| {
+                            let mut options = s.agent(provider);
+                            options.binary = path;
+                            s.agents.insert(provider.into(), options);
+                        });
+                        caps::refresh();
+                        this.update_runs.remove(provider);
+                        let behind = this
+                            .updates
+                            .iter()
+                            .any(|u| u.provider == provider && is_newer(&u.latest, &version));
+                        if behind && !install {
+                            // That copy is older than the latest too: update it now.
+                            for u in this.updates.iter_mut().filter(|u| u.provider == provider) {
+                                u.current = version.clone();
+                            }
+                            this.run_update(provider, false, cx);
+                        } else {
+                            for u in this.updates.iter_mut().filter(|u| u.provider == provider) {
+                                u.latest = version.clone();
+                            }
+                            let mut run = UpdateRun::new(install, String::new());
+                            run.finished = Some(std::time::Instant::now());
+                            this.update_runs.insert(provider, run);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        if failure.force {
+            primary_used = true;
+            row = row.child(
+                self.button(bid("force"), "Update anyway", true)
+                    .h(px(26.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.update_runs.remove(provider);
+                        this.run_update(provider, true, cx);
+                    })),
+            );
+        }
+        if let Some(command) = failure.command.clone() {
+            let first = !primary_used;
+            primary_used = true;
+            row = row.child(
+                self.button(bid("copy"), "Copy command", first)
+                    .h(px(26.))
+                    .child(icon(
+                        IconName::Copy,
+                        12.,
+                        if first { c_canvas() } else { c_secondary() },
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(command.clone()));
+                        this.info = Some((
+                            "Copied. Paste it into a terminal.".into(),
+                            std::time::Instant::now(),
+                        ));
+                        cx.notify();
+                    })),
+            );
+        }
+        if !failure.needs_you {
+            row = row.child(
+                self.button(bid("retry"), "Try again", !primary_used)
+                    .h(px(26.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.update_runs.remove(provider);
+                        if install {
+                            this.run_install(provider, cx);
+                        } else {
+                            this.run_update(provider, false, cx);
+                        }
+                    })),
+            );
+        }
+        if let Some(log) = failure.log {
+            row = row.child(
+                self.button(bid("log"), "View log", false)
                     .h(px(26.))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.edit_path(std::path::Path::new(&log));
                         cx.notify();
                     })),
-                )
-            })
-            .child(
-                self.button(
-                    (SharedString::from(format!("{tag}-dismiss")), n),
-                    "Dismiss",
-                    false,
-                )
+            );
+        }
+        let row = row.child(
+            self.button(bid("dismiss"), "Dismiss", false)
                 .h(px(26.))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.update_runs.remove(provider);
@@ -1062,7 +1235,26 @@ impl RunoApp {
                     }
                     cx.notify();
                 })),
-            )
+        );
+        div()
+            .v_flex()
+            .gap_2()
+            .w_full()
+            .when_some(failure.command, |el, command| {
+                el.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(rgb(c_subtle()))
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .font_family(self.mono_font.clone())
+                        .text_size(px(11.))
+                        .child(command),
+                )
+            })
+            .child(row)
     }
 
     /// The live progress of an update: a bar, what the updater is doing, and the time.
@@ -1267,22 +1459,6 @@ mod tests {
         assert!(!is_newer("2.1.296", "v2.1.296"));
         assert!(!is_newer("1.0.0", "1.2.0"));
         assert!(!is_newer("", "1.0.0"));
-        assert_eq!(
-            update_command("claude", "claude").unwrap(),
-            vec!["claude", "update"]
-        );
-        assert_eq!(
-            update_command("codex", "codex").unwrap(),
-            vec![
-                "npm",
-                "install",
-                "-g",
-                "@openai/codex@latest",
-                "--loglevel",
-                "http"
-            ]
-        );
-        assert!(update_command("grok", "grok").is_none());
         assert_eq!(percent_of("Downloading 2.1.296 66%"), Some(66.));
         assert_eq!(percent_of("[####    ] 42.5 %"), Some(42.5));
         assert_eq!(percent_of("no number here %"), None);
@@ -1307,19 +1483,12 @@ mod tests {
         assert_eq!(run.progress(start), 0.5, "a printed percentage wins");
         run.finished = Some(start);
         assert_eq!(run.progress(start), 1.);
-        let npm_fail = "npm error code ENOTEMPTY\nnpm error syscall rename\nnpm error ENOTEMPTY: directory not empty, rename '/usr/local/lib/node_modules/@openai/codex' -> '/usr/local/lib/node_modules/@openai/.codex-x1'\nnpm error A complete log of this run can be found in: /Users/a/.npm/_logs/x-debug-0.log";
-        assert!(failure_summary(npm_fail)
-            .contains("Delete /usr/local/lib/node_modules/@openai/.codex-x1 and"));
-        assert_eq!(
-            log_path(npm_fail).as_deref(),
-            Some("/Users/a/.npm/_logs/x-debug-0.log")
-        );
         let other = "npm error code E500\nnpm error 500 Internal Server Error - GET https://registry.npmjs.org/x\nnpm error A complete log of this run can be found in: /tmp/l.log";
         assert_eq!(
             failure_summary(other),
             "500 Internal Server Error - GET https://registry.npmjs.org/x"
         );
-        assert!(failure_summary("npm error code EACCES").contains("npm config set prefix"));
+
         assert_eq!(
             and_list(&["A".into(), "B".into(), "C".into()]),
             "A, B and C"

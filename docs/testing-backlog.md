@@ -76,6 +76,10 @@ Tested with real Claude Code only: Chat → CLI → Chat → CLI, `/cost` unchan
 | Real `claude update`, `opencode upgrade` and `cursor update`, and npm for the others | "Update now" upgrades the CLI, and the version refreshes. Only a fake npm has been used |
 | An update check with no network | No popup and no error spam |
 | Real updates through the card, for each agent (npm with `--loglevel http`, `claude update`, `opencode upgrade`, `cursor update`) | The bar and the current line keep moving, then "Updated" shows and the card fades out. Only fake updaters printing percentages and npm lines have been tested |
+| Codex owned by Orca, plus an nvm copy (Anish's Mac) | "Update needs you" names Orca, offers "Switch to 0.149.1", and the switch then updates the nvm copy with nvm's own npm and `--prefix`. Simulated in the cloud with fake files only |
+| Homebrew formula and cask installs (`brew upgrade`, `brew upgrade --cask`) | The card runs brew and shows its output |
+| Updating while the agent runs in a session | The card asks first and offers "Update anyway" |
+| A copy earlier on PATH shadowing the updated one | After a "successful" update, the card says Runo still runs the old copy and offers to switch |
 | A real npm failure (EACCES, ENOTEMPTY, EEXIST, offline) | The card turns into "Update failed" with a plain-words reason, Try again and View log. ENOTEMPTY names the leftover folder to delete |
 | Desktop notifications on macOS, Linux and Windows | Notifications appear when an agent finishes or fails |
 | Keep the computer awake (caffeinate, systemd-inhibit) | The machine doesn't sleep while agents run, and sleeps again afterwards |

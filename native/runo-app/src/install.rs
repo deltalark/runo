@@ -102,7 +102,7 @@ pub(crate) fn install_plan(
 }
 
 /// Folders installers commonly use that a desktop app's PATH may not include.
-fn extra_dirs() -> Vec<PathBuf> {
+pub(crate) fn extra_dirs() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -164,10 +164,9 @@ impl RunoApp {
         };
         let mut cmd = std::process::Command::new(&plan.program[0]);
         cmd.args(&plan.program[1..]);
-        self.update_runs.insert(
-            provider,
-            alerts::UpdateRun::new(true, format!("Running {}…", plan.shown)),
-        );
+        let mut run = alerts::UpdateRun::new(true, format!("Running {}…", plan.shown));
+        run.command = plan.shown.clone();
+        self.update_runs.insert(provider, run);
         alerts::run_streaming(format!("install:{provider}"), cmd, self.tx.clone());
         cx.notify();
     }
@@ -180,7 +179,7 @@ impl RunoApp {
         if let Err(error) = result {
             // The install card stays and says what went wrong, with the log and a retry.
             if let Some(run) = self.update_runs.get_mut(p.id) {
-                run.failed = Some((alerts::failure_summary(&error), alerts::log_path(&error)));
+                run.failed = Some(updater::explain(&error, &run.command));
             }
             return;
         }
@@ -200,13 +199,13 @@ impl RunoApp {
             if installed {
                 run.finished = Some(std::time::Instant::now());
             } else {
-                run.failed = Some((
-                    format!(
+                run.failed = Some(updater::Failure {
+                    why: format!(
                         "The installer finished, but `{}` wasn't found. Restart Runo, or set its path in Settings.",
                         p.bin
                     ),
-                    None,
-                ));
+                    ..Default::default()
+                });
             }
         }
         self.info = Some((
