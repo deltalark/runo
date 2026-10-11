@@ -176,7 +176,7 @@ impl RunoApp {
             .text_size(px(12.))
             .font_weight(FontWeight::MEDIUM)
             .when(selected, |el| {
-                el.bg(rgb(c_active())).text_color(rgb(c_text()))
+                el.bg(tint(c_active())).text_color(rgb(c_text()))
             })
             .when(!selected, |el| el.text_color(rgb(c_muted())))
             .child(
@@ -214,7 +214,7 @@ impl RunoApp {
                     .rounded_sm()
                     .cursor_pointer()
                     .text_color(rgb(c_muted()))
-                    .hover(|el| el.bg(rgb(c_active())).text_color(rgb(c_text())))
+                    .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
                     .on_click(cx.listener(move |this, _, _, cx| this.close_shell(id, cx)))
                     .child(Icon::new(IconName::X).size(px(11.))),
             )
@@ -396,7 +396,7 @@ impl RunoApp {
                         .px_2()
                         .py(px(1.))
                         .rounded_md()
-                        .bg(rgb(c_active()))
+                        .bg(tint(c_active()))
                         .text_color(rgb(c_secondary()))
                         .text_size(px(11.))
                         .child(format!("{scrolled} lines up")),

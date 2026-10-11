@@ -119,7 +119,7 @@ impl RunoApp {
                     .h(px(28.))
                     .rounded_md()
                     .cursor_pointer()
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.split_menu = !this.split_menu;
                         cx.notify();
@@ -171,7 +171,7 @@ impl RunoApp {
                             .px_3()
                             .py_2()
                             .rounded_xl()
-                            .bg(rgb(c_active()))
+                            .bg(tint(c_active()))
                             .text_size(px(13.))
                             .child(m.text.clone()),
                     )
@@ -237,7 +237,7 @@ impl RunoApp {
                         .rounded_md()
                         .cursor_pointer()
                         .text_size(px(13.))
-                        .hover(|el| el.bg(rgb(c_active())))
+                        .hover(|el| el.bg(tint(c_active())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.split = Some(other);
                             this.split_menu = false;
@@ -305,7 +305,7 @@ impl RunoApp {
                                 .rounded_lg()
                                 .border_1()
                                 .border_color(rgb(c_border()))
-                                .bg(rgb(c_subtle()))
+                                .bg(tint(c_subtle()))
                                 .child(Input::new(&self.split_input).appearance(false).h(px(34.))),
                         ),
                 )

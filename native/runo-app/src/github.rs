@@ -277,7 +277,7 @@ impl RunoApp {
             .items_center()
             .gap_3()
             .rounded_md()
-            .hover(|el| el.bg(rgb(c_subtle())))
+            .hover(|el| el.bg(tint(c_subtle())))
             .child(icon(mark, 14., color))
             .child(
                 div()

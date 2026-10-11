@@ -180,6 +180,7 @@ struct RunoApp {
     settings_menu: Option<String>,
     discovered: Option<Discovered>,
     applied_dark: Option<bool>,
+    applied_font: Option<&'static str>,
     applied_glass: Option<bool>,
     applied_enter: Option<bool>,
     changes: Vec<git::Change>,
@@ -468,7 +469,7 @@ fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyE
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgb(c_subtle()))
+                    .bg(tint(c_subtle()))
                     .border_1()
                     .border_color(rgb(c_border()))
                     .child(
@@ -896,6 +897,7 @@ impl RunoApp {
             settings_menu: None,
             discovered: None,
             applied_dark: None,
+            applied_font: None,
             applied_glass: None,
             applied_enter: None,
             changes: Vec::new(),
@@ -2249,7 +2251,7 @@ impl RunoApp {
                     .border_1()
                     .border_color(rgb(c_border()))
                     .cursor_pointer()
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.resume_past(item.clone(), cx);
                         cx.notify();
@@ -2428,7 +2430,7 @@ impl RunoApp {
                     .border_color(rgb(c_border()))
                     .bg(rgb(c_raised()))
                     .text_color(rgb(c_text()))
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
             })
             .child(label.into())
     }
@@ -2447,7 +2449,7 @@ impl RunoApp {
             .justify_center()
             .rounded_md()
             .cursor_pointer()
-            .hover(|el| el.bg(rgb(c_subtle())))
+            .hover(|el| el.bg(tint(c_subtle())))
             .child(icon(name, 15., c_secondary()))
     }
 
@@ -2470,7 +2472,7 @@ impl RunoApp {
             .justify_center()
             .rounded_md()
             .cursor_pointer()
-            .hover(|el| el.bg(rgb(c_subtle())))
+            .hover(|el| el.bg(tint(c_subtle())))
             .child(icon(name, (size * 0.5).round(), c_secondary()))
     }
 
@@ -2487,13 +2489,13 @@ impl RunoApp {
             .border_1()
             .when(selected, |el| {
                 el.border_color(rgb(c_blue()))
-                    .bg(rgb(c_selected()))
+                    .bg(tint(c_selected()))
                     .text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
                 el.border_color(rgb(c_border()))
                     .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
             })
             .child(label)
     }
@@ -2592,11 +2594,11 @@ impl RunoApp {
                             .text_color(rgb(c_text()))
                             .border_1()
                             .border_b_0()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                     })
                     .when(!active, |el| {
                         el.text_color(rgb(c_secondary()))
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .hover(|el| el.bg(tint(c_subtle())))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select(id);
@@ -2655,7 +2657,7 @@ impl RunoApp {
             .pl(px(lead))
             .pr_2()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(pane(c_sidebar()))
             .window_control_area(WindowControlArea::Drag)
             .child({
@@ -2776,8 +2778,8 @@ impl RunoApp {
             .cursor_pointer()
             .text_size(px(13.))
             .text_color(rgb(if selected { c_text() } else { c_secondary() }))
-            .when(selected, |el| el.bg(rgb(c_active())))
-            .hover(|el| el.bg(rgb(c_subtle())).text_color(rgb(c_text())))
+            .when(selected, |el| el.bg(tint(c_active())))
+            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
             .on_click(cx.listener(move |this, _, window, cx| {
                 match view {
                     View::Settings => this.open_settings(),
@@ -2836,7 +2838,7 @@ impl RunoApp {
             .border_1()
             .border_color(rgb(c_border()))
             .cursor_pointer()
-            .hover(|el| el.bg(rgb(c_subtle())))
+            .hover(|el| el.bg(tint(c_subtle())))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
             })
@@ -2881,8 +2883,8 @@ impl RunoApp {
             .gap(px(2.))
             .rounded_md()
             .cursor_pointer()
-            .when(selected, |el| el.bg(rgb(c_active())))
-            .when(!selected, |el| el.hover(|el| el.bg(rgb(c_subtle()))))
+            .when(selected, |el| el.bg(tint(c_active())))
+            .when(!selected, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select(id);
                 cx.notify();
@@ -3048,7 +3050,7 @@ impl RunoApp {
                     .gap(px(6.))
                     .rounded_md()
                     .cursor_pointer()
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(pos) = this.expanded.iter().position(|p| *p == pid) {
                             this.expanded.remove(pos);
@@ -3152,7 +3154,7 @@ impl RunoApp {
             .h_full()
             .v_flex()
             .border_r_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(pane(c_sidebar()))
             .child(
                 div()
@@ -3176,7 +3178,7 @@ impl RunoApp {
                             .cursor_pointer()
                             .text_size(px(13.))
                             .font_weight(FontWeight::MEDIUM)
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .hover(|el| el.bg(tint(c_subtle())))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_new_session();
                                 cx.notify();
@@ -3198,7 +3200,7 @@ impl RunoApp {
                             .items_center()
                             .gap_2()
                             .rounded_md()
-                            .bg(rgb(c_subtle()))
+                            .bg(tint(c_subtle()))
                             .child(icon(IconName::Search, 13., c_muted()))
                             .child(
                                 Input::new(&self.search)
@@ -3300,7 +3302,7 @@ impl RunoApp {
                             .p_1()
                             .rounded_sm()
                             .cursor_pointer()
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .hover(|el| el.bg(tint(c_subtle())))
                             .tooltip(|window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new("Add a project folder")
                                     .build(window, cx)
@@ -3377,7 +3379,7 @@ impl RunoApp {
                     .border_t_1()
                     .border_color(rgb(c_border()))
                     .cursor_pointer()
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.right_tab = RightTab::Changes;
                         this.show_panel = true;
@@ -3430,7 +3432,7 @@ impl RunoApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .bg(rgb(c_subtle()))
+                    .bg(tint(c_subtle()))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.right_tab = RightTab::Changes;
@@ -3572,7 +3574,7 @@ impl RunoApp {
                                     .px(px(14.))
                                     .py(px(10.))
                                     .rounded(px(14.))
-                                    .bg(rgb(c_active()))
+                                    .bg(tint(c_active()))
                                     .text_size(px(13.5))
                                     .text_color(rgb(c_text()))
                                     .whitespace_normal()
@@ -3824,11 +3826,11 @@ impl RunoApp {
                     .border_1()
                     .cursor_pointer()
                     .when(current, |el| {
-                        el.border_color(rgb(c_blue())).bg(rgb(c_selected()))
+                        el.border_color(rgb(c_blue())).bg(tint(c_selected()))
                     })
                     .when(!current, |el| {
                         el.border_color(rgb(c_border()))
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .hover(|el| el.bg(tint(c_subtle())))
                     })
                     .when(racer.archived, |el| el.opacity(0.5))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -3865,7 +3867,7 @@ impl RunoApp {
             .rounded_xl()
             .border_1()
             .border_color(rgb(c_border()))
-            .bg(rgb(c_subtle()))
+            .bg(tint(c_subtle()))
             .child(
                 div()
                     .flex()
@@ -3963,7 +3965,7 @@ impl RunoApp {
                     .rounded_xl()
                     .border_1()
                     .border_color(rgb(c_border()))
-                    .bg(rgb(c_subtle()))
+                    .bg(tint(c_subtle()))
                     .child(
                         div()
                             .flex()
@@ -4054,7 +4056,7 @@ impl RunoApp {
                                 .px(px(6.))
                                 .py(px(1.))
                                 .rounded_sm()
-                                .bg(rgb(c_subtle()))
+                                .bg(tint(c_subtle()))
                                 .text_size(px(11.))
                                 .child("worktree"),
                         )
@@ -4118,7 +4120,7 @@ impl RunoApp {
                 el.child(
                     self.ghost_button("split", IconName::PanelRightOpen, "Split view")
                         .when(self.split_session().is_some(), |el| {
-                            el.bg(rgb(c_active())).text_color(rgb(c_text()))
+                            el.bg(tint(c_active())).text_color(rgb(c_text()))
                         })
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_split(cx))),
                 )
@@ -4196,8 +4198,8 @@ impl RunoApp {
             .cursor_pointer()
             .text_size(px(12.))
             .text_color(rgb(c_secondary()))
-            .when(open, |el| el.bg(rgb(c_active())).text_color(rgb(c_text())))
-            .hover(|el| el.bg(rgb(c_subtle())).text_color(rgb(c_text())))
+            .when(open, |el| el.bg(tint(c_active())).text_color(rgb(c_text())))
+            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menu = if this.menu.as_deref() == Some(key.as_str()) {
                     None
@@ -4237,7 +4239,7 @@ impl RunoApp {
                     .rounded_md()
                     .cursor_pointer()
                     .text_size(px(13.))
-                    .hover(|el| el.bg(rgb(c_active())))
+                    .hover(|el| el.bg(tint(c_active())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         on_pick(this, i);
                         this.menu = None;
@@ -4592,7 +4594,7 @@ impl RunoApp {
                         .rounded_md()
                         .border_1()
                         .border_color(rgb(c_border()))
-                        .bg(rgb(c_subtle()))
+                        .bg(tint(c_subtle()))
                         .text_xs()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(c_text()))
@@ -4612,7 +4614,7 @@ impl RunoApp {
                 div()
                     .size(px(56.))
                     .rounded_2xl()
-                    .bg(rgb(c_selected()))
+                    .bg(tint(c_selected()))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -4801,11 +4803,11 @@ impl RunoApp {
                 .border_1()
                 .cursor_pointer()
                 .when(selected, |el| {
-                    el.border_color(rgb(c_blue())).bg(rgb(c_selected()))
+                    el.border_color(rgb(c_blue())).bg(tint(c_selected()))
                 })
                 .when(!selected, |el| {
                     el.border_color(rgb(c_border()))
-                        .hover(|el| el.bg(rgb(c_subtle())))
+                        .hover(|el| el.bg(tint(c_subtle())))
                 })
         };
 
@@ -4938,7 +4940,7 @@ impl RunoApp {
                     .cursor_pointer()
                     .text_sm()
                     .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(rgb(c_subtle())).text_color(rgb(c_text())))
+                    .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.new_more_agents = !this.new_more_agents;
                         cx.notify();
@@ -5080,7 +5082,7 @@ impl RunoApp {
                                         } else {
                                             c_secondary()
                                         }))
-                                        .hover(|el| el.bg(rgb(c_subtle())))
+                                        .hover(|el| el.bg(tint(c_subtle())))
                                         .tooltip(|window, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new(
                                                 "Run the same task on several agents, each in its own worktree, then keep the best result.",
@@ -5246,7 +5248,7 @@ impl RunoApp {
                     .border_color(rgb(c_border()))
                     .cursor_pointer()
                     .when(archived, |el| el.opacity(0.7))
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select(id);
                         cx.notify();
@@ -5409,7 +5411,7 @@ impl RunoApp {
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
             .when(selected, |el| {
-                el.bg(rgb(c_active())).text_color(rgb(c_text()))
+                el.bg(tint(c_active())).text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
                 el.text_color(rgb(c_secondary()))
@@ -5473,7 +5475,7 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         self.ghost_button_sized(id, name, tip, 24.)
-            .when(on, |el| el.bg(rgb(c_active())))
+            .when(on, |el| el.bg(tint(c_active())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 flip(this);
                 this.reload_diff();
@@ -5553,7 +5555,7 @@ impl RunoApp {
                             .items_center()
                             .gap_2()
                             .cursor_pointer()
-                            .bg(rgb(c_subtle()))
+                            .bg(tint(c_subtle()))
                             .text_color(rgb(c_muted()))
                             .hover(|el| el.text_color(rgb(c_text())))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -5574,7 +5576,7 @@ impl RunoApp {
                         .px_3()
                         .py(px(3.))
                         .text_color(rgb(c_blue()))
-                        .bg(rgb(c_selected()))
+                        .bg(tint(c_selected()))
                         .whitespace_nowrap()
                         .child(row.text),
                 );
@@ -5600,7 +5602,7 @@ impl RunoApp {
                     .when_some(bg, |el, bg| el.bg(rgb(bg)))
                     .when(can_note, |el| {
                         el.cursor_pointer()
-                            .hover(|el| el.bg(rgb(c_selected())))
+                            .hover(|el| el.bg(tint(c_selected())))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.note_at = Some(target.clone());
                                 this.note_input
@@ -5672,7 +5674,7 @@ impl RunoApp {
                                 .id(("note-x", index))
                                 .rounded_sm()
                                 .cursor_pointer()
-                                .hover(|el| el.bg(rgb(c_subtle())))
+                                .hover(|el| el.bg(tint(c_subtle())))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.remove_note(index);
                                     cx.notify();
@@ -5705,7 +5707,7 @@ impl RunoApp {
                                 .text_xs()
                                 .cursor_pointer()
                                 .text_color(rgb(c_secondary()))
-                                .hover(|el| el.bg(rgb(c_subtle())))
+                                .hover(|el| el.bg(tint(c_subtle())))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.note_at = None;
                                     cx.notify();
@@ -5757,8 +5759,8 @@ impl RunoApp {
                     .gap_2()
                     .rounded_md()
                     .cursor_pointer()
-                    .when(selected, |el| el.bg(rgb(c_active())))
-                    .when(!selected, |el| el.hover(|el| el.bg(rgb(c_subtle()))))
+                    .when(selected, |el| el.bg(tint(c_active())))
+                    .when(!selected, |el| el.hover(|el| el.bg(tint(c_subtle()))))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.demo {
                             this.selected_file = Some(path.clone());
@@ -5824,7 +5826,7 @@ impl RunoApp {
                                     .text_xs()
                                     .text_color(rgb(c_secondary()))
                                     .cursor_pointer()
-                                    .hover(|el| el.bg(rgb(c_subtle())))
+                                    .hover(|el| el.bg(tint(c_subtle())))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
                                         if this.confirm_discard.as_deref() == Some(keep.as_str()) {
@@ -5863,7 +5865,7 @@ impl RunoApp {
                                     .cursor_pointer()
                                     .opacity(0.)
                                     .group_hover("change-row", |el| el.opacity(1.))
-                                    .hover(|el| el.bg(rgb(c_subtle())))
+                                    .hover(|el| el.bg(tint(c_subtle())))
                                     .tooltip(|window, cx| {
                                         gpui_kit::component::tooltip::Tooltip::new(
                                             "Discard changes to this file",
@@ -6107,7 +6109,7 @@ impl RunoApp {
                         .items_center()
                         .gap_2()
                         .rounded_lg()
-                        .bg(rgb(c_selected()))
+                        .bg(tint(c_selected()))
                         .child(icon(IconName::MessageSquareText, 14., c_blue()))
                         .child(
                             div()
@@ -6283,7 +6285,7 @@ impl RunoApp {
                     .cursor_pointer()
                     .text_sm()
                     .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_preview(&p);
                         cx.notify();
@@ -6335,7 +6337,7 @@ impl RunoApp {
             .text_size(px(12.))
             .font_weight(FontWeight::MEDIUM)
             .when(selected, |el| {
-                el.bg(rgb(c_active())).text_color(rgb(c_text()))
+                el.bg(tint(c_active())).text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
                 el.text_color(rgb(c_muted()))
@@ -6430,8 +6432,8 @@ impl RunoApp {
             .child(tour::anchor(&self.anchors, "terminal"))
             .v_flex()
             .border_t_1()
-            .border_color(rgb(c_border()))
-            .bg(rgb(c_term_bg()))
+            .border_color(divider())
+            .bg(window_fill(c_term_bg()))
             .child(
                 div()
                     .h(px(32.))
@@ -6585,8 +6587,8 @@ impl RunoApp {
             .child(tour::anchor(&self.anchors, "right-pane"))
             .v_flex()
             .border_l_1()
-            .border_color(rgb(c_border()))
-            .bg(pane(c_sidebar()))
+            .border_color(divider())
+            .bg(panel(c_sidebar()))
             .child(
                 div()
                     .h(px(44.))
@@ -6739,10 +6741,14 @@ impl Render for RunoApp {
                 Some(window),
                 cx,
             );
-            // A theme switch reloads the theme file's fonts; keep the bundled UI font.
-            if cx.theme().font_family.as_ref() != UI_FONT {
-                gpui_kit::component::Theme::update(cx, |theme| theme.font_family = UI_FONT.into());
-            }
+            // A theme switch reloads the theme file's fonts; set the UI font again.
+            self.applied_font = None;
+        }
+        let font = ui_font(&st.font);
+        if self.applied_font != Some(font) {
+            self.applied_font = Some(font);
+            gpui_kit::component::Theme::update(cx, |theme| theme.font_family = font.into());
+            window.refresh();
         }
         self.apply_pending(window, cx);
         if self.applied_enter != Some(st.send_on_enter) {
@@ -6899,7 +6905,7 @@ impl Render for RunoApp {
                 }
                 cx.notify();
             }))
-            .bg(glass_fill(c_canvas()))
+            .bg(window_fill(c_canvas()))
             .text_color(rgb(c_text()))
             .text_size(px(13.))
             .font_family(cx.theme().font_family.clone())
@@ -6910,7 +6916,14 @@ impl Render for RunoApp {
                     .min_h_0()
                     .flex()
                     .children(left)
-                    .child(div().flex_1().min_w_0().flex().child(center).animated(
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .bg(glass_fill(c_canvas()))
+                            .child(center)
+                            .animated(
                         SharedString::from(format!(
                             "center-{}-{}",
                             shown as u8,
@@ -6931,7 +6944,7 @@ impl Render for RunoApp {
                     .items_center()
                     .justify_between()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(pane(c_sidebar()))
                     .text_size(px(11.5))
                     .gap_4()
@@ -6952,7 +6965,7 @@ impl Render for RunoApp {
                                         .px_1()
                                         .rounded_sm()
                                         .cursor_pointer()
-                                        .hover(|el| el.bg(rgb(c_subtle())))
+                                        .hover(|el| el.bg(tint(c_subtle())))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.notice = None;
                                             cx.notify();
@@ -7036,7 +7049,7 @@ impl Render for RunoApp {
                                                     .w(px(48.))
                                                     .h(px(4.))
                                                     .rounded_full()
-                                                    .bg(rgb(c_active()))
+                                                    .bg(tint(c_active()))
                                                     .child(
                                                         div()
                                                             .h_full()
@@ -7084,7 +7097,18 @@ impl Render for RunoApp {
 }
 
 /// The UI typeface, bundled so the app looks the same on every platform.
-const UI_FONT: &str = "Inter";
+/// Runo's own interface font, bundled with the app.
+const BUNDLED_FONT: &str = "Inter";
+
+/// The interface font for the "Interface font" setting. "system" is the platform's UI
+/// font where it can be named; elsewhere Runo's own font.
+fn ui_font(setting: &str) -> &'static str {
+    match setting {
+        "system" if cfg!(target_os = "macos") => ".SystemUIFont",
+        "system" if cfg!(windows) => "Segoe UI",
+        _ => BUNDLED_FONT,
+    }
+}
 
 fn load_fonts(cx: &mut App) {
     let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
@@ -7093,9 +7117,7 @@ fn load_fonts(cx: &mut App) {
         std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.otf")),
         std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.otf")),
     ];
-    if cx.text_system().add_fonts(fonts).is_ok() {
-        gpui_kit::component::Theme::update(cx, |theme| theme.font_family = UI_FONT.into());
-    }
+    let _ = cx.text_system().add_fonts(fonts);
 }
 
 const SIDEBAR_WIDTH: f32 = 264.;
@@ -7136,9 +7158,17 @@ fn main() {
             app_id: Some("runo".into()),
             ..Default::default()
         };
-        open_window(options, cx, |window, cx| {
+        let (handle, _) = open_window(options, cx, |window, cx| {
             cx.new(|cx| RunoApp::new(window, cx))
         })
         .expect("failed to open Runo window");
+        // The component library's root paints the theme's opaque background over the
+        // whole window, which hides the glass. Runo paints its own surface, so clear it.
+        let _ = handle.update(cx, |_, window, cx| {
+            gpui_kit::base::Root::update(window, cx, |root, _, cx| {
+                root.style().background = Some(gpui_kit::transparent_black().into());
+                cx.notify();
+            })
+        });
     });
 }

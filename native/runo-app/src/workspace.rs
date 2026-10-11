@@ -124,7 +124,7 @@ impl RunoApp {
                     .cursor_pointer()
                     .text_size(px(11.5))
                     .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(rgb(c_active())).text_color(rgb(c_text())))
+                    .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
                     .tooltip(move |window, cx| {
                         gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
                     })
@@ -291,7 +291,7 @@ impl RunoApp {
                     .rounded_md()
                     .when(exists, |el| {
                         el.cursor_pointer()
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .hover(|el| el.bg(tint(c_subtle())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.select(sid);
                                 cx.notify();

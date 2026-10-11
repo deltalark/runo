@@ -67,6 +67,8 @@ pub struct AppSettings {
     pub glass: String,
     /// Cards, menus and dialogs are translucent too.
     pub glass_cards: bool,
+    /// Interface font: "bundled" (Runo's own, tuned for sharp small text) or "system".
+    pub font: String,
     /// Pass Runo's memory MCP server to agents that accept one per run.
     pub memory_server: bool,
     /// The first-run tour was finished or skipped.
@@ -112,6 +114,7 @@ impl Default for AppSettings {
             group_by_status: false,
             glass: "off".into(),
             glass_cards: true,
+            font: "bundled".into(),
             memory_server: true,
             tour_seen: false,
             default_view: "chat".into(),
@@ -234,12 +237,13 @@ pub fn autoscroll() -> bool {
     AUTOSCROLL.load(Ordering::Relaxed)
 }
 
-/// Window opacity for each glass style.
+/// Opacity of the content surface for each glass style. Sidebars and panels are
+/// derived from it, so each style keeps the same layering.
 pub fn glass_alpha(style: &str) -> u8 {
     match style {
-        "subtle" => 225,
-        "frosted" => 190,
-        "clear" => 150,
+        "subtle" => 248,
+        "frosted" => 236,
+        "clear" => 216,
         _ => 255,
     }
 }
@@ -256,24 +260,93 @@ fn with_alpha(color: u32, alpha: u8) -> Rgba {
     rgba((color << 8) | alpha as u32)
 }
 
-/// The window's base surface: see-through in glass mode.
+/// The content surface: the most solid layer in glass mode, so text stays crisp.
 pub fn glass_fill(color: u32) -> Rgba {
     with_alpha(color, GLASS.load(Ordering::Relaxed))
 }
 
-/// Sidebars, title and status bars: a light tint over the base surface in glass mode.
+/// Opacity of the sidebar layer for the current glass style: the most see-through,
+/// like the sidebar material in macOS apps. Dark surfaces need more body, or light
+/// text over a thin layer fades into the desktop behind it.
+fn sidebar_alpha() -> u8 {
+    let (light, dark) = match GLASS.load(Ordering::Relaxed) {
+        255 => return 255,
+        a if a >= 248 => (204, 232),
+        a if a >= 236 => (164, 212),
+        _ => (124, 188),
+    };
+    if is_dark() {
+        dark
+    } else {
+        light
+    }
+}
+
+/// Sidebars, title and status bars: the most translucent layer in glass mode.
 pub fn pane(color: u32) -> Rgba {
     if glass_on() {
-        with_alpha(color, 110)
+        with_alpha(color, sidebar_alpha())
     } else {
         rgb(color)
     }
 }
 
-/// Dialogs, menus and popups floating over the app.
+/// Side panels next to the content, such as changes, files and the terminal: between
+/// the sidebar and the content.
+pub fn panel(color: u32) -> Rgba {
+    if glass_on() {
+        let (side, content) = (sidebar_alpha() as u16, GLASS.load(Ordering::Relaxed) as u16);
+        with_alpha(color, ((side + content * 2) / 3) as u8)
+    } else {
+        rgb(color)
+    }
+}
+
+/// The window behind every surface: clear in glass mode so the desktop shows through.
+pub fn window_fill(color: u32) -> Rgba {
+    if glass_on() {
+        rgba(0)
+    } else {
+        rgb(color)
+    }
+}
+
+/// Dividers between the window's regions: a faint hairline in glass mode instead of a
+/// solid grey line, which looks heavy over the blur.
+pub fn divider() -> Rgba {
+    if !glass_on() {
+        rgb(c_border())
+    } else if is_dark() {
+        rgba(0xffffff1a)
+    } else {
+        rgba(0x0000001a)
+    }
+}
+
+/// Hover, selection and other row fills. In glass mode they are a see-through shade of
+/// the surface instead of a solid colour: a solid fill on a translucent layer gets a
+/// ragged, mis-shaded rim where its rounded edges are antialiased.
+pub fn tint(color: u32) -> Rgba {
+    if !glass_on() {
+        return rgb(color);
+    }
+    let lum = |c: u32| (((c >> 16) & 0xff) + ((c >> 8) & 0xff) + (c & 0xff)) as f32 / 3.0;
+    let (base, fill) = (lum(c_canvas()), lum(color));
+    // The desktop behind already shades a translucent layer, so a lighter touch reads
+    // the same as the solid fill does on an opaque window.
+    let alpha = |a: f32| (a.clamp(0.0, 1.0) * 0.6 * 255.0).round() as u32;
+    if fill <= base {
+        rgba(alpha((base - fill) / base.max(1.0)))
+    } else {
+        rgba(0xffffff00 | alpha((fill - base) / (255.0 - base).max(1.0)))
+    }
+}
+
+/// Dialogs, menus and popups floating over the app. Only the window itself is blurred,
+/// so these stay nearly solid: text behind a thin card would show through unblurred.
 pub fn float(color: u32) -> Rgba {
     if glass_on() && GLASS_CARDS.load(Ordering::Relaxed) {
-        with_alpha(color, 222)
+        with_alpha(color, 246)
     } else {
         rgb(color)
     }
@@ -324,11 +397,21 @@ pub fn c_border() -> u32 {
 pub fn c_text() -> u32 {
     pick(0x18181b, 0xe9e9ec)
 }
+/// Secondary and muted text are a step stronger in glass mode: the translucent layers
+/// let the desktop through under the text too, which would otherwise wash it out.
 pub fn c_secondary() -> u32 {
-    pick(0x55555e, 0xa1a1aa)
+    if glass_on() {
+        pick(0x45454d, 0xbdbdc6)
+    } else {
+        pick(0x55555e, 0xa1a1aa)
+    }
 }
 pub fn c_muted() -> u32 {
-    pick(0x9b9ba4, 0x6e6e78)
+    if glass_on() {
+        pick(0x7c7c86, 0x93939d)
+    } else {
+        pick(0x9b9ba4, 0x6e6e78)
+    }
 }
 pub fn c_term_bg() -> u32 {
     pick(0xfafafa, 0x111113)

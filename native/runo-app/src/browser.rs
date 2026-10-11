@@ -207,7 +207,7 @@ impl RunoApp {
                 .items_center()
                 .gap_2()
                 .rounded_md()
-                .hover(|el| el.bg(rgb(c_subtle())))
+                .hover(|el| el.bg(tint(c_subtle())))
                 .child(icon(lead, 13., c_muted()))
                 .child(
                     div()
@@ -328,7 +328,7 @@ impl RunoApp {
                     .rounded_lg()
                     .border_1()
                     .border_color(rgb(c_border()))
-                    .bg(rgb(c_subtle()))
+                    .bg(tint(c_subtle()))
                     .child(
                         div()
                             .flex()

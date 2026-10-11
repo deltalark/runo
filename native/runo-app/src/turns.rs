@@ -688,7 +688,7 @@ impl RunoApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .bg(rgb(c_subtle()))
+                    .bg(tint(c_subtle()))
                     .text_size(px(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .child(icon(IconName::ListChecks, 13., c_secondary()))
@@ -886,7 +886,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .rounded_md()
-                    .bg(rgb(c_subtle()))
+                    .bg(tint(c_subtle()))
                     .text_size(px(12.5))
                     .child(icon(IconName::Clock, 12., c_muted()))
                     .child(div().text_color(rgb(c_muted())).child("Queued"))
@@ -979,8 +979,8 @@ impl RunoApp {
                         .gap_2()
                         .rounded_md()
                         .cursor_pointer()
-                        .when(i == 0, |el| el.bg(rgb(c_active())))
-                        .hover(|el| el.bg(rgb(c_active())))
+                        .when(i == 0, |el| el.bg(tint(c_active())))
+                        .hover(|el| el.bg(tint(c_active())))
                         .text_size(px(12.5))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.pick_mention(&path, window, cx);

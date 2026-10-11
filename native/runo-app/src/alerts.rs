@@ -1085,7 +1085,7 @@ impl RunoApp {
                     .cursor_pointer()
                     .text_xs()
                     .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.alerts_expanded = !this.alerts_expanded;
                         cx.notify();
@@ -1246,7 +1246,7 @@ impl RunoApp {
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .bg(rgb(c_subtle()))
+                        .bg(tint(c_subtle()))
                         .border_1()
                         .border_color(rgb(c_border()))
                         .font_family(self.mono_font.clone())
@@ -1420,7 +1420,7 @@ impl RunoApp {
                                         .text_xs()
                                         .text_color(rgb(c_secondary()))
                                         .hover(|el| {
-                                            el.bg(rgb(c_subtle())).text_color(rgb(c_text()))
+                                            el.bg(tint(c_subtle())).text_color(rgb(c_text()))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select(sid);
