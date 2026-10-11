@@ -150,6 +150,12 @@ impl AppSettings {
 
     /// Push the values that hot paths read (colours, animation switch…) into statics.
     pub fn apply(&self) {
+        crate::caps::set_binaries(
+            self.agents
+                .iter()
+                .map(|(id, a)| (id.clone(), a.binary.clone()))
+                .collect(),
+        );
         let accent = ACCENTS
             .iter()
             .find(|(id, _, _)| *id == self.accent)
@@ -684,7 +690,16 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
     }
     found.provider_paths = crate::agent::PROVIDERS
         .iter()
-        .map(|p| (p.id, which(p.bin)))
+        .map(|p| {
+            let bin = crate::caps::binary(p);
+            let configured = Path::new(&bin);
+            let path = if bin.contains(std::path::MAIN_SEPARATOR) {
+                configured.is_file().then(|| configured.to_path_buf())
+            } else {
+                which(&bin)
+            };
+            (p.id, path)
+        })
         .collect();
     found
 }

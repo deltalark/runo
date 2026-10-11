@@ -48,6 +48,26 @@ pub struct Control {
 
 static CAPS: OnceLock<RwLock<HashMap<String, Caps>>> = OnceLock::new();
 static UPDATED: AtomicBool = AtomicBool::new(false);
+/// Binaries set in Settings, by agent, for CLIs installed off PATH.
+static BINARIES: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
+
+/// Remember the binaries set in Settings, so detection runs the right file.
+pub fn set_binaries(binaries: HashMap<String, String>) {
+    if let Ok(mut map) = BINARIES.write() {
+        *map = Some(binaries);
+    }
+}
+
+/// The program to run for an agent: its Settings binary, or the usual name on PATH.
+pub fn binary(provider: &'static crate::agent::Provider) -> String {
+    BINARIES
+        .read()
+        .ok()
+        .and_then(|map| map.as_ref()?.get(provider.id).cloned())
+        .filter(|b| !b.trim().is_empty())
+        .map(|b| b.trim().to_string())
+        .unwrap_or_else(|| provider.bin.to_string())
+}
 
 fn store() -> &'static RwLock<HashMap<String, Caps>> {
     CAPS.get_or_init(|| RwLock::new(HashMap::new()))
@@ -70,11 +90,12 @@ pub fn take_updated() -> bool {
 pub fn refresh() {
     std::thread::spawn(|| {
         for provider in crate::agent::PROVIDERS.iter() {
+            let bin = binary(provider);
             let caps = match provider.id {
-                "claude" => claude(),
-                "codex" => codex(),
-                "opencode" => opencode(),
-                _ => generic(provider.bin),
+                "claude" => claude(&bin),
+                "codex" => codex(&bin),
+                "opencode" => opencode(&bin),
+                _ => generic(&bin),
             };
             if let Ok(mut map) = store().write() {
                 map.insert(provider.id.to_string(), caps);
@@ -87,7 +108,7 @@ pub fn refresh() {
 /// Agents without parseable help: the version, and Runo's three permission levels,
 /// which `agent::provider_args` maps onto each CLI's own flags.
 fn generic(bin: &str) -> Caps {
-    let installed = crate::agent::installed(bin);
+    let installed = crate::agent::available(bin, bin);
     let version = if installed {
         run(bin, &["--version"])
             .lines()
@@ -121,6 +142,7 @@ fn generic(bin: &str) -> Caps {
 fn run(bin: &str, args: &[&str]) -> String {
     Command::new(bin)
         .args(args)
+        .stdin(std::process::Stdio::null())
         .output()
         .map(|o| {
             let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -199,12 +221,12 @@ fn not_installed() -> Caps {
     }
 }
 
-fn claude() -> Caps {
-    let version = run("claude", &["--version"]);
+fn claude(bin: &str) -> Caps {
+    let version = run(bin, &["--version"]);
     if version.trim().is_empty() {
         return not_installed();
     }
-    parse_claude(&version, &run("claude", &["--help"]))
+    parse_claude(&version, &run(bin, &["--help"]))
 }
 
 /// Claude Code: modes, efforts and model aliases from `claude --help`.
@@ -238,8 +260,8 @@ fn parse_claude(version: &str, help: &str) -> Caps {
     }
 }
 
-fn codex() -> Caps {
-    let version = run("codex", &["--version"]);
+fn codex(bin: &str) -> Caps {
+    let version = run(bin, &["--version"]);
     if version.trim().is_empty() {
         return not_installed();
     }
@@ -255,8 +277,8 @@ fn codex() -> Caps {
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
     parse_codex(
         &version,
-        &run("codex", &["exec", "--help"]),
-        &run("codex", &["--help"]),
+        &run(bin, &["exec", "--help"]),
+        &run(bin, &["--help"]),
         cache.as_ref(),
     )
 }
@@ -378,16 +400,16 @@ fn parse_codex(
     }
 }
 
-fn opencode() -> Caps {
-    let version = run("opencode", &["--version"]);
+fn opencode(bin: &str) -> Caps {
+    let version = run(bin, &["--version"]);
     if version.trim().is_empty() {
         return not_installed();
     }
     parse_opencode(
         &version,
-        &run("opencode", &["models"]),
-        &run("opencode", &["agent", "list"]),
-        &run("opencode", &["run", "--help"]),
+        &run(bin, &["models"]),
+        &run(bin, &["agent", "list"]),
+        &run(bin, &["run", "--help"]),
     )
 }
 
@@ -738,7 +760,7 @@ mod tests {
 
     #[test]
     fn parses_claude_help_when_installed() {
-        let caps = claude();
+        let caps = claude("claude");
         if !caps.installed {
             return;
         }
@@ -759,7 +781,7 @@ mod tests {
 
     #[test]
     fn parses_codex_when_installed() {
-        let caps = codex();
+        let caps = codex("codex");
         if !caps.installed {
             return;
         }
@@ -779,7 +801,7 @@ mod tests {
 
     #[test]
     fn parses_opencode_when_installed() {
-        let caps = opencode();
+        let caps = opencode("opencode");
         if !caps.installed {
             return;
         }

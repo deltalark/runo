@@ -95,3 +95,21 @@ Tested with real Claude Code only: Chat → CLI → Chat → CLI, `/cost` unchan
 | --- | --- |
 | Codex with the memory MCP server (`-c mcp_servers.runo_memory…`) | Codex can call `read_memory`, `search_history` and `save_note`. Only Claude Code has been verified |
 | A large history (hundreds of sessions) | `search_history` stays fast and returns at most 20 results |
+
+## 8. Installing agents from Runo
+
+Tested in the cloud with a fake `npm` only: the confirm card, the "Installing…" state, a CLI that lands off PATH (`~/.npm-global/bin`) being found and saved as the agent's binary, and a failed npm install showing its error. No vendor installer has been run for real.
+
+| What to test | Expected |
+| --- | --- |
+| Claude Code on macOS and Linux (`curl -fsSL https://claude.ai/install.sh \| bash`) and Windows (`irm https://claude.ai/install.ps1 \| iex`) | Installs, Runo finds `claude` (often in `~/.local/bin`), and the card switches to Installed |
+| Cursor (`curl https://cursor.com/install -fsS \| bash`) | The CLI is found even when the installer names it `agent` instead of `cursor-agent` |
+| Droid with and without npm, and on Windows | npm installs `droid`; without npm the Factory script runs |
+| OpenCode without npm on macOS and Linux | The `opencode.ai/install` script runs and `~/.opencode/bin/opencode` is found |
+| Grok CLI install script | Installs and is found. On Windows the card says to use WSL |
+| Codex, Gemini, Copilot, Amp and Qwen through real npm | Each installs globally and is detected |
+| npm with a system prefix (EACCES) | The notice suggests `npm config set prefix ~/.npm-global` |
+| No Node.js at all | The card explains that Node.js is needed instead of offering Install |
+| An installer that asks a question on stdin | It does not hang Runo; the install fails with a message |
+| A desktop launch on macOS (Finder/Dock, so PATH is minimal) | The newly installed CLI is still found, through the saved binary path |
+| Signing in after install | The info line tells you to run the CLI once in a terminal; check that a first chat turn works afterwards |

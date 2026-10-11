@@ -9,6 +9,7 @@ mod git;
 mod github;
 mod handoff;
 mod history;
+mod install;
 mod memory_mcp;
 mod pty;
 mod settings;
@@ -156,6 +157,12 @@ struct RunoApp {
     /// Sessions whose JSON output already gave text this turn, so the final result is not
     /// shown twice.
     json_text: std::collections::HashSet<u64>,
+    /// Agents being installed right now.
+    installing: std::collections::HashSet<&'static str>,
+    /// The agent whose install confirm card is open.
+    install_confirm: Option<&'static str>,
+    /// A freshly installed CLI found off PATH, to save as the agent's binary.
+    pending_binary: Option<(&'static str, String)>,
     cli_focus: FocusHandle,
     /// Frames to wait before focusing a CLI that just opened.
     focus_cli: u8,
@@ -799,6 +806,9 @@ impl RunoApp {
             next_shell: 0,
             cli_runs: HashMap::new(),
             json_text: Default::default(),
+            installing: Default::default(),
+            install_confirm: None,
+            pending_binary: None,
             cli_focus: cx.focus_handle(),
             focus_cli: 0,
             view_changed: None,
@@ -4748,7 +4758,7 @@ impl RunoApp {
             let caps = caps::get(p.id);
             let installed = installed_all[i];
             let detail = if !installed {
-                format!("{} not found on PATH", p.bin)
+                "Not installed".to_string()
             } else if caps.version.is_empty() {
                 "Installed".to_string()
             } else {
@@ -4790,9 +4800,11 @@ impl RunoApp {
                     .child(
                         div()
                             .v_flex()
+                            .flex_1()
                             .min_w_0()
                             .child(
                                 div()
+                                    .truncate()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(p.name),
@@ -4804,7 +4816,8 @@ impl RunoApp {
                                     .text_color(rgb(if installed { c_muted() } else { c_red() }))
                                     .child(detail),
                             ),
-                    ),
+                    )
+                    .when(!installed, |el| el.child(self.install_button(p.id, cx))),
             );
         }
 
@@ -6532,6 +6545,13 @@ impl Render for RunoApp {
         set_dark(dark);
         self.measure_cell(window);
         self.tour_rects = self.anchors.take();
+        if let Some((id, path)) = self.pending_binary.take() {
+            settings::update(cx, |s| {
+                let mut options = s.agent(id);
+                options.binary = path;
+                s.agents.insert(id.into(), options);
+            });
+        }
         // Keep shortcuts working when nothing has focus, such as right after launch.
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
@@ -6699,6 +6719,8 @@ impl Render for RunoApp {
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if this.tour.is_some() {
                     this.end_tour(cx);
+                } else if this.install_confirm.is_some() {
+                    this.install_confirm = None;
                 } else if this.ctx_menu.is_some() {
                     this.ctx_menu = None;
                 } else if this.switch_plan.is_some() {
@@ -6903,6 +6925,7 @@ impl Render for RunoApp {
             .children(self.switch_modal(cx))
             .children(palette)
             .children(self.ctx_menu_view(cx))
+            .children(self.install_modal(cx))
             .children(self.tour_view(window, cx));
         fade(root, "app-root", 450)
     }

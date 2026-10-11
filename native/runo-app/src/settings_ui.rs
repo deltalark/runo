@@ -249,7 +249,10 @@ fn detected_section(pid: &'static str) -> Section {
         if caps.installed {
             Ctl::Chip(caps.version.clone(), 0)
         } else if caps.detected {
-            Ctl::Chip("Not installed".into(), 1)
+            Ctl::Button(
+                "Install…".into(),
+                Rc::new(move |this, _| this.ask_install(pid)),
+            )
         } else {
             Ctl::Chip("Detecting…".into(), 2)
         },
@@ -455,11 +458,16 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 rows.push(row(
                     p.name,
                     &path.map(|p| p.display().to_string()).unwrap_or_else(|| format!("`{}` was not found on PATH", p.bin)),
-                    if caps.installed { Ctl::Chip(caps.version.clone(), 0) } else { Ctl::Chip("Not found".into(), 1) },
+                    if caps.installed {
+                        Ctl::Chip(caps.version.clone(), 0)
+                    } else {
+                        let pid = p.id;
+                        Ctl::Button("Install…".into(), Rc::new(move |this, _| this.ask_install(pid)))
+                    },
                 ));
             }
             vec![
-                section("Agent CLIs", "Runo drives the CLIs you already have installed and signed in.", rows),
+                section("Agent CLIs", "Runo drives the agent CLIs on your computer. Missing ones can be installed from here with each vendor's official installer.", rows),
                 section("Detection", "Models, modes and reasoning levels come from the CLIs themselves.", vec![row(
                     "Re-detect all agents",
                     "Run detection again, for example after installing or updating a CLI.",
