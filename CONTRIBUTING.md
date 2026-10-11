@@ -8,7 +8,7 @@ Thanks for helping with Runo. It is a Rust workspace; the app lives in `native/r
 cargo run -p runo
 ```
 
-On Linux you may need GPUI's system libraries (libxkbcommon, Wayland or X11, and Vulkan development packages).
+On Linux you may need the UI toolkit's system libraries (libxkbcommon, Wayland or X11, and Vulkan development packages).
 
 ## Layout
 
