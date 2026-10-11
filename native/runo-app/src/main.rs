@@ -7149,6 +7149,61 @@ fn set_font_smoothing(on: bool) {
 #[cfg(not(target_os = "macos"))]
 fn set_font_smoothing(_on: bool) {}
 
+/// Show Runo's icon in the Dock when it runs outside an app bundle (`cargo run`), where
+/// macOS would otherwise show a generic executable icon. A bundled Runo.app already has it.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use std::ffi::{c_char, c_void};
+    type Id = *mut c_void;
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Id;
+        fn objc_msgSend();
+    }
+    #[link(name = "AppKit", kind = "framework")]
+    unsafe extern "C" {}
+    static PNG: &[u8] = include_bytes!("../assets/icon/png/runo-512.png");
+    unsafe {
+        let send0: unsafe extern "C" fn(Id, Id) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        let send1: unsafe extern "C" fn(Id, Id, Id) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        let send_bytes: unsafe extern "C" fn(Id, Id, *const c_void, usize) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        let data = send_bytes(
+            objc_getClass(c"NSData".as_ptr()),
+            sel_registerName(c"dataWithBytes:length:".as_ptr()),
+            PNG.as_ptr().cast(),
+            PNG.len(),
+        );
+        if data.is_null() {
+            return;
+        }
+        let image = send0(
+            objc_getClass(c"NSImage".as_ptr()),
+            sel_registerName(c"alloc".as_ptr()),
+        );
+        let image = send1(image, sel_registerName(c"initWithData:".as_ptr()), data);
+        if image.is_null() {
+            return;
+        }
+        let app = send0(
+            objc_getClass(c"NSApplication".as_ptr()),
+            sel_registerName(c"sharedApplication".as_ptr()),
+        );
+        send1(
+            app,
+            sel_registerName(c"setApplicationIconImage:".as_ptr()),
+            image,
+        );
+        send0(image, sel_registerName(c"release".as_ptr()));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_dock_icon() {}
+
 /// Runo's own interface font, bundled with the app: Geist, which stays crisp at small
 /// sizes on non-Retina displays.
 const BUNDLED_FONT: &str = "Geist";
@@ -7190,6 +7245,7 @@ fn main() {
         settings.apply();
         // Before any text is drawn: the renderer reads this once.
         set_font_smoothing(settings.font_smoothing);
+        set_dock_icon();
         cx.set_global(settings);
         let glass = settings::glass_alpha(&cx.global::<AppSettings>().glass) < 255;
         let options = WindowOptions {
