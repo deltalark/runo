@@ -53,6 +53,7 @@ actions!(
         OpenSettings,
         StopAgent,
         TogglePanel,
+        ToggleSidebar,
         Dismiss,
         QuickOpen
     ]
@@ -65,6 +66,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenSettings, Some("Runo")),
         KeyBinding::new("secondary-.", StopAgent, Some("Runo")),
         KeyBinding::new("secondary-b", TogglePanel, Some("Runo")),
+        KeyBinding::new("secondary-\\", ToggleSidebar, Some("Runo")),
         KeyBinding::new("escape", Dismiss, Some("Runo")),
         KeyBinding::new("secondary-k", QuickOpen, Some("Runo")),
         KeyBinding::new("secondary-p", QuickOpen, Some("Runo")),
@@ -146,6 +148,13 @@ struct RunoApp {
     race_stats: HashMap<u64, (usize, usize, usize)>,
     new_race: Vec<usize>,
     expanded: Vec<u64>,
+    /// Sessions open as tabs in the title bar, in tab order.
+    tabs: Vec<u64>,
+    /// Agent replies whose step list is expanded, by (session, message index).
+    open_steps: std::collections::HashSet<(u64, usize)>,
+    show_sidebar: bool,
+    /// Change counts (files, added, removed) per session, for the sidebar.
+    stats: HashMap<u64, (usize, usize, usize)>,
     confirm_delete: Option<u64>,
     /// Diff line a review note is being written for: path, line number, code.
     note_at: Option<(String, usize, String)>,
@@ -393,7 +402,7 @@ impl RunoApp {
         }
         let selected = state.sessions.first().map(|s| s.id);
 
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions…"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter sessions"));
         let search_sub = cx.subscribe_in(&search, window, |_, _, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -487,6 +496,10 @@ impl RunoApp {
         }
         let mut app = Self {
             expanded: state.projects.iter().map(|p| p.id).collect(),
+            tabs: Vec::new(),
+            open_steps: Default::default(),
+            show_sidebar: true,
+            stats: HashMap::new(),
             new_project: state.projects.first().map(|p| p.id),
             view: View::Session,
             state,
@@ -588,6 +601,11 @@ impl RunoApp {
                 },
             );
         app._subscriptions.extend([branch_sub, task_sub]);
+        let ids: Vec<u64> = app.state.sessions.iter().map(|s| s.id).collect();
+        for id in ids {
+            app.measure(id);
+        }
+        app.tabs.extend(app.selected);
         app.refresh();
         window.focus(&app.focus, cx);
         app
@@ -632,6 +650,13 @@ impl RunoApp {
             return;
         }
         self.changes = git::changes(&dir);
+        if let Some(id) = self.selected {
+            let (a, r) = self
+                .changes
+                .iter()
+                .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
+            self.stats.insert(id, (self.changes.len(), a, r));
+        }
         self.files = git::tracked_files(&dir);
         self.sync = git::sync_state(&dir);
         self.race_stats.clear();
@@ -667,8 +692,54 @@ impl RunoApp {
         }
     }
 
+    /// Files changed and lines added/removed in a session's folder, for its sidebar card.
+    fn measure(&mut self, id: u64) {
+        let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
+            return;
+        };
+        let changes = if self.demo {
+            demo_changes()
+        } else if git::is_repo(&dir) {
+            git::changes(&dir)
+        } else {
+            return;
+        };
+        let (a, r) = changes
+            .iter()
+            .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
+        self.stats.insert(id, (changes.len(), a, r));
+    }
+
+    fn open_change(&mut self, path: &str) {
+        if !self.demo {
+            if let Some(dir) = self.current().map(|s| s.dir.clone()) {
+                self.diff = git::file_diff(&dir, path);
+            }
+        }
+        self.selected_file = Some(path.to_string());
+    }
+
+    fn close_tab(&mut self, id: u64) {
+        let Some(pos) = self.tabs.iter().position(|t| *t == id) else {
+            return;
+        };
+        self.tabs.remove(pos);
+        if self.selected == Some(id) {
+            match self.tabs.get(pos).or(self.tabs.last()).copied() {
+                Some(next) => self.select(next),
+                None => {
+                    self.selected = None;
+                    self.view = View::Inbox;
+                }
+            }
+        }
+    }
+
     fn select(&mut self, id: u64) {
         self.selected = Some(id);
+        if !self.tabs.contains(&id) {
+            self.tabs.push(id);
+        }
         self.renaming = false;
         self.note_at = None;
         if let Some(session) = self.state.session_mut(id) {
@@ -744,6 +815,7 @@ impl RunoApp {
                 self.handles.remove(&Target::Session(id));
                 self.streams.remove(&id);
                 self.started.remove(&id);
+                self.measure(id);
                 let on_screen = self.selected == Some(id) && self.view == View::Session;
                 if let Some(session) = self.state.session_mut(id) {
                     session.status = if ok { Status::Done } else { Status::Failed };
@@ -1005,13 +1077,18 @@ impl RunoApp {
         let mut jumps: Vec<Vec<Jump>> = Vec::new();
         let mut commands = CommandGroup::new().label("Commands");
         let mut command_jumps = Vec::new();
-        let actions: [(&str, IconName, Box<dyn Action>); 4] = [
+        let actions: [(&str, IconName, Box<dyn Action>); 5] = [
             ("New session", IconName::Plus, Box::new(NewSession)),
             ("Open settings", IconName::Settings, Box::new(OpenSettings)),
             (
                 "Toggle the Changes panel",
                 IconName::PanelRightOpen,
                 Box::new(TogglePanel),
+            ),
+            (
+                "Toggle the sidebar",
+                IconName::PanelLeft,
+                Box::new(ToggleSidebar),
             ),
             (
                 "Stop the running agent",
@@ -1763,6 +1840,8 @@ impl RunoApp {
             return;
         };
         let session = self.state.sessions.remove(pos);
+        self.tabs.retain(|t| *t != id);
+        self.stats.remove(&id);
         if session.isolated && !self.demo && remove_worktree() {
             if let Some(project) = self
                 .state
@@ -1811,67 +1890,93 @@ impl RunoApp {
     ) -> Stateful<Div> {
         div()
             .id(id)
-            .h(px(34.))
-            .px_3()
+            .h(px(30.))
+            .px(px(10.))
             .flex()
+            .flex_none()
             .items_center()
             .justify_center()
-            .gap_2()
-            .rounded_lg()
+            .gap(px(6.))
+            .rounded_md()
             .cursor_pointer()
-            .text_sm()
+            .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
             .when(primary, |el| {
-                el.bg(rgb(c_text())).text_color(rgb(c_canvas()))
+                el.bg(rgb(c_text()))
+                    .text_color(rgb(c_canvas()))
+                    .hover(|el| el.opacity(0.9))
             })
             .when(!primary, |el| {
                 el.border_1()
                     .border_color(rgb(c_border()))
-                    .bg(rgb(c_canvas()))
+                    .bg(rgb(c_raised()))
                     .text_color(rgb(c_text()))
                     .hover(|el| el.bg(rgb(c_subtle())))
             })
             .child(label.into())
     }
 
-    fn icon_button(&self, id: &'static str, name: IconName, tip: &'static str) -> Stateful<Div> {
+    /// Borderless square icon button with a tooltip.
+    fn ghost_button(&self, id: &'static str, name: IconName, tip: &'static str) -> Stateful<Div> {
         div()
             .id(id)
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
             })
-            .size(px(36.))
+            .size(px(28.))
             .flex()
+            .flex_none()
             .items_center()
             .justify_center()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(rgb(c_canvas()))
+            .rounded_md()
             .cursor_pointer()
             .hover(|el| el.bg(rgb(c_subtle())))
-            .child(icon(name, 16., c_text()))
+            .child(icon(name, 15., c_secondary()))
+    }
+
+    fn ghost_button_sized(
+        &self,
+        id: impl Into<ElementId>,
+        name: IconName,
+        tip: &'static str,
+        size: f32,
+    ) -> Stateful<Div> {
+        div()
+            .id(id)
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
+            })
+            .size(px(size))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|el| el.bg(rgb(c_subtle())))
+            .child(icon(name, (size * 0.5).round(), c_secondary()))
     }
 
     fn chip(&self, id: (&'static str, usize), label: String, selected: bool) -> Stateful<Div> {
         div()
             .id(id)
-            .h(px(32.))
-            .px_3()
+            .h(px(28.))
+            .px(px(10.))
             .flex()
             .items_center()
-            .rounded_lg()
+            .rounded_md()
             .cursor_pointer()
-            .text_sm()
+            .text_size(px(12.5))
             .border_1()
             .when(selected, |el| {
                 el.border_color(rgb(c_blue()))
                     .bg(rgb(c_selected()))
-                    .text_color(rgb(c_blue()))
+                    .text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
                 el.border_color(rgb(c_border()))
                     .text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(rgb(c_subtle())))
             })
             .child(label)
     }
@@ -1898,18 +2003,33 @@ impl RunoApp {
         }
     }
 
+    /// The agent's glyph in its colour, without a background, for dense rows.
+    fn provider_mark(&self, provider: &agent::Provider, size: f32) -> Div {
+        div()
+            .w(px(size + 2.))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .text_size(px(size))
+            .line_height(px(size + 2.))
+            .font_weight(FontWeight::BOLD)
+            .text_color(rgb(provider.color))
+            .child(provider.mark)
+    }
+
     fn provider_badge(&self, provider: &agent::Provider, size: f32) -> Div {
         div()
             .size(px(size))
             .flex_none()
-            .rounded_md()
+            .rounded(px((size * 0.28).min(6.)))
             .flex()
             .items_center()
             .justify_center()
+            .text_size(px(size * 0.55))
             .bg(rgb(settings::mix(
                 provider.color,
                 c_canvas(),
-                if is_dark() { 0.22 } else { 0.12 },
+                if is_dark() { 0.2 } else { 0.12 },
             )))
             .text_color(rgb(provider.color))
             .font_weight(FontWeight::BOLD)
@@ -1918,88 +2038,169 @@ impl RunoApp {
 
     // ---------- title bar ----------
 
-    fn title_bar(&self) -> impl IntoElement {
-        let project = self
-            .current()
-            .and_then(|s| self.state.projects.iter().find(|p| p.id == s.project_id))
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| "No project".into());
-        let branch = self.current().map(|s| s.branch.clone()).unwrap_or_default();
-        let running = self.started.len();
-        div()
-            .h(px(46.))
-            .flex_none()
+    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut tabs = div()
             .flex()
-            .items_center()
-            .justify_between()
-            .pl(px(if cfg!(target_os = "macos") { 84. } else { 16. }))
-            .pr_4()
-            .border_b_1()
-            .border_color(rgb(c_border()))
-            .bg(rgb(c_canvas()))
-            .window_control_area(WindowControlArea::Drag)
-            .child(div().w(px(280.)))
-            .child(
+            .items_end()
+            .h_full()
+            .min_w_0()
+            .overflow_hidden();
+        for &id in &self.tabs {
+            let Some(session) = self.state.session(id) else {
+                continue;
+            };
+            let provider = agent::provider(&session.provider);
+            let active = self.selected == Some(id) && self.view == View::Session;
+            let working = self.handles.contains_key(&Target::Session(id));
+            tabs = tabs.child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_sm()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Runo"))
-                    .child(div().h(px(14.)).w(px(1.)).bg(rgb(c_border())))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_color(rgb(c_secondary()))
-                            .child(project)
-                            .when(!branch.is_empty(), |el| {
-                                el.child(div().text_color(rgb(c_muted())).child("/"))
-                                    .child(icon(IconName::GitBranch, 13., c_muted()))
-                                    .child(branch)
-                            }),
-                    )
-                    .when(running > 0, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_2()
-                                .py(px(2.))
-                                .rounded_full()
-                                .bg(rgb(c_selected()))
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(c_blue()))
-                                .child(self.status_dot(Status::Working, "title-running", 6.))
-                                .child(if running == 1 {
-                                    "1 agent running".to_string()
-                                } else {
-                                    format!("{running} agents running")
-                                }),
-                        )
-                    }),
-            )
-            .child(if self.view == View::Settings {
-                div().w(px(280.)).into_any_element()
-            } else {
-                div()
-                    .w(px(280.))
-                    .h(px(32.))
+                    .id(("tab", id as usize))
+                    .group("tab")
+                    .h(px(34.))
+                    .min_w(px(120.))
+                    .max_w(px(210.))
                     .px_3()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(c_border()))
-                    .bg(rgb(c_sidebar()))
-                    .child(icon(IconName::Search, 14., c_muted()))
-                    .child(Input::new(&self.search).appearance(false).h(px(28.)))
-                    .into_any_element()
-            })
+                    .rounded_t_md()
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .when(active, |el| {
+                        el.bg(rgb(c_canvas()))
+                            .text_color(rgb(c_text()))
+                            .border_1()
+                            .border_b_0()
+                            .border_color(rgb(c_border()))
+                    })
+                    .when(!active, |el| {
+                        el.text_color(rgb(c_secondary()))
+                            .hover(|el| el.bg(rgb(c_subtle())))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select(id);
+                        cx.notify();
+                    }))
+                    .child(self.provider_mark(provider, 12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(session.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .id(("tab-x", id as usize))
+                            .size(px(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .hover(|el| el.bg(rgb(c_border())))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(id);
+                                cx.notify();
+                            }))
+                            .child(if working || session.unread {
+                                div()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(rgb(if working { c_blue() } else { c_amber() }))
+                                    .group_hover("tab", |el| el.opacity(0.))
+                                    .into_any_element()
+                            } else {
+                                icon(IconName::X, 11., c_muted()).into_any_element()
+                            }),
+                    ),
+            );
+        }
+        let (added, removed) = self
+            .changes
+            .iter()
+            .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
+        let show_stats = self.view == View::Session && !self.changes.is_empty();
+        div()
+            .h(px(40.))
+            .flex_none()
+            .flex()
+            .items_end()
+            .gap_2()
+            .pl(px(if cfg!(target_os = "macos") { 80. } else { 8. }))
+            .pr_2()
+            .border_b_1()
+            .border_color(rgb(c_border()))
+            .bg(rgb(c_sidebar()))
+            .window_control_area(WindowControlArea::Drag)
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_sidebar = !this.show_sidebar;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.ghost_button("open-palette", IconName::Search, "Quick open")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_palette(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_end()
+                    .child(tabs),
+            )
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(show_stats, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .gap_1()
+                                .px_2()
+                                .text_size(px(12.))
+                                .font_family(self.mono_font.clone())
+                                .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
+                                .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
+                        )
+                    })
+                    .when(
+                        self.view == View::Session && self.current().is_some(),
+                        |el| {
+                            el.child(
+                                self.ghost_button(
+                                    "toggle-panel",
+                                    IconName::PanelRight,
+                                    "Toggle the Changes panel",
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.show_panel = !this.show_panel;
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                        },
+                    ),
+            )
     }
 
     // ---------- sidebar ----------
@@ -2016,17 +2217,17 @@ impl RunoApp {
         let selected = self.view == view;
         div()
             .id(id)
-            .h(px(36.))
-            .px_3()
+            .h(px(28.))
+            .px_2()
             .flex()
             .items_center()
-            .gap_3()
-            .rounded_lg()
+            .gap_2()
+            .rounded_md()
             .cursor_pointer()
-            .text_sm()
-            .text_color(rgb(if selected { c_blue() } else { c_text() }))
-            .when(selected, |el| el.bg(rgb(c_selected())))
-            .hover(|el| el.bg(rgb(c_subtle())))
+            .text_size(px(13.))
+            .text_color(rgb(if selected { c_text() } else { c_secondary() }))
+            .when(selected, |el| el.bg(rgb(c_active())))
+            .hover(|el| el.bg(rgb(c_subtle())).text_color(rgb(c_text())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if view == View::Settings {
                     this.open_settings();
@@ -2037,16 +2238,12 @@ impl RunoApp {
                 }
                 cx.notify();
             }))
-            .child(icon(
-                name,
-                16.,
-                if selected { c_blue() } else { c_secondary() },
-            ))
+            .child(icon(name, 15., if selected { c_text() } else { c_muted() }))
             .child(div().flex_1().child(label))
             .when(count > 0 && view != View::Inbox, |el| {
                 el.child(
                     div()
-                        .text_xs()
+                        .text_size(px(11.5))
                         .text_color(rgb(c_muted()))
                         .child(count.to_string()),
                 )
@@ -2054,17 +2251,17 @@ impl RunoApp {
             .when(count > 0 && view == View::Inbox, |el| {
                 el.child(
                     div()
-                        .min_w(px(20.))
-                        .h(px(18.))
+                        .min_w(px(18.))
+                        .h(px(16.))
                         .px_1()
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded_full()
                         .bg(rgb(c_blue()))
-                        .text_xs()
+                        .text_size(px(10.5))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(c_canvas()))
+                        .text_color(rgb(0xffffff))
                         .child(count.to_string()),
                 )
             })
@@ -2080,12 +2277,12 @@ impl RunoApp {
     ) -> impl IntoElement {
         div()
             .id(id)
-            .size(px(24.))
+            .size(px(22.))
             .flex()
             .items_center()
             .justify_center()
             .rounded_md()
-            .bg(rgb(c_canvas()))
+            .bg(rgb(c_raised()))
             .border_1()
             .border_color(rgb(c_border()))
             .cursor_pointer()
@@ -2094,98 +2291,138 @@ impl RunoApp {
                 gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
             })
             .on_click(on_click)
-            .child(icon(name, 13., c_secondary()))
+            .child(icon(name, 12., c_secondary()))
     }
 
+    /// A session in the sidebar: agent and age, title, then branch and change counts.
     fn session_row(&self, session: &Session, cx: &mut Context<Self>) -> impl IntoElement {
         let id = session.id;
         let provider = agent::provider(&session.provider);
         let selected = self.selected == Some(id) && self.view == View::Session;
         let unread = session.unread;
         let pinned = session.pinned;
+        let working = session.status == Status::Working;
+        let model = session
+            .selections()
+            .get("model")
+            .filter(|m| !m.is_empty())
+            .cloned();
+        let when = match self.started.get(&id) {
+            Some(t) if working => elapsed(t.elapsed()),
+            _ => session
+                .messages
+                .last()
+                .map(|m| m.time.clone())
+                .unwrap_or_default(),
+        };
+        let stats = self.stats.get(&id).copied();
         div()
             .id(("session", id as usize))
             .relative()
             .group("session-row")
-            .ml_3()
-            .mr_1()
+            .mx_1()
             .px_2()
             .py(px(7.))
-            .flex()
-            .items_center()
-            .gap_2()
-            .rounded_lg()
+            .v_flex()
+            .gap(px(2.))
+            .rounded_md()
             .cursor_pointer()
-            .when(selected, |el| el.bg(rgb(c_selected())))
-            .hover(|el| el.bg(rgb(c_subtle())))
+            .when(selected, |el| el.bg(rgb(c_active())))
+            .when(!selected, |el| el.hover(|el| el.bg(rgb(c_subtle()))))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select(id);
                 cx.notify();
             }))
-            .child(self.provider_badge(provider, 24.))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .v_flex()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child(self.provider_mark(provider, 11.))
+                    .child(div().flex_1().min_w_0().truncate().child(match model {
+                        Some(m) => format!("{} · {m}", provider.name),
+                        None => provider.name.to_string(),
+                    }))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted())))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(if unread {
-                                        FontWeight::BOLD
-                                    } else {
-                                        FontWeight::MEDIUM
-                                    })
-                                    .text_color(rgb(c_text()))
-                                    .child(session.title.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(rgb(c_muted()))
-                            .child(div().min_w_0().truncate().child(session.branch.clone()))
-                            .when(session.status == Status::Working, |el| {
-                                el.child(div().flex_none().text_color(rgb(c_blue())).child(
-                                    match self.started.get(&id) {
-                                        Some(t) => format!("· {}", elapsed(t.elapsed())),
-                                        None => "· Working".into(),
-                                    },
-                                ))
-                            })
-                            .when(session.status == Status::Failed, |el| {
-                                el.child(
-                                    div().flex_none().text_color(rgb(c_red())).child("· Failed"),
-                                )
-                            }),
+                            .flex_none()
+                            .text_color(rgb(if working { c_blue() } else { c_muted() }))
+                            .child(when),
                     ),
             )
-            .child(if unread {
+            .child(
                 div()
-                    .size(px(8.))
-                    .flex_none()
-                    .rounded_full()
-                    .bg(rgb(c_blue()))
-                    .into_any_element()
-            } else {
-                self.status_dot(session.status, ("dot", id as usize), 8.)
-            })
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(if unread || selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .text_color(rgb(c_text()))
+                            .child(session.title.clone()),
+                    )
+                    .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted())))
+                    .child(if unread {
+                        div()
+                            .size(px(7.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(c_blue()))
+                            .into_any_element()
+                    } else if session.status == Status::Failed {
+                        div()
+                            .size(px(7.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(c_red()))
+                            .into_any_element()
+                    } else if working {
+                        self.status_dot(Status::Working, ("dot", id as usize), 7.)
+                    } else {
+                        div().into_any_element()
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child(icon(IconName::GitBranch, 11., c_muted()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(session.branch.clone()),
+                    )
+                    .when_some(stats.filter(|s| s.0 > 0), |el, (_, a, r)| {
+                        el.child(
+                            div()
+                                .flex()
+                                .gap_1()
+                                .font_family(self.mono_font.clone())
+                                .child(div().text_color(rgb(c_add())).child(format!("+{a}")))
+                                .child(div().text_color(rgb(c_del())).child(format!("−{r}"))),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .absolute()
-                    .right(px(4.))
-                    .top_0()
-                    .bottom_0()
+                    .right(px(6.))
+                    .top(px(6.))
                     .flex()
                     .items_center()
                     .gap(px(2.))
@@ -2216,20 +2453,15 @@ impl RunoApp {
                         }),
                     )),
             )
-            .animated(
-                SharedString::from(format!("row-in-{id}")),
-                Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()),
-                |el, d| el.opacity(d),
-            )
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let filter = self.search.read(cx).value().to_lowercase();
-        let mut projects = div().v_flex().gap_1();
+        let mut projects = div().v_flex().gap(px(2.)).pb_2();
         for project in &self.state.projects {
             let pid = project.id;
             let open = self.expanded.contains(&pid);
-            let sessions: Vec<&Session> = self
+            let mut sessions: Vec<&Session> = self
                 .state
                 .sessions
                 .iter()
@@ -2241,7 +2473,6 @@ impl RunoApp {
                         || project.name.to_lowercase().contains(&filter)
                 })
                 .collect();
-            let mut sessions = sessions;
             sessions.sort_by_key(|s| !s.pinned);
             if !filter.is_empty() && sessions.is_empty() {
                 continue;
@@ -2249,13 +2480,15 @@ impl RunoApp {
             projects = projects.child(
                 div()
                     .id(("project", pid as usize))
-                    .h(px(32.))
+                    .group("project")
+                    .h(px(28.))
+                    .mt_2()
+                    .mx_1()
                     .px_2()
-                    .mt_1()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .rounded_lg()
+                    .gap(px(6.))
+                    .rounded_md()
                     .cursor_pointer()
                     .hover(|el| el.bg(rgb(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -2268,36 +2501,44 @@ impl RunoApp {
                     }))
                     .child(icon(
                         if open {
-                            IconName::FolderOpen
+                            IconName::ChevronDown
                         } else {
-                            IconName::Folder
+                            IconName::ChevronRight
                         },
-                        16.,
-                        c_secondary(),
+                        12.,
+                        c_muted(),
                     ))
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .truncate()
-                            .text_sm()
+                            .text_size(px(12.5))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
+                            .text_color(rgb(c_secondary()))
                             .child(project.name.clone()),
                     )
-                    .when(!open && !sessions.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(c_muted()))
-                                .child(sessions.len().to_string()),
-                        )
-                    })
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(c_muted()))
+                            .group_hover("project", |el| el.opacity(0.))
+                            .child(if sessions.is_empty() {
+                                String::new()
+                            } else {
+                                sessions.len().to_string()
+                            }),
+                    )
                     .child(
                         div()
                             .id(("project-new", pid as usize))
+                            .absolute()
+                            .right(px(10.))
                             .p(px(3.))
-                            .rounded_md()
+                            .rounded_sm()
                             .cursor_pointer()
+                            .opacity(0.)
+                            .group_hover("project", |el| el.opacity(1.))
                             .hover(|el| el.bg(rgb(c_border())))
                             .tooltip(|window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(
@@ -2311,25 +2552,17 @@ impl RunoApp {
                                 this.view = View::NewSession;
                                 cx.notify();
                             }))
-                            .child(icon(IconName::Plus, 14., c_muted())),
+                            .child(icon(IconName::Plus, 13., c_secondary())),
                     )
-                    .child(icon(
-                        if open {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        },
-                        14.,
-                        c_muted(),
-                    )),
+                    .relative(),
             );
             if open || !filter.is_empty() {
                 if sessions.is_empty() {
                     projects = projects.child(
                         div()
-                            .ml(px(38.))
+                            .ml(px(30.))
                             .py_1()
-                            .text_xs()
+                            .text_size(px(12.))
                             .text_color(rgb(c_muted()))
                             .child("No sessions yet"),
                     );
@@ -2339,139 +2572,137 @@ impl RunoApp {
                 }
             }
         }
-        let user = std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "You".into());
+        let unread = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.unread && !s.archived)
+            .count();
         div()
-            .w(px(280.))
+            .w(px(264.))
             .flex_none()
             .h_full()
             .v_flex()
-            .p_3()
-            .gap_1()
             .border_r_1()
             .border_color(rgb(c_border()))
             .bg(rgb(c_sidebar()))
             .child(
                 div()
-                    .h(px(52.))
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .gap_3()
+                    .p_2()
+                    .v_flex()
+                    .gap_1()
                     .child(
                         div()
-                            .size(px(36.))
-                            .rounded_lg()
-                            .bg(rgb(c_text()))
+                            .id("new-session")
+                            .h(px(32.))
+                            .px_2()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .text_color(rgb(c_canvas()))
-                            .font_weight(FontWeight::BOLD)
-                            .child("R"),
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(c_border()))
+                            .bg(rgb(c_raised()))
+                            .cursor_pointer()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.view = View::NewSession;
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::SquarePen, 14., c_text()))
+                            .child(div().flex_1().child("New session"))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(c_muted()))
+                                    .child(format!("{MOD_KEY}N")),
+                            ),
                     )
                     .child(
                         div()
-                            .v_flex()
+                            .h(px(28.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_md()
+                            .bg(rgb(c_subtle()))
+                            .child(icon(IconName::Search, 13., c_muted()))
                             .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("Runo"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(c_muted()))
-                                    .child("Personal workspace"),
+                                Input::new(&self.search)
+                                    .appearance(false)
+                                    .h(px(26.))
+                                    .text_size(px(12.5)),
                             ),
+                    )
+                    .child(
+                        div()
+                            .mt_1()
+                            .v_flex()
+                            .child(self.nav_item(
+                                "inbox",
+                                IconName::Inbox,
+                                "Inbox",
+                                unread,
+                                View::Inbox,
+                                cx,
+                            ))
+                            .child(self.nav_item(
+                                "all-sessions",
+                                IconName::Layers,
+                                "All sessions",
+                                self.state.sessions.len(),
+                                View::AllSessions,
+                                cx,
+                            ))
+                            .child(self.nav_item(
+                                "worktrees",
+                                IconName::GitBranch,
+                                "Worktrees",
+                                self.state.sessions.iter().filter(|s| s.isolated).count(),
+                                View::Worktrees,
+                                cx,
+                            ))
+                            .child(self.nav_item(
+                                "history",
+                                IconName::RotateCcwClock,
+                                "History",
+                                0,
+                                View::History,
+                                cx,
+                            )),
                     ),
             )
             .child(
                 div()
-                    .id("new-session")
-                    .h(px(40.))
+                    .mt_1()
                     .px_3()
-                    .my_1()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(c_border()))
-                    .bg(rgb(c_canvas()))
-                    .cursor_pointer()
-                    .text_sm()
-                    .hover(|el| el.bg(rgb(c_subtle())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.view = View::NewSession;
-                        cx.notify();
-                    }))
-                    .child(icon(IconName::Plus, 16., c_text()))
-                    .child(div().flex_1().child("New session")),
-            )
-            .child(
-                self.nav_item(
-                    "inbox",
-                    IconName::BellDot,
-                    "Inbox",
-                    self.state
-                        .sessions
-                        .iter()
-                        .filter(|s| s.unread && !s.archived)
-                        .count(),
-                    View::Inbox,
-                    cx,
-                ),
-            )
-            .child(self.nav_item(
-                "all-sessions",
-                IconName::Layers,
-                "All sessions",
-                self.state.sessions.len(),
-                View::AllSessions,
-                cx,
-            ))
-            .child(self.nav_item(
-                "worktrees",
-                IconName::GitBranch,
-                "Worktrees",
-                self.state.sessions.iter().filter(|s| s.isolated).count(),
-                View::Worktrees,
-                cx,
-            ))
-            .child(self.nav_item(
-                "history",
-                IconName::RotateCcwClock,
-                "History",
-                0,
-                View::History,
-                cx,
-            ))
-            .child(
-                div()
-                    .mt_3()
-                    .px_2()
+                    .h(px(24.))
                     .flex()
                     .items_center()
                     .justify_between()
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(11.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_secondary()))
-                            .child("Projects"),
+                            .text_color(rgb(c_muted()))
+                            .child("PROJECTS"),
                     )
                     .child(
                         div()
                             .id("add-project")
                             .p_1()
-                            .rounded_md()
+                            .rounded_sm()
                             .cursor_pointer()
                             .hover(|el| el.bg(rgb(c_subtle())))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new("Add a project folder")
+                                    .build(window, cx)
+                            })
                             .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx)))
-                            .child(icon(IconName::FolderPlus, 16., c_secondary())),
+                            .child(icon(IconName::FolderPlus, 14., c_muted())),
                     ),
             )
             .child(
@@ -2481,75 +2712,36 @@ impl RunoApp {
                     .overflow_y_scrollbar()
                     .child(projects),
             )
-            .child(self.nav_item(
-                "settings",
-                IconName::Settings,
-                "Settings",
-                0,
-                View::Settings,
-                cx,
-            ))
             .child(
                 div()
-                    .mt_1()
-                    .pt_2()
+                    .p_2()
                     .border_t_1()
                     .border_color(rgb(c_border()))
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .size(px(32.))
-                            .rounded_full()
-                            .bg(rgb(c_blue()))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(c_canvas()))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(
-                                user.chars()
-                                    .next()
-                                    .unwrap_or('U')
-                                    .to_uppercase()
-                                    .to_string(),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .v_flex()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(user),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(c_muted()))
-                                    .child("Local workspace"),
-                            ),
-                    )
-                    .child(div().size(px(8.)).rounded_full().bg(rgb(c_green()))),
+                    .child(self.nav_item(
+                        "settings",
+                        IconName::Settings,
+                        "Settings",
+                        0,
+                        View::Settings,
+                        cx,
+                    )),
             )
     }
-
-    // ---------- center ----------
 
     fn step_row(&self, text: &str) -> impl IntoElement {
         div()
             .flex()
             .items_center()
-            .gap_3()
-            .h(px(30.))
-            .text_sm()
-            .child(icon(IconName::ChevronRight, 14., c_muted()))
-            .child(icon(IconName::CircleCheck, 18., c_green()))
-            .child(div().text_color(rgb(c_text())).child(text.to_string()))
+            .gap_2()
+            .h(px(24.))
+            .text_size(px(12.5))
+            .child(icon(IconName::Check, 12., c_muted()))
+            .child(
+                div()
+                    .truncate()
+                    .text_color(rgb(c_secondary()))
+                    .child(text.to_string()),
+            )
     }
 
     fn changes_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2557,41 +2749,90 @@ impl RunoApp {
             .changes
             .iter()
             .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-        let names: Vec<String> = self
-            .changes
-            .iter()
-            .take(3)
-            .map(|c| c.path.rsplit('/').next().unwrap_or(&c.path).to_string())
-            .collect();
-        let more = self.changes.len().saturating_sub(3);
-        div()
-            .id("changes-card")
-            .mt_2()
-            .max_w(px(640.))
-            .px_4()
-            .py_3()
-            .flex()
-            .items_center()
-            .gap_3()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .cursor_pointer()
-            .hover(|el| el.bg(rgb(c_subtle())))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.right_tab = RightTab::Changes;
-                cx.notify();
-            }))
-            .child(icon(IconName::FileText, 20., c_secondary()))
-            .child(
+        let mut rows = div().v_flex();
+        for (i, change) in self.changes.iter().take(4).enumerate() {
+            let path = change.path.clone();
+            let (dir, name) = match change.path.rsplit_once('/') {
+                Some((d, n)) => (format!("{d}/"), n.to_string()),
+                None => (String::new(), change.path.clone()),
+            };
+            rows = rows.child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .v_flex()
+                    .id(("card-file", i))
+                    .h(px(28.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(rgb(c_border()))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.right_tab = RightTab::Changes;
+                        this.show_panel = true;
+                        this.open_change(&path);
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::File, 12., c_muted()))
                     .child(
                         div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .text_size(px(12.5))
+                            .child(div().flex_none().child(name))
+                            .child(
+                                div()
+                                    .ml_2()
+                                    .truncate()
+                                    .text_color(rgb(c_muted()))
+                                    .child(dir),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_add()))
+                            .child(format!("+{}", change.added)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_del()))
+                            .child(format!("−{}", change.removed)),
+                    ),
+            );
+        }
+        let more = self.changes.len().saturating_sub(4);
+        div()
+            .id("changes-card")
+            .mt_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("changes-card-head")
+                    .h(px(32.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .bg(rgb(c_subtle()))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.right_tab = RightTab::Changes;
+                        this.show_panel = true;
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::GitCompare, 13., c_secondary()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
                             .child(format!(
                                 "{} file{} changed",
                                 self.changes.len(),
@@ -2600,33 +2841,40 @@ impl RunoApp {
                     )
                     .child(
                         div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(rgb(c_muted()))
-                            .child(format!(
-                                "{}{}",
-                                names.join(", "),
-                                if more > 0 {
-                                    format!("  +{more} more")
-                                } else {
-                                    String::new()
-                                }
-                            )),
+                            .text_size(px(12.))
+                            .text_color(rgb(c_add()))
+                            .child(format!("+{added}")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_del()))
+                            .child(format!("−{removed}")),
+                    )
+                    .child(
+                        div()
+                            .ml_1()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_secondary()))
+                            .hover(|el| el.text_color(rgb(c_text())))
+                            .child("Review"),
                     ),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(c_add()))
-                    .child(format!("+{added}")),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(c_del()))
-                    .child(format!("−{removed}")),
-            )
-            .child(icon(IconName::ChevronRight, 16., c_muted()))
+            .child(rows)
+            .when(more > 0, |el| {
+                el.child(
+                    div()
+                        .h(px(26.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .border_t_1()
+                        .border_color(rgb(c_border()))
+                        .text_size(px(12.))
+                        .text_color(rgb(c_muted()))
+                        .child(format!("{more} more")),
+                )
+            })
             .animated(
                 SharedString::from(format!(
                     "card-{}-{}",
@@ -2634,7 +2882,7 @@ impl RunoApp {
                     self.changes.len()
                 )),
                 Animation::new(Duration::from_millis(400)).with_easing(ease_out_quint()),
-                |el, d| el.opacity(d).mt(px(8.0 + (1.0 - d) * 10.0)),
+                |el, d| el.opacity(d),
             )
     }
 
@@ -2647,176 +2895,189 @@ impl RunoApp {
         working: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_user = message.role == Role::User;
-        let (name, color) = match message.role {
-            Role::User => ("You", c_muted()),
-            Role::Agent => (provider.name, provider.color),
-            Role::System => ("Runo", c_red()),
+        let anim = SharedString::from(format!("msg-{}-{}", self.selected.unwrap_or(0), index));
+        let fade = |el: Stateful<Div>| {
+            el.animated(
+                anim.clone(),
+                Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
+                |el, delta| el.opacity(delta).mt(px((1.0 - delta) * 6.0)),
+            )
         };
-        let body = if message.text.is_empty() {
-            "Working…".to_string()
-        } else {
-            message.text.clone()
+        let markdown = |text: String| {
+            TextView::markdown(
+                SharedString::from(format!("body-{}-{}", self.selected.unwrap_or(0), index)),
+                text,
+            )
+            .selectable(true)
         };
-        let mut steps = div().v_flex().my_1();
-        for (i, step) in message.steps.iter().enumerate() {
+        if message.role == Role::User {
+            return fade(
+                div()
+                    .id(("message", index))
+                    .w_full()
+                    .flex()
+                    .justify_end()
+                    .child(
+                        div()
+                            .max_w(px(560.))
+                            .px(px(14.))
+                            .py(px(10.))
+                            .rounded(px(14.))
+                            .bg(rgb(c_active()))
+                            .text_size(px(13.5))
+                            .text_color(rgb(c_text()))
+                            .whitespace_normal()
+                            .child(markdown(message.text.clone())),
+                    ),
+            )
+            .into_any_element();
+        }
+        if message.role == Role::System {
+            return fade(
+                div()
+                    .id(("message", index))
+                    .px_3()
+                    .py(px(10.))
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(settings::mix(c_red(), c_canvas(), 0.35)))
+                    .bg(rgb(settings::mix(c_red(), c_canvas(), 0.07)))
+                    .text_size(px(13.))
+                    .child(
+                        div()
+                            .pt(px(2.))
+                            .child(icon(IconName::TriangleAlert, 14., c_red())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(markdown(message.text.clone())),
+                    ),
+            )
+            .into_any_element();
+        }
+        let key = (self.selected.unwrap_or(0), index);
+        let live = working;
+        let open = live || self.open_steps.contains(&key);
+        let mut steps = div()
+            .v_flex()
+            .ml(px(5.))
+            .pl_3()
+            .border_l_1()
+            .border_color(rgb(c_border()));
+        let shown = if open { message.steps.len() } else { 0 };
+        for (i, step) in message.steps.iter().take(shown).enumerate() {
             steps = steps.child(stagger(
                 div().child(self.step_row(step)),
-                SharedString::from(format!(
-                    "step-{}-{}-{}",
-                    self.selected.unwrap_or(0),
-                    index,
-                    i
-                )),
+                SharedString::from(format!("step-{}-{}-{}", key.0, index, i)),
                 i,
             ));
         }
-        let is_system = message.role == Role::System;
+        let n = message.steps.len();
         let copy_text = message.text.clone();
-        let avatar = match message.role {
-            Role::Agent => self
-                .provider_badge(provider, 32.)
-                .rounded_full()
-                .into_any_element(),
-            Role::System => div()
-                .size(px(32.))
-                .flex_none()
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(settings::mix(c_red(), c_canvas(), 0.14)))
-                .child(icon(IconName::TriangleAlert, 15., c_red()))
-                .into_any_element(),
-            Role::User => div()
-                .size(px(32.))
-                .flex_none()
-                .rounded_full()
-                .bg(rgb(c_border()))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(color))
-                .child("You")
-                .into_any_element(),
-        };
-        div()
-            .id(("message", index))
-            .group("message")
+        let summary = div()
+            .id(("steps-toggle", index))
+            .h(px(26.))
             .flex()
-            .gap_3()
-            .child(avatar)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .v_flex()
-                    .gap_1()
-                    .child(
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .text_color(rgb(c_secondary()))
+            .hover(|el| el.text_color(rgb(c_text())))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.open_steps.remove(&key) {
+                    this.open_steps.insert(key);
+                }
+                cx.notify();
+            }))
+            .child(icon(
+                if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                },
+                12.,
+                c_muted(),
+            ))
+            .child(format!(
+                "{} {} step{}",
+                if live { "Working ·" } else { "Worked ·" },
+                n,
+                if n == 1 { "" } else { "s" }
+            ));
+        fade(
+            div()
+                .id(("message", index))
+                .group("message")
+                .v_flex()
+                .gap_2()
+                .when(n > 0, |el| {
+                    el.child(summary).when(open, |el| el.child(steps))
+                })
+                .child(
+                    div()
+                        .w_full()
+                        .whitespace_normal()
+                        .text_size(px(13.5))
+                        .text_color(rgb(c_text()))
+                        .child(if message.text.is_empty() {
+                            working_indicator().into_any_element()
+                        } else {
+                            markdown(message.text.clone()).into_any_element()
+                        }),
+                )
+                .when(show_changes && !working, |el| {
+                    el.child(self.changes_card(cx))
+                })
+                .when(!message.text.is_empty(), |el| {
+                    el.child(
                         div()
+                            .h(px(22.))
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(name),
-                            )
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child(self.provider_mark(provider, 12.))
+                            .child(provider.name)
                             .when(!message.time.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(c_muted()))
-                                        .child(message.time.clone()),
-                                )
+                                el.child("·").child(message.time.clone())
                             })
-                            .when(!message.text.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .id(("copy", index))
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .px_2()
-                                        .py(px(2.))
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .text_xs()
-                                        .text_color(rgb(c_muted()))
-                                        .opacity(0.)
-                                        .group_hover("message", |el| el.opacity(1.))
-                                        .hover(|el| {
-                                            el.bg(rgb(c_subtle())).text_color(rgb(c_text()))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                copy_text.clone(),
-                                            ));
-                                            this.info = Some((
-                                                "Copied to the clipboard.".into(),
-                                                std::time::Instant::now(),
-                                            ));
-                                            cx.notify();
-                                        }))
-                                        .child(icon(IconName::Copy, 12., c_muted()))
-                                        .child("Copy"),
+                            .when(!message.meta.is_empty(), |el| {
+                                el.child("·").child(message.meta.clone())
+                            })
+                            .child(
+                                self.ghost_button_sized(
+                                    ("copy", index),
+                                    IconName::Copy,
+                                    "Copy",
+                                    22.,
                                 )
-                            }),
+                                .opacity(0.)
+                                .group_hover("message", |el| el.opacity(1.))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_text.clone(),
+                                        ));
+                                        this.info = Some((
+                                            "Copied to the clipboard.".into(),
+                                            std::time::Instant::now(),
+                                        ));
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
                     )
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(760.))
-                            .whitespace_normal()
-                            .text_sm()
-                            .when(is_user, |el| {
-                                el.px_4().py_3().rounded_xl().bg(rgb(c_subtle()))
-                            })
-                            .when(is_system, |el| {
-                                el.px_4()
-                                    .py_3()
-                                    .rounded_xl()
-                                    .border_1()
-                                    .border_color(rgb(settings::mix(c_red(), c_canvas(), 0.35)))
-                                    .bg(rgb(settings::mix(c_red(), c_canvas(), 0.06)))
-                            })
-                            .text_color(rgb(c_text()))
-                            .child(if message.text.is_empty() {
-                                working_indicator().into_any_element()
-                            } else {
-                                TextView::markdown(
-                                    SharedString::from(format!(
-                                        "body-{}-{}",
-                                        self.selected.unwrap_or(0),
-                                        index
-                                    )),
-                                    body,
-                                )
-                                .selectable(true)
-                                .into_any_element()
-                            }),
-                    )
-                    .when(!message.steps.is_empty(), |el| el.child(steps))
-                    .when(!message.meta.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(c_muted()))
-                                .child(message.meta.clone()),
-                        )
-                    })
-                    .when(show_changes && !working, |el| {
-                        el.child(self.changes_card(cx))
-                    }),
-            )
-            .animated(
-                SharedString::from(format!("msg-{}-{}", self.selected.unwrap_or(0), index)),
-                Animation::new(Duration::from_millis(280)).with_easing(ease_out_quint()),
-                |el, delta| el.opacity(delta).mt(px((1.0 - delta) * 8.0)),
-            )
+                }),
+        )
+        .into_any_element()
     }
 
     /// The sessions racing on the same task, to compare and keep one.
@@ -2941,7 +3202,15 @@ impl RunoApp {
         let confirming = self.confirm_delete == Some(id);
         let isolated = session.isolated;
         let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
-        let mut list = div().v_flex().gap_5().px_8().py_5();
+        let mut list = div()
+            .w_full()
+            .max_w(px(780.))
+            .mx_auto()
+            .v_flex()
+            .gap_6()
+            .px_6()
+            .pt_6()
+            .pb_8();
         if session.race != 0 {
             list = list.child(self.race_strip(session, cx));
         }
@@ -2953,12 +3222,20 @@ impl RunoApp {
                     .justify_center()
                     .text_xs()
                     .text_color(rgb(c_muted()))
-                    .child(format!("Started at {}", first.time)),
+                    .text_size(px(11.5))
+                    .child(format!("Started {}", first.time)),
             );
         }
         for (i, message) in session.messages.iter().enumerate() {
             let show = Some(i) == last_agent && !self.changes.is_empty();
-            list = list.child(self.message_view(i, message, provider, show, working, cx));
+            list = list.child(self.message_view(
+                i,
+                message,
+                provider,
+                show,
+                working && Some(i) == last_agent,
+                cx,
+            ));
         }
         if let Some(task) = self.pending_start.get(&session.id) {
             list = list.child(
@@ -2992,180 +3269,150 @@ impl RunoApp {
                     ),
             );
         }
+        let status = match self.started.get(&id).filter(|_| working) {
+            Some(start) => format!("Working · {}", elapsed(start.elapsed())),
+            None => Self::status_label(session.status).to_string(),
+        };
+        let header = div()
+            .h(px(44.))
+            .flex_none()
+            .px_4()
+            .flex()
+            .items_center()
+            .gap_3()
+            .border_b_1()
+            .border_color(rgb(c_border()))
+            .child(if self.renaming {
+                div()
+                    .w(px(360.))
+                    .child(Input::new(&self.rename).bordered(true).h(px(28.)))
+                    .into_any_element()
+            } else {
+                div()
+                    .id("session-title")
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .flex_shrink(1.)
+                    .cursor_pointer()
+                    .group("title")
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Click to rename")
+                            .build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.start_rename(window, cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(session.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .opacity(0.)
+                            .group_hover("title", |el| el.opacity(1.))
+                            .child(icon(IconName::Pencil, 12., c_muted())),
+                    )
+                    .into_any_element()
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .child(icon(IconName::GitBranch, 12., c_muted()))
+                    .child(session.branch.clone())
+                    .when(isolated, |el| {
+                        el.child(
+                            div()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded_sm()
+                                .bg(rgb(c_subtle()))
+                                .text_size(px(11.))
+                                .child("worktree"),
+                        )
+                    }),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .child(self.status_dot(session.status, "hdr-dot", 6.))
+                    .child(status),
+            )
+            .when(working, |el| {
+                el.child(
+                    self.button("stop", "Stop", false)
+                        .h(px(26.))
+                        .text_color(rgb(c_red()))
+                        .child(icon(IconName::CircleStop, 13., c_red()))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.stop();
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(confirming, |el| {
+                el.child(
+                    self.button("cancel-delete", "Cancel", false)
+                        .h(px(26.))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.confirm_delete = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.button(
+                        "delete",
+                        if isolated && !self.demo && remove_worktree() {
+                            "Delete session & worktree"
+                        } else {
+                            "Delete session"
+                        },
+                        false,
+                    )
+                    .h(px(26.))
+                    .border_color(rgb(c_red()))
+                    .text_color(rgb(c_red()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.delete_session(id);
+                        cx.notify();
+                    })),
+                )
+            })
+            .when(!confirming, |el| {
+                el.child(
+                    self.ghost_button("delete", IconName::Trash, "Delete session")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if confirm_delete() {
+                                this.confirm_delete = Some(id);
+                            } else {
+                                this.delete_session(id);
+                            }
+                            cx.notify();
+                        })),
+                )
+            });
         div()
             .flex_1()
             .min_w_0()
             .v_flex()
-            .child(
-                div()
-                    .px_8()
-                    .pt_5()
-                    .pb_3()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_1()
-                            .min_w_0()
-                            .child(if self.renaming {
-                                div()
-                                    .w(px(420.))
-                                    .child(Input::new(&self.rename).bordered(true).h(px(38.)))
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .id("session-title")
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .min_w_0()
-                                    .cursor_pointer()
-                                    .group("title")
-                                    .tooltip(|window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(
-                                            "Click to rename",
-                                        )
-                                        .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.start_rename(window, cx);
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_2xl()
-                                            .font_weight(FontWeight::BOLD)
-                                            .child(session.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .opacity(0.)
-                                            .group_hover("title", |el| el.opacity(1.))
-                                            .child(icon(IconName::Pencil, 15., c_muted())),
-                                    )
-                                    .into_any_element()
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_sm()
-                                    .text_color(rgb(c_secondary()))
-                                    .child(if working {
-                                        self.provider_badge(provider, 18.)
-                                            .animated(
-                                                "hdr-badge",
-                                                Animation::new(Duration::from_millis(1100))
-                                                    .repeat()
-                                                    .with_easing(pulsating_between(0.35, 1.0)),
-                                                |el, d| el.opacity(d),
-                                            )
-                                            .into_any_element()
-                                    } else {
-                                        self.provider_badge(provider, 18.).into_any_element()
-                                    })
-                                    .child(provider.name)
-                                    .child(div().h(px(14.)).w(px(1.)).bg(rgb(c_border())))
-                                    .child(icon(IconName::GitBranch, 14., c_muted()))
-                                    .child(session.branch.clone())
-                                    .child(self.status_dot(session.status, "hdr-dot", 7.))
-                                    .child(match self.started.get(&id).filter(|_| working) {
-                                        Some(start) => {
-                                            format!("Working · {}", elapsed(start.elapsed()))
-                                        }
-                                        None => Self::status_label(session.status).to_string(),
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_2()
-                            .when(working, |el| {
-                                el.child(
-                                    self.button("stop", "Stop", false)
-                                        .h(px(36.))
-                                        .text_color(rgb(c_red()))
-                                        .child(icon(IconName::CircleStop, 15., c_red()))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.stop();
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .child(
-                                self.icon_button(
-                                    "toggle-panel",
-                                    if self.show_panel {
-                                        IconName::PanelRightClose
-                                    } else {
-                                        IconName::PanelRightOpen
-                                    },
-                                    if self.show_panel {
-                                        "Hide changes panel"
-                                    } else {
-                                        "Show changes panel"
-                                    },
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.show_panel = !this.show_panel;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .when(confirming, |el| {
-                                el.child(
-                                    self.button("cancel-delete", "Cancel", false)
-                                        .h(px(36.))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.confirm_delete = None;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    self.button(
-                                        "delete",
-                                        if isolated && !self.demo && remove_worktree() {
-                                            "Delete session & worktree"
-                                        } else {
-                                            "Delete session"
-                                        },
-                                        false,
-                                    )
-                                    .h(px(36.))
-                                    .border_color(rgb(c_red()))
-                                    .text_color(rgb(c_red()))
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.delete_session(id);
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(!confirming, |el| {
-                                el.child(
-                                    self.icon_button("delete", IconName::Trash, "Delete session")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if confirm_delete() {
-                                                this.confirm_delete = Some(id);
-                                            } else {
-                                                this.delete_session(id);
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                            }),
-                    ),
-            )
+            .child(header)
             .child(
                 div()
                     .id("chat")
@@ -3192,19 +3439,17 @@ impl RunoApp {
         let key = key.to_string();
         div()
             .id(id)
-            .h(px(32.))
-            .px_3()
+            .h(px(26.))
+            .px_2()
             .flex()
             .items_center()
-            .gap_2()
-            .rounded_lg()
-            .border_1()
+            .gap(px(6.))
+            .rounded_md()
             .cursor_pointer()
-            .text_sm()
-            .text_color(rgb(c_text()))
-            .border_color(rgb(if open { c_blue() } else { c_border() }))
-            .when(open, |el| el.bg(rgb(c_selected())))
-            .hover(|el| el.bg(rgb(c_subtle())))
+            .text_size(px(12.))
+            .text_color(rgb(c_secondary()))
+            .when(open, |el| el.bg(rgb(c_active())).text_color(rgb(c_text())))
+            .hover(|el| el.bg(rgb(c_subtle())).text_color(rgb(c_text())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menu = if this.menu.as_deref() == Some(key.as_str()) {
                     None
@@ -3215,18 +3460,10 @@ impl RunoApp {
             }))
             .when_some(lead, |el, lead| el.child(lead))
             .when_some(caption, |el, caption| {
-                el.child(div().text_xs().text_color(rgb(c_muted())).child(caption))
+                el.child(div().text_color(rgb(c_muted())).child(caption))
             })
             .child(label)
-            .child(icon(
-                if open {
-                    IconName::ChevronUp
-                } else {
-                    IconName::ChevronDown
-                },
-                12.,
-                c_muted(),
-            ))
+            .child(icon(IconName::ChevronDown, 11., c_muted()))
     }
 
     /// Popup list anchored above its button; picking an item or clicking elsewhere closes it.
@@ -3243,19 +3480,16 @@ impl RunoApp {
             list = list.child(
                 div()
                     .id(("menu-item", i))
-                    .min_h(px(32.))
+                    .min_h(px(28.))
                     .px_2()
-                    .py_1()
+                    .py(px(5.))
                     .flex()
                     .items_center()
                     .gap_2()
                     .rounded_md()
                     .cursor_pointer()
-                    .text_sm()
-                    .when(selected, |el| {
-                        el.bg(rgb(c_selected())).text_color(rgb(c_blue()))
-                    })
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .text_size(px(13.))
+                    .hover(|el| el.bg(rgb(c_active())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         on_pick(this, i);
                         this.menu = None;
@@ -3267,7 +3501,7 @@ impl RunoApp {
                         |el| {
                             el.child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(11.5))
                                     .text_color(rgb(c_muted()))
                                     .max_w(px(280.))
                                     .whitespace_normal()
@@ -3276,21 +3510,21 @@ impl RunoApp {
                         },
                     ))
                     .when(selected, |el| {
-                        el.child(icon(IconName::Check, 14., c_blue()))
+                        el.child(icon(IconName::Check, 13., c_text()))
                     }),
             );
         }
         fade(
             div()
                 .absolute()
-                .bottom(px(40.))
+                .bottom(px(32.))
                 .left_0()
-                .min_w(px(210.))
+                .min_w(px(220.))
                 .max_h(px(340.))
-                .rounded_xl()
+                .rounded_lg()
                 .border_1()
                 .border_color(rgb(c_border()))
-                .bg(rgb(c_canvas()))
+                .bg(rgb(c_raised()))
                 .shadow_lg()
                 .occlude()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -3398,13 +3632,13 @@ impl RunoApp {
             ));
         }
 
-        let mut chips = div().flex().flex_wrap().items_center().gap_2().child(
+        let mut chips = div().flex().flex_wrap().items_center().gap_1().child(
             div()
                 .relative()
                 .child(self.menu_button(
                     SharedString::from("chip-provider"),
                     "provider",
-                    Some(self.provider_badge(provider, 16.).into_any_element()),
+                    Some(self.provider_mark(provider, 13.).into_any_element()),
                     None,
                     provider.name.to_string(),
                     cx,
@@ -3454,64 +3688,75 @@ impl RunoApp {
             );
         }
 
+        let ready = !working && !empty_prompt;
         div()
-            .px_8()
-            .pb_2()
+            .w_full()
+            .max_w(px(780.))
+            .mx_auto()
+            .px_6()
+            .pb_3()
             .v_flex()
-            .gap_2()
+            .gap(px(6.))
             .child(
                 div()
-                    .px_4()
-                    .py_3()
+                    .px_3()
+                    .pt_3()
+                    .pb_2()
                     .v_flex()
-                    .gap_3()
-                    .rounded_xl()
+                    .gap_2()
+                    .rounded(px(12.))
                     .border_1()
                     .border_color(rgb(c_border()))
-                    .bg(rgb(c_canvas()))
+                    .bg(rgb(c_raised()))
+                    .shadow_sm()
                     .child(
-                        Textarea::new(&self.prompt)
-                            .appearance(false)
-                            .bordered(false)
-                            .h(px(56.)),
+                        div().px_1().text_size(px(13.5)).child(
+                            Textarea::new(&self.prompt)
+                                .appearance(false)
+                                .bordered(false)
+                                .h(px(48.)),
+                        ),
                     )
                     .child(
                         div()
                             .flex()
-                            .items_end()
+                            .items_center()
                             .justify_between()
                             .gap_3()
                             .child(div().flex_1().min_w_0().child(chips))
                             .child(
                                 div()
                                     .id("send")
-                                    .size(px(38.))
+                                    .size(px(28.))
                                     .flex_none()
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded_lg()
+                                    .rounded_full()
                                     .cursor_pointer()
-                                    .bg(rgb(if working || empty_prompt {
-                                        c_muted()
-                                    } else {
-                                        c_text()
-                                    }))
-                                    .when(!working && !empty_prompt, |el| {
-                                        el.hover(|el| el.bg(rgb(c_blue())))
+                                    .bg(rgb(if ready { c_text() } else { c_active() }))
+                                    .when(ready, |el| el.hover(|el| el.opacity(0.85)))
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new("Send")
+                                            .build(window, cx)
                                     })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.send_message(window, cx);
                                         cx.notify();
                                     }))
                                     .child(if working {
-                                        icon(IconName::Loader, 18., c_canvas()).animated(
+                                        icon(IconName::Loader, 14., c_secondary()).animated(
                                             "spin",
                                             Animation::new(Duration::from_millis(900)).repeat(),
                                             |i, d| i.rotate(percentage(d)),
                                         )
                                     } else {
-                                        icon(IconName::ArrowUp, 18., c_canvas()).into_any_element()
+                                        icon(
+                                            IconName::ArrowUp,
+                                            15.,
+                                            if ready { c_canvas() } else { c_muted() },
+                                        )
+                                        .into_any_element()
                                     }),
                             ),
                     ),
@@ -3522,14 +3767,22 @@ impl RunoApp {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .text_xs()
+                    .text_size(px(11.))
                     .text_color(rgb(c_muted()))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(icon(IconName::GitBranch, 12., c_muted()))
+                            .child(icon(
+                                if isolated {
+                                    IconName::GitBranch
+                                } else {
+                                    IconName::Folder
+                                },
+                                11.,
+                                c_muted(),
+                            ))
                             .child(if isolated {
                                 "Isolated worktree"
                             } else {
@@ -3537,9 +3790,9 @@ impl RunoApp {
                             }),
                     )
                     .child(if cx.global::<AppSettings>().send_on_enter {
-                        "↵ to send  ·  ⇧↵ new line".to_string()
+                        "↵ send  ·  ⇧↵ new line".to_string()
                     } else {
-                        format!("{MOD_KEY}↵ to send  ·  ↵ new line")
+                        format!("{MOD_KEY}↵ send  ·  ↵ new line")
                     }),
             )
             .into_any_element()
@@ -3660,7 +3913,12 @@ impl RunoApp {
                     .p_8()
                     .v_flex()
                     .gap_4()
-                    .child(div().text_2xl().font_weight(FontWeight::BOLD).child(title))
+                    .child(
+                        div()
+                            .text_size(px(20.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
                     .child(body),
             )
             .into_any_element()
@@ -4216,29 +4474,27 @@ impl RunoApp {
         let selected = self.right_tab == tab;
         div()
             .id(SharedString::from(format!("rt-{label}")))
-            .h_full()
-            .px_4()
+            .h(px(26.))
+            .px(px(10.))
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(6.))
+            .rounded_md()
             .cursor_pointer()
-            .text_sm()
+            .text_size(px(12.5))
+            .font_weight(FontWeight::MEDIUM)
             .when(selected, |el| {
-                el.font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(c_text()))
-                    .border_b_2()
-                    .border_color(rgb(c_blue()))
+                el.bg(rgb(c_active())).text_color(rgb(c_text()))
             })
-            .when(!selected, |el| el.text_color(rgb(c_secondary())))
+            .when(!selected, |el| {
+                el.text_color(rgb(c_secondary()))
+                    .hover(|el| el.text_color(rgb(c_text())))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.right_tab = tab;
                 cx.notify();
             }))
-            .child(icon(
-                name,
-                16.,
-                if selected { c_text() } else { c_secondary() },
-            ))
+            .child(icon(name, 13., if selected { c_text() } else { c_muted() }))
             .child(label)
     }
 
@@ -4435,12 +4691,7 @@ impl RunoApp {
             .changes
             .iter()
             .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-        let mut list = div()
-            .v_flex()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .overflow_hidden();
+        let mut list = div().v_flex();
         for (i, change) in self.changes.iter().enumerate() {
             let path = change.path.clone();
             let selected = self.selected_file.as_deref() == Some(change.path.as_str());
@@ -4449,14 +4700,15 @@ impl RunoApp {
                 div()
                     .id(("chg", i))
                     .group("change-row")
-                    .h(px(38.))
-                    .px_3()
+                    .h(px(28.))
+                    .px_2()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
+                    .rounded_md()
                     .cursor_pointer()
-                    .when(selected, |el| el.bg(rgb(c_selected())))
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .when(selected, |el| el.bg(rgb(c_active())))
+                    .when(!selected, |el| el.hover(|el| el.bg(rgb(c_subtle()))))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.demo {
                             this.selected_file = Some(path.clone());
@@ -4468,21 +4720,27 @@ impl RunoApp {
                     }))
                     .child(
                         div()
-                            .w(px(16.))
-                            .text_xs()
-                            .font_weight(FontWeight::BOLD)
+                            .w(px(12.))
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(change_color(&change.status)))
                             .child(change.status.clone()),
                     )
-                    .child(
+                    .child({
+                        let (dir, name) = match change.path.rsplit_once('/') {
+                            Some((d, n)) => (d.to_string(), n.to_string()),
+                            None => (String::new(), change.path.clone()),
+                        };
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(rgb(c_text()))
-                            .child(change.path.clone()),
-                    )
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(12.5))
+                            .child(div().flex_none().text_color(rgb(c_text())).child(name))
+                            .child(div().truncate().text_color(rgb(c_muted())).child(dir))
+                    })
                     .child(if confirming {
                         let (keep, gone) = (change.path.clone(), change.path.clone());
                         div()
@@ -4532,16 +4790,15 @@ impl RunoApp {
                         div()
                             .flex()
                             .items_center()
-                            .gap_3()
+                            .gap_2()
+                            .text_size(px(11.5))
                             .child(
                                 div()
-                                    .text_sm()
                                     .text_color(rgb(c_add()))
                                     .child(format!("+{}", change.added)),
                             )
                             .child(
                                 div()
-                                    .text_sm()
                                     .text_color(rgb(c_del()))
                                     .child(format!("−{}", change.removed)),
                             )
@@ -4587,54 +4844,47 @@ impl RunoApp {
             .flex_1()
             .min_h_0()
             .v_flex()
-            .p_4()
-            .gap_3()
+            .child(div().p_3().child(self.ship_bar(cx)))
             .child(
                 div()
+                    .h(px(28.))
+                    .px_3()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap_2()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(c_muted()))
+                    .child("CHANGES")
+                    .child(format!("{}", self.changes.len()))
+                    .when(!self.changes.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_color(rgb(c_add()))
+                                .font_weight(FontWeight::NORMAL)
+                                .child(format!("+{added}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(c_del()))
+                                .font_weight(FontWeight::NORMAL)
+                                .child(format!("−{removed}")),
+                        )
+                    })
+                    .child(div().flex_1())
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_4()
-                            .child(
-                                div()
-                                    .text_base()
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("Changes"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(c_add()))
-                                    .child(format!("+{added}")),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(rgb(c_del()))
-                                    .child(format!("−{removed}")),
-                            ),
-                    )
-                    .child(
-                        self.button("refresh-changes", "Refresh", false)
-                            .h(px(30.))
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(
-                                    "Re-read git status. Changes are compared with the last commit.",
-                                )
-                                .build(window, cx)
-                            })
-                            .child(icon(IconName::RefreshCw, 13., c_secondary()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh();
-                                cx.notify();
-                            })),
+                        self.ghost_button_sized(
+                            "refresh-changes",
+                            IconName::RefreshCw,
+                            "Refresh. Changes are compared with the last commit.",
+                            22.,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.refresh();
+                            cx.notify();
+                        })),
                     ),
             )
-            .child(self.ship_bar(cx))
             .child(if self.changes.is_empty() {
                 div()
                     .flex_1()
@@ -4661,7 +4911,8 @@ impl RunoApp {
                 // Scroll areas take their full max height, so size it to the rows.
                 div()
                     .flex_none()
-                    .h(px((self.changes.len() as f32 * 38. + 2.).min(170.)))
+                    .h(px((self.changes.len() as f32 * 28. + 4.).min(176.)))
+                    .px_2()
                     .overflow_y_scrollbar()
                     .child(list)
                     .into_any_element()
@@ -4669,35 +4920,60 @@ impl RunoApp {
             .when(!self.changes.is_empty(), |el| {
                 el.child(
                     div()
+                        .mt_2()
                         .flex_1()
                         .min_h_0()
                         .v_flex()
-                        .rounded_xl()
-                        .border_1()
+                        .border_t_1()
                         .border_color(rgb(c_border()))
-                        .overflow_hidden()
+                        .bg(rgb(c_canvas()))
                         .child(
                             div()
-                                .h(px(40.))
-                                .px_3()
+                                .h(px(32.))
+                                .pl_3()
+                                .pr_1()
                                 .flex()
                                 .items_center()
-                                .gap_3()
+                                .gap_2()
                                 .border_b_1()
                                 .border_color(rgb(c_border()))
-                                .child(icon(IconName::File, 16., c_secondary()))
-                                .child(div().flex_1().truncate().text_sm().child(selected.clone()))
+                                .child(icon(IconName::File, 12., c_muted()))
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_size(px(12.))
+                                        .font_family(self.mono_font.clone())
+                                        .child(selected.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
                                         .text_color(rgb(c_add()))
                                         .child(format!("+{}", sel_stats.0)),
                                 )
                                 .child(
                                     div()
-                                        .text_sm()
+                                        .text_size(px(11.5))
                                         .text_color(rgb(c_del()))
                                         .child(format!("−{}", sel_stats.1)),
+                                )
+                                .child(
+                                    self.ghost_button_sized(
+                                        "open-file",
+                                        IconName::ArrowUpRight,
+                                        "Open file",
+                                        24.,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            if let Some(path) = this.selected_file.clone() {
+                                                this.open_preview(&path);
+                                                this.right_tab = RightTab::Files;
+                                            }
+                                            cx.notify();
+                                        },
+                                    )),
                                 ),
                         )
                         .child(fade(
@@ -4712,43 +4988,7 @@ impl RunoApp {
                                 selected
                             )),
                             220,
-                        ))
-                        .child(
-                            div()
-                                .h(px(46.))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .border_t_1()
-                                .border_color(rgb(c_border()))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .text_xs()
-                                        .text_color(rgb(c_secondary()))
-                                        .child(icon(IconName::GitCompare, 14., c_muted()))
-                                        .child(format!(
-                                            "{} file{} changed",
-                                            self.changes.len(),
-                                            if self.changes.len() == 1 { "" } else { "s" }
-                                        )),
-                                )
-                                .child(
-                                    self.button("open-file", "Open file", false)
-                                        .h(px(30.))
-                                        .child(icon(IconName::ArrowUpRight, 13., c_secondary()))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(path) = this.selected_file.clone() {
-                                                this.open_preview(&path);
-                                                this.right_tab = RightTab::Files;
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
+                        )),
                 )
             })
             .into_any_element()
@@ -4830,17 +5070,21 @@ impl RunoApp {
             .when(has_changes, |el| {
                 el.child(
                     div()
-                        .flex()
-                        .items_center()
+                        .v_flex()
                         .gap_2()
                         .child(
-                            div()
-                                .flex_1()
-                                .child(Input::new(&self.commit_msg).bordered(true).h(px(32.))),
+                            div().text_size(px(12.5)).child(
+                                Input::new(&self.commit_msg)
+                                    .bordered(true)
+                                    .bg(rgb(c_canvas()))
+                                    .h(px(30.)),
+                            ),
                         )
                         .child(
                             self.button("commit", "Commit", true)
-                                .h(px(32.))
+                                .w_full()
+                                .justify_center()
+                                .h(px(28.))
                                 .tooltip(|window, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new(
                                         "Stage and commit every change. An empty message uses the session title.",
@@ -4860,20 +5104,21 @@ impl RunoApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(icon(IconName::GitBranch, 13., c_muted()))
+                    .child(icon(IconName::GitBranch, 12., c_muted()))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_xs()
+                            .text_size(px(12.))
                             .text_color(rgb(c_secondary()))
                             .child(status),
                     )
                     .child(
                         self.button("push", "Push", false)
-                            .h(px(28.))
-                            .text_xs()
+                            .h(px(24.))
+                            .px_2()
+                            .text_size(px(12.))
                             .when(!can_push, |el| el.opacity(0.45))
                             .child(icon(IconName::CloudUpload, 13., c_secondary()))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -4885,8 +5130,9 @@ impl RunoApp {
                     )
                     .child(
                         self.button("create-pr", "Create PR", false)
-                            .h(px(28.))
-                            .text_xs()
+                            .h(px(24.))
+                            .px_2()
+                            .text_size(px(12.))
                             .when(!can_pr, |el| el.opacity(0.45))
                             .tooltip(|window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(
@@ -4992,19 +5238,21 @@ impl RunoApp {
         let selected = self.cli_tab == cli;
         div()
             .id(label)
-            .h_full()
-            .px_3()
+            .h(px(22.))
+            .px_2()
             .flex()
             .items_center()
+            .rounded_md()
             .cursor_pointer()
-            .text_sm()
+            .text_size(px(12.))
+            .font_weight(FontWeight::MEDIUM)
             .when(selected, |el| {
-                el.font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(c_text()))
-                    .border_b_2()
-                    .border_color(rgb(c_text()))
+                el.bg(rgb(c_active())).text_color(rgb(c_text()))
             })
-            .when(!selected, |el| el.text_color(rgb(c_secondary())))
+            .when(!selected, |el| {
+                el.text_color(rgb(c_muted()))
+                    .hover(|el| el.text_color(rgb(c_text())))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cli_tab = cli;
                 cx.notify();
@@ -5068,7 +5316,7 @@ impl RunoApp {
             );
         }
         div()
-            .h(px(250.))
+            .h(px(230.))
             .flex_none()
             .v_flex()
             .border_t_1()
@@ -5076,18 +5324,16 @@ impl RunoApp {
             .bg(rgb(c_term_bg()))
             .child(
                 div()
-                    .h(px(40.))
+                    .h(px(32.))
                     .px_2()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
-                    .bg(rgb(c_canvas()))
                     .child(
                         div()
-                            .h_full()
                             .flex()
+                            .items_center()
+                            .gap_1()
                             .child(self.terminal_tab("Terminal", false, cx))
                             .child(self.terminal_tab("CLI", true, cx)),
                     )
@@ -5118,14 +5364,18 @@ impl RunoApp {
                             })
                             .when(!running && !self.cli_tab && has_output, |el| {
                                 el.child(
-                                    self.button("term-clear", "Clear", false)
-                                        .h(px(26.))
-                                        .px_2()
-                                        .text_xs()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                    self.ghost_button_sized(
+                                        "term-clear",
+                                        IconName::Eraser,
+                                        "Clear output",
+                                        22.,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
                                             this.terminal.remove(&id);
                                             cx.notify();
-                                        })),
+                                        },
+                                    )),
                                 )
                             }),
                     ),
@@ -5139,46 +5389,55 @@ impl RunoApp {
                 el.child(
                     div()
                         .px_3()
-                        .py_1()
                         .flex()
                         .items_center()
                         .gap_2()
                         .border_t_1()
                         .border_color(rgb(c_border()))
-                        .bg(rgb(c_canvas()))
                         .child(
                             div()
                                 .font_family(self.mono_font.clone())
-                                .text_sm()
-                                .text_color(rgb(c_secondary()))
-                                .child("$"),
+                                .text_size(px(12.))
+                                .text_color(rgb(c_green()))
+                                .child("❯"),
                         )
-                        .child(Input::new(&self.term_input).appearance(false).h(px(30.))),
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(12.5))
+                                .child(Input::new(&self.term_input).appearance(false).h(px(30.))),
+                        ),
                 )
             })
     }
 
     fn right_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .w(px(500.))
+            .w(px(460.))
             .flex_none()
             .h_full()
             .v_flex()
             .border_l_1()
             .border_color(rgb(c_border()))
-            .bg(rgb(c_canvas()))
+            .bg(rgb(c_sidebar()))
             .child(
                 div()
-                    .h(px(46.))
+                    .h(px(44.))
+                    .flex_none()
                     .px_2()
                     .flex()
                     .items_center()
+                    .gap_1()
                     .border_b_1()
                     .border_color(rgb(c_border()))
                     .child(self.right_tab_button(
                         RightTab::Changes,
                         IconName::GitCompare,
-                        format!("Changes {}", self.changes.len()),
+                        if self.changes.is_empty() {
+                            "Changes".into()
+                        } else {
+                            format!("Changes  {}", self.changes.len())
+                        },
                         cx,
                     ))
                     .child(self.right_tab_button(
@@ -5239,6 +5498,10 @@ impl Render for RunoApp {
                 Some(window),
                 cx,
             );
+            // A theme switch reloads the theme file's fonts; keep the bundled UI font.
+            if cx.theme().font_family.as_ref() != UI_FONT {
+                gpui_kit::component::Theme::update(cx, |theme| theme.font_family = UI_FONT.into());
+            }
         }
         if self.applied_enter != Some(st.send_on_enter) {
             self.applied_enter = Some(st.send_on_enter);
@@ -5282,13 +5545,9 @@ impl Render for RunoApp {
             (String::new(), c_muted(), None)
         };
         let running = self.started.len();
-        let summary = match (self.state.sessions.len(), running) {
-            (0, _) => String::new(),
-            (n, 0) => format!("{n} session{}", if n == 1 { "" } else { "s" }),
-            (n, r) => format!(
-                "{n} session{}  ·  {r} running",
-                if n == 1 { "" } else { "s" }
-            ),
+        let summary = match self.state.sessions.len() {
+            0 => String::new(),
+            n => format!("{n} session{}", if n == 1 { "" } else { "s" }),
         };
         let palette = self
             .palette
@@ -5320,6 +5579,10 @@ impl Render for RunoApp {
                 this.show_panel = !this.show_panel;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.show_sidebar = !this.show_sidebar;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if this.palette.is_some() {
                     this.close_palette(window, cx);
@@ -5341,14 +5604,17 @@ impl Render for RunoApp {
             }))
             .bg(rgb(c_canvas()))
             .text_color(rgb(c_text()))
+            .text_size(px(13.))
             .font_family(cx.theme().font_family.clone())
-            .child(self.title_bar())
+            .child(self.title_bar(cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .when(self.view != View::Settings, |el| el.child(self.sidebar(cx)))
+                    .when(self.view != View::Settings && self.show_sidebar, |el| {
+                        el.child(self.sidebar(cx))
+                    })
                     .child(div().flex_1().min_w_0().flex().child(center).animated(
                         SharedString::from(format!(
                             "center-{}-{}",
@@ -5363,16 +5629,16 @@ impl Render for RunoApp {
             .child(
                 div()
                     .id("status")
-                    .h(px(30.))
+                    .h(px(24.))
                     .flex_none()
-                    .px_4()
+                    .px_3()
                     .flex()
                     .items_center()
                     .justify_between()
                     .border_t_1()
                     .border_color(rgb(c_border()))
-                    .bg(rgb(c_canvas()))
-                    .text_xs()
+                    .bg(rgb(c_sidebar()))
+                    .text_size(px(11.5))
                     .gap_4()
                     .child(fade(
                         div()
@@ -5382,7 +5648,7 @@ impl Render for RunoApp {
                             .items_center()
                             .gap_2()
                             .text_color(rgb(status_color))
-                            .when_some(status_icon, |el, i| el.child(icon(i, 13., status_color)))
+                            .when_some(status_icon, |el, i| el.child(icon(i, 12., status_color)))
                             .child(div().truncate().child(status.clone()))
                             .when(self.notice.is_some(), |el| {
                                 el.child(
@@ -5396,7 +5662,7 @@ impl Render for RunoApp {
                                             this.notice = None;
                                             cx.notify();
                                         }))
-                                        .child(icon(IconName::X, 12., c_muted())),
+                                        .child(icon(IconName::X, 11., c_muted())),
                                 )
                             }),
                         SharedString::from(format!("status-{status}")),
@@ -5407,14 +5673,44 @@ impl Render for RunoApp {
                             .flex()
                             .flex_none()
                             .items_center()
-                            .gap_2()
-                            .text_color(rgb(c_secondary()))
-                            .when(!summary.is_empty(), |el| {
-                                el.child(summary)
-                                    .child(div().text_color(rgb(c_border())).child("|"))
+                            .gap_3()
+                            .text_color(rgb(c_muted()))
+                            .when(running > 0, |el| {
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .text_color(rgb(c_secondary()))
+                                        .child(self.status_dot(Status::Working, "sb-run", 6.))
+                                        .child(format!("{running} running")),
+                                )
                             })
-                            .child(div().size(px(7.)).rounded_full().bg(rgb(c_green())))
-                            .child("Local environment"),
+                            .when_some(
+                                self.current()
+                                    .filter(|_| self.view == View::Session)
+                                    .map(|s| s.branch.clone())
+                                    .filter(|b| !b.is_empty()),
+                                |el, branch| {
+                                    el.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(icon(IconName::GitBranch, 11., c_muted()))
+                                            .child(branch),
+                                    )
+                                },
+                            )
+                            .when(!summary.is_empty(), |el| el.child(summary))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .child(div().size(px(6.)).rounded_full().bg(rgb(c_green())))
+                                    .child("Local"),
+                            ),
                     ),
             )
             .children(palette);
@@ -5422,9 +5718,25 @@ impl Render for RunoApp {
     }
 }
 
+/// The UI typeface, bundled so the app looks the same on every platform.
+const UI_FONT: &str = "Inter";
+
+fn load_fonts(cx: &mut App) {
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.otf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.otf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.otf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.otf")),
+    ];
+    if cx.text_system().add_fonts(fonts).is_ok() {
+        gpui_kit::component::Theme::update(cx, |theme| theme.font_family = UI_FONT.into());
+    }
+}
+
 fn main() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
+        load_fonts(cx);
         bind_keys(cx);
         let settings = AppSettings::load();
         settings.apply();
