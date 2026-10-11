@@ -11,6 +11,7 @@ mod handoff;
 mod history;
 mod install;
 mod memory_mcp;
+mod models;
 mod pty;
 mod settings;
 mod settings_ui;
