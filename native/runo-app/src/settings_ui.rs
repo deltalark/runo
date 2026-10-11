@@ -1421,23 +1421,28 @@ impl RunoApp {
             .h_full()
             .v_flex()
             .child(header)
-            .child(fade(
+            .child({
+                // Pages cross-fade inside Settings, but opening Settings shows it at once.
+                let still = self.settings_switching();
                 div()
                     .id("settings-scroll")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(body),
-                SharedString::from(format!(
-                    "settings-page-{}",
-                    if query.is_empty() {
-                        self.settings_page.label()
-                    } else {
-                        "search"
-                    }
-                )),
-                220,
-            ));
+                    .child(body)
+                    .animated(
+                        SharedString::from(format!(
+                            "settings-page-{}",
+                            if query.is_empty() {
+                                self.settings_page.label()
+                            } else {
+                                "search"
+                            }
+                        )),
+                        Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                        move |el, d| if still { el } else { el.opacity(d) },
+                    )
+            });
         div()
             .size_full()
             .flex()

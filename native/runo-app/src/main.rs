@@ -263,6 +263,10 @@ struct RunoApp {
     show_sidebar: bool,
     /// When each panel last opened or closed, so it can slide instead of snapping.
     panel_anim: HashMap<&'static str, (bool, std::time::Instant)>,
+    /// Whether the last frame showed Settings; panels snap rather than slide across that change.
+    was_settings: bool,
+    /// When Settings last opened or closed; views appear without motion right after.
+    settings_switch_at: Option<std::time::Instant>,
     /// Change counts (files, added, removed) per session, for the sidebar.
     stats: HashMap<u64, (usize, usize, usize)>,
     confirm_delete: Option<u64>,
@@ -877,6 +881,8 @@ impl RunoApp {
             open_steps: Default::default(),
             show_sidebar: true,
             panel_anim: HashMap::new(),
+            was_settings: false,
+            settings_switch_at: None,
             stats: HashMap::new(),
             new_project: state.projects.first().map(|p| p.id),
             view: View::Session,
@@ -2584,21 +2590,25 @@ impl RunoApp {
                         self.on_context(ctxmenu::CtxTarget::Tab(id), cx),
                     )
                     .group("tab")
-                    .h(px(34.))
+                    // A whole rounded box rather than an open-bottomed one: a border with a
+                    // missing side draws uneven, discoloured corners on translucent fills.
+                    .h(px(28.))
+                    .mb(px(3.))
+                    .mr_1()
                     .min_w(px(120.))
                     .max_w(px(210.))
                     .px_3()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded_t_md()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(transparent_black())
                     .cursor_pointer()
                     .text_size(px(12.5))
                     .when(active, |el| {
                         el.bg(glass_fill(c_canvas()))
                             .text_color(rgb(c_text()))
-                            .border_1()
-                            .border_b_0()
                             .border_color(divider())
                     })
                     .when(!active, |el| {
@@ -3335,23 +3345,19 @@ impl RunoApp {
                     .child(div().size_full().overflow_y_scrollbar().child(projects)),
             )
             .child(
-                div()
-                    .p_2()
-                    .border_t_1()
-                    .border_color(rgb(c_border()))
-                    .child(
-                        div()
-                            .relative()
-                            .child(tour::anchor(&self.anchors, "settings"))
-                            .child(self.nav_item(
-                                "settings",
-                                IconName::Settings,
-                                "Settings",
-                                0,
-                                View::Settings,
-                                cx,
-                            )),
-                    ),
+                div().p_2().child(
+                    div()
+                        .relative()
+                        .child(tour::anchor(&self.anchors, "settings"))
+                        .child(self.nav_item(
+                            "settings",
+                            IconName::Settings,
+                            "Settings",
+                            0,
+                            View::Settings,
+                            cx,
+                        )),
+                ),
             )
     }
 
@@ -6658,11 +6664,16 @@ impl RunoApp {
 
 impl RunoApp {
     /// Note when a panel opens or closes, so it can animate.
-    fn track_panel(&mut self, key: &'static str, open: bool) {
+    fn track_panel(&mut self, key: &'static str, open: bool, snap: bool) {
         let now = std::time::Instant::now();
         match self.panel_anim.get(key) {
             Some((was, _)) if *was == open => {}
-            // The first time a panel is seen it just appears.
+            // The first time a panel is seen it just appears, and so does a change made by
+            // opening or leaving Settings, where sliding looks awkward.
+            _ if snap => {
+                self.panel_anim
+                    .insert(key, (open, now - Duration::from_secs(10)));
+            }
             None => {
                 self.panel_anim
                     .insert(key, (open, now - Duration::from_secs(10)));
@@ -6671,6 +6682,12 @@ impl RunoApp {
                 self.panel_anim.insert(key, (open, now));
             }
         }
+    }
+
+    /// Settings just opened or closed, so views switch without motion.
+    pub(crate) fn settings_switching(&self) -> bool {
+        self.settings_switch_at
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(PANEL_MS + 120))
     }
 
     /// The panel's last change, while it is still animating.
@@ -6685,6 +6702,13 @@ impl RunoApp {
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let st = cx.global::<AppSettings>().clone();
+        // Opening or leaving Settings swaps the whole window, so it happens without motion.
+        let in_settings = self.view == View::Settings;
+        let settings_snap = in_settings != self.was_settings;
+        self.was_settings = in_settings;
+        if settings_snap {
+            self.settings_switch_at = Some(std::time::Instant::now());
+        }
         let dark = match st.theme.as_str() {
             "dark" => true,
             "light" => false,
@@ -6775,6 +6799,7 @@ impl Render for RunoApp {
         } else {
             self.view
         };
+        let still = self.settings_switching();
         let center = match shown {
             View::Session | View::NewSession => self.session_view(window, cx),
             View::Inbox => self.list_view(View::Inbox, cx),
@@ -6802,9 +6827,9 @@ impl Render for RunoApp {
         }
         let show_right = shown == View::Session && self.current().is_some() && self.show_panel;
         let show_left = self.view != View::Settings && self.show_sidebar;
-        self.track_panel("sidebar", show_left);
-        self.track_panel("right", show_right);
-        self.track_panel("term", self.term_tall);
+        self.track_panel("sidebar", show_left, settings_snap);
+        self.track_panel("right", show_right, settings_snap);
+        self.track_panel("term", self.term_tall, false);
         let left_motion = self.panel_motion("sidebar");
         let right_motion = self.panel_motion("right");
         let left = panel_slide(
@@ -6945,7 +6970,13 @@ impl Render for RunoApp {
                             self.selected.unwrap_or(0)
                         )),
                         Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
-                        |el, delta| el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta))),
+                        move |el, delta| {
+                            if still {
+                                el
+                            } else {
+                                el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta)))
+                            }
+                        },
                     ))
                     .children(right),
             )
