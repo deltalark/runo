@@ -463,6 +463,8 @@ pub enum Event {
     Done(Target, bool),
     /// Result of a one-off background command, by the key it was started with.
     Output(String, Result<String, String>),
+    /// An interactive shell has new output, or exited.
+    Pty(u64),
 }
 
 /// Run a command to completion on a background thread and send its stdout back.
@@ -659,7 +661,7 @@ mod tests {
                     assert!(ok);
                     break;
                 }
-                Event::Output(..) => {}
+                Event::Output(..) | Event::Pty(_) => {}
             }
         }
         lines.sort();
@@ -816,7 +818,7 @@ mod arg_tests {
                     assert!(!ok);
                     break;
                 }
-                Event::Output(..) => unreachable!(),
+                Event::Output(..) | Event::Pty(_) => unreachable!(),
             }
         }
         assert_eq!(out[0], "env=from-env");
