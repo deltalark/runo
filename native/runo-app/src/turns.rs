@@ -40,10 +40,8 @@ impl RunoApp {
                     &prompt,
                     2,
                 );
-                format!(
-                    "Session memory with the full history and code state is in {}. Read it if you need earlier context.\n\n{recent}",
-                    handoff::MEMORY_FILE
-                )
+                let name = agent::provider(&provider).name;
+                format!("{}\n{recent}", handoff::digest(&session.messages, name))
             } else {
                 let recent =
                     context_prompt(&session.messages[session.conversation_start..], &prompt);
@@ -65,6 +63,10 @@ impl RunoApp {
         session.messages.push(Message::now(Role::Agent, ""));
         let sel = session.selections();
         let agent_session = session.agent_session.clone();
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|_| !demo && memory_server());
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: &sent,
@@ -74,6 +76,7 @@ impl RunoApp {
             in_git,
             session_id: &agent_session,
             images: &images,
+            memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
         };
         match agent::run_agent(Target::Session(id), &spec, &dir, self.tx.clone()) {
             Ok(handle) => {

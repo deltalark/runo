@@ -28,6 +28,8 @@ pub(crate) struct BriefInput<'a> {
     pub messages: &'a [Message],
     pub files: &'a [git::Change],
     pub commits: &'a str,
+    /// Notes agents saved through the memory server.
+    pub notes: &'a str,
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -50,14 +52,16 @@ pub(crate) fn tokens(text: &str) -> usize {
 }
 
 /// Pairs of (request, reply) in order, skipping notices and empty turns.
-fn exchanges(messages: &[Message]) -> Vec<(&Message, Option<&Message>)> {
-    let mut out: Vec<(&Message, Option<&Message>)> = Vec::new();
-    for m in messages {
+type Exchange<'a> = (&'a Message, Option<(usize, &'a Message)>);
+
+fn exchanges(messages: &[Message]) -> Vec<Exchange<'_>> {
+    let mut out: Vec<Exchange> = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
         match m.role {
             Role::User if !m.text.trim().is_empty() => out.push((m, None)),
             Role::Agent => {
                 if let Some(last) = out.last_mut().filter(|(_, r)| r.is_none()) {
-                    last.1 = Some(m);
+                    last.1 = Some((i, m));
                 }
             }
             _ => {}
@@ -65,6 +69,20 @@ fn exchanges(messages: &[Message]) -> Vec<(&Message, Option<&Message>)> {
     }
     out
 }
+
+/// Which agent wrote message `index`: the one a later switch moved away from, else `current`.
+fn author<'a>(messages: &[Message], index: usize, current: &'a str) -> &'a str {
+    messages[index..]
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .find_map(|m| parse_divider(&m.meta).map(|(from, ..)| agent::provider(from).name))
+        .unwrap_or(current)
+}
+
+/// Older requests listed by name; the rest are left to search_history.
+const EARLIER_LISTED: usize = 12;
+/// Tool steps quoted per reply.
+const STEPS_LISTED: usize = 12;
 
 /// The handoff the new agent reads before its first instruction.
 pub(crate) fn brief(input: &BriefInput) -> String {
@@ -86,7 +104,15 @@ pub(crate) fn brief(input: &BriefInput) -> String {
     let split = all.len().saturating_sub(RECENT_EXCHANGES).max(1);
     if all.len() > 1 && split > 1 {
         out.push_str("\n## Earlier requests\n");
-        for (ask, _) in &all[1..split] {
+        let earlier = &all[1..split];
+        let skip = earlier.len().saturating_sub(EARLIER_LISTED);
+        if skip > 0 {
+            out.push_str(&format!(
+                "- ({skip} older request{} not listed)\n",
+                if skip == 1 { "" } else { "s" }
+            ));
+        }
+        for (ask, _) in &earlier[skip..] {
             out.push_str(&format!("- {}\n", one_line(&ask.text, 160)));
         }
     }
@@ -101,16 +127,22 @@ pub(crate) fn brief(input: &BriefInput) -> String {
             if i > 0 {
                 out.push_str(&format!("\nMe: {}\n", clip(&ask.text, ASK_CHARS)));
             }
-            if let Some(reply) = reply {
+            if let Some((at, reply)) = reply {
+                let who = author(input.messages, *at, input.from);
                 if !reply.steps.is_empty() {
-                    out.push_str(&format!("{} did: {}\n", input.from, reply.steps.join("; ")));
+                    let skip = reply.steps.len().saturating_sub(STEPS_LISTED);
+                    let steps: Vec<String> = reply.steps[skip..]
+                        .iter()
+                        .map(|s| one_line(s, 80))
+                        .collect();
+                    out.push_str(&format!(
+                        "{who} did: {}{}\n",
+                        if skip > 0 { "…; " } else { "" },
+                        steps.join("; ")
+                    ));
                 }
                 if !reply.text.trim().is_empty() {
-                    out.push_str(&format!(
-                        "{}: {}\n",
-                        input.from,
-                        clip(&reply.text, REPLY_CHARS)
-                    ));
+                    out.push_str(&format!("{who}: {}\n", clip(&reply.text, REPLY_CHARS)));
                 }
             }
         }
@@ -147,6 +179,9 @@ pub(crate) fn brief(input: &BriefInput) -> String {
             }
         }
     }
+    if !input.notes.trim().is_empty() {
+        out.push_str(&format!("\n## Notes\n{}\n", input.notes.trim()));
+    }
     out.push_str("\n## Code state\n");
     if input.files.is_empty() {
         out.push_str("No uncommitted changes.\n");
@@ -180,8 +215,53 @@ pub(crate) fn provider_at(session: &Session, index: usize) -> &'static agent::Pr
     agent::provider(from.unwrap_or(&session.provider))
 }
 
+/// Exchanges listed in a digest.
+const DIGEST_EXCHANGES: usize = 12;
+
+/// A compact timeline of the whole session, credited per agent: what agents that cannot
+/// resume their own conversation get every turn, with the full memory file one read away.
+pub(crate) fn digest(messages: &[Message], current: &str) -> String {
+    let all = exchanges(messages);
+    let Some((task, _)) = all.first() else {
+        return String::new();
+    };
+    let mut out = format!(
+        "Session memory: {MEMORY_FILE} has the full history, plan and code state; read it before answering questions about earlier work.\n\nTask: {}\n",
+        clip(&task.text, 400)
+    );
+    out.push_str("Timeline (oldest first):\n");
+    let skip = all.len().saturating_sub(DIGEST_EXCHANGES);
+    if skip > 0 {
+        out.push_str(&format!(
+            "- ({skip} earlier exchanges in the memory file)\n"
+        ));
+    }
+    for (ask, reply) in &all[skip..] {
+        let did = match reply {
+            Some((at, r)) => {
+                let who = author(messages, *at, current);
+                let what = if r.text.trim().is_empty() {
+                    r.steps.last().map(|s| one_line(s, 120)).unwrap_or_default()
+                } else {
+                    one_line(&r.text, 160)
+                };
+                format!("{who}: {what}")
+            }
+            None => "no reply".into(),
+        };
+        out.push_str(&format!("- Asked: {} → {did}\n", one_line(&ask.text, 120)));
+    }
+    out
+}
+
 /// Where Runo keeps a session's memory, inside its folder.
 pub(crate) const MEMORY_FILE: &str = ".runo/memory.md";
+/// Notes agents saved through the memory server.
+pub(crate) const NOTES_FILE: &str = ".runo/notes.md";
+
+fn read_notes(dir: &str) -> String {
+    std::fs::read_to_string(std::path::Path::new(dir).join(NOTES_FILE)).unwrap_or_default()
+}
 
 /// The memory file's text: the same summary as a handoff, for any agent to read.
 pub(crate) fn memory_text(brief: &str) -> String {
@@ -253,6 +333,7 @@ impl RunoApp {
             messages: &session.messages,
             files: &files,
             commits: &commits,
+            notes: &read_notes(&session.dir),
         });
         self.switch_preview = false;
         self.switch_plan = Some(SwitchPlan {
@@ -288,6 +369,7 @@ impl RunoApp {
             messages: &session.messages,
             files: &files,
             commits: &git::recent_commits(&session.dir, 5),
+            notes: &read_notes(&session.dir),
         }));
         let path = std::path::Path::new(&session.dir).join(MEMORY_FILE);
         git::exclude(&session.dir, "/.runo/");
@@ -688,7 +770,9 @@ mod tests {
             messages: &messages,
             files: &files,
             commits: "abc123 Add form",
+            notes: "- Use bcrypt",
         });
+        assert!(text.contains("## Notes\n- Use bcrypt"));
         assert!(text.contains("## The task\nAdd a login page"));
         assert!(text.contains("## Earlier requests\n- Follow-up 0"));
         assert!(text.contains("Me: Follow-up 6"));
@@ -705,5 +789,119 @@ mod tests {
         assert!(memory.starts_with("# Session memory\n"));
         assert!(!memory.contains("You are taking over"));
         assert!(memory.contains("## The task"));
+    }
+
+    fn input<'a>(messages: &'a [Message], files: &'a [git::Change]) -> BriefInput<'a> {
+        BriefInput {
+            from: "Codex",
+            dir: "/repo",
+            branch: "",
+            messages,
+            files,
+            commits: "",
+            notes: "",
+        }
+    }
+
+    #[test]
+    fn digests_credit_each_agent_and_stay_short() {
+        let mut d = Message::new(Role::System, "");
+        d.meta = divider_meta("claude", "gemini", true, 10);
+        let mut messages = vec![
+            Message::new(Role::User, "Create add()"),
+            Message::new(Role::Agent, "Created add in calc.py.\nDetails…"),
+            d,
+        ];
+        for i in 0..20 {
+            messages.push(Message::new(Role::User, format!("Step {i}")));
+            messages.push(Message::new(Role::Agent, format!("Did {i}")));
+        }
+        let text = digest(&messages, "Gemini");
+        assert!(text.contains("Task: Create add()"));
+        assert!(text.contains("(9 earlier exchanges in the memory file)"));
+        assert!(text.contains("- Asked: Step 19 → Gemini: Did 19"));
+        assert!(tokens(&text) < 600);
+        let short = digest(&messages[..3], "Gemini");
+        assert!(short.contains("- Asked: Create add() → Claude Code: Created add in calc.py."));
+        assert!(digest(&[], "Gemini").is_empty());
+    }
+
+    #[test]
+    fn briefs_survive_empty_and_odd_sessions() {
+        // Nothing yet.
+        let text = brief(&input(&[], &[]));
+        assert!(!text.contains("## The task"));
+        assert!(text.contains("No uncommitted changes."));
+        // A reply with no request, notices and dividers only.
+        let mut divider = Message::new(Role::System, "");
+        divider.meta = divider_meta("claude", "codex", true, 10);
+        let odd = vec![
+            Message::new(Role::Agent, "stray reply"),
+            Message::new(Role::System, "The agent stopped with an error."),
+            divider,
+            Message::new(Role::User, "   "),
+        ];
+        let text = brief(&input(&odd, &[]));
+        assert!(!text.contains("stray reply"));
+        assert!(!text.contains("stopped with an error"));
+        assert!(!text.contains("Branch:"));
+        // A folder that is not a repository.
+        assert!(brief(&input(&odd, &[])).contains("source of truth"));
+    }
+
+    #[test]
+    fn briefs_stay_small_for_huge_sessions() {
+        let big = "lörem ïpsum 🚀 ".repeat(2000);
+        let mut messages = Vec::new();
+        for i in 0..300 {
+            messages.push(Message::new(Role::User, format!("Request {i}: {big}")));
+            let mut reply = Message::new(Role::Agent, big.clone());
+            reply.steps = (0..50).map(|n| format!("Step {n} {big}")).collect();
+            messages.push(reply);
+        }
+        let files: Vec<git::Change> = (0..500)
+            .map(|n| git::Change {
+                path: format!("src/f{n}.rs"),
+                status: "M".into(),
+                added: n,
+                removed: 0,
+            })
+            .collect();
+        let text = brief(&input(&messages, &files));
+        assert!(tokens(&text) < 6000, "{} tokens", tokens(&text));
+        assert!(text.contains("(282 older requests not listed)"));
+        assert!(text.contains("Me: Request 299"));
+        assert!(text.contains("- …and 460 more"));
+        assert!(text.contains("did: …; Step 38"));
+    }
+
+    #[test]
+    fn replies_are_credited_to_the_agent_that_wrote_them() {
+        let mut d1 = Message::new(Role::System, "");
+        d1.meta = divider_meta("claude", "gemini", true, 10);
+        let mut d2 = Message::new(Role::System, "");
+        d2.meta = divider_meta("gemini", "codex", false, 0);
+        let messages = vec![
+            Message::new(Role::User, "Start"),
+            Message::new(Role::Agent, "Claude reply"),
+            d1,
+            Message::new(Role::User, "Next"),
+            Message::new(Role::Agent, "Gemini reply"),
+            d2,
+            Message::new(Role::User, "Last"),
+            Message::new(Role::Agent, "Codex reply"),
+        ];
+        let text = brief(&input(&messages, &[]));
+        assert!(text.contains("Claude Code: Claude reply"), "{text}");
+        assert!(text.contains("Gemini: Gemini reply"));
+        assert!(text.contains("Codex: Codex reply"));
+        let session = Session {
+            provider: "codex".into(),
+            messages,
+            ..Session::default()
+        };
+        assert_eq!(provider_at(&session, 1).id, "claude");
+        assert_eq!(provider_at(&session, 4).id, "gemini");
+        assert_eq!(provider_at(&session, 7).id, "codex");
     }
 }
