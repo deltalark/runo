@@ -18,6 +18,7 @@ pub enum SettingsPage {
     MoreAgents,
     Mcp,
     Skills,
+    Hooks,
     Worktrees,
 }
 
@@ -42,6 +43,7 @@ impl SettingsPage {
                 SettingsPage::MoreAgents,
                 SettingsPage::Mcp,
                 SettingsPage::Skills,
+                SettingsPage::Hooks,
             ],
         ),
         ("Workspace", &[SettingsPage::Worktrees]),
@@ -66,6 +68,7 @@ impl SettingsPage {
             Self::MoreAgents => "More agents",
             Self::Mcp => "MCP",
             Self::Skills => "Skills",
+            Self::Hooks => "Hooks",
             Self::Worktrees => "Worktrees",
         }
     }
@@ -83,6 +86,7 @@ impl SettingsPage {
             Self::MoreAgents => "Cursor, Gemini, Copilot, Amp, Droid, Qwen Code and Grok. Runo maps its permission levels onto each CLI's flags.",
             Self::Mcp => "MCP servers found across your agents' config files.",
             Self::Skills => "Agent skills discovered in project, personal and agent folders.",
+            Self::Hooks => "Commands Claude Code runs on agent events, and the config files behind them.",
             Self::Worktrees => "Where isolated sessions and Runo's data live.",
         }
     }
@@ -105,6 +109,7 @@ impl SettingsPage {
             Self::Providers => IconName::Layers,
             Self::Mcp => IconName::Plug,
             Self::Skills => IconName::Sparkles,
+            Self::Hooks => IconName::Webhook,
             Self::Worktrees => IconName::GitBranch,
             _ => IconName::Bot,
         }
@@ -129,7 +134,8 @@ enum Ctl {
     Button(String, Action),
     Chip(String, u32),
     Keys(String),
-    Reveal(PathBuf),
+    /// Open the file in Runo's editor, or reveal it.
+    Edit(PathBuf),
 }
 
 struct Row {
@@ -494,7 +500,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                         row(
                             &m.name,
                             &format!("{} · {}{}", m.transport, if m.enabled { "Configured" } else { "Disabled" }, if m.detail.is_empty() { String::new() } else { format!(" · {}", m.detail) }),
-                            Ctl::Reveal(m.path.clone()),
+                            Ctl::Edit(m.path.clone()),
                         )
                     })
                     .collect();
@@ -502,8 +508,15 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     sections.push(section(&format!("{provider} servers"), &format!("Read from the {provider} config file. Reveal shows where to edit them."), rows));
                 }
             }
-            if sections.is_empty() {
-                sections.push(section("MCP servers", "Servers are read from ~/.claude.json and ~/.codex/config.toml.", vec![row("No servers found", "Add one with your agent's own commands and it will appear here.", Ctl::Chip("0".into(), 3))]));
+            let files: Vec<Row> = data
+                .files
+                .iter()
+                .filter(|(label, _)| label.contains("MCP") || label.contains("Codex"))
+                .map(|(label, path)| row(label, &path.display().to_string(), Ctl::Edit(path.clone())))
+                .collect();
+            sections.push(section("Config files", "Edit servers directly. Files that do not exist yet are created when you save.", files));
+            if data.mcp.is_empty() {
+                sections.insert(0, section("MCP servers", "Servers are read from ~/.claude.json and ~/.codex/config.toml.", vec![row("No servers found", "Add one with your agent's own commands and it will appear here.", Ctl::Chip("0".into(), 3))]));
             }
             sections
         }
@@ -514,7 +527,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     .skills
                     .iter()
                     .filter(|k| k.source == source)
-                    .map(|k| row(&k.name, &k.description.chars().take(200).collect::<String>(), Ctl::Reveal(k.path.clone())))
+                    .map(|k| row(&k.name, &k.description.chars().take(200).collect::<String>(), Ctl::Edit(k.path.clone())))
                     .collect();
                 if !rows.is_empty() {
                     let title = match source {
@@ -529,6 +542,36 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             if sections.is_empty() {
                 sections.push(section("Skills", "Skills live in SKILL.md files under your agents' skills folders.", vec![row("No skills found", "Create one in ~/.claude/skills, ~/.agents/skills or ~/.codex/skills.", Ctl::Chip("0".into(), 3))]));
             }
+            sections
+        }
+        SettingsPage::Hooks => {
+            let mut sections = Vec::new();
+            for scope in ["project", "user"] {
+                let rows: Vec<Row> = data
+                    .hooks
+                    .iter()
+                    .filter(|h| h.scope == scope)
+                    .map(|h| {
+                        let n = h.commands.len();
+                        let summary = format!("{n} command{} · {}", if n == 1 { "" } else { "s" }, h.commands.join(" · "));
+                        row(&h.event, &summary.chars().take(200).collect::<String>(), Ctl::Edit(h.path.clone()))
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    let title = if scope == "project" { "Project hooks" } else { "Your hooks (~/.claude/settings.json)" };
+                    sections.push(section(title, &format!("{} events", rows.len()), rows));
+                }
+            }
+            if sections.is_empty() {
+                sections.push(section("Hooks", "Hooks run a shell command when the agent uses a tool, finishes, or asks for permission.", vec![row("No hooks found", "Add a \"hooks\" block to a settings file below, for example PostToolUse with matcher Edit running your formatter.", Ctl::Chip("0".into(), 3))]));
+            }
+            let files: Vec<Row> = data
+                .files
+                .iter()
+                .filter(|(label, _)| !label.contains("MCP") && !label.contains("Codex"))
+                .map(|(label, path)| row(label, &path.display().to_string(), Ctl::Edit(path.clone())))
+                .collect();
+            sections.push(section("Config files", "Open in Runo's editor. Files that do not exist yet are created when you save.", files));
             sections
         }
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
@@ -827,10 +870,32 @@ impl RunoApp {
                 }
                 keys.into_any_element()
             }
-            Ctl::Reveal(path) => self
-                .button(("setting-reveal", ix), "Reveal", false)
-                .on_click(move |_, _, cx| cx.reveal_path(&path))
-                .into_any_element(),
+            Ctl::Edit(path) => {
+                let exists = path.exists();
+                let edit = path.clone();
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        self.button(
+                            ("setting-edit", ix),
+                            if exists { "Edit" } else { "Create" },
+                            false,
+                        )
+                        .child(icon(IconName::Pencil, 12., c_secondary()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit_path(&edit);
+                            cx.notify();
+                        })),
+                    )
+                    .when(exists, |el| {
+                        el.child(
+                            self.button(("setting-reveal", ix), "Reveal", false)
+                                .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                        )
+                    })
+                    .into_any_element()
+            }
         }
     }
 

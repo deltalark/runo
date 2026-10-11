@@ -165,6 +165,8 @@ struct RunoApp {
     file_editor: Entity<gpui_kit::component::input::EditorState>,
     file_preview: bool,
     file_dirty: bool,
+    /// Where the main-area editor returns to.
+    editor_back: View,
     terminal: HashMap<u64, Vec<String>>,
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
@@ -690,6 +692,7 @@ impl RunoApp {
             file_editor,
             file_preview: false,
             file_dirty: false,
+            editor_back: View::Session,
             terminal,
             handles: HashMap::new(),
             tx,
