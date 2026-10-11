@@ -255,6 +255,8 @@ struct RunoApp {
     /// Agent replies whose step list is expanded, by (session, message index).
     open_steps: std::collections::HashSet<(u64, usize)>,
     show_sidebar: bool,
+    /// When each panel last opened or closed, so it can slide instead of snapping.
+    panel_anim: HashMap<&'static str, (bool, std::time::Instant)>,
     /// Change counts (files, added, removed) per session, for the sidebar.
     stats: HashMap<u64, (usize, usize, usize)>,
     confirm_delete: Option<u64>,
@@ -382,6 +384,59 @@ fn slide_in<E: IntoElement + Styled + 'static>(
         Animation::new(Duration::from_millis(ms)).with_easing(ease_out_quint()),
         |el, d| el.opacity(d).left(px(24. * (1. - d))),
     )
+}
+
+/// How long panels take to slide open or closed.
+const PANEL_MS: u64 = 280;
+
+/// A side panel that slides open and closed: its width animates while its content keeps
+/// its full size and is clipped, so it reads as the panel moving, not squashing.
+/// `motion` is the panel's last change, when that was recent.
+fn panel_slide(
+    id: &str,
+    motion: Option<(bool, std::time::Instant)>,
+    open: bool,
+    width: f32,
+    from_left: bool,
+    content: impl FnOnce() -> AnyElement,
+) -> Option<AnyElement> {
+    if !open && motion.is_none() {
+        return None;
+    }
+    let wrapper = div()
+        .flex_none()
+        .h_full()
+        .overflow_hidden()
+        .flex()
+        .when(from_left, |el| el.justify_end())
+        .child(
+            div()
+                .w(px(width))
+                .h_full()
+                .flex_none()
+                .flex()
+                .child(content()),
+        );
+    Some(match motion {
+        Some((opening, at)) => wrapper.w(px(if opening { width } else { 0. })).animated(
+            SharedString::from(format!("{id}-{opening}-{:?}", at)),
+            Animation::new(Duration::from_millis(PANEL_MS)).with_easing(ease_in_out_cubic),
+            move |el, d| {
+                let shown = if opening { d } else { 1. - d };
+                el.w(px(width * shown)).opacity(0.25 + 0.75 * shown)
+            },
+        ),
+        None => wrapper.w(px(width)).into_any_element(),
+    })
+}
+
+/// Smooth start and end, for things that move across the screen.
+fn ease_in_out_cubic(t: f32) -> f32 {
+    if t < 0.5 {
+        4. * t * t * t
+    } else {
+        1. - (-2. * t + 2.).powi(3) / 2.
+    }
 }
 
 /// A friendly empty state: a softly breathing icon, a title and a hint.
@@ -798,6 +853,7 @@ impl RunoApp {
             tabs: Vec::new(),
             open_steps: Default::default(),
             show_sidebar: true,
+            panel_anim: HashMap::new(),
             stats: HashMap::new(),
             new_project: state.projects.first().map(|p| p.id),
             view: View::Session,
@@ -2590,14 +2646,15 @@ impl RunoApp {
             .border_color(rgb(c_border()))
             .bg(pane(c_sidebar()))
             .window_control_area(WindowControlArea::Drag)
-            .child(
-                div()
+            .child({
+                // The tabs line up with the main column, and follow the sidebar as it slides.
+                let (closed, open) = (60., SIDEBAR_WIDTH - lead - 8.);
+                let lead_area = div()
                     .h_full()
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .when(sidebar, |el| el.w(px(SIDEBAR_WIDTH - lead - 8.)))
                     .child(
                         self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -2617,8 +2674,24 @@ impl RunoApp {
                                         cx.notify();
                                     })),
                             ),
-                    ),
-            )
+                    );
+                match self.panel_motion("sidebar") {
+                    Some((opening, at)) => lead_area
+                        .w(px(if opening { open } else { closed }))
+                        .animated(
+                            SharedString::from(format!("title-lead-{opening}-{at:?}")),
+                            Animation::new(Duration::from_millis(PANEL_MS))
+                                .with_easing(ease_in_out_cubic),
+                            move |el, d| {
+                                let t = if opening { d } else { 1. - d };
+                                el.w(px(closed + (open - closed) * t))
+                            },
+                        ),
+                    None => lead_area
+                        .w(px(if sidebar { open } else { closed }))
+                        .into_any_element(),
+                }
+            })
             .child(
                 div()
                     .flex_1()
@@ -3040,9 +3113,16 @@ impl RunoApp {
                             .child("No sessions yet"),
                     );
                 }
+                // Opening a project folds its sessions down into place.
+                let mut rows = div().v_flex().gap(px(2.));
                 for session in sessions {
-                    projects = projects.child(self.session_row(session, cx));
+                    rows = rows.child(self.session_row(session, cx));
                 }
+                projects = projects.child(rows.animated(
+                    ("project-rows", pid as usize),
+                    Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
+                    |el, d| el.opacity(d).top(px(-6. * (1. - d))),
+                ));
             }
         }
         if cx.global::<AppSettings>().group_by_status {
@@ -4170,34 +4250,35 @@ impl RunoApp {
                     }),
             );
         }
-        fade(
-            div()
-                .absolute()
-                .bottom(px(32.))
-                .left_0()
-                .min_w(px(220.))
-                .max_h(px(340.))
-                .rounded_lg()
-                .border_1()
-                .border_color(rgb(c_border()))
-                .bg(rgb(c_raised()))
-                .shadow_lg()
-                .occlude()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.menu = None;
-                    cx.notify();
-                }))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("popup-scroll-{key}")))
-                        .max_h(px(340.))
-                        .overflow_y_scroll()
-                        .child(list),
-                ),
-            SharedString::from(format!("menu-{key}")),
-            140,
-        )
-        .into_any_element()
+        div()
+            .absolute()
+            .bottom(px(32.))
+            .left_0()
+            .min_w(px(220.))
+            .max_h(px(340.))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(rgb(c_raised()))
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id(SharedString::from(format!("popup-scroll-{key}")))
+                    .max_h(px(340.))
+                    .overflow_y_scroll()
+                    .child(list),
+            )
+            // Menus open upward from their chip: fade in while rising a few pixels.
+            .animated(
+                SharedString::from(format!("menu-{key}")),
+                Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
+                |el, d| el.opacity(d).bottom(px(26. + 6. * d)),
+            )
     }
 
     fn composer(
@@ -6330,7 +6411,7 @@ impl RunoApp {
             .session_shells(id)
             .map(|sh| self.shell_tab_button(sh, cx))
             .collect();
-        div()
+        let panel = div()
             .h(px(self.term_height()))
             .flex_none()
             .relative()
@@ -6466,7 +6547,21 @@ impl RunoApp {
                                 .child(Input::new(&self.term_input).appearance(false).h(px(30.))),
                         ),
                 )
-            })
+            });
+        // Growing or shrinking the terminal eases between the two heights.
+        match self.panel_motion("term") {
+            Some((tall, at)) => panel
+                .animated(
+                    SharedString::from(format!("term-size-{tall}-{at:?}")),
+                    Animation::new(Duration::from_millis(PANEL_MS)).with_easing(ease_in_out_cubic),
+                    move |el, d| {
+                        let (from, to) = if tall { (230., 560.) } else { (560., 230.) };
+                        el.h(px(from + (to - from) * d))
+                    },
+                )
+                .into_any_element(),
+            None => panel.into_any_element(),
+        }
     }
 
     fn right_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6532,6 +6627,32 @@ impl RunoApp {
                 260,
             ))
             .child(self.terminal_panel(window, cx))
+    }
+}
+
+impl RunoApp {
+    /// Note when a panel opens or closes, so it can animate.
+    fn track_panel(&mut self, key: &'static str, open: bool) {
+        let now = std::time::Instant::now();
+        match self.panel_anim.get(key) {
+            Some((was, _)) if *was == open => {}
+            // The first time a panel is seen it just appears.
+            None => {
+                self.panel_anim
+                    .insert(key, (open, now - Duration::from_secs(10)));
+            }
+            Some(_) => {
+                self.panel_anim.insert(key, (open, now));
+            }
+        }
+    }
+
+    /// The panel's last change, while it is still animating.
+    fn panel_motion(&self, key: &str) -> Option<(bool, std::time::Instant)> {
+        self.panel_anim
+            .get(key)
+            .copied()
+            .filter(|(_, at)| anim_on() && at.elapsed() < Duration::from_millis(PANEL_MS + 120))
     }
 }
 
@@ -6649,6 +6770,23 @@ impl Render for RunoApp {
             self.show_panel = wide;
         }
         let show_right = shown == View::Session && self.current().is_some() && self.show_panel;
+        let show_left = self.view != View::Settings && self.show_sidebar;
+        self.track_panel("sidebar", show_left);
+        self.track_panel("right", show_right);
+        self.track_panel("term", self.term_tall);
+        let left_motion = self.panel_motion("sidebar");
+        let right_motion = self.panel_motion("right");
+        let left = panel_slide(
+            "sidebar-slide",
+            left_motion,
+            show_left,
+            SIDEBAR_WIDTH,
+            true,
+            || self.sidebar(cx).into_any_element(),
+        );
+        let right = panel_slide("right-slide", right_motion, show_right, 460., false, || {
+            self.right_pane(window, cx).into_any_element()
+        });
         if self
             .info
             .as_ref()
@@ -6759,9 +6897,7 @@ impl Render for RunoApp {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .when(self.view != View::Settings && self.show_sidebar, |el| {
-                        el.child(self.sidebar(cx))
-                    })
+                    .children(left)
                     .child(div().flex_1().min_w_0().flex().child(center).animated(
                         SharedString::from(format!(
                             "center-{}-{}",
@@ -6771,7 +6907,7 @@ impl Render for RunoApp {
                         Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
                         |el, delta| el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta))),
                     ))
-                    .when(show_right, |el| el.child(self.right_pane(window, cx))),
+                    .children(right),
             )
             .child(
                 div()
