@@ -204,7 +204,14 @@ impl RunoApp {
             Err(error) => {
                 let first = error.lines().next().unwrap_or("").to_string();
                 self.gh.error = Some(if first.contains("could not start") {
-                    "The GitHub CLI (gh) is not installed. Install it and run gh auth login.".into()
+                    "The GitHub CLI (gh) is not installed. Install it, then run gh auth login."
+                        .into()
+                } else if first.contains("none of the git remotes")
+                    || first.contains("no git remotes")
+                {
+                    "This project has no GitHub remote. Push it to GitHub to see its pull requests, issues and runs here.".into()
+                } else if first.contains("auth login") || first.contains("not logged") {
+                    "Sign in to GitHub first: run gh auth login in the Terminal.".into()
                 } else {
                     first
                 });
@@ -437,16 +444,12 @@ impl RunoApp {
                 .gap_2()
                 .child(chips)
                 .when_some(self.gh.error.clone(), |el, error| {
-                    el.child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(rgb(settings::mix(c_red(), c_canvas(), 0.08)))
-                            .text_size(px(12.5))
-                            .text_color(rgb(c_red()))
-                            .child(error),
-                    )
+                    el.child(empty_hint(
+                        "gh-error",
+                        IconName::GitPullRequest,
+                        "GitHub is not available for this project",
+                        &error,
+                    ))
                 })
                 .when(self.gh.loading > 0, |el| {
                     el.child(
@@ -456,23 +459,25 @@ impl RunoApp {
                             .child("Loading from GitHub…"),
                     )
                 })
-                .child(section("PULL REQUESTS", self.gh.prs.len()))
-                .child(if self.gh.prs.is_empty() {
-                    empty("No open pull requests.").into_any_element()
-                } else {
-                    prs.into_any_element()
-                })
-                .child(section("ISSUES", self.gh.issues.len()))
-                .child(if self.gh.issues.is_empty() {
-                    empty("No open issues.").into_any_element()
-                } else {
-                    issues.into_any_element()
-                })
-                .child(section("ACTIONS", self.gh.runs.len()))
-                .child(if self.gh.runs.is_empty() {
-                    empty("No workflow runs.").into_any_element()
-                } else {
-                    runs.into_any_element()
+                .when(self.gh.error.is_none(), |el| {
+                    el.child(section("PULL REQUESTS", self.gh.prs.len()))
+                        .child(if self.gh.prs.is_empty() {
+                            empty("No open pull requests.").into_any_element()
+                        } else {
+                            prs.into_any_element()
+                        })
+                        .child(section("ISSUES", self.gh.issues.len()))
+                        .child(if self.gh.issues.is_empty() {
+                            empty("No open issues.").into_any_element()
+                        } else {
+                            issues.into_any_element()
+                        })
+                        .child(section("ACTIONS", self.gh.runs.len()))
+                        .child(if self.gh.runs.is_empty() {
+                            empty("No workflow runs.").into_any_element()
+                        } else {
+                            runs.into_any_element()
+                        })
                 }),
         )
     }

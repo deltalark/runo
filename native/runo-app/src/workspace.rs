@@ -188,7 +188,7 @@ impl RunoApp {
                 self.chip(
                     ("notes-project", i),
                     if has {
-                        format!("{} ·", project.name)
+                        format!("{} •", project.name)
                     } else {
                         project.name.clone()
                     },
