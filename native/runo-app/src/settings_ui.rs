@@ -412,6 +412,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
                 row("Glass", "A translucent window over a blurred desktop, like macOS glass. Clear shows the most of what is behind.", Ctl::Segment(options(&[("off", "Off"), ("subtle", "Subtle"), ("frosted", "Frosted"), ("clear", "Clear")]), st.glass.clone(), Rc::new(|s, v| s.glass = v))),
+                row("Interface font", "Runo's own font is tuned for sharp text at small sizes. System uses your operating system's font.", Ctl::Segment(options(&[("bundled", "Runo"), ("system", "System")]), st.font.clone(), Rc::new(|s, v| s.font = v))),
                 row("Glass menus and dialogs", "Popups, menus and dialogs are translucent with a light rim too.", Ctl::Switch(st.glass_cards, Rc::new(|s, v| s.glass_cards = v))),
                 row("Diff colors", "Colorblind uses blue and orange instead of green and red. High contrast uses stronger tints.", Ctl::Segment(options(&[("default", "Default"), ("colorblind", "Colorblind"), ("contrast", "High contrast")]), st.diff_colors.clone(), Rc::new(|s, v| s.diff_colors = v))),
             ]),
@@ -678,13 +679,13 @@ impl RunoApp {
                             .cursor_pointer()
                             .text_sm()
                             .when(selected, |el| {
-                                el.bg(rgb(c_selected()))
+                                el.bg(tint(c_selected()))
                                     .text_color(rgb(c_blue()))
                                     .font_weight(FontWeight::SEMIBOLD)
                             })
                             .when(!selected, |el| {
                                 el.text_color(rgb(c_secondary()))
-                                    .hover(|el| el.bg(rgb(c_subtle())))
+                                    .hover(|el| el.bg(tint(c_subtle())))
                             })
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 let (set, value) = (set.clone(), value.clone());
@@ -721,9 +722,9 @@ impl RunoApp {
                             .cursor_pointer()
                             .text_sm()
                             .when(selected, |el| {
-                                el.bg(rgb(c_selected())).text_color(rgb(c_blue()))
+                                el.bg(tint(c_selected())).text_color(rgb(c_blue()))
                             })
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .hover(|el| el.bg(tint(c_subtle())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.settings_menu = None;
                                 let (set, value) = (set.clone(), value.clone());
@@ -753,7 +754,7 @@ impl RunoApp {
                             .text_sm()
                             .bg(rgb(c_canvas()))
                             .border_color(rgb(if open { c_blue() } else { c_border() }))
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .hover(|el| el.bg(tint(c_subtle())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.settings_menu =
                                     if this.settings_menu.as_deref() == Some(toggle_key.as_str()) {
@@ -939,7 +940,7 @@ impl RunoApp {
             .rounded_xl()
             .border_1()
             .border_color(rgb(c_border()))
-            .bg(rgb(c_subtle()))
+            .bg(tint(c_subtle()))
             .overflow_hidden();
         let count = sec.rows.len();
         for (i, r) in sec.rows.into_iter().enumerate() {
@@ -1034,13 +1035,13 @@ impl RunoApp {
             .cursor_pointer()
             .text_sm()
             .when(selected, |el| {
-                el.bg(rgb(c_selected()))
+                el.bg(tint(c_selected()))
                     .text_color(rgb(c_blue()))
                     .font_weight(FontWeight::SEMIBOLD)
             })
             .when(!selected, |el| {
                 el.text_color(rgb(c_text()))
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_page = page;
@@ -1075,7 +1076,7 @@ impl RunoApp {
             .v_flex()
             .p_3()
             .border_r_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(pane(c_sidebar()));
         let mut groups = div()
             .id("settings-nav")
@@ -1170,7 +1171,7 @@ impl RunoApp {
                         .cursor_pointer()
                         .text_sm()
                         .text_color(rgb(c_secondary()))
-                        .hover(|el| el.bg(rgb(c_subtle())))
+                        .hover(|el| el.bg(tint(c_subtle())))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.view = View::Session;
                             cx.notify();
@@ -1291,7 +1292,7 @@ impl RunoApp {
                     .rounded_lg()
                     .border_1()
                     .border_color(rgb(c_border()))
-                    .bg(rgb(c_subtle()))
+                    .bg(tint(c_subtle()))
                     .child(icon(IconName::Search, 14., c_muted()))
                     .child(
                         Input::new(&self.settings_search)

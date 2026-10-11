@@ -626,7 +626,7 @@ impl RunoApp {
                     .gap_2()
                     .p_3()
                     .rounded_xl()
-                    .bg(rgb(c_subtle()))
+                    .bg(tint(c_subtle()))
                     .child(row(IconName::Check, c_green(), {
                         let mut parts = vec![format!(
                             "a summary of {} exchange{}",

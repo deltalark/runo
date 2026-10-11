@@ -289,7 +289,7 @@ impl RunoApp {
                 .rounded_md()
                 .cursor_pointer()
                 .text_size(px(12.))
-                .when(on, |el| el.bg(rgb(c_active())).text_color(rgb(c_text())))
+                .when(on, |el| el.bg(tint(c_active())).text_color(rgb(c_text())))
                 .when(!on, |el| {
                     el.text_color(rgb(c_muted()))
                         .hover(|el| el.text_color(rgb(c_text())))
@@ -498,7 +498,7 @@ impl RunoApp {
                         .border_b_1()
                         .border_color(rgb(c_border()))
                         .when(r == 0, |el| {
-                            el.bg(rgb(c_subtle())).font_weight(FontWeight::SEMIBOLD)
+                            el.bg(tint(c_subtle())).font_weight(FontWeight::SEMIBOLD)
                         })
                         .when(r > 0 && r % 2 == 0, |el| el.bg(rgb(c_canvas())));
                     for c in 0..cols {
@@ -555,7 +555,7 @@ impl RunoApp {
                         .gap_2()
                         .p_3()
                         .rounded_lg()
-                        .bg(rgb(c_subtle()))
+                        .bg(tint(c_subtle()))
                         .text_sm()
                         .text_color(rgb(c_secondary()))
                         .child(icon(IconName::Info, 13., c_secondary()))

@@ -253,7 +253,7 @@ impl RunoApp {
                         .px_3()
                         .py_2()
                         .rounded_lg()
-                        .bg(rgb(c_subtle()))
+                        .bg(tint(c_subtle()))
                         .border_1()
                         .border_color(rgb(c_border()))
                         .font_family(self.mono_font.clone())
@@ -369,7 +369,7 @@ impl RunoApp {
             .font_weight(FontWeight::MEDIUM)
             .when(!busy, |el| {
                 el.cursor_pointer()
-                    .hover(|el| el.bg(rgb(c_subtle())))
+                    .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.ask_install(provider);
