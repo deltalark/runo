@@ -153,6 +153,9 @@ struct RunoApp {
     next_shell: u64,
     /// Agent CLIs open in the CLI view, by session.
     cli_runs: HashMap<u64, cliview::CliRun>,
+    /// Sessions whose JSON output already gave text this turn, so the final result is not
+    /// shown twice.
+    json_text: std::collections::HashSet<u64>,
     cli_focus: FocusHandle,
     /// Frames to wait before focusing a CLI that just opened.
     focus_cli: u8,
@@ -795,6 +798,7 @@ impl RunoApp {
             shell_tab: None,
             next_shell: 0,
             cli_runs: HashMap::new(),
+            json_text: Default::default(),
             cli_focus: cx.focus_handle(),
             focus_cli: 0,
             view_changed: None,
@@ -1140,8 +1144,14 @@ impl RunoApp {
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Line(Target::Session(id), line) => {
+                let provider = self
+                    .state
+                    .session(id)
+                    .map(|s| s.provider.clone())
+                    .unwrap_or_default();
                 let updates = match self.streams.get_mut(&id) {
                     Some(parser) => parser.feed(&line),
+                    None if agent::reports_conversation(&provider) => self.json_updates(id, &line),
                     None => vec![stream::Update::Text(line)],
                 };
                 let plain = !self.streams.contains_key(&id);
@@ -1198,7 +1208,11 @@ impl RunoApp {
                 let stopped = self.stopping.contains(&id);
                 self.handles.remove(&Target::Session(id));
                 self.streams.remove(&id);
-                self.started.remove(&id);
+                if let Some(start) = self.started.remove(&id) {
+                    let since =
+                        std::time::SystemTime::now() - start.elapsed() - Duration::from_secs(2);
+                    self.find_copilot_session(id, since);
+                }
                 self.measure(id);
                 let on_screen = self.selected == Some(id) && self.view == View::Session;
                 if let Some(session) = self.state.session_mut(id) {
@@ -2007,7 +2021,14 @@ impl RunoApp {
             return;
         }
         // CLI-first people get the agent's own CLI, with the task as its first prompt.
-        if cx.global::<AppSettings>().default_view == "cli" && agent::has_cli_view(&provider) {
+        // Only CLIs known to take a first prompt on the command line open this way.
+        if cx.global::<AppSettings>().default_view == "cli"
+            && agent::imports_cli_turns(&provider)
+            && self
+                .state
+                .session(id)
+                .is_some_and(|s| cliview::cli_blocker(s).is_none())
+        {
             if let Some(s) = self.state.session_mut(id) {
                 s.cli = true;
                 s.status = Status::Done;

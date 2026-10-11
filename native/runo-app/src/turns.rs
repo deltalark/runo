@@ -32,17 +32,26 @@ impl RunoApp {
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
-        let resume = session.has_conversation();
-        if session.provider == "claude" && !resume {
+        let has = session.has_conversation();
+        let provider = session.provider.clone();
+        // Resume the CLI's own conversation when its id is known (Claude Code and Codex can
+        // also pick up the newest one in the folder). Otherwise the history goes in the prompt.
+        let native = has
+            && agent::resumes(&provider)
+            && (matches!(provider.as_str(), "claude" | "codex")
+                || !session.agent_session.is_empty());
+        if agent::names_conversation(&provider) && !native {
             session.agent_session = agent::new_uuid();
         }
-        let (provider, dir) = (session.provider.clone(), session.dir.clone());
+        let resume = has;
+        self.json_text.remove(&id);
+        let dir = session.dir.clone();
         let in_git = !demo && git::is_repo(&dir);
         // Agents that cannot resume their own conversation get it written into the prompt.
         let handoff = std::mem::take(&mut session.handoff);
         let sent = if !handoff.is_empty() {
             format!("{handoff}\n\n## Your next instruction\n{prompt}")
-        } else if resume && !agent::resumes(&provider) {
+        } else if resume && !native {
             let memory = std::path::Path::new(&dir).join(handoff::MEMORY_FILE);
             if memory.is_file() {
                 // The memory file holds the history; only the latest exchange is resent.
@@ -81,7 +90,7 @@ impl RunoApp {
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: &sent,
-            resume: resume && agent::resumes(&provider),
+            resume: native,
             sel: &sel,
             opts,
             in_git,
@@ -110,6 +119,69 @@ impl RunoApp {
         self.save();
         self.chat_scroll.scroll_to_bottom();
         self.keep_awake_update();
+    }
+
+    /// Updates from one line of JSON output, remembering the conversation id it names.
+    pub(crate) fn json_updates(&mut self, id: u64, line: &str) -> Vec<stream::Update> {
+        let Some(parsed) = agent::json_line(line) else {
+            return if line.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![stream::Update::Text(line.to_string())]
+            };
+        };
+        if let Some(conversation) = parsed.conversation {
+            if let Some(s) = self.state.session_mut(id) {
+                s.agent_session = conversation;
+            }
+        }
+        let mut out: Vec<stream::Update> =
+            parsed.steps.into_iter().map(stream::Update::Step).collect();
+        if let Some(text) = parsed.text {
+            self.json_text.insert(id);
+            out.push(stream::Update::Text(text));
+        }
+        if let Some(result) = parsed.result.filter(|_| !self.json_text.contains(&id)) {
+            out.push(stream::Update::Text(result));
+        }
+        if let Some(error) = parsed.error {
+            out.push(stream::Update::Error(error));
+        }
+        out
+    }
+
+    /// Copilot prints no conversation id; after a run, its newest saved session is this one.
+    pub(crate) fn find_copilot_session(&mut self, id: u64, since: std::time::SystemTime) {
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        if session.provider != "copilot" || !session.agent_session.is_empty() {
+            return;
+        }
+        let root = std::env::var_os("COPILOT_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(|h| std::path::PathBuf::from(h).join(".copilot"))
+            })
+            .map(|p| p.join("session-state"));
+        let newest = root
+            .and_then(|r| std::fs::read_dir(r).ok())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let modified = e.metadata().ok()?.modified().ok()?;
+                (e.path().is_dir() && modified >= since)
+                    .then(|| (modified, e.file_name().to_string_lossy().into_owned()))
+            })
+            .max();
+        if let Some((_, found)) = newest {
+            if let Some(s) = self.state.session_mut(id) {
+                s.agent_session = found;
+            }
+        }
     }
 
     /// After a turn: count what it changed, then send the next queued prompt.
