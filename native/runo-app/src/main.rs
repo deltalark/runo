@@ -309,6 +309,8 @@ struct RunoApp {
     pending_mentions: Vec<String>,
     /// The `@query` being typed in the composer.
     mention: Option<String>,
+    /// The `/query` typed at the start of the prompt, which lists playbooks.
+    slash: Option<String>,
     /// A commit message written by the agent, waiting to be put in the commit box.
     commit_suggestion: Option<String>,
     writing_commit: bool,
@@ -855,8 +857,18 @@ impl RunoApp {
                 _ => false,
             };
             if send {
-                // With @mention suggestions open, Enter picks the first one.
-                if let Some(first) = this.mention_matches().into_iter().next() {
+                // With @mention or /playbook suggestions open, Enter picks the first one;
+                // ⌘/Ctrl+Enter on a playbook starts it as its own session instead.
+                if let Some(first) = this.slash_matches().into_iter().next() {
+                    let new_session = matches!(
+                        event,
+                        InputEvent::PressEnter {
+                            secondary: true,
+                            ..
+                        }
+                    );
+                    this.pick_slash(first, new_session, window, cx);
+                } else if let Some(first) = this.mention_matches().into_iter().next() {
                     this.pick_mention(&first, window, cx);
                 } else {
                     this.send_message(window, cx);
@@ -999,6 +1011,7 @@ impl RunoApp {
             attachments: Vec::new(),
             pending_mentions: Vec::new(),
             mention: None,
+            slash: None,
             commit_suggestion: None,
             writing_commit: false,
             awake: None,
@@ -1061,11 +1074,18 @@ impl RunoApp {
             address_sub,
         ]);
         app.restore_layout();
-        // Scheduled automations are checked twice a minute.
+        // Playbooks agents asked for start within a couple of seconds; scheduled ones are
+        // checked twice a minute.
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_secs(30))
-                .await;
+            for _ in 0..15 {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                if this
+                    .update(cx, |this, cx| this.take_playbook_requests(cx))
+                    .is_err()
+                {
+                    return;
+                }
+            }
             if this
                 .update(cx, |this, cx| {
                     this.run_due_automations(cx);
@@ -4113,6 +4133,28 @@ impl RunoApp {
                     }),
             )
             .child(div().flex_1())
+            .child(
+                div()
+                    .id("hdr-playbooks")
+                    .h(px(26.))
+                    .px_2()
+                    .mr_2()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        self.on_context(ctxmenu::CtxTarget::Playbooks(session.project_id), cx),
+                    )
+                    .child(icon(IconName::Play, 11., c_secondary()))
+                    .child("Playbooks"),
+            )
             .child(self.view_toggle(session, cx))
             .child(
                 div()

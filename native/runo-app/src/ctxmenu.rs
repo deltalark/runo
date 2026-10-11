@@ -15,6 +15,8 @@ pub(crate) enum CtxTarget {
     File(String),
     Message(usize),
     Terminal,
+    /// The Playbooks button in a session's header, for its project.
+    Playbooks(u64),
 }
 
 #[derive(Clone)]
@@ -33,6 +35,7 @@ enum Act {
     EditProject(u64),
     /// Run a playbook (id) in a project (id).
     Playbook(u64, u64),
+    ManagePlaybooks,
     Toggle(u64),
     Diff(String),
     Preview(String),
@@ -236,6 +239,22 @@ impl RunoApp {
                 ])
                 .collect()
             }
+            CtxTarget::Playbooks(pid) => self
+                .state
+                .automations
+                .iter()
+                .filter(|a| a.project_id == 0 || a.project_id == *pid)
+                .take(12)
+                .map(|a| item(a.name.clone(), IconName::Play, Act::Playbook(a.id, *pid)))
+                .chain([
+                    None,
+                    item(
+                        "Manage playbooks…",
+                        IconName::BookOpen,
+                        Act::ManagePlaybooks,
+                    ),
+                ])
+                .collect(),
             CtxTarget::Change(path) | CtxTarget::File(path) => {
                 let full = current_dir.join(path);
                 let mut v = Vec::new();
@@ -359,6 +378,7 @@ impl RunoApp {
             }
             Act::EditProject(pid) => self.edit_project(pid),
             Act::Playbook(id, pid) => self.run_playbook(id, Some(pid), cx),
+            Act::ManagePlaybooks => self.view = View::Automations,
             Act::NewIn(pid) => {
                 self.new_project = Some(pid);
                 self.open_new_session();

@@ -430,6 +430,68 @@ impl RunoApp {
     pub(crate) fn update_mention(&mut self, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().to_string();
         self.mention = mention_query(&text);
+        self.slash = slash_query(&text);
+    }
+
+    /// Playbooks matching the `/query`, best first.
+    pub(crate) fn slash_matches(&self) -> Vec<u64> {
+        let Some(query) = &self.slash else {
+            return Vec::new();
+        };
+        let q = query.to_lowercase();
+        let here = self.current().map(|s| s.project_id);
+        let mut hits: Vec<(usize, &store::Automation)> = self
+            .state
+            .automations
+            .iter()
+            .filter(|a| a.project_id == 0 || Some(a.project_id) == here)
+            .filter_map(|a| {
+                let slug = a.slug();
+                if slug.starts_with(&q) {
+                    Some((0, a))
+                } else if slug.contains(&q) || a.name.to_lowercase().contains(&q) {
+                    Some((1, a))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        hits.sort_by_key(|(rank, a)| (*rank, a.name.len()));
+        hits.into_iter().take(8).map(|(_, a)| a.id).collect()
+    }
+
+    /// Use a playbook from the `/` menu: put its prompt in the box for this session, or
+    /// start it as its own session in this project.
+    pub(crate) fn pick_slash(
+        &mut self,
+        playbook: u64,
+        new_session: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.slash = None;
+        let Some(prompt) = self
+            .state
+            .automations
+            .iter()
+            .find(|a| a.id == playbook)
+            .map(|a| a.prompt.clone())
+        else {
+            return;
+        };
+        if new_session {
+            self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+            let here = self.current().map(|s| s.project_id);
+            self.run_playbook(playbook, here, cx);
+            return;
+        }
+        if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == playbook) {
+            a.last_run = workspace::unix_now();
+        }
+        self.prompt.update(cx, |p, cx| {
+            p.set_value(prompt, window, cx);
+            p.focus(window, cx);
+        });
     }
 
     /// Files matching the `@query`, best first.
@@ -872,7 +934,12 @@ impl RunoApp {
         let session = self.current()?;
         let id = session.id;
         let matches = self.mention_matches();
-        if session.queue.is_empty() && self.attachments.is_empty() && matches.is_empty() {
+        let playbooks = self.slash_matches();
+        if session.queue.is_empty()
+            && self.attachments.is_empty()
+            && matches.is_empty()
+            && playbooks.is_empty()
+        {
             return None;
         }
         let mut col = div().v_flex().gap_1();
@@ -993,6 +1060,80 @@ impl RunoApp {
             }
             col = col.child(list);
         }
+        if !playbooks.is_empty() {
+            let mut list = div()
+                .v_flex()
+                .p_1()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(c_border()))
+                .bg(rgb(c_raised()))
+                .shadow_lg()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(rgb(c_muted()))
+                        .child(format!(
+                            "PLAYBOOKS · Enter uses it here · {}↵ starts a new session",
+                            if cfg!(target_os = "macos") {
+                                "⌘"
+                            } else {
+                                "Ctrl+"
+                            }
+                        )),
+                );
+            for (i, id) in playbooks.into_iter().enumerate() {
+                let Some(a) = self.state.automations.iter().find(|a| a.id == id) else {
+                    continue;
+                };
+                list = list.child(
+                    div()
+                        .id(("slash", i))
+                        .min_h(px(30.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(i == 0, |el| el.bg(tint(c_active())))
+                        .hover(|el| el.bg(tint(c_active())))
+                        .text_size(px(12.5))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.pick_slash(id, false, window, cx);
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::BookOpen, 12., c_muted()))
+                        .child(div().flex_none().child(format!("/{}", a.slug())))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(rgb(c_muted()))
+                                .child(a.summary()),
+                        )
+                        .child(
+                            self.ghost_button_sized(
+                                ("slash-run", i),
+                                IconName::Play,
+                                "Start as a new session",
+                                22.,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.pick_slash(id, true, window, cx);
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                );
+            }
+            col = col.child(list);
+        }
         Some(col.into_any_element())
     }
 }
@@ -1056,6 +1197,15 @@ pub fn mention_query(text: &str) -> Option<String> {
     Some(query.to_string())
 }
 
+/// `foo` when the whole prompt is `/foo` (a playbook being picked), else None.
+pub fn slash_query(text: &str) -> Option<String> {
+    let query = text.trim_start().strip_prefix('/')?;
+    if query.contains(char::is_whitespace) || query.contains('/') {
+        return None;
+    }
+    Some(query.to_lowercase())
+}
+
 /// Replace the trailing `@query` with `@path `.
 pub fn complete_mention(text: &str, path: &str) -> String {
     match text.rfind('@') {
@@ -1107,6 +1257,15 @@ mod tests {
             "Add login\n\nWith tests"
         );
         assert_eq!(clean_commit_message("\"Fix bug\""), "Fix bug");
+    }
+
+    #[test]
+    fn slash_starts_a_playbook_pick() {
+        assert_eq!(slash_query("/"), Some(String::new()));
+        assert_eq!(slash_query("/Find"), Some("find".into()));
+        assert_eq!(slash_query("/find bugs"), None);
+        assert_eq!(slash_query("see /usr/bin"), None);
+        assert_eq!(slash_query("/usr/bin"), None);
     }
 
     #[test]
