@@ -247,7 +247,7 @@ impl RunoApp {
         color: u32,
         action: Option<(&'static str, String)>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let url = item.url.clone();
         let mut meta = Vec::new();
         if item.number > 0 && !id.0.starts_with("run") {
@@ -261,7 +261,7 @@ impl RunoApp {
         if item.state == "draft" {
             meta.push("draft".into());
         }
-        div()
+        let row = div()
             .id(id)
             .group("gh-row")
             .px_3()
@@ -294,6 +294,15 @@ impl RunoApp {
             .when_some(action, |el, (label, task)| {
                 el.child(
                     self.button((label, id.1), label, false)
+                        .child(icon(
+                            if label == "Review" {
+                                IconName::GitCompare
+                            } else {
+                                IconName::Play
+                            },
+                            12.,
+                            c_secondary(),
+                        ))
                         .h(px(26.))
                         .opacity(0.)
                         .group_hover("gh-row", |el| el.opacity(1.))
@@ -322,7 +331,12 @@ impl RunoApp {
                     )
                     .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
                 )
-            })
+            });
+        stagger(
+            row,
+            SharedString::from(format!("{}-in-{}", id.0, id.1)),
+            id.1,
+        )
     }
 
     pub(crate) fn github_view(&self, cx: &mut Context<Self>) -> AnyElement {

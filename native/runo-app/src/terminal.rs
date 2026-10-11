@@ -176,6 +176,14 @@ impl RunoApp {
                         window.focus(&this.term_focus, cx);
                         cx.notify();
                     }))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(icon(
+                        IconName::Terminal,
+                        12.,
+                        if shell.exited() { c_muted() } else { c_green() },
+                    ))
                     .child(if shell.exited() {
                         format!("{} (exited)", shell.title)
                     } else {

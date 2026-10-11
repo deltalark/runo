@@ -520,6 +520,7 @@ impl RunoApp {
                 )
                 .child(
                     self.button(("review-turn", index), "Review", false)
+                        .child(icon(IconName::GitCompare, 12., c_secondary()))
                         .h(px(24.))
                         .px_2()
                         .text_size(px(12.))
@@ -531,6 +532,7 @@ impl RunoApp {
                 )
                 .child(
                     self.button(("keep-turn", index), "Keep", true)
+                        .child(icon(IconName::Check, 12., c_canvas()))
                         .h(px(24.))
                         .px_2()
                         .text_size(px(12.))
@@ -593,6 +595,7 @@ impl RunoApp {
                         .border_color(rgb(c_border()))
                         .child(
                             self.button(("plan-more", index), "Keep planning", false)
+                                .child(icon(IconName::Pencil, 12., c_secondary()))
                                 .h(px(26.))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.prompt.update(cx, |p, cx| p.focus(window, cx));
@@ -601,6 +604,7 @@ impl RunoApp {
                         )
                         .child(
                             self.button(("plan-go", index), "Approve and build", true)
+                                .child(icon(IconName::Play, 12., c_canvas()))
                                 .h(px(26.))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(id) = this.selected {
@@ -704,6 +708,7 @@ impl RunoApp {
             .when(last, |el| {
                 el.child(
                     self.button(("allow-once", index), "Allow once", false)
+                        .child(icon(IconName::Check, 12., c_secondary()))
                         .h(px(24.))
                         .px_2()
                         .text_size(px(12.))
@@ -721,6 +726,7 @@ impl RunoApp {
                 )
                 .child(
                     self.button(("allow-always", index), "Always allow", true)
+                        .child(icon(IconName::ShieldCheck, 12., c_canvas()))
                         .h(px(24.))
                         .px_2()
                         .text_size(px(12.))
