@@ -15,8 +15,11 @@ pub(crate) struct AgentUpdate {
     pub latest: String,
 }
 
-/// An agent update while it runs, and briefly after it succeeds.
+/// An agent update or install while it runs, briefly after it succeeds, and after it
+/// fails until dismissed.
 pub(crate) struct UpdateRun {
+    /// An install of a missing agent, rather than an update.
+    pub install: bool,
     pub started: std::time::Instant,
     /// The newest line the updater printed.
     pub line: String,
@@ -25,6 +28,114 @@ pub(crate) struct UpdateRun {
     /// How far the updater's own messages say it got (downloading, installing, done).
     pub phase: f32,
     pub finished: Option<std::time::Instant>,
+    /// Why it failed, in plain words, and the full log the tool wrote, if it named one.
+    pub failed: Option<(String, Option<String>)>,
+}
+
+impl UpdateRun {
+    pub(crate) fn new(install: bool, first_line: String) -> Self {
+        UpdateRun {
+            install,
+            started: std::time::Instant::now(),
+            line: first_line,
+            percent: None,
+            phase: 0.,
+            finished: None,
+            failed: None,
+        }
+    }
+
+    pub(crate) fn running(&self) -> bool {
+        self.finished.is_none() && self.failed.is_none()
+    }
+}
+
+/// The log file npm points to when it fails ("A complete log of this run can be found in: …").
+pub(crate) fn log_path(output: &str) -> Option<String> {
+    output.lines().find_map(|l| {
+        let (_, path) = l.split_once("can be found in:")?;
+        Some(path.trim().to_string()).filter(|p| !p.is_empty())
+    })
+}
+
+/// Why an update or install failed, in words a person can act on.
+pub(crate) fn failure_summary(output: &str) -> String {
+    let has = |s: &str| output.contains(s);
+    let path_after = |marker: &str| {
+        output.lines().find_map(|l| {
+            let (_, rest) = l.split_once(marker)?;
+            Some(rest.trim().trim_matches(['\'', '"']).to_string())
+        })
+    };
+    if has("EACCES") {
+        return "npm can't write to its global folder. Run `npm config set prefix ~/.npm-global` in a terminal, add ~/.npm-global/bin to your PATH, then try again.".into();
+    }
+    if has("ENOTEMPTY") {
+        let folder = output
+            .lines()
+            .find(|l| l.contains("ENOTEMPTY") && l.contains(" -> "))
+            // npm renames the old copy to a temporary ".name-xxxx" folder; that leftover
+            // folder is what blocks the next update.
+            .and_then(|l| l.split('\'').nth(3))
+            .unwrap_or("the folder npm names in the log");
+        return format!("An earlier npm update left a half-finished copy behind. Delete {folder} and try again.");
+    }
+    if has("EEXIST") {
+        let file = path_after("File exists:").unwrap_or_else(|| "a file".into());
+        return format!("{file} is in the way, probably from installing this agent another way. Remove it, then try again.");
+    }
+    if has("ETARGET") || has("E404") {
+        return "npm can't find that version yet. It may still be publishing, so try again in a few minutes.".into();
+    }
+    if [
+        "ENOTFOUND",
+        "ETIMEDOUT",
+        "ECONNRESET",
+        "ECONNREFUSED",
+        "EAI_AGAIN",
+    ]
+    .iter()
+    .any(|code| has(code))
+    {
+        return "Couldn't reach the package registry. Check your connection, then try again."
+            .into();
+    }
+    let noise = |l: &str| {
+        let l = l.trim();
+        l.is_empty()
+            || l.contains("complete log of this run")
+            || l.contains(" http fetch ")
+            || l.trim_start_matches("npm")
+                .trim_start_matches(" error")
+                .trim_start_matches(" ERR!")
+                .trim()
+                .is_empty()
+    };
+    let detail = |l: &str| {
+        l.trim()
+            .trim_start_matches("npm error")
+            .trim_start_matches("npm ERR!")
+            .trim()
+            .to_string()
+    };
+    let errors: Vec<&str> = output
+        .lines()
+        .filter(|l| (l.contains("npm error") || l.contains("npm ERR!")) && !noise(l))
+        .collect();
+    // npm's first error lines are "code X" and the message; prefer the message.
+    errors
+        .iter()
+        .find(|l| !detail(l).starts_with("code ") && !detail(l).starts_with("errno "))
+        .or(errors.first())
+        .map(|l| detail(l))
+        .or_else(|| {
+            output
+                .lines()
+                .rev()
+                .find(|l| !noise(l))
+                .map(|l| l.trim().to_string())
+        })
+        .unwrap_or_else(|| "It stopped without saying why.".into())
 }
 
 /// How long the success badge stays before the card hides itself.
@@ -123,7 +234,7 @@ fn clean_line(raw: &str) -> String {
 }
 
 /// Run an updater, sending each line it prints as `<key>-line` and the result as `<key>`.
-fn run_streaming(key: String, mut command: std::process::Command, tx: Sender<Event>) {
+pub(crate) fn run_streaming(key: String, mut command: std::process::Command, tx: Sender<Event>) {
     use std::io::Read;
     use std::process::Stdio;
     command
@@ -203,8 +314,25 @@ fn run_streaming(key: String, mut command: std::process::Command, tx: Sender<Eve
     });
 }
 
-/// The green "Updated" pill shown when an update finishes.
-fn update_done_badge(n: usize) -> AnyElement {
+/// A finished card: hold the success badge, then fade out just before it is removed.
+fn fade_after_badge(card: AnyElement, id: String) -> AnyElement {
+    let total = UPDATE_DONE_SHOWN.as_secs_f32();
+    div().child(card).animated(
+        SharedString::from(id),
+        Animation::new(UPDATE_DONE_SHOWN),
+        move |el, d| {
+            let fade_from = 1. - 0.5 / total;
+            el.opacity(if d < fade_from {
+                1.
+            } else {
+                1. - (d - fade_from) / (1. - fade_from)
+            })
+        },
+    )
+}
+
+/// The green pill shown when an update or install finishes.
+fn update_done_badge(n: usize, label: &'static str) -> AnyElement {
     let pill = div()
         .flex()
         .items_center()
@@ -219,7 +347,7 @@ fn update_done_badge(n: usize) -> AnyElement {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(c_green()))
         .child(icon(IconName::Check, 12., c_green()))
-        .child("Updated");
+        .child(label);
     pill.animated(
         ("up-done", n),
         Animation::new(Duration::from_millis(420)).with_easing(ease_out_quint()),
@@ -392,13 +520,7 @@ impl RunoApp {
         cmd.args(&args[1..]);
         self.update_runs.insert(
             provider,
-            UpdateRun {
-                started: std::time::Instant::now(),
-                line: format!("Starting {}…", args.join(" ")),
-                percent: None,
-                phase: 0.,
-                finished: None,
-            },
+            UpdateRun::new(false, format!("Starting {}…", args.join(" "))),
         );
         run_streaming(format!("update:{provider}"), cmd, self.tx.clone());
         cx.notify();
@@ -416,14 +538,25 @@ impl RunoApp {
             .map(|(id, _)| *id)
             .collect();
         for id in &done {
-            self.update_runs.remove(id);
-            self.updates.retain(|u| u.provider != *id);
+            if self.update_runs.remove(id).is_some_and(|run| !run.install) {
+                self.updates.retain(|u| u.provider != *id);
+            }
         }
         !done.is_empty()
     }
 
     /// Results of update checks and update runs.
     pub(crate) fn handle_alert_job(&mut self, key: &str, result: Result<String, String>) -> bool {
+        if let Some(provider) = key
+            .strip_prefix("update:")
+            .or_else(|| key.strip_prefix("install:"))
+            .and_then(|k| k.strip_suffix("-line"))
+        {
+            if let (Some(run), Ok(line)) = (self.update_runs.get_mut(provider), result) {
+                run.take_line(&line);
+            }
+            return true;
+        }
         if let Some(provider) = key.strip_prefix("install:") {
             self.finish_install(provider, result);
             return true;
@@ -443,15 +576,6 @@ impl RunoApp {
                     })
                 })
                 .collect();
-            return true;
-        }
-        if let Some(provider) = key
-            .strip_prefix("update:")
-            .and_then(|k| k.strip_suffix("-line"))
-        {
-            if let (Some(run), Ok(line)) = (self.update_runs.get_mut(provider), result) {
-                run.take_line(&line);
-            }
             return true;
         }
         let Some(provider) = key.strip_prefix("update:") else {
@@ -481,14 +605,13 @@ impl RunoApp {
                 caps::refresh();
             }
             Err(error) => {
-                self.update_runs.remove(provider);
-                let last = error
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("")
-                    .to_string();
-                self.notice = Some(format!("Could not update {name}: {last}"));
+                // The card stays and says what went wrong, with the log and a retry.
+                let summary = failure_summary(&error);
+                self.state
+                    .log(0, format!("Updating {name} failed: {summary}"));
+                if let Some(run) = self.update_runs.get_mut(provider) {
+                    run.failed = Some((summary, log_path(&error)));
+                }
             }
         }
         true
@@ -668,10 +791,14 @@ impl RunoApp {
                 cx,
             ));
         }
+        // Updates and installs in progress, finished or failed come first, so the one the
+        // person just started is never hidden behind "more waiting".
+        let mut run_cards = Vec::new();
         for (n, update) in self.updates.iter().enumerate() {
             let key = format!("u:{}:{}", update.provider, update.latest);
-            let run = self.update_runs.get(update.provider);
+            let run = self.update_runs.get(update.provider).filter(|r| !r.install);
             let done = run.is_some_and(|r| r.finished.is_some());
+            let failed = run.and_then(|r| r.failed.clone());
             if self.alerts_hidden.contains(&key) && !done {
                 continue;
             }
@@ -686,8 +813,12 @@ impl RunoApp {
             let (body, actions) = match run {
                 Some(_) if done => (
                     format!("{} is now on version {latest}.", provider.name),
-                    div().flex().child(update_done_badge(n)),
+                    div().flex().child(update_done_badge(n, "Updated")),
                 ),
+                Some(_) if failed.is_some() => {
+                    let (why, log) = failed.clone().unwrap_or_default();
+                    (why, self.failure_actions(("up", n), id, log, false, cx))
+                }
                 Some(run) => (
                     format!("Updating from {current} to {latest}."),
                     self.update_progress_view(n, run),
@@ -718,14 +849,18 @@ impl RunoApp {
             };
             let card = self.alert_card(
                 SharedString::from(format!("alert-{key}")),
-                c_green(),
+                if failed.is_some() { c_red() } else { c_green() },
                 if done {
                     IconName::CircleCheck
+                } else if failed.is_some() {
+                    IconName::TriangleAlert
                 } else {
                     IconName::Download
                 },
                 if done {
                     "Update complete"
+                } else if failed.is_some() {
+                    "Update failed"
                 } else if run.is_some() {
                     "Updating"
                 } else {
@@ -739,25 +874,80 @@ impl RunoApp {
                 None,
                 cx,
             );
-            cards.push(if done {
-                // Hold the badge, then fade out just before the card is removed.
-                let total = UPDATE_DONE_SHOWN.as_secs_f32();
-                div().child(card).animated(
-                    SharedString::from(format!("up-out-{key}")),
-                    Animation::new(UPDATE_DONE_SHOWN),
-                    move |el, d| {
-                        let fade_from = 1. - 0.5 / total;
-                        el.opacity(if d < fade_from {
-                            1.
-                        } else {
-                            1. - (d - fade_from) / (1. - fade_from)
-                        })
-                    },
-                )
+            let target = if run.is_some() {
+                &mut run_cards
+            } else {
+                &mut cards
+            };
+            target.push(if done {
+                fade_after_badge(card, format!("up-out-{key}"))
             } else {
                 card
             });
         }
+        let mut installs: Vec<(&&'static str, &UpdateRun)> =
+            self.update_runs.iter().filter(|(_, r)| r.install).collect();
+        installs.sort_by_key(|(_, r)| r.started);
+        for (n, (&id, run)) in installs.into_iter().enumerate() {
+            let provider = agent::provider(id);
+            let done = run.finished.is_some();
+            let key = format!("i:{id}:{:?}", run.started);
+            if self.alerts_hidden.contains(&key) && !done {
+                continue;
+            }
+            let (body, actions) = if done {
+                (
+                    format!(
+                        "Sign in once by running `{}` in a terminal, then pick it in New session.",
+                        provider.bin
+                    ),
+                    div().flex().child(update_done_badge(n, "Installed")),
+                )
+            } else if let Some((why, log)) = run.failed.clone() {
+                (why, self.failure_actions(("in", n), id, log, true, cx))
+            } else {
+                (
+                    "Downloading and setting up the CLI.".to_string(),
+                    self.update_progress_view(n + 100, run),
+                )
+            };
+            let card = self.alert_card(
+                SharedString::from(format!("alert-{key}")),
+                if run.failed.is_some() {
+                    c_red()
+                } else {
+                    c_green()
+                },
+                if done {
+                    IconName::CircleCheck
+                } else if run.failed.is_some() {
+                    IconName::TriangleAlert
+                } else {
+                    IconName::Download
+                },
+                if done {
+                    "Installed"
+                } else if run.failed.is_some() {
+                    "Install failed"
+                } else {
+                    "Installing"
+                },
+                Some(provider.name.to_string()),
+                Some(self.provider_badge(provider, 18.)),
+                body,
+                actions,
+                key.clone(),
+                None,
+                cx,
+            );
+            run_cards.push(if done {
+                fade_after_badge(card, format!("in-out-{key}"))
+            } else {
+                card
+            });
+        }
+        run_cards.extend(cards);
+        let cards = run_cards;
         if cards.is_empty() {
             return None;
         }
@@ -812,6 +1002,67 @@ impl RunoApp {
                 .child(list),
         );
         Some(stack.into_any_element())
+    }
+
+    /// Retry, the full log when the tool wrote one, and dismiss, for a failed run.
+    fn failure_actions(
+        &self,
+        id: (&'static str, usize),
+        provider: &'static str,
+        log: Option<String>,
+        install: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (tag, n) = id;
+        div()
+            .flex()
+            .gap_2()
+            .child(
+                self.button(
+                    (SharedString::from(format!("{tag}-retry")), n),
+                    "Try again",
+                    true,
+                )
+                .h(px(26.))
+                .child(icon(IconName::RotateCw, 12., c_canvas()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.update_runs.remove(provider);
+                    if install {
+                        this.run_install(provider, cx);
+                    } else {
+                        this.run_update(provider, cx);
+                    }
+                })),
+            )
+            .when_some(log, |el, log| {
+                el.child(
+                    self.button(
+                        (SharedString::from(format!("{tag}-log")), n),
+                        "View log",
+                        false,
+                    )
+                    .h(px(26.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit_path(std::path::Path::new(&log));
+                        cx.notify();
+                    })),
+                )
+            })
+            .child(
+                self.button(
+                    (SharedString::from(format!("{tag}-dismiss")), n),
+                    "Dismiss",
+                    false,
+                )
+                .h(px(26.))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.update_runs.remove(provider);
+                    if !install {
+                        this.updates.retain(|u| u.provider != provider);
+                    }
+                    cx.notify();
+                })),
+            )
     }
 
     /// The live progress of an update: a bar, what the updater is doing, and the time.
@@ -1045,13 +1296,8 @@ mod tests {
         );
         assert_eq!(phase_of("changed 1 package in 7s"), Some(0.95));
         let start = std::time::Instant::now();
-        let mut run = UpdateRun {
-            started: start,
-            line: String::new(),
-            percent: None,
-            phase: 0.,
-            finished: None,
-        };
+        let mut run = UpdateRun::new(false, String::new());
+        run.started = start;
         let early = run.progress(start);
         let later = run.progress(start + Duration::from_secs(30));
         assert!(early < later && later < 0.97, "time eases the bar forward");
@@ -1061,6 +1307,19 @@ mod tests {
         assert_eq!(run.progress(start), 0.5, "a printed percentage wins");
         run.finished = Some(start);
         assert_eq!(run.progress(start), 1.);
+        let npm_fail = "npm error code ENOTEMPTY\nnpm error syscall rename\nnpm error ENOTEMPTY: directory not empty, rename '/usr/local/lib/node_modules/@openai/codex' -> '/usr/local/lib/node_modules/@openai/.codex-x1'\nnpm error A complete log of this run can be found in: /Users/a/.npm/_logs/x-debug-0.log";
+        assert!(failure_summary(npm_fail)
+            .contains("Delete /usr/local/lib/node_modules/@openai/.codex-x1 and"));
+        assert_eq!(
+            log_path(npm_fail).as_deref(),
+            Some("/Users/a/.npm/_logs/x-debug-0.log")
+        );
+        let other = "npm error code E500\nnpm error 500 Internal Server Error - GET https://registry.npmjs.org/x\nnpm error A complete log of this run can be found in: /tmp/l.log";
+        assert_eq!(
+            failure_summary(other),
+            "500 Internal Server Error - GET https://registry.npmjs.org/x"
+        );
+        assert!(failure_summary("npm error code EACCES").contains("npm config set prefix"));
         assert_eq!(
             and_list(&["A".into(), "B".into(), "C".into()]),
             "A, B and C"
