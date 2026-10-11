@@ -474,8 +474,8 @@ impl RunoApp {
             .min_w(px(210.))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
-            .bg(rgb(c_raised()))
+            .border_color(float_edge())
+            .bg(float(c_raised()))
             .shadow_lg()
             .occlude()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {

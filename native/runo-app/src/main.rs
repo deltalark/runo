@@ -157,6 +157,7 @@ struct RunoApp {
     settings_menu: Option<String>,
     discovered: Option<Discovered>,
     applied_dark: Option<bool>,
+    applied_glass: Option<bool>,
     applied_enter: Option<bool>,
     changes: Vec<git::Change>,
     dir_is_git: bool,
@@ -787,6 +788,7 @@ impl RunoApp {
             settings_menu: None,
             discovered: None,
             applied_dark: None,
+            applied_glass: None,
             applied_enter: None,
             changes: Vec::new(),
             dir_is_git: true,
@@ -1484,8 +1486,8 @@ impl RunoApp {
                     .max_h(px(520.))
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(c_border()))
-                    .bg(rgb(c_canvas()))
+                    .border_color(float_edge())
+                    .bg(float(c_canvas()))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_click(|_, _, cx| cx.stop_propagation())
@@ -2417,7 +2419,7 @@ impl RunoApp {
                     .cursor_pointer()
                     .text_size(px(12.5))
                     .when(active, |el| {
-                        el.bg(rgb(c_canvas()))
+                        el.bg(glass_fill(c_canvas()))
                             .text_color(rgb(c_text()))
                             .border_1()
                             .border_b_0()
@@ -2482,7 +2484,7 @@ impl RunoApp {
             .pr_2()
             .border_b_1()
             .border_color(rgb(c_border()))
-            .bg(rgb(c_sidebar()))
+            .bg(pane(c_sidebar()))
             .window_control_area(WindowControlArea::Drag)
             .child(
                 div()
@@ -2948,7 +2950,7 @@ impl RunoApp {
             .v_flex()
             .border_r_1()
             .border_color(rgb(c_border()))
-            .bg(rgb(c_sidebar()))
+            .bg(pane(c_sidebar()))
             .child(
                 div()
                     .p_2()
@@ -4511,8 +4513,8 @@ impl RunoApp {
                         .v_flex()
                         .rounded_2xl()
                         .border_1()
-                        .border_color(rgb(c_border()))
-                        .bg(rgb(c_canvas()))
+                        .border_color(float_edge())
+                        .bg(float(c_canvas()))
                         .shadow_2xl()
                         .overflow_hidden()
                         // Clicks inside the dialog must not reach the backdrop.
@@ -6329,7 +6331,7 @@ impl RunoApp {
             .v_flex()
             .border_l_1()
             .border_color(rgb(c_border()))
-            .bg(rgb(c_sidebar()))
+            .bg(pane(c_sidebar()))
             .child(
                 div()
                     .h(px(44.))
@@ -6408,6 +6410,18 @@ impl Render for RunoApp {
                 window.focus(&self.term_focus, cx);
             }
             cx.notify();
+        }
+        // Glass: let the desktop show through, blurred, behind the translucent surfaces.
+        let glass = glass_on();
+        if self.applied_glass != Some(glass) {
+            self.applied_glass = Some(glass);
+            window.set_background_appearance(if !glass {
+                WindowBackgroundAppearance::Opaque
+            } else if cfg!(target_os = "windows") {
+                WindowBackgroundAppearance::MicaBackdrop
+            } else {
+                WindowBackgroundAppearance::Blurred
+            });
         }
         if self.applied_dark != Some(dark) {
             self.applied_dark = Some(dark);
@@ -6548,7 +6562,7 @@ impl Render for RunoApp {
                 }
                 cx.notify();
             }))
-            .bg(rgb(c_canvas()))
+            .bg(glass_fill(c_canvas()))
             .text_color(rgb(c_text()))
             .text_size(px(13.))
             .font_family(cx.theme().font_family.clone())
@@ -6583,7 +6597,7 @@ impl Render for RunoApp {
                     .justify_between()
                     .border_t_1()
                     .border_color(rgb(c_border()))
-                    .bg(rgb(c_sidebar()))
+                    .bg(pane(c_sidebar()))
                     .text_size(px(11.5))
                     .gap_4()
                     .child(fade(
@@ -6755,7 +6769,14 @@ fn main() {
         let settings = AppSettings::load();
         settings.apply();
         cx.set_global(settings);
+        let glass = settings::glass_alpha(&cx.global::<AppSettings>().glass) < 255;
         let options = WindowOptions {
+            // Transparency has to be asked for when the window is created on some platforms.
+            window_background: if glass {
+                WindowBackgroundAppearance::Blurred
+            } else {
+                WindowBackgroundAppearance::Opaque
+            },
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
                 size(px(1560.), px(960.)),

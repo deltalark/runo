@@ -289,7 +289,7 @@ impl RunoApp {
 
     /// The popups in the corner of the window.
     pub(crate) fn alerts_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.demo {
+        if self.demo || self.view == View::Settings {
             return None;
         }
         let mut cards: Vec<AnyElement> = Vec::new();
@@ -562,7 +562,7 @@ impl RunoApp {
                 .rounded_xl()
                 .border_1()
                 .border_color(rgb(settings::mix(accent, c_border(), 0.45)))
-                .bg(rgb(c_raised()))
+                .bg(float(c_raised()))
                 .shadow_xl()
                 .overflow_hidden()
                 .child(

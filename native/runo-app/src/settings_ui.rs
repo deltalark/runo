@@ -394,6 +394,8 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("Theme", "System follows your OS appearance.", vec![
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
+                row("Glass", "A translucent window over a blurred desktop, like macOS glass. Clear shows the most of what is behind.", Ctl::Segment(options(&[("off", "Off"), ("subtle", "Subtle"), ("frosted", "Frosted"), ("clear", "Clear")]), st.glass.clone(), Rc::new(|s, v| s.glass = v))),
+                row("Glass menus and dialogs", "Popups, menus and dialogs are translucent with a light rim too.", Ctl::Switch(st.glass_cards, Rc::new(|s, v| s.glass_cards = v))),
                 row("Diff colors", "Colorblind uses blue and orange instead of green and red. High contrast uses stronger tints.", Ctl::Segment(options(&[("default", "Default"), ("colorblind", "Colorblind"), ("contrast", "High contrast")]), st.diff_colors.clone(), Rc::new(|s, v| s.diff_colors = v))),
             ]),
         ],
@@ -1048,7 +1050,7 @@ impl RunoApp {
             .p_3()
             .border_r_1()
             .border_color(rgb(c_border()))
-            .bg(rgb(c_sidebar()));
+            .bg(pane(c_sidebar()));
         let mut groups = div()
             .id("settings-nav")
             .flex_1()
