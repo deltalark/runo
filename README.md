@@ -9,7 +9,7 @@ Runo is written in Rust on [GPUI Kit](https://gpui-kit.com/) and targets macOS, 
 Install and sign in to at least one agent CLI first (see [provider setup](docs/providers.md)).
 
 ```bash
-cargo run -p runo-native --release
+cargo run -p runo --release
 ```
 
 To build an app with Runo's icon, use [cargo-bundle](https://github.com/burtonageo/cargo-bundle). It makes `Runo.app` on macOS and a `.deb` on Linux:
@@ -19,7 +19,7 @@ cargo install cargo-bundle
 cd native/runo-app && cargo bundle --release
 ```
 
-On Windows the icon is built into `runo-native.exe`. On Linux, `native/runo-app/assets/linux/runo.desktop` and the PNGs in `assets/icon/png` install the launcher icon. To change the icon, edit `assets/icon/runo.svg` and run `python3 build.py` in that folder.
+On Windows the icon is built into `Runo.exe`. On Linux, `native/runo-app/assets/linux/runo.desktop` and the PNGs in `assets/icon/png` install the launcher icon. To change the icon, edit `assets/icon/runo.svg` and run `python3 build.py` in that folder.
 
 ## What it does
 
