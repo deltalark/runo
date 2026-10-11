@@ -1,64 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <defs>
-    <!-- Background: deep indigo into violet, lit from the top left. -->
-    <linearGradient id="bg" x1="0.1" y1="0" x2="0.9" y2="1">
-      <stop offset="0" stop-color="#6D6BFF"/>
-      <stop offset="0.55" stop-color="#5146E5"/>
-      <stop offset="1" stop-color="#2E1A8F"/>
-    </linearGradient>
-    <radialGradient id="glow" cx="0.28" cy="0.18" r="0.75">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.32"/>
-      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="warm" cx="0.92" cy="0.95" r="0.6">
-      <stop offset="0" stop-color="#FF5FA8" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#FF5FA8" stop-opacity="0"/>
-    </radialGradient>
-    <!-- The bubble: bright glass. -->
-    <linearGradient id="bubble" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF"/>
-      <stop offset="1" stop-color="#E4E6FF"/>
-    </linearGradient>
-    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#1B1640"/>
-      <stop offset="1" stop-color="#0E0B26"/>
-    </linearGradient>
-    <linearGradient id="prompt" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#8CF5D2"/>
-      <stop offset="1" stop-color="#3FD4A8"/>
-    </linearGradient>
-    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
-      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.08"/>
-      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.18"/>
-    </linearGradient>
-  </defs>
-
-  <!-- Squircle tile, inset like macOS app icons (824px art on a 1024 canvas). -->
-  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
-  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#warm)"/>
-  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#glow)"/>
-  <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="url(#rim)" stroke-width="3"/>
-
-  <g transform="translate(0 -38)">
-  <!-- Soft shadow under the bubble, built from a few faint layers. -->
-  <path d="M262 318 h500 a74 74 0 0 1 74 74 v232 a74 74 0 0 1 -74 74 h-250 l-118 96 v-96 h-132 a74 74 0 0 1 -74 -74 v-232 a74 74 0 0 1 74 -74 z" transform="translate(0 30)" fill="#14095A" opacity="0.06"/>
-  <path d="M262 318 h500 a74 74 0 0 1 74 74 v232 a74 74 0 0 1 -74 74 h-250 l-118 96 v-96 h-132 a74 74 0 0 1 -74 -74 v-232 a74 74 0 0 1 74 -74 z" transform="translate(0 22)" fill="#14095A" opacity="0.08"/>
-  <path d="M262 318 h500 a74 74 0 0 1 74 74 v232 a74 74 0 0 1 -74 74 h-250 l-118 96 v-96 h-132 a74 74 0 0 1 -74 -74 v-232 a74 74 0 0 1 74 -74 z" transform="translate(0 15)" fill="#14095A" opacity="0.1"/>
-  <path d="M262 318 h500 a74 74 0 0 1 74 74 v232 a74 74 0 0 1 -74 74 h-250 l-118 96 v-96 h-132 a74 74 0 0 1 -74 -74 v-232 a74 74 0 0 1 74 -74 z" transform="translate(0 8)" fill="#14095A" opacity="0.12"/>
-  <path d="M262 318 h500 a74 74 0 0 1 74 74 v232 a74 74 0 0 1 -74 74 h-250 l-118 96 v-96 h-132 a74 74 0 0 1 -74 -74 v-232 a74 74 0 0 1 74 -74 z" transform="translate(0 3)" fill="#14095A" opacity="0.14"/>
-  <!-- Chat bubble: the conversation. -->
-  <path d="M262 318 h500 a74 74 0 0 1 74 74 v232 a74 74 0 0 1 -74 74 h-250 l-118 96 v-96 h-132 a74 74 0 0 1 -74 -74 v-232 a74 74 0 0 1 74 -74 z"
-        fill="url(#bubble)"/>
-
-  <!-- Terminal inside it: the CLI underneath. -->
-  <rect x="236" y="364" width="552" height="290" rx="44" fill="url(#screen)"/>
-  <circle cx="282" cy="402" r="11" fill="#FF6B8B"/>
-  <circle cx="318" cy="402" r="11" fill="#FFC857"/>
-  <circle cx="354" cy="402" r="11" fill="#3FD4A8"/>
-
-  <!-- Prompt chevron and a cursor. -->
-  <path d="M318 476 l84 54 l-84 54" fill="none" stroke="url(#prompt)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="448" y="566" width="150" height="34" rx="17" fill="#FFFFFF" opacity="0.92"/>
-  </g>
+<defs><linearGradient id="t" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#232327"/><stop offset="1" stop-color="#0E0E10"/></linearGradient>
+<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.04"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.08"/></linearGradient></defs>
+<rect x="100" y="100" width="824" height="824" rx="186" fill="url(#t)"/>
+<rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="url(#rim)" stroke-width="3"/>
+<g fill="none" stroke="#FAFAFA" stroke-width="76" stroke-linejoin="round" stroke-linecap="butt">
+<path d="M380 724 V300 H540 A122 122 0 0 1 540 544 H380"/>
+<path d="M512 544 L652 724"/></g>
 </svg>
