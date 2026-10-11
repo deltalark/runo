@@ -202,7 +202,7 @@ impl RunoApp {
             );
         }
         self.page(
-            "Notes",
+            "Project notes",
             div()
                 .v_flex()
                 .gap_3()
@@ -331,7 +331,7 @@ impl RunoApp {
                 "Agent runs, commits, undos and edits show up here as they happen.",
             ));
         }
-        self.page("Activity", rows)
+        self.page("Timeline", rows)
     }
 
     // ---------- Automations ----------
@@ -596,7 +596,7 @@ impl RunoApp {
                 .child(text)
         };
         self.page(
-            "Automations",
+            "Scheduled prompts",
             div()
                 .v_flex()
                 .gap_4()

@@ -289,7 +289,7 @@ impl RunoApp {
 
     /// The popups in the corner of the window.
     pub(crate) fn alerts_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.demo || self.view == View::Settings {
+        if self.demo || self.view == View::Settings || self.tour.is_some() {
             return None;
         }
         let mut cards: Vec<AnyElement> = Vec::new();

@@ -55,6 +55,17 @@ impl SettingsPage {
             .flat_map(|(_, pages)| pages.iter().copied())
     }
 
+    /// The page this one is listed under in the navigation tree.
+    fn parent(self) -> Option<SettingsPage> {
+        match self {
+            SettingsPage::Claude
+            | SettingsPage::Codex
+            | SettingsPage::OpenCode
+            | SettingsPage::MoreAgents => Some(SettingsPage::Providers),
+            _ => None,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
@@ -354,6 +365,9 @@ fn launch_section(pid: &'static str, st: &AppSettings, model_hint: &str) -> Sect
 fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec<Section> {
     match page {
         SettingsPage::General => vec![
+            section("Getting started", "A one-minute walk through the window and what each part does.", vec![
+                row("Welcome tour", "Highlights each part of Runo with a short explanation. Also in the palette as Take the tour.", Ctl::Button("Take the tour".into(), Rc::new(|this, _| this.start_tour()))),
+            ]),
             section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
                 switch_row("Notifications", "Show a desktop notification when an agent finishes or fails (macOS and Linux).", st.notifications, |s, v| s.notifications = v),
             ]),
@@ -1002,8 +1016,8 @@ impl RunoApp {
         };
         div()
             .id(SharedString::from(format!("snav-{}", page.label())))
-            .h(px(36.))
-            .px_3()
+            .h(px(34.))
+            .px_2()
             .flex()
             .items_center()
             .gap_3()
@@ -1062,7 +1076,7 @@ impl RunoApp {
             .v_flex()
             .gap_4();
         for (title, pages) in SettingsPage::GROUPS.iter() {
-            let mut group = div().v_flex().gap(px(2.)).child(
+            let group = div().v_flex().gap(px(2.)).child(
                 div()
                     .px_3()
                     .pb_1()
@@ -1071,10 +1085,64 @@ impl RunoApp {
                     .text_color(rgb(c_muted()))
                     .child(title.to_uppercase()),
             );
-            for page in pages.iter() {
-                group = group.child(self.settings_nav_item(*page, cx));
+            // Pages hang off their group like a file tree; agent pages hang off Providers.
+            let mut items = div()
+                .ml(px(14.))
+                .pl(px(6.))
+                .border_l_1()
+                .border_color(rgb(c_border()))
+                .v_flex()
+                .gap(px(2.));
+            let mut i = 0;
+            while i < pages.len() {
+                let page = pages[i];
+                items = items.child(self.settings_nav_item(page, cx));
+                let children: Vec<SettingsPage> = pages[i + 1..]
+                    .iter()
+                    .copied()
+                    .take_while(|p| p.parent() == Some(page))
+                    .collect();
+                if !children.is_empty() {
+                    let last = children.len() - 1;
+                    let mut sub = div().ml(px(24.)).v_flex().gap(px(2.));
+                    for (n, child) in children.iter().enumerate() {
+                        sub = sub.child(
+                            div()
+                                .relative()
+                                // The elbow into this row.
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(-12.))
+                                        .top(px(-2.))
+                                        .w(px(10.))
+                                        .h(px(20.))
+                                        .border_l_1()
+                                        .border_b_1()
+                                        .border_color(rgb(c_border()))
+                                        .rounded_bl(px(6.)),
+                                )
+                                // The trunk on to the next sibling.
+                                .when(n < last, |el| {
+                                    el.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(-12.))
+                                            .top(px(-2.))
+                                            .bottom(px(-2.))
+                                            .w(px(1.))
+                                            .bg(rgb(c_border())),
+                                    )
+                                })
+                                .child(self.settings_nav_item(*child, cx)),
+                        );
+                    }
+                    items = items.child(sub);
+                    i += children.len();
+                }
+                i += 1;
             }
-            groups = groups.child(group);
+            groups = groups.child(group.child(items));
         }
         nav = nav.child(groups).child(
             div()

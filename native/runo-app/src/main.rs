@@ -16,6 +16,7 @@ mod split;
 mod store;
 mod stream;
 mod terminal;
+mod tour;
 mod turns;
 mod workspace;
 
@@ -124,6 +125,7 @@ enum Jump {
     View(View),
     Session(u64),
     File(String),
+    Tour,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -216,6 +218,11 @@ struct RunoApp {
     switch_preview: bool,
     /// The open right-click menu: where, and on what.
     ctx_menu: Option<(Point<Pixels>, ctxmenu::CtxTarget)>,
+    /// The first-run tour's current step.
+    tour: Option<usize>,
+    /// Where the tour's highlighted parts are drawn this frame, and where they were last frame.
+    anchors: tour::Anchors,
+    tour_rects: HashMap<&'static str, Bounds<Pixels>>,
     /// Past Claude and Codex conversations found on this machine.
     history: Vec<history::Past>,
     /// Change counts (files, added, removed) of each session racing the selected one.
@@ -840,6 +847,9 @@ impl RunoApp {
             switch_plan: None,
             switch_preview: false,
             ctx_menu: None,
+            tour: (!cx.global::<AppSettings>().tour_seen).then_some(0),
+            anchors: Default::default(),
+            tour_rects: HashMap::new(),
             race_mode: false,
             history: Vec::new(),
             race_stats: HashMap::new(),
@@ -1375,6 +1385,7 @@ impl RunoApp {
         self.close_palette(window, cx);
         match jump {
             Jump::Action => {}
+            Jump::Tour => self.start_tour(),
             Jump::View(view) => match view {
                 View::History => self.open_history(),
                 View::Notes => self.open_notes(window, cx),
@@ -1420,18 +1431,41 @@ impl RunoApp {
             command_jumps.push(Jump::Action);
         }
         for (label, name, view) in [
-            ("Go to Inbox", IconName::BellDot, View::Inbox),
-            ("Go to All sessions", IconName::Layers, View::AllSessions),
-            ("Go to Worktrees", IconName::GitBranch, View::Worktrees),
-            ("Go to History", IconName::RotateCcwClock, View::History),
-            ("Go to GitHub", IconName::GitPullRequest, View::GitHub),
-            ("Go to Automations", IconName::Timer, View::Automations),
-            ("Go to Activity", IconName::Activity, View::Activity),
-            ("Go to Notes", IconName::NotebookPen, View::Notes),
+            ("Go to Unread", IconName::BellDot, View::Inbox),
+            ("Go to Sessions", IconName::Layers, View::AllSessions),
+            (
+                "Go to Isolated sessions",
+                IconName::GitBranch,
+                View::Worktrees,
+            ),
+            (
+                "Go to Agent history",
+                IconName::RotateCcwClock,
+                View::History,
+            ),
+            (
+                "Go to Pull requests",
+                IconName::GitPullRequest,
+                View::GitHub,
+            ),
+            (
+                "Go to Scheduled prompts",
+                IconName::Timer,
+                View::Automations,
+            ),
+            ("Go to Timeline", IconName::Activity, View::Activity),
+            ("Go to Project notes", IconName::NotebookPen, View::Notes),
         ] {
             commands = commands.item(CommandItem::new().label(label).icon(name));
             command_jumps.push(Jump::View(view));
         }
+        commands = commands.item(
+            CommandItem::new()
+                .label("Take the tour")
+                .icon(IconName::Sparkles)
+                .keywords(["welcome", "help", "guide", "onboarding"]),
+        );
+        command_jumps.push(Jump::Tour);
         jumps.push(command_jumps);
 
         let mut sessions = CommandGroup::new().label("Sessions");
@@ -2141,7 +2175,7 @@ impl RunoApp {
             );
         }
         self.page(
-            "History",
+            "Agent history",
             div()
                 .v_flex()
                 .gap_3()
@@ -2475,13 +2509,16 @@ impl RunoApp {
             .iter()
             .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
         let show_stats = self.view == View::Session && !self.changes.is_empty();
+        let lead = if cfg!(target_os = "macos") { 80. } else { 8. };
+        // With the sidebar open, the tabs line up with the main column, not the sidebar.
+        let sidebar = self.view != View::Settings && self.show_sidebar;
         div()
             .h(px(40.))
             .flex_none()
             .flex()
             .items_end()
             .gap_2()
-            .pl(px(if cfg!(target_os = "macos") { 80. } else { 8. }))
+            .pl(px(lead))
             .pr_2()
             .border_b_1()
             .border_color(rgb(c_border()))
@@ -2490,9 +2527,11 @@ impl RunoApp {
             .child(
                 div()
                     .h_full()
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap_1()
+                    .when(sidebar, |el| el.w(px(SIDEBAR_WIDTH - lead - 8.)))
                     .child(
                         self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -2502,11 +2541,16 @@ impl RunoApp {
                             })),
                     )
                     .child(
-                        self.ghost_button("open-palette", IconName::Search, "Quick open")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_palette(window, cx);
-                                cx.notify();
-                            })),
+                        div()
+                            .relative()
+                            .child(tour::anchor(&self.anchors, "palette"))
+                            .child(
+                                self.ghost_button("open-palette", IconName::Search, "Quick open")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_palette(window, cx);
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
             .child(
@@ -2516,7 +2560,7 @@ impl RunoApp {
                     .h_full()
                     .flex()
                     .items_end()
-                    .child(tabs),
+                    .child(tabs.relative().child(tour::anchor(&self.anchors, "tabs"))),
             )
             .child(
                 div()
@@ -2945,7 +2989,7 @@ impl RunoApp {
             .filter(|s| s.unread && !s.archived)
             .count();
         div()
-            .w(px(264.))
+            .w(px(SIDEBAR_WIDTH))
             .flex_none()
             .h_full()
             .v_flex()
@@ -2960,6 +3004,8 @@ impl RunoApp {
                     .child(
                         div()
                             .id("new-session")
+                            .relative()
+                            .child(tour::anchor(&self.anchors, "new-session"))
                             .h(px(32.))
                             .px_2()
                             .flex()
@@ -3007,10 +3053,12 @@ impl RunoApp {
                         div()
                             .mt_1()
                             .v_flex()
+                            .relative()
+                            .child(tour::anchor(&self.anchors, "nav"))
                             .child(self.nav_item(
                                 "inbox",
                                 IconName::Inbox,
-                                "Inbox",
+                                "Unread",
                                 unread,
                                 View::Inbox,
                                 cx,
@@ -3018,7 +3066,7 @@ impl RunoApp {
                             .child(self.nav_item(
                                 "all-sessions",
                                 IconName::Layers,
-                                "All sessions",
+                                "Sessions",
                                 self.state.sessions.len(),
                                 View::AllSessions,
                                 cx,
@@ -3026,7 +3074,7 @@ impl RunoApp {
                             .child(self.nav_item(
                                 "worktrees",
                                 IconName::GitBranch,
-                                "Worktrees",
+                                "Isolated",
                                 self.state.sessions.iter().filter(|s| s.isolated).count(),
                                 View::Worktrees,
                                 cx,
@@ -3034,7 +3082,7 @@ impl RunoApp {
                             .child(self.nav_item(
                                 "history",
                                 IconName::RotateCcwClock,
-                                "History",
+                                "Agent history",
                                 0,
                                 View::History,
                                 cx,
@@ -3042,7 +3090,7 @@ impl RunoApp {
                             .child(self.nav_item(
                                 "github",
                                 IconName::GitPullRequest,
-                                "GitHub",
+                                "Pull requests",
                                 self.gh.prs.len(),
                                 View::GitHub,
                                 cx,
@@ -3050,7 +3098,7 @@ impl RunoApp {
                             .child(self.nav_item(
                                 "automations",
                                 IconName::Timer,
-                                "Automations",
+                                "Scheduled",
                                 self.state.automations.len(),
                                 View::Automations,
                                 cx,
@@ -3058,7 +3106,7 @@ impl RunoApp {
                             .child(self.nav_item(
                                 "activity",
                                 IconName::Activity,
-                                "Activity",
+                                "Timeline",
                                 0,
                                 View::Activity,
                                 cx,
@@ -3066,7 +3114,7 @@ impl RunoApp {
                             .child(self.nav_item(
                                 "notes",
                                 IconName::NotebookPen,
-                                "Notes",
+                                "Project notes",
                                 0,
                                 View::Notes,
                                 cx,
@@ -3107,22 +3155,28 @@ impl RunoApp {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(projects),
+                    .relative()
+                    .child(tour::anchor(&self.anchors, "projects"))
+                    .child(div().size_full().overflow_y_scrollbar().child(projects)),
             )
             .child(
                 div()
                     .p_2()
                     .border_t_1()
                     .border_color(rgb(c_border()))
-                    .child(self.nav_item(
-                        "settings",
-                        IconName::Settings,
-                        "Settings",
-                        0,
-                        View::Settings,
-                        cx,
-                    )),
+                    .child(
+                        div()
+                            .relative()
+                            .child(tour::anchor(&self.anchors, "settings"))
+                            .child(self.nav_item(
+                                "settings",
+                                IconName::Settings,
+                                "Settings",
+                                0,
+                                View::Settings,
+                                cx,
+                            )),
+                    ),
             )
     }
 
@@ -4147,6 +4201,7 @@ impl RunoApp {
         let mut chips = div().flex().flex_wrap().items_center().gap_1().child(
             div()
                 .relative()
+                .child(tour::anchor(&self.anchors, "agent-chip"))
                 // A new agent pops in when the session switches.
                 .child(slide_in(
                     div().child(self.menu_button(
@@ -4230,6 +4285,8 @@ impl RunoApp {
             .child(
                 div()
                     .id("composer-box")
+                    .relative()
+                    .child(tour::anchor(&self.anchors, "composer"))
                     .px_3()
                     .pt_3()
                     .pb_2()
@@ -5141,9 +5198,9 @@ impl RunoApp {
         }
         self.page(
             match kind {
-                View::Inbox => "Inbox",
-                View::Worktrees => "Worktrees",
-                _ => "All sessions",
+                View::Inbox => "Unread",
+                View::Worktrees => "Isolated sessions",
+                _ => "Sessions",
             },
             rows,
         )
@@ -6188,6 +6245,8 @@ impl RunoApp {
         div()
             .h(px(self.term_height()))
             .flex_none()
+            .relative()
+            .child(tour::anchor(&self.anchors, "terminal"))
             .v_flex()
             .border_t_1()
             .border_color(rgb(c_border()))
@@ -6327,6 +6386,8 @@ impl RunoApp {
             .w(px(460.))
             .flex_none()
             .h_full()
+            .relative()
+            .child(tour::anchor(&self.anchors, "right-pane"))
             .v_flex()
             .border_l_1()
             .border_color(rgb(c_border()))
@@ -6399,6 +6460,7 @@ impl Render for RunoApp {
         };
         set_dark(dark);
         self.measure_cell(window);
+        self.tour_rects = self.anchors.take();
         // Keep shortcuts working when nothing has focus, such as right after launch.
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
@@ -6520,6 +6582,11 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_file(cx)))
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                if this.tour.is_some() && this.tour_key(&e.keystroke.key, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewSession, _, cx| {
                 this.open_new_session();
                 cx.notify();
@@ -6541,7 +6608,9 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
-                if this.ctx_menu.is_some() {
+                if this.tour.is_some() {
+                    this.end_tour(cx);
+                } else if this.ctx_menu.is_some() {
                     this.ctx_menu = None;
                 } else if this.switch_plan.is_some() {
                     this.switch_plan = None;
@@ -6744,7 +6813,8 @@ impl Render for RunoApp {
             .children(self.alerts_view(cx))
             .children(self.switch_modal(cx))
             .children(palette)
-            .children(self.ctx_menu_view(cx));
+            .children(self.ctx_menu_view(cx))
+            .children(self.tour_view(window, cx));
         fade(root, "app-root", 450)
     }
 }
@@ -6763,6 +6833,8 @@ fn load_fonts(cx: &mut App) {
         gpui_kit::component::Theme::update(cx, |theme| theme.font_family = UI_FONT.into());
     }
 }
+
+const SIDEBAR_WIDTH: f32 = 264.;
 
 fn main() {
     // `runo --mcp-memory <folder>`: serve the memory tools to an agent, without a window.

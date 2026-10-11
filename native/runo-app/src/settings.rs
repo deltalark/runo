@@ -69,6 +69,8 @@ pub struct AppSettings {
     pub glass_cards: bool,
     /// Pass Runo's memory MCP server to agents that accept one per run.
     pub memory_server: bool,
+    /// The first-run tour was finished or skipped.
+    pub tour_seen: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -109,6 +111,7 @@ impl Default for AppSettings {
             glass: "off".into(),
             glass_cards: true,
             memory_server: true,
+            tour_seen: false,
         }
     }
 }

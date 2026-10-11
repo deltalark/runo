@@ -438,7 +438,7 @@ impl RunoApp {
                 .child(text)
         };
         self.page(
-            "GitHub",
+            "Pull requests",
             div()
                 .v_flex()
                 .gap_2()
