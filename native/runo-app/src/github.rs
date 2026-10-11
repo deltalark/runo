@@ -381,7 +381,7 @@ impl RunoApp {
                 .items_center()
                 .gap_2()
                 .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(c_muted()))
                 .child(title)
                 .child(count.to_string())

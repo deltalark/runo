@@ -129,7 +129,7 @@ impl RunoApp {
                         div()
                             .truncate()
                             .text_size(px(13.5))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(session.title.clone()),
                     )
                     .child(icon(IconName::ChevronDown, 11., c_muted())),

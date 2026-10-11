@@ -318,7 +318,7 @@ fn update_done_badge(n: usize, label: &'static str) -> AnyElement {
         .border_1()
         .border_color(rgb(settings::mix(c_green(), c_border(), 0.5)))
         .text_size(px(12.))
-        .font_weight(FontWeight::SEMIBOLD)
+        .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(c_green()))
         .child(icon(IconName::Check, 12., c_green()))
         .child(label);
@@ -1370,7 +1370,7 @@ impl RunoApp {
                         .child(
                             div()
                                 .text_size(px(12.5))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::MEDIUM)
                                 .child(title),
                         )
                         .child(div().flex_1())

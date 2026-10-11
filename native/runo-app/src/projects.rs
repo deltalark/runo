@@ -229,7 +229,7 @@ impl RunoApp {
         let label = |text: &'static str| {
             div()
                 .text_size(px(11.5))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(c_secondary()))
                 .child(text)
         };
@@ -409,44 +409,42 @@ impl RunoApp {
                 )
         };
 
-        let preview = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .size(px(36.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_lg()
-                    .bg(tint(c_subtle()))
-                    .border_1()
-                    .border_color(rgb(c_border()))
-                    .child(icon(ICONS[form.icon].1, 18., accent)),
-            )
-            .child(
-                div()
-                    .v_flex()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::BOLD)
-                            .child(if editing {
+        let preview =
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .size(px(36.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_lg()
+                        .bg(tint(c_subtle()))
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .child(icon(ICONS[form.icon].1, 18., accent)),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .min_w_0()
+                        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child(
+                            if editing {
                                 "Edit project"
                             } else {
                                 "New project"
-                            }),
-                    )
-                    .child(div().text_xs().text_color(rgb(c_muted())).truncate().child(
-                        if editing {
-                            "Change how this project looks in the sidebar"
-                        } else {
-                            "Pick a folder for Runo's agents to work in"
-                        },
-                    )),
-            );
+                            },
+                        ))
+                        .child(div().text_xs().text_color(rgb(c_muted())).truncate().child(
+                            if editing {
+                                "Change how this project looks in the sidebar"
+                            } else {
+                                "Pick a folder for Runo's agents to work in"
+                            },
+                        )),
+                );
 
         let card = div()
             .id("project-card")

@@ -708,7 +708,7 @@ impl RunoApp {
                             .when(selected, |el| {
                                 el.bg(tint(c_selected()))
                                     .text_color(rgb(c_blue()))
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::MEDIUM)
                             })
                             .when(!selected, |el| {
                                 el.text_color(rgb(c_secondary()))
@@ -896,7 +896,7 @@ impl RunoApp {
                     .py_1()
                     .rounded_full()
                     .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(color))
                     .bg(rgb(c_canvas()))
                     .border_1()
@@ -920,7 +920,7 @@ impl RunoApp {
                             .border_color(rgb(c_border()))
                             .bg(rgb(c_canvas()))
                             .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(part.to_string()),
                     );
                 }
@@ -993,7 +993,7 @@ impl RunoApp {
                             .child(
                                 div()
                                     .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(c_text()))
                                     .child(r.title),
                             )
@@ -1021,7 +1021,7 @@ impl RunoApp {
                     .child(
                         div()
                             .text_base()
-                            .font_weight(FontWeight::BOLD)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(c_text()))
                             .child(sec.title),
                     )
@@ -1064,7 +1064,7 @@ impl RunoApp {
             .when(selected, |el| {
                 el.bg(tint(c_selected()))
                     .text_color(rgb(c_blue()))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
             })
             .when(!selected, |el| {
                 el.text_color(rgb(c_text()))
@@ -1118,7 +1118,7 @@ impl RunoApp {
                     .px_3()
                     .pb_1()
                     .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_muted()))
                     .child(title.to_uppercase()),
             );
@@ -1257,7 +1257,7 @@ impl RunoApp {
                     .child(
                         div()
                             .text_3xl()
-                            .font_weight(FontWeight::BOLD)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(c_text()))
                             .child(title.clone()),
                     )
@@ -1299,7 +1299,7 @@ impl RunoApp {
                     .child(icon(IconName::ChevronRight, 14., c_muted()))
                     .child(
                         div()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(c_text()))
                             .child(if query.is_empty() {
                                 self.settings_page.label().to_string()

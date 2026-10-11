@@ -498,7 +498,7 @@ impl RunoApp {
                         .border_b_1()
                         .border_color(rgb(c_border()))
                         .when(r == 0, |el| {
-                            el.bg(tint(c_subtle())).font_weight(FontWeight::SEMIBOLD)
+                            el.bg(tint(c_subtle())).font_weight(FontWeight::MEDIUM)
                         })
                         .when(r > 0 && r % 2 == 0, |el| el.bg(rgb(c_canvas())));
                     for c in 0..cols {

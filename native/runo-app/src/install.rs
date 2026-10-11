@@ -293,7 +293,7 @@ impl RunoApp {
                     .child(
                         div()
                             .text_lg()
-                            .font_weight(FontWeight::BOLD)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("Install {}?", p.name)),
                     ),
             )

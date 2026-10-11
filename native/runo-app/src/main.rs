@@ -489,7 +489,7 @@ fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyE
             .child(
                 div()
                     .text_size(px(14.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_text()))
                     .child(title.to_string()),
             )
@@ -2266,7 +2266,7 @@ impl RunoApp {
                                 div()
                                     .truncate()
                                     .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::MEDIUM)
                                     .child(past.title.clone()),
                             )
                             .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
@@ -2302,7 +2302,7 @@ impl RunoApp {
                     .child(
                         div()
                             .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child("No past conversations found"),
                     )
                     .child(div().text_xs().text_color(rgb(c_muted())).child(
@@ -2531,7 +2531,7 @@ impl RunoApp {
             .justify_center()
             .text_size(px(size))
             .line_height(px(size + 2.))
-            .font_weight(FontWeight::BOLD)
+            .font_weight(FontWeight::SEMIBOLD)
             .text_color(rgb(provider.color))
             .child(provider.mark)
     }
@@ -2551,7 +2551,7 @@ impl RunoApp {
                 if is_dark() { 0.2 } else { 0.12 },
             )))
             .text_color(rgb(provider.color))
-            .font_weight(FontWeight::BOLD)
+            .font_weight(FontWeight::SEMIBOLD)
             .child(provider.mark)
     }
 
@@ -2812,7 +2812,7 @@ impl RunoApp {
                         .rounded_full()
                         .bg(rgb(c_blue()))
                         .text_size(px(10.5))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(0xffffff))
                         .child(count.to_string()),
                 )
@@ -2920,9 +2920,9 @@ impl RunoApp {
                             .truncate()
                             .text_size(px(13.))
                             .font_weight(if unread || selected {
-                                FontWeight::SEMIBOLD
-                            } else {
                                 FontWeight::MEDIUM
+                            } else {
+                                FontWeight::NORMAL
                             })
                             .text_color(rgb(c_text()))
                             .child(session.title.clone()),
@@ -3084,7 +3084,7 @@ impl RunoApp {
                             .min_w_0()
                             .truncate()
                             .text_size(px(12.5))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(c_secondary()))
                             .child(project.name.clone()),
                     )
@@ -3302,7 +3302,7 @@ impl RunoApp {
                     .child(
                         div()
                             .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(c_muted()))
                             .child("PROJECTS"),
                     )
@@ -3888,7 +3888,7 @@ impl RunoApp {
                         div()
                             .flex_1()
                             .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(format!("Race between {} agents", racers.len())),
                     )
                     .when(others > 0, |el| {
@@ -3984,7 +3984,7 @@ impl RunoApp {
                             .items_center()
                             .gap_2()
                             .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(icon(IconName::Loader, 14., c_blue()))
                             .child("Preparing the worktree"),
                     )
@@ -4040,7 +4040,7 @@ impl RunoApp {
                         div()
                             .truncate()
                             .text_size(px(14.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(session.title.clone()),
                     )
                     .child(
@@ -4608,7 +4608,7 @@ impl RunoApp {
                         .border_color(rgb(c_border()))
                         .bg(tint(c_subtle()))
                         .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(c_text()))
                         .child(key),
                 )
@@ -4640,7 +4640,7 @@ impl RunoApp {
                     .child(
                         div()
                             .text_xl()
-                            .font_weight(FontWeight::BOLD)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(if has_projects {
                                 "Start a session"
                             } else {
@@ -4705,7 +4705,7 @@ impl RunoApp {
                     .child(
                         div()
                             .text_size(px(20.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )
                     .child(body),
@@ -4797,7 +4797,7 @@ impl RunoApp {
         let label = |t: &'static str| {
             div()
                 .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(c_muted()))
                 .child(t)
         };
@@ -4917,7 +4917,7 @@ impl RunoApp {
                                 div()
                                     .truncate()
                                     .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::MEDIUM)
                                     .child(p.name),
                             )
                             .child(
@@ -5030,12 +5030,7 @@ impl RunoApp {
                 .child(
                     div()
                         .v_flex()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(title),
-                        )
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
                         .child(div().text_xs().text_color(rgb(c_muted())).child(desc)),
                 )
         };
@@ -5059,7 +5054,7 @@ impl RunoApp {
                             .child(
                                 div()
                                     .text_xl()
-                                    .font_weight(FontWeight::BOLD)
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .child("New session"),
                             )
                             .child(
@@ -5237,7 +5232,7 @@ impl RunoApp {
                     div()
                         .mt_4()
                         .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(c_secondary()))
                         .child("Archived"),
                 );
@@ -5288,7 +5283,7 @@ impl RunoApp {
                                         div()
                                             .truncate()
                                             .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .font_weight(FontWeight::MEDIUM)
                                             .child(session.title.clone()),
                                     ),
                             )
@@ -5375,7 +5370,7 @@ impl RunoApp {
                         28.,
                         c_muted(),
                     ))
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child(
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(
                         if kind == View::Inbox {
                             "You're all caught up"
                         } else {
@@ -5743,7 +5738,7 @@ impl RunoApp {
         }
         if !self.dir_is_git {
             return div().p_4().v_flex().gap_2()
-                .child(div().text_base().font_weight(FontWeight::BOLD).child("Changes"))
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Changes"))
                 .child(div().text_sm().text_color(rgb(c_secondary())).child("This folder is not a git repository, so diffs and isolated worktrees are unavailable. Run `git init` in the Terminal below to enable them."))
                 .into_any_element();
         }
@@ -5786,7 +5781,7 @@ impl RunoApp {
                         div()
                             .w(px(12.))
                             .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(change_color(&change.status)))
                             .child(change.status.clone()),
                     )
@@ -5917,7 +5912,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .text_size(px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_muted()))
                     .child("CHANGES")
                     .child(format!("{}", self.changes.len()))
@@ -5961,7 +5956,7 @@ impl RunoApp {
                     .child(
                         div()
                             .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .child("No uncommitted changes"),
                     )
                     .child(

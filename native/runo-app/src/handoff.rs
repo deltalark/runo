@@ -608,7 +608,7 @@ impl RunoApp {
                             .w_full()
                             .text_center()
                             .text_lg()
-                            .font_weight(FontWeight::BOLD)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .child(format!("Switch this session to {}?", to.name)),
                     )
                     .child(
