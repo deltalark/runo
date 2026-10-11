@@ -1,4 +1,5 @@
 mod agent;
+mod browser;
 mod caps;
 mod fileview;
 mod git;
@@ -187,6 +188,10 @@ struct RunoApp {
     branch: Entity<InputState>,
     term_input: Entity<InputState>,
     address: Entity<InputState>,
+    browser_recent: Vec<String>,
+    browser_ports: Vec<u16>,
+    browser_check: Option<browser::PageCheck>,
+    browser_scanning: bool,
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
@@ -635,6 +640,12 @@ impl RunoApp {
                 cx.notify();
             }
         });
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder("localhost:3000"));
+        let address_sub = cx.subscribe_in(&address, window, |this, _, event, _, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.submit_address(true, cx);
+            }
+        });
         let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
         let rename_sub = cx.subscribe_in(&rename, window, |this, input, event, _, cx| {
             match event {
@@ -786,7 +797,11 @@ impl RunoApp {
             }),
             branch: cx.new(|cx| InputState::new(window, cx).placeholder("branch (optional)")),
             term_input,
-            address: cx.new(|cx| InputState::new(window, cx).placeholder("https://localhost:3000")),
+            address,
+            browser_recent: Vec::new(),
+            browser_ports: Vec::new(),
+            browser_check: None,
+            browser_scanning: false,
             new_provider: agent::PROVIDERS
                 .iter()
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
@@ -872,8 +887,14 @@ impl RunoApp {
                     _ => {}
                 },
             );
-        app._subscriptions
-            .extend([branch_sub, task_sub, notes_sub, split_sub, file_sub]);
+        app._subscriptions.extend([
+            branch_sub,
+            task_sub,
+            notes_sub,
+            split_sub,
+            file_sub,
+            address_sub,
+        ]);
         app.restore_layout();
         // Scheduled automations are checked twice a minute.
         cx.spawn(async move |this, cx| loop {
@@ -5024,6 +5045,9 @@ impl RunoApp {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.right_tab = tab;
+                if tab == RightTab::Browser {
+                    this.scan_ports();
+                }
                 cx.notify();
             }))
             .child(icon(name, 13., if selected { c_text() } else { c_muted() }))
@@ -5862,24 +5886,6 @@ impl RunoApp {
                             })),
                     ),
             )
-    }
-
-    fn browser_tab(&self, cx: &mut Context<Self>) -> AnyElement {
-        div().p_4().v_flex().gap_3()
-            .child(div().text_base().font_weight(FontWeight::BOLD).child("Browser"))
-            .child(div().text_sm().text_color(rgb(c_secondary())).child("Embedded pages are not available in the native build yet. Open a URL, such as a worktree dev server, in your system browser."))
-            .child(Input::new(&self.address).bordered(true).h(px(36.)))
-            .child(div().flex().child(self.button("open-url", "Open in browser", true)
-                        .child(icon(IconName::ExternalLink, 12., c_canvas())).on_click(cx.listener(|this, _, _, cx| {
-                let raw = this.address.read(cx).value().trim().to_string();
-                if raw.starts_with("http://") || raw.starts_with("https://") {
-                    cx.open_url(&raw);
-                } else if !raw.is_empty() {
-                    this.notice = Some("Enter a full http:// or https:// URL.".into());
-                }
-                cx.notify();
-            }))))
-            .into_any_element()
     }
 
     fn files_tab(&self, cx: &mut Context<Self>) -> AnyElement {
