@@ -854,7 +854,7 @@ impl RunoApp {
             terminal.insert(
                 11,
                 vec![
-                    "$ cargo check -p runo-native".to_string(),
+                    "$ cargo check -p runo".to_string(),
                     "    Finished dev profile in 0.97s".to_string(),
                     "$ git status --short".to_string(),
                     " M src/sidebar/navigation.rs".to_string(),

@@ -3,7 +3,7 @@
 Native desktop app for running coding agents (Claude Code, Codex, OpenCode) in parallel, each in its own git worktree. Written in Rust on [GPUI Kit](https://gpui-kit.com/); targets macOS, Windows and Linux.
 
 ```bash
-cargo run -p runo-native --release
+cargo run -p runo --release
 ```
 
 ## What works

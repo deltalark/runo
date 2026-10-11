@@ -458,7 +458,7 @@ impl State {
         let mut state = State {
             next_id: 100,
             projects: vec![
-                project(1, "runo-native"),
+                project(1, "runo-app"),
                 project(2, "Worldigo"),
                 project(3, "trademe"),
                 project(4, "scalpy"),

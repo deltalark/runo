@@ -5648,7 +5648,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "runo-native"
+name = "runo"
 version = "0.1.0"
 dependencies = [
  "chrono",

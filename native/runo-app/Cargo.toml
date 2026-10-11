@@ -1,5 +1,5 @@
 [package]
-name = "runo-native"
+name = "runo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ description = "Runo's native GPUI desktop client"
 build = "build.rs"
 
 [[bin]]
-name = "runo-native"
+name = "Runo"
 path = "src/main.rs"
 
 # App bundle metadata for `cargo bundle` (macOS .app, Linux .deb).

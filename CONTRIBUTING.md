@@ -5,7 +5,7 @@ Thanks for helping with Runo. It is a Rust workspace; the app lives in `native/r
 ## Build and run
 
 ```bash
-cargo run -p runo-native
+cargo run -p runo
 ```
 
 On Linux you may need GPUI's system libraries (libxkbcommon, Wayland or X11, and Vulkan development packages).
