@@ -381,6 +381,108 @@ impl RunoApp {
     }
 }
 
+impl RunoApp {
+    /// Once, after the tour (or after updating, for people who saw it already): ask whether
+    /// agents may use the built-in browser.
+    pub(crate) fn browser_offer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let st = cx.global::<AppSettings>();
+        if !st.tour_seen || st.browser_asked || self.tour.is_some() || self.view == View::Settings {
+            return None;
+        }
+        let found = browser_engine::find_chromium();
+        let body = match &found {
+            Some(path) => format!(
+                "Runo can open your app in the Browser tab using a headless copy of {}, with its own profile, so you and your agents can see and click through pages without leaving Runo. You can change this in Settings.",
+                browser_engine::browser_name(path)
+            ),
+            None => "Runo can open your app in the Browser tab using a headless Chromium. None was found in Applications; install Chrome, Edge or Brave, or wait for the Chrome for Testing download coming next. You can turn this on later in Settings.".to_string(),
+        };
+        let answer = |on: bool| {
+            cx.listener(move |_: &mut Self, _, _, cx| {
+                settings::update(cx, |s| {
+                    s.browser_asked = true;
+                    s.browser_enabled = on;
+                });
+            })
+        };
+        let card = div()
+            .id("browser-offer")
+            .w(px(CARD_W))
+            .p_5()
+            .v_flex()
+            .gap_3()
+            .rounded_xl()
+            .border_1()
+            .border_color(float_edge())
+            .bg(float(c_canvas()))
+            .shadow_2xl()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(32.))
+                            .flex_none()
+                            .rounded_lg()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(settings::mix(c_blue(), c_raised(), 0.16)))
+                            .child(icon(IconName::Globe, 16., c_blue())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Let agents use a built-in browser?"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .line_height(px(19.))
+                    .text_color(rgb(c_secondary()))
+                    .child(body),
+            )
+            .child(
+                div()
+                    .pt_1()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        self.button("browser-offer-later", "Not now", false)
+                            .on_click(answer(false)),
+                    )
+                    .when(found.is_some(), |el| {
+                        el.child(
+                            self.button("browser-offer-on", "Turn on", true)
+                                .on_click(answer(true)),
+                        )
+                    }),
+            );
+        let dim = if is_dark() {
+            hsla(0., 0., 0., 0.62)
+        } else {
+            hsla(0., 0., 0., 0.38)
+        };
+        let layer = div()
+            .id("browser-offer-layer")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(dim)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(rise(card, SharedString::from("browser-offer-card"), 280));
+        Some(fade(layer, SharedString::from("browser-offer-fade"), 200))
+    }
+}
+
 /// Top-left corner for the card next to `target`, falling back to other sides when the
 /// preferred one has no room, and always inside the window.
 fn place(side: Side, target: (f32, f32, f32, f32), window: (f32, f32)) -> (f32, f32) {
