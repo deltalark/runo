@@ -31,6 +31,8 @@ enum Act {
     CloseOthers(u64),
     NewIn(u64),
     EditProject(u64),
+    /// Run a playbook (id) in a project (id).
+    Playbook(u64, u64),
     Toggle(u64),
     Diff(String),
     Preview(String),
@@ -200,6 +202,26 @@ impl RunoApp {
                         Act::Toggle(*pid),
                     ),
                     item("Edit project…", IconName::Palette, Act::EditProject(*pid)),
+                ]
+                .into_iter()
+                .chain(
+                    // Playbooks that can run here: any-project ones and this project's own.
+                    self.state
+                        .automations
+                        .iter()
+                        .filter(|a| a.project_id == 0 || a.project_id == *pid)
+                        .take(8)
+                        .enumerate()
+                        .flat_map(|(i, a)| {
+                            let first = (i == 0).then_some(None);
+                            first.into_iter().chain(std::iter::once(item(
+                                a.name.clone(),
+                                IconName::Play,
+                                Act::Playbook(a.id, *pid),
+                            )))
+                        }),
+                )
+                .chain([
                     None,
                     item(
                         "Copy path",
@@ -211,7 +233,8 @@ impl RunoApp {
                         IconName::FolderOpen,
                         Act::Reveal(PathBuf::from(&p.path)),
                     ),
-                ]
+                ])
+                .collect()
             }
             CtxTarget::Change(path) | CtxTarget::File(path) => {
                 let full = current_dir.join(path);
@@ -335,6 +358,7 @@ impl RunoApp {
                 self.save();
             }
             Act::EditProject(pid) => self.edit_project(pid),
+            Act::Playbook(id, pid) => self.run_playbook(id, Some(pid), cx),
             Act::NewIn(pid) => {
                 self.new_project = Some(pid);
                 self.open_new_session();

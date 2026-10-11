@@ -1,5 +1,5 @@
 //! Workspace-level features: sidebar status groups, saved layout, quick commands,
-//! project notes, the activity feed and scheduled automations.
+//! project notes, the activity feed and playbooks.
 
 use super::*;
 
@@ -334,47 +334,70 @@ impl RunoApp {
         self.page("Timeline", rows)
     }
 
-    // ---------- Automations ----------
+    // ---------- Playbooks ----------
 
-    /// Start every automation whose time has come. Called on a timer.
+    /// Start every scheduled playbook whose time has come. Called on a timer.
     pub(crate) fn run_due_automations(&mut self, cx: &mut Context<Self>) {
         if self.demo {
             return;
         }
         let now = unix_now();
-        let due: Vec<store::Automation> = self
+        let due: Vec<u64> = self
             .state
             .automations
             .iter()
             .filter(|a| a.due(now))
-            .cloned()
+            .map(|a| a.id)
             .collect();
-        for auto in due {
-            self.run_automation(auto.id, cx);
+        for id in due {
+            self.run_playbook(id, None, cx);
         }
     }
 
-    pub(crate) fn run_automation(&mut self, auto_id: u64, cx: &mut Context<Self>) {
+    /// The project a playbook started by hand runs in: the open session's, the one picked
+    /// for a new session, or the first.
+    pub(crate) fn current_project(&self) -> Option<u64> {
+        self.current()
+            .map(|s| s.project_id)
+            .or(self.new_project)
+            .filter(|id| self.state.projects.iter().any(|p| p.id == *id))
+            .or_else(|| self.state.projects.first().map(|p| p.id))
+    }
+
+    /// Run a playbook as a new session: in its own project when it has one, else in `in_project`.
+    pub(crate) fn run_playbook(
+        &mut self,
+        playbook: u64,
+        in_project: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.demo_guard(cx) {
+            return;
+        }
         let Some(auto) = self
             .state
             .automations
             .iter()
-            .find(|a| a.id == auto_id)
+            .find(|a| a.id == playbook)
             .cloned()
         else {
             return;
         };
-        if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == auto_id) {
+        if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == playbook) {
             a.last_run = unix_now();
         }
-        let Some(project) = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == auto.project_id)
+        let target = Some(auto.project_id)
+            .filter(|id| *id != 0)
+            .or(in_project)
+            .or_else(|| self.current_project());
+        let Some(project) = target
+            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
             .cloned()
         else {
-            self.notice = Some(format!("Automation “{}”: its project is gone.", auto.name));
+            self.notice = Some(format!(
+                "Playbook “{}”: add a project to run it in.",
+                auto.name
+            ));
             self.save();
             return;
         };
@@ -395,86 +418,101 @@ impl RunoApp {
                 if !self.expanded.contains(&project.id) {
                     self.expanded.push(project.id);
                 }
-                self.state.log(id, format!("Automation: {}", auto.name));
+                self.state.log(id, format!("Playbook: {}", auto.name));
                 let opts = cx.global::<AppSettings>().agent(&auto.provider);
                 self.start_agent(id, auto.prompt.clone(), &opts);
                 self.measure(id);
+                self.select(id);
             }
             Err(error) => {
-                self.notice = Some(format!(
-                    "Automation “{}” could not start: {error}",
-                    auto.name
-                ));
+                self.notice = Some(format!("Playbook “{}” could not start: {error}", auto.name));
             }
         }
         self.save();
     }
 
-    pub(crate) fn add_automation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
-        let name = self.auto_name.read(cx).value().trim().to_string();
-        let prompt = self.auto_prompt.read(cx).value().trim().to_string();
-        let every: u64 = self.auto_every.read(cx).value().trim().parse().unwrap_or(0);
-        let Some(project_id) = self
-            .auto_project
-            .or_else(|| self.state.projects.first().map(|p| p.id))
-        else {
-            self.notice = Some("Add a project first.".into());
-            return;
-        };
-        if prompt.is_empty() || every == 0 {
-            self.notice = Some("Write a prompt and how many minutes between runs.".into());
-            return;
-        }
+    fn push_playbook(&mut self, name: String, prompt: String, project_id: u64, every: u64) {
         let id = self.state.next_id();
         self.state.automations.push(store::Automation {
             id,
-            name: if name.is_empty() {
-                prompt
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(40)
-                    .collect()
-            } else {
-                name
-            },
+            name,
             project_id,
             provider: agent::PROVIDERS[self.auto_provider].id.into(),
             prompt,
             every_minutes: every,
-            // The first run waits one interval.
+            // A scheduled first run waits one interval.
             last_run: unix_now(),
             enabled: true,
         });
+        self.save();
+    }
+
+    pub(crate) fn add_automation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.auto_name.read(cx).value().trim().to_string();
+        let prompt = self.auto_prompt.read(cx).value().trim().to_string();
+        let every: u64 = self.auto_every.read(cx).value().trim().parse().unwrap_or(0);
+        if prompt.is_empty() {
+            self.notice = Some("Write what the playbook should do.".into());
+            return;
+        }
+        let project_id = self.auto_project.unwrap_or(0);
+        if every > 0 && project_id == 0 {
+            self.notice = Some(
+                "A schedule needs a project to run in. Pick one, or leave the schedule empty."
+                    .into(),
+            );
+            return;
+        }
+        let name = if name.is_empty() {
+            prompt
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(40)
+                .collect()
+        } else {
+            name
+        };
+        self.push_playbook(name, prompt, project_id, every);
         for input in [&self.auto_name, &self.auto_prompt, &self.auto_every] {
             input.update(cx, |i, cx| i.set_value("", window, cx));
         }
         self.notice = None;
-        self.save();
     }
 
     pub(crate) fn automations_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let here = self.current_project();
+        let here_name = here
+            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
+            .map(|p| p.name.clone());
         let mut list = div().v_flex().gap_2();
         for (i, auto) in self.state.automations.iter().enumerate() {
             let id = auto.id;
             let provider = agent::provider(&auto.provider);
-            let project = self
-                .state
-                .projects
-                .iter()
-                .find(|p| p.id == auto.project_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_else(|| "missing project".into());
-            let next = if auto.enabled {
-                let at = auto.last_run + auto.every_minutes * 60;
-                let mins = at.saturating_sub(unix_now()) / 60;
-                format!("next run in {mins} min")
+            let fixed = (auto.project_id != 0).then(|| {
+                self.state
+                    .projects
+                    .iter()
+                    .find(|p| p.id == auto.project_id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "missing project".into())
+            });
+            let when = if auto.scheduled() {
+                if auto.enabled {
+                    let at = auto.last_run + auto.every_minutes * 60;
+                    let mins = at.saturating_sub(unix_now()) / 60;
+                    format!("Every {} min · next in {mins} min", auto.every_minutes)
+                } else {
+                    format!("Every {} min · paused", auto.every_minutes)
+                }
             } else {
-                "paused".into()
+                "Run by hand".into()
+            };
+            let run_label = match (&fixed, &here_name) {
+                (Some(p), _) => format!("Run in {p}"),
+                (None, Some(p)) => format!("Run in {p}"),
+                (None, None) => "Run".into(),
             };
             list = list.child(stagger(
                 div()
@@ -486,7 +524,7 @@ impl RunoApp {
                     .rounded_lg()
                     .border_1()
                     .border_color(rgb(c_border()))
-                    .when(!auto.enabled, |el| el.opacity(0.6))
+                    .when(auto.scheduled() && !auto.enabled, |el| el.opacity(0.6))
                     .child(self.provider_badge(provider, 24.))
                     .child(
                         div()
@@ -505,37 +543,44 @@ impl RunoApp {
                                     .text_size(px(12.))
                                     .text_color(rgb(c_muted()))
                                     .child(format!(
-                                        "Every {} min · {project} · {next}",
-                                        auto.every_minutes
+                                        "{} · {} · {when}",
+                                        provider.name,
+                                        fixed.clone().unwrap_or_else(|| "Any project".into())
                                     )),
                             ),
                     )
                     .child(
-                        self.button(("auto-run", i), "Run now", false)
-                            .child(icon(IconName::Play, 12., c_secondary()))
+                        self.button(("auto-run", i), run_label, true)
+                            .child(icon(IconName::Play, 12., c_canvas()))
                             .h(px(26.))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_automation(id, cx);
+                                let here = this.current_project();
+                                this.run_playbook(id, here, cx);
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        self.button(
-                            ("auto-toggle", i),
-                            if auto.enabled { "Pause" } else { "Resume" },
-                            false,
+                    .when(auto.scheduled(), |el| {
+                        el.child(
+                            self.button(
+                                ("auto-toggle", i),
+                                if auto.enabled { "Pause" } else { "Resume" },
+                                false,
+                            )
+                            .h(px(26.))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if let Some(a) =
+                                        this.state.automations.iter_mut().find(|a| a.id == id)
+                                    {
+                                        a.enabled = !a.enabled;
+                                        a.last_run = unix_now();
+                                    }
+                                    this.save();
+                                    cx.notify();
+                                },
+                            )),
                         )
-                        .h(px(26.))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(a) = this.state.automations.iter_mut().find(|a| a.id == id)
-                            {
-                                a.enabled = !a.enabled;
-                                a.last_run = unix_now();
-                            }
-                            this.save();
-                            cx.notify();
-                        })),
-                    )
+                    })
                     .child(
                         self.ghost_button_sized(("auto-del", i), IconName::Trash, "Delete", 26.)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -551,22 +596,47 @@ impl RunoApp {
         if self.state.automations.is_empty() {
             list = list.child(empty_hint(
                 "auto-empty",
-                IconName::Timer,
-                "No automations yet",
-                "Schedule a prompt below and Runo starts a session for it on time.",
+                IconName::BookOpen,
+                "No playbooks yet",
+                "Start from a template below, or write your own.",
             ));
         }
-        let mut projects = div().flex().flex_wrap().gap_2();
-        let picked_project = self
-            .auto_project
-            .or_else(|| self.state.projects.first().map(|p| p.id));
+        // Templates: one click saves them as playbooks that run in any project.
+        let mut templates = div().flex().flex_wrap().gap_2();
+        for (i, (name, prompt)) in PLAYBOOK_TEMPLATES.iter().enumerate() {
+            let added = self.state.automations.iter().any(|a| a.name == *name);
+            templates = templates.child(
+                self.chip(
+                    ("auto-tpl", i),
+                    format!("{}{name}", if added { "✓ " } else { "+ " }),
+                    added,
+                )
+                .when(!added, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.push_playbook(name.to_string(), prompt.to_string(), 0, 0);
+                        cx.notify();
+                    }))
+                }),
+            );
+        }
+        let mut projects = div().flex().flex_wrap().gap_2().child(
+            self.chip(
+                ("auto-project-any", 0),
+                "Any project".into(),
+                self.auto_project.is_none(),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.auto_project = None;
+                cx.notify();
+            })),
+        );
         for (i, p) in self.state.projects.iter().enumerate() {
             let pid = p.id;
             projects = projects.child(
                 self.chip(
                     ("auto-project", i),
                     p.name.clone(),
-                    picked_project == Some(pid),
+                    self.auto_project == Some(pid),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.auto_project = Some(pid);
@@ -596,7 +666,7 @@ impl RunoApp {
                 .child(text)
         };
         self.page(
-            "Scheduled prompts",
+            "Playbooks",
             div()
                 .v_flex()
                 .gap_4()
@@ -604,9 +674,16 @@ impl RunoApp {
                     div()
                         .text_size(px(13.))
                         .text_color(rgb(c_secondary()))
-                        .child("Prompts that start a new session on a schedule, such as a nightly dependency check. They run while Runo is open."),
+                        .child("Saved tasks you can run in any project: from here, from Quick open (⌘K), or by right-clicking a project. Give one a project and a schedule to also run it on a timer while Runo is open."),
                 )
                 .child(list)
+                .child(
+                    div()
+                        .v_flex()
+                        .gap_2()
+                        .child(label("TEMPLATES"))
+                        .child(templates),
+                )
                 .child(
                     div()
                         .p_4()
@@ -620,22 +697,22 @@ impl RunoApp {
                             div()
                                 .text_size(px(13.))
                                 .font_weight(FontWeight::MEDIUM)
-                                .child("New automation"),
+                                .child("New playbook"),
                         )
                         .child(label("NAME"))
                         .child(Input::new(&self.auto_name).bordered(true).h(px(30.)))
-                        .child(label("PROMPT"))
+                        .child(label("INSTRUCTIONS"))
                         .child(Input::new(&self.auto_prompt).bordered(true).h(px(30.)))
-                        .child(label("EVERY (MINUTES)"))
-                        .child(div().w(px(160.)).child(Input::new(&self.auto_every).bordered(true).h(px(30.))))
-                        .child(label("PROJECT"))
-                        .child(projects)
                         .child(label("AGENT"))
                         .child(agents)
+                        .child(label("PROJECT"))
+                        .child(projects)
+                        .child(label("SCHEDULE (MINUTES BETWEEN RUNS, OPTIONAL)"))
+                        .child(div().w(px(160.)).child(Input::new(&self.auto_every).bordered(true).h(px(30.))))
                         .child(
-                            div().child(
-                                self.button("auto-add", "Add automation", true)
-                        .child(icon(IconName::Plus, 12., c_canvas()))
+                            div().flex().child(
+                                self.button("auto-add", "Save playbook", true)
+                                    .child(icon(IconName::Plus, 12., c_canvas()))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.add_automation(window, cx);
                                         cx.notify();
@@ -646,6 +723,16 @@ impl RunoApp {
         )
     }
 }
+
+/// Starting points offered on the Playbooks page.
+pub(crate) const PLAYBOOK_TEMPLATES: [(&str, &str); 6] = [
+    ("Find bugs", "Review the code in this project for bugs: logic errors, unhandled errors, race conditions and edge cases. List each finding with the file, line and a suggested fix, most serious first. Don't change any files."),
+    ("Scan for vulnerabilities", "Audit this project for security issues: injection, unsafe deserialization, secrets in code, weak authentication, and dependencies with known vulnerabilities. Rank findings by severity with file, line and a fix. Don't change any files."),
+    ("Update the docs", "Bring the README and docs in line with the code as it is now: fix outdated commands, options and examples, and document anything new. Keep the existing tone."),
+    ("Add missing tests", "Find important code paths without tests and add focused tests for them, following the project's existing test style. Run the tests and make sure they pass."),
+    ("Review my changes", "Review the uncommitted and unpushed changes in this repository as a careful reviewer would: correctness, naming, missing tests and anything risky. Don't change any files."),
+    ("Upgrade dependencies", "Check this project's dependencies for newer versions. Upgrade the safe ones (patch and minor), run the build and tests, and list major upgrades that need a decision."),
+];
 
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()

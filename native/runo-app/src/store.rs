@@ -278,15 +278,17 @@ pub struct Activity {
     pub text: String,
 }
 
-/// A prompt that starts a new session on a schedule.
+/// A playbook: a saved task (instructions and agent) that runs in any project on demand,
+/// and optionally on a schedule in one project.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Automation {
     pub id: u64,
     pub name: String,
+    /// The project it always runs in, or 0 to run in whichever project it is started from.
     pub project_id: u64,
     pub provider: String,
     pub prompt: String,
-    /// Minutes between runs.
+    /// Minutes between scheduled runs; 0 runs it only when started by hand.
     pub every_minutes: u64,
     /// Unix seconds of the last run; 0 if it never ran.
     #[serde(default)]
@@ -302,7 +304,12 @@ fn yes() -> bool {
 impl Automation {
     /// Whether the automation should run now.
     pub fn due(&self, now: u64) -> bool {
-        self.enabled && now >= self.last_run + self.every_minutes.max(1) * 60
+        self.scheduled() && self.enabled && now >= self.last_run + self.every_minutes * 60
+    }
+
+    /// Runs on a timer as well as by hand. A schedule needs a project to run in.
+    pub fn scheduled(&self) -> bool {
+        self.every_minutes > 0 && self.project_id != 0
     }
 }
 
