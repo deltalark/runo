@@ -71,7 +71,7 @@ impl SettingsPage {
 
     fn subtitle(self) -> &'static str {
         match self {
-            Self::General => "Alerts, motion and how deleting works.",
+            Self::General => "Alerts, the built-in browser, motion and how deleting works.",
             Self::Appearance => "Theme, glass, fonts and how wide conversations run.",
             Self::Terminal => "Text size, font, scrolling and mouse behavior in the terminal panel and agent CLIs.",
             Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere.",
@@ -371,6 +371,13 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::General => vec![
             section("Getting started", "A one-minute walk through the window and what each part does.", vec![
                 row("Welcome tour", "Highlights each part of Runo with a short explanation. Also in the palette as Take the tour.", Ctl::Button("Take the tour".into(), Rc::new(|this, _| this.start_tour()))),
+            ]),
+            section("Browser", "Show pages in the Browser tab with a headless copy of the Chrome, Edge, Brave or Chromium on this machine, using its own profile.", vec![
+                switch_row("Built-in browser", "Adds the Browser tab: open your dev server beside the conversation and click and type in it. Off, the tab is hidden.", st.browser_enabled, |s, v| s.browser_enabled = v),
+                match browser_engine::find_chromium() {
+                    Some(path) => row("Uses", &tilde(&path), Ctl::Chip(browser_engine::browser_name(&path), 0)),
+                    None => row("Uses", "No Chromium-based browser found in Applications. Downloading Chrome for Testing is coming next.", Ctl::Chip("Not found".into(), 1)),
+                },
             ]),
             section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
                 switch_row("Notifications", "Show a desktop notification when an agent finishes or fails (macOS and Linux).", st.notifications, |s, v| s.notifications = v),

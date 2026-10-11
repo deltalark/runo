@@ -1,6 +1,7 @@
 mod agent;
 mod alerts;
 mod browser;
+mod browser_engine;
 mod caps;
 mod cliview;
 mod ctxmenu;
@@ -95,6 +96,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-m", ToggleView, Some("Runo")),
     ]);
     // Inside a shell, keys belong to the shell: Ctrl-P is history, Escape is vi.
+    // Keys typed into the Browser tab's page go to the page.
+    cx.bind_keys([KeyBinding::new("escape", NoAction {}, Some("RunoBrowser"))]);
     let mut shell_keys = vec!["escape"];
     if !cfg!(target_os = "macos") {
         shell_keys.extend([
@@ -225,8 +228,11 @@ struct RunoApp {
     address: Entity<InputState>,
     browser_recent: Vec<String>,
     browser_ports: Vec<u16>,
-    browser_check: Option<browser::PageCheck>,
     browser_scanning: bool,
+    /// The headless Chromium behind the Browser tab, started on first use.
+    browser: Option<std::sync::Arc<browser_engine::Engine>>,
+    browser_view: browser::BrowserView,
+    browser_focus: FocusHandle,
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
@@ -953,8 +959,10 @@ impl RunoApp {
             address,
             browser_recent: Vec::new(),
             browser_ports: Vec::new(),
-            browser_check: None,
             browser_scanning: false,
+            browser: None,
+            browser_view: browser::BrowserView::default(),
+            browser_focus: cx.focus_handle(),
             new_provider: agent::PROVIDERS
                 .iter()
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
@@ -1061,6 +1069,22 @@ impl RunoApp {
             address_sub,
         ]);
         app.restore_layout();
+        // The Browser tab's live page: pick up frames at display rate while it is open.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(16))
+                .await;
+            if this.update(cx, |this, cx| this.pump_browser(cx)).is_err() {
+                break;
+            }
+        })
+        .detach();
+        // Chromium would exit when its pipe closes, but stop it right away.
+        cx.on_app_quit(|this, _| {
+            this.browser = None;
+            async {}
+        })
+        .detach();
         // Scheduled automations are checked twice a minute.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -6654,12 +6678,14 @@ impl RunoApp {
                         },
                         cx,
                     ))
-                    .child(self.right_tab_button(
-                        RightTab::Browser,
-                        IconName::Globe,
-                        "Browser".into(),
-                        cx,
-                    ))
+                    .when(cx.global::<AppSettings>().browser_enabled, |el| {
+                        el.child(self.right_tab_button(
+                            RightTab::Browser,
+                            IconName::Globe,
+                            "Browser".into(),
+                            cx,
+                        ))
+                    })
                     .child(self.right_tab_button(
                         RightTab::Files,
                         IconName::FileText,
@@ -6761,6 +6787,12 @@ impl Render for RunoApp {
         }
         if let Some(path) = self.pending_file.take() {
             self.open_file(&path, window, cx);
+        }
+        if self.right_tab == RightTab::Browser && !st.browser_enabled {
+            self.right_tab = RightTab::Changes;
+        }
+        if self.right_tab == RightTab::Browser {
+            self.sync_browser_address(window, cx);
         }
         // A new shell takes focus once its element has been drawn.
         if let Some(id) = self.selected.filter(|_| self.view == View::Session) {
@@ -7165,7 +7197,8 @@ impl Render for RunoApp {
             .children(self.ctx_menu_view(cx))
             .children(self.install_modal(cx))
             .children(self.project_modal(cx))
-            .children(self.tour_view(window, cx));
+            .children(self.tour_view(window, cx))
+            .children(self.browser_offer(cx));
         fade(root, "app-root", 450)
     }
 }

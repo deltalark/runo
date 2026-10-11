@@ -89,6 +89,10 @@ pub struct AppSettings {
     pub term_right_click: String,
     /// MCP servers (`<app>/<name>`) handed to every agent that doesn't load them itself.
     pub mcp_shared: Vec<String>,
+    /// Show pages in the Browser tab with a headless Chromium.
+    pub browser_enabled: bool,
+    /// The built-in browser card was answered.
+    pub browser_asked: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -139,6 +143,8 @@ impl Default for AppSettings {
             term_scroll: "normal".into(),
             term_right_click: "menu".into(),
             mcp_shared: Vec::new(),
+            browser_enabled: false,
+            browser_asked: false,
         }
     }
 }
