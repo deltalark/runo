@@ -1,5 +1,6 @@
 mod agent;
 mod caps;
+mod fileview;
 mod git;
 mod github;
 mod history;
@@ -60,6 +61,7 @@ actions!(
         StopAgent,
         TogglePanel,
         ToggleSidebar,
+        SaveFile,
         Dismiss,
         QuickOpen
     ]
@@ -74,6 +76,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-b", TogglePanel, Some("Runo")),
         KeyBinding::new("secondary-\\", ToggleSidebar, Some("Runo")),
         KeyBinding::new("escape", Dismiss, Some("Runo")),
+        KeyBinding::new("secondary-s", SaveFile, Some("Runo")),
         KeyBinding::new("secondary-k", QuickOpen, Some("Runo")),
         KeyBinding::new("secondary-p", QuickOpen, Some("Runo")),
     ]);
@@ -105,6 +108,7 @@ enum View {
     Activity,
     Automations,
     GitHub,
+    Editor,
 }
 
 /// What a quick-open entry does when chosen.
@@ -155,7 +159,12 @@ struct RunoApp {
     selected_file: Option<String>,
     diff: String,
     files: Vec<String>,
-    preview: Option<(String, String)>,
+    /// The file shown in the Files tab (or the main area), and its editor.
+    open_file: Option<fileview::OpenFile>,
+    pending_file: Option<String>,
+    file_editor: Entity<gpui_kit::component::input::EditorState>,
+    file_preview: bool,
+    file_dirty: bool,
     terminal: HashMap<u64, Vec<String>>,
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
@@ -543,6 +552,13 @@ impl RunoApp {
                 cx.notify();
             }
         });
+        let file_editor = Self::new_file_editor(window, cx);
+        let file_sub = cx.subscribe_in(&file_editor, window, |this, _, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.file_changed(cx);
+                cx.notify();
+            }
+        });
         let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
         let rename_sub = cx.subscribe_in(&rename, window, |this, input, event, _, cx| {
             match event {
@@ -669,7 +685,11 @@ impl RunoApp {
             selected_file: None,
             diff: String::new(),
             files: Vec::new(),
-            preview: None,
+            open_file: None,
+            pending_file: None,
+            file_editor,
+            file_preview: false,
+            file_dirty: false,
             terminal,
             handles: HashMap::new(),
             tx,
@@ -775,7 +795,7 @@ impl RunoApp {
                 },
             );
         app._subscriptions
-            .extend([branch_sub, task_sub, notes_sub, split_sub]);
+            .extend([branch_sub, task_sub, notes_sub, split_sub, file_sub]);
         app.restore_layout();
         // Scheduled automations are checked twice a minute.
         cx.spawn(async move |this, cx| loop {
@@ -950,7 +970,8 @@ impl RunoApp {
         self.view = View::Session;
         self.selected_file = None;
         self.diff.clear();
-        self.preview = None;
+        self.open_file = None;
+        self.file_dirty = false;
         self.confirm_delete = None;
         self.confirm_discard = None;
         self.notice = None;
@@ -1153,18 +1174,9 @@ impl RunoApp {
         self.submit_prompt(window, cx);
     }
 
-    /// Load a file of the current session into the Files preview.
+    /// Show a file of the current session in the Files tab; applied on the next frame.
     fn open_preview(&mut self, path: &str) {
-        if self.demo {
-            self.preview = Some((path.to_string(), "(demo data)".into()));
-        } else if let Some(dir) = self.current().map(|s| s.dir.clone()) {
-            let text = std::fs::read_to_string(std::path::Path::new(&dir).join(path))
-                .unwrap_or_else(|_| "(binary, deleted or unreadable file)".into());
-            self.preview = Some((
-                path.to_string(),
-                text.lines().take(1500).collect::<Vec<_>>().join("\n"),
-            ));
-        }
+        self.pending_file = Some(path.to_string());
     }
 
     fn open_settings(&mut self) {
@@ -2321,6 +2333,7 @@ impl RunoApp {
                         self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_sidebar = !this.show_sidebar;
+                                this.save();
                                 cx.notify();
                             })),
                     )
@@ -2371,6 +2384,7 @@ impl RunoApp {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.show_panel = !this.show_panel;
+                                        this.save();
                                         cx.notify();
                                     },
                                 )),
@@ -5677,7 +5691,11 @@ impl RunoApp {
                         this.open_preview(&p);
                         cx.notify();
                     }))
-                    .child(icon(IconName::File, 14., c_muted()))
+                    .child(icon(
+                        Self::file_icon(fileview::file_kind(path, b"")),
+                        14.,
+                        c_muted(),
+                    ))
                     .child(div().truncate().child(path.clone())),
             );
         }
@@ -5690,30 +5708,10 @@ impl RunoApp {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .v_flex()
                     .border_t_1()
                     .border_color(rgb(c_border()))
-                    .overflow_y_scrollbar()
-                    .p_3()
-                    .font_family(self.mono_font.clone())
-                    .text_xs()
-                    .child(match &self.preview {
-                        Some((path, text)) => div()
-                            .v_flex()
-                            .gap_2()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child(path.clone()))
-                            .child(
-                                TextView::markdown(
-                                    SharedString::from(format!("preview-{path}")),
-                                    format!("```\n{}\n```", text.replace("```", "'''")),
-                                )
-                                .selectable(true),
-                            )
-                            .into_any_element(),
-                        None => div()
-                            .text_color(rgb(c_muted()))
-                            .child("Select a file to preview.")
-                            .into_any_element(),
-                    }),
+                    .child(self.file_view(false, cx)),
             )
             .into_any_element()
     }
@@ -6032,6 +6030,9 @@ impl Render for RunoApp {
         };
         set_dark(dark);
         self.measure_cell(window);
+        if let Some(path) = self.pending_file.take() {
+            self.open_file(&path, window, cx);
+        }
         // A new shell takes focus once its element has been drawn.
         if self.focus_shell > 0 {
             self.focus_shell -= 1;
@@ -6074,6 +6075,13 @@ impl Render for RunoApp {
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
             View::GitHub => self.github_view(cx),
+            View::Editor => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .v_flex()
+                .child(self.file_view(true, cx))
+                .into_any_element(),
         };
         // The side panel needs room; on narrow windows it starts hidden (toggle in the header).
         let wide = window.viewport_size().width >= px(1180.);
@@ -6121,6 +6129,7 @@ impl Render for RunoApp {
                 this.open_palette(window, cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_file(cx)))
             .on_action(cx.listener(|this, _: &NewSession, _, cx| {
                 this.view = View::NewSession;
                 cx.notify();
@@ -6134,11 +6143,11 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TogglePanel, _, cx| {
-                this.show_panel = !this.show_panel;
+                this.show_panel = !this.show_panel; this.save();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.show_sidebar = !this.show_sidebar;
+                this.show_sidebar = !this.show_sidebar; this.save();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
