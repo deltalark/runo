@@ -555,8 +555,17 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                     MEMORY_SERVER.into(),
                     serde_json::json!({ "command": exe, "args": ["--mcp-memory", dir] }),
                 );
-                // Reading and searching memory needs no approval.
-                allowed.push(format!("mcp__{MEMORY_SERVER}"));
+                // Memory and reading playbooks need no approval; starting a playbook as a
+                // new session asks first.
+                for tool in [
+                    "read_memory",
+                    "search_history",
+                    "save_note",
+                    "list_playbooks",
+                    "get_playbook",
+                ] {
+                    allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
+                }
             }
             if !servers.is_empty() {
                 let config = serde_json::json!({ "mcpServers": servers });
@@ -763,7 +772,7 @@ mod interactive_tests {
 }
 
 /// Name of Runo's memory MCP server in the agents' config.
-pub const MEMORY_SERVER: &str = "runo_memory";
+pub const MEMORY_SERVER: &str = "runo";
 
 /// A TOML basic string.
 fn toml_string(text: &str) -> String {

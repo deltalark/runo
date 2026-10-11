@@ -474,7 +474,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Follow output", "Scroll the conversation to the latest output while an agent works.", st.autoscroll, |s, v| s.autoscroll = v),
             ]),
             section("Memory", "Runo keeps a summary of each session in .runo/memory.md inside its folder, kept out of git.", vec![
-                switch_row("Memory server", "Give Claude Code and Codex Runo's memory tools: read the session memory, search earlier sessions, save notes.", st.memory_server, |s, v| s.memory_server = v),
+                switch_row("Runo tools for agents", "Give Claude Code and Codex Runo's tools: read the session memory, search earlier sessions, save notes, and use playbooks (as /mcp__runo__… commands in Claude Code).", st.memory_server, |s, v| s.memory_server = v),
             ]),
             section("New sessions", "What a session starts with before you change it in the composer.", vec![
                 row("Default view", "How new sessions open. CLI shows the agent's own command line on the same conversation (Claude Code and Codex); switch any time from the session header at no token cost.", Ctl::Segment(vec![("chat".into(), "Chat".into()), ("cli".into(), "CLI".into())], st.default_view.clone(), Rc::new(|s, v| s.default_view = v))),

@@ -1,6 +1,7 @@
 //! `runo --mcp-memory <folder>`: a small MCP server (JSON-RPC over stdio) that lets any
 //! agent read the session memory, search earlier sessions of the project and save notes,
-//! instead of having the whole history pasted into every prompt.
+//! instead of having the whole history pasted into every prompt. It also offers the
+//! playbooks: as tools, and as MCP prompts that CLIs like Claude Code show as slash commands.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -34,12 +35,19 @@ pub fn handle(dir: &str, request: &Value) -> Option<Value> {
     let id = request.get("id")?.clone();
     let params = &request["params"];
     let result = match request["method"].as_str().unwrap_or("") {
-        "initialize" => Ok(json!({
-            "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "runo-memory", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Runo's session memory. Call read_memory to catch up on this task, search_history to find what earlier sessions did, and save_note to keep decisions for whoever works on this next."
-        })),
+        "initialize" => {
+            if let Some(name) = params["clientInfo"]["name"].as_str() {
+                let _ = CLIENT.set(name.to_string());
+            }
+            Ok(json!({
+                "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+                "capabilities": { "tools": {}, "prompts": {} },
+                "serverInfo": { "name": "runo", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": "Runo's session memory and playbooks. Call read_memory to catch up on this task, search_history to find what earlier sessions did, and save_note to keep decisions for whoever works on this next. Playbooks are saved tasks: list_playbooks shows them, get_playbook gives one's instructions to carry out now, and run_playbook starts one as its own session in Runo."
+            }))
+        }
+        "prompts/list" => Ok(json!({ "prompts": prompt_list(&load_state(), dir) })),
+        "prompts/get" => prompt_get(&load_state(), dir, params["name"].as_str().unwrap_or("")),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
         "tools/call" => Ok(call(
@@ -72,6 +80,29 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": { "query": { "type": "string" } },
                 "required": ["query"]
+            }
+        },
+        {
+            "name": "list_playbooks",
+            "description": "List the playbooks (saved tasks) that can run in this project, with what each does.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "get_playbook",
+            "description": "Get a playbook's instructions, to carry them out yourself now in this conversation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "The playbook's name, as list_playbooks shows it." } },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "run_playbook",
+            "description": "Start a playbook as its own new session in Runo, in this project. It runs alongside this one; use get_playbook instead to do it here.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string" } },
+                "required": ["name"]
             }
         },
         {
@@ -137,6 +168,9 @@ fn call(dir: &str, name: &str, args: &Value) -> Value {
                 Err(e) => failure(format!("Could not save the note: {e}")),
             }
         }
+        "list_playbooks" | "get_playbook" | "run_playbook" => {
+            playbook_call(&load_state(), dir, name, args, &crate::store::inbox_dir())
+        }
         other => failure(format!("Unknown tool {other}")),
     }
 }
@@ -171,6 +205,116 @@ fn find_section(memory: &str, name: &str) -> Option<String> {
 }
 
 /// Runo's saved sessions, read without changing anything.
+/// The name of the CLI this server talks to, from its `initialize` request.
+static CLIENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The project a session folder belongs to.
+fn project_of(state: &State, dir: &str) -> Option<u64> {
+    state
+        .sessions
+        .iter()
+        .find(|s| s.dir == dir)
+        .map(|s| s.project_id)
+        .or_else(|| {
+            state
+                .projects
+                .iter()
+                .filter(|p| Path::new(dir).starts_with(&p.path))
+                .max_by_key(|p| p.path.len())
+                .map(|p| p.id)
+        })
+}
+
+/// Playbooks that can run in the project of `dir`: its own and the any-project ones.
+fn playbooks_here<'a>(state: &'a State, dir: &str) -> Vec<&'a crate::store::Automation> {
+    let project = project_of(state, dir);
+    state
+        .automations
+        .iter()
+        .filter(|a| a.project_id == 0 || Some(a.project_id) == project)
+        .collect()
+}
+
+fn find_playbook<'a>(
+    state: &'a State,
+    dir: &str,
+    name: &str,
+) -> Option<&'a crate::store::Automation> {
+    let want = name.trim().trim_start_matches('/').to_lowercase();
+    let here = playbooks_here(state, dir);
+    here.iter()
+        .find(|a| a.slug() == want || a.name.to_lowercase() == want)
+        .or_else(|| here.iter().find(|a| a.slug().contains(&want)))
+        .copied()
+}
+
+fn prompt_list(state: &State, dir: &str) -> Value {
+    Value::Array(
+        playbooks_here(state, dir)
+            .into_iter()
+            .map(|a| json!({ "name": a.slug(), "title": a.name, "description": a.summary() }))
+            .collect(),
+    )
+}
+
+fn prompt_get(state: &State, dir: &str, name: &str) -> Result<Value, Value> {
+    match find_playbook(state, dir, name) {
+        Some(a) => Ok(json!({
+            "description": a.summary(),
+            "messages": [{ "role": "user", "content": { "type": "text", "text": a.prompt } }]
+        })),
+        None => Err(json!({ "code": -32602, "message": format!("No playbook called {name}") })),
+    }
+}
+
+fn playbook_call(state: &State, dir: &str, tool: &str, args: &Value, inbox: &Path) -> Value {
+    if tool == "list_playbooks" {
+        let here = playbooks_here(state, dir);
+        if here.is_empty() {
+            return text("There are no playbooks yet. People add them on Runo's Playbooks page.");
+        }
+        return text(
+            here.iter()
+                .map(|a| format!("- {} ({}): {}", a.slug(), a.provider, a.summary()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    let name = args["name"].as_str().unwrap_or("");
+    let Some(playbook) = find_playbook(state, dir, name) else {
+        return failure(format!(
+            "No playbook called \"{name}\" here. Call list_playbooks to see the names."
+        ));
+    };
+    if tool == "get_playbook" {
+        return text(format!(
+            "Playbook \"{}\". Carry out these instructions now:\n\n{}",
+            playbook.name, playbook.prompt
+        ));
+    }
+    let project = match playbook.project_id {
+        0 => project_of(state, dir),
+        id => Some(id),
+    };
+    let Some(project) = project else {
+        return failure(
+            "This folder is not one of Runo's projects, so there is nowhere to run it.",
+        );
+    };
+    let request = crate::store::PlaybookRequest {
+        playbook: playbook.id,
+        project,
+        from: CLIENT.get().cloned().unwrap_or_else(|| "an agent".into()),
+    };
+    match crate::store::send_request(inbox, &request) {
+        Ok(()) => text(format!(
+            "Asked Runo to start \"{}\" as a new session. It shows up in Runo's sidebar; if Runo is closed it starts when Runo opens.",
+            playbook.name
+        )),
+        Err(e) => failure(format!("Could not reach Runo: {e}")),
+    }
+}
+
 fn load_state() -> State {
     let path: PathBuf = crate::store::data_dir().join("state.json");
     std::fs::read_to_string(path)
@@ -282,7 +426,7 @@ mod tests {
         )
         .is_none());
         let list = handle(d, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
         let call = |name: &str, args: Value| {
             handle(d, &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap()["result"]["content"][0]["text"]
                 .as_str()
@@ -305,5 +449,63 @@ mod tests {
             "hello brave new world"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn playbooks_list_get_and_run() {
+        use crate::store::{Automation, Project};
+        let mut state = State::default();
+        for (id, path) in [(1, "/w/app"), (2, "/w/site")] {
+            state.projects.push(Project {
+                id,
+                path: path.into(),
+                name: format!("p{id}"),
+                ..Default::default()
+            });
+        }
+        let book = |id, name: &str, project_id, prompt: &str| Automation {
+            id,
+            name: name.into(),
+            project_id,
+            provider: "claude".into(),
+            prompt: prompt.into(),
+            description: String::new(),
+            every_minutes: 0,
+            last_run: 0,
+            enabled: true,
+        };
+        state.automations = vec![
+            book(10, "Find bugs", 0, "Review the code for bugs. List them."),
+            book(11, "Ship site", 2, "Deploy the site."),
+        ];
+        // Only playbooks for this project (and any-project ones) show up.
+        let prompts = prompt_list(&state, "/w/app/src");
+        assert_eq!(prompts.as_array().unwrap().len(), 1);
+        assert_eq!(prompts[0]["name"], "find-bugs");
+        assert_eq!(prompts[0]["description"], "Review the code for bugs.");
+        let got = prompt_get(&state, "/w/app", "find-bugs").unwrap();
+        assert_eq!(
+            got["messages"][0]["content"]["text"],
+            "Review the code for bugs. List them."
+        );
+        assert!(prompt_get(&state, "/w/app", "ship-site").is_err());
+
+        let inbox = std::env::temp_dir().join(format!("runo-inbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&inbox);
+        let say = |tool: &str, args: Value| {
+            playbook_call(&state, "/w/site", tool, &args, &inbox)["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert!(say("list_playbooks", json!({})).contains("ship-site (claude)"));
+        assert!(say("get_playbook", json!({"name": "/Find bugs"})).contains("List them."));
+        assert!(say("run_playbook", json!({"name": "ship"})).contains("Asked Runo"));
+        assert!(say("run_playbook", json!({"name": "nope"})).contains("No playbook"));
+        let requests = crate::store::take_requests(&inbox);
+        assert_eq!(requests.len(), 1);
+        assert_eq!((requests[0].playbook, requests[0].project), (11, 2));
+        assert!(crate::store::take_requests(&inbox).is_empty());
+        let _ = std::fs::remove_dir_all(&inbox);
     }
 }
