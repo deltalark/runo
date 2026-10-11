@@ -362,6 +362,9 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             if !spec.in_git {
                 args.push(s("--skip-git-repo-check"));
             }
+            for over in crate::mcp::codex_overrides() {
+                args.extend([s("-c"), over]);
+            }
             if let Some((exe, dir)) = spec.memory {
                 args.extend([
                     s("-c"),
@@ -544,13 +547,20 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 args.extend([s("--append-system-prompt"), opts.append_prompt.clone()]);
             }
             let mut allowed = list(&opts.allowed_tools);
+            // Servers shared from other apps, plus Runo's memory server.
+            let mut servers: serde_json::Map<String, serde_json::Value> =
+                crate::mcp::claude_servers().into_iter().collect();
             if let Some((exe, dir)) = spec.memory {
-                let config = serde_json::json!({
-                    "mcpServers": { MEMORY_SERVER: { "command": exe, "args": ["--mcp-memory", dir] } }
-                });
-                args.extend([s("--mcp-config"), config.to_string()]);
+                servers.insert(
+                    MEMORY_SERVER.into(),
+                    serde_json::json!({ "command": exe, "args": ["--mcp-memory", dir] }),
+                );
                 // Reading and searching memory needs no approval.
                 allowed.push(format!("mcp__{MEMORY_SERVER}"));
+            }
+            if !servers.is_empty() {
+                let config = serde_json::json!({ "mcpServers": servers });
+                args.extend([s("--mcp-config"), config.to_string()]);
             }
             if !allowed.is_empty() {
                 args.extend([s("--allowed-tools"), allowed.join(",")]);
