@@ -228,7 +228,8 @@ struct RunoApp {
     new_more_agents: bool,
     /// Newer releases of installed agents, from the last update check.
     updates: Vec<alerts::AgentUpdate>,
-    updating: std::collections::HashSet<&'static str>,
+    /// Agent updates running now, or just finished and showing their success badge.
+    update_runs: HashMap<&'static str, alerts::UpdateRun>,
     update_checked: Option<std::time::Instant>,
     /// Popups the person hid ("s:<session>:<message>" or "u:<agent>:<version>").
     alerts_hidden: std::collections::HashSet<String>,
@@ -622,8 +623,11 @@ impl RunoApp {
                     if rescan && watching && !this.demo {
                         this.refresh();
                         cx.notify();
-                    } else if repaint || (tick && (!this.started.is_empty() || this.info.is_some()))
+                    } else if repaint
+                        || (tick && (!this.started.is_empty() || this.info.is_some()))
+                        || (ticks.is_multiple_of(5) && !this.update_runs.is_empty())
                     {
+                        this.prune_update_runs();
                         cx.notify();
                     }
                 });
@@ -868,7 +872,7 @@ impl RunoApp {
             new_isolated: true,
             new_more_agents: false,
             updates: Vec::new(),
-            updating: Default::default(),
+            update_runs: HashMap::new(),
             update_checked: None,
             alerts_hidden: Default::default(),
             alerts_expanded: false,

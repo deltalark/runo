@@ -15,6 +15,218 @@ pub(crate) struct AgentUpdate {
     pub latest: String,
 }
 
+/// An agent update while it runs, and briefly after it succeeds.
+pub(crate) struct UpdateRun {
+    pub started: std::time::Instant,
+    /// The newest line the updater printed.
+    pub line: String,
+    /// A percentage the updater printed itself, when it prints one.
+    pub percent: Option<f32>,
+    /// How far the updater's own messages say it got (downloading, installing, done).
+    pub phase: f32,
+    pub finished: Option<std::time::Instant>,
+}
+
+/// How long the success badge stays before the card hides itself.
+pub(crate) const UPDATE_DONE_SHOWN: Duration = Duration::from_millis(2600);
+
+impl UpdateRun {
+    /// Fraction done for the bar: the updater's own percentage when it prints one, else
+    /// the furthest phase it reported, eased forward by elapsed time so it never stalls.
+    pub(crate) fn progress(&self, now: std::time::Instant) -> f32 {
+        if self.finished.is_some() {
+            return 1.;
+        }
+        if let Some(p) = self.percent {
+            return (p / 100.).clamp(0.02, 0.98);
+        }
+        let t = now.duration_since(self.started).as_secs_f32();
+        let timed = 0.85 * (1. - (-t / 25.).exp());
+        timed.max(self.phase).clamp(0.03, 0.97)
+    }
+
+    fn take_line(&mut self, line: &str) {
+        if let Some(p) = percent_of(line) {
+            self.percent = Some(p);
+        }
+        if let Some(phase) = phase_of(line) {
+            self.phase = self.phase.max(phase);
+        }
+        self.line = line.chars().take(160).collect();
+    }
+}
+
+/// A percentage printed in a progress line, like "Downloading 42%" or "[####] 42.5 %".
+fn percent_of(line: &str) -> Option<f32> {
+    let at = line.rfind('%')?;
+    let digits: String = line[..at]
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    digits
+        .parse::<f32>()
+        .ok()
+        .filter(|p| (0. ..=100.).contains(p))
+}
+
+/// How far along an updater is, from the words in its output.
+fn phase_of(line: &str) -> Option<f32> {
+    let l = line.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| l.contains(w));
+    if has(&[
+        "added ",
+        "changed ",
+        "updated",
+        "successfully",
+        "up to date",
+        "complete",
+    ]) {
+        Some(0.95)
+    } else if has(&["verif", "linking", "postinstall", "reify"]) {
+        Some(0.8)
+    } else if has(&["extract", "unpack", "installing"]) {
+        Some(0.6)
+    } else if has(&["download", "fetch", "get 200", "get 304"]) {
+        Some(0.35)
+    } else {
+        None
+    }
+}
+
+/// A line of updater output without colour codes or spinner characters.
+fn clean_line(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip an escape sequence: ESC [ ... final letter, or ESC and one character.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+        } else if !c.is_control() && !('\u{2800}'..='\u{28ff}').contains(&c) {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Run an updater, sending each line it prints as `<key>-line` and the result as `<key>`.
+fn run_streaming(key: String, mut command: std::process::Command, tx: Sender<Event>) {
+    use std::io::Read;
+    use std::process::Stdio;
+    command
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    std::thread::spawn(move || {
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = tx.send(Event::Output(
+                    key,
+                    Err(format!(
+                        "could not start {:?}: {error}",
+                        command.get_program()
+                    )),
+                ));
+                return;
+            }
+        };
+        let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut readers = Vec::new();
+        let streams: Vec<Box<dyn Read + Send>> = [
+            child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for mut stream in streams {
+            let (tx, tail, line_key) = (tx.clone(), tail.clone(), format!("{key}-line"));
+            readers.push(std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let mut pending = Vec::new();
+                let emit = |bytes: &[u8]| {
+                    let line = clean_line(&String::from_utf8_lossy(bytes));
+                    if line.is_empty() {
+                        return;
+                    }
+                    if let Ok(mut tail) = tail.lock() {
+                        tail.push(line.clone());
+                        let extra = tail.len().saturating_sub(30);
+                        tail.drain(..extra);
+                    }
+                    let _ = tx.send(Event::Output(line_key.clone(), Ok(line)));
+                };
+                while let Ok(n) = stream.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    for &b in &buf[..n] {
+                        // Progress bars redraw with \r, so treat it as a line end too.
+                        if b == b'\n' || b == b'\r' {
+                            emit(&pending);
+                            pending.clear();
+                        } else {
+                            pending.push(b);
+                        }
+                    }
+                }
+                emit(&pending);
+            }));
+        }
+        for reader in readers {
+            let _ = reader.join();
+        }
+        let ok = child.wait().is_ok_and(|status| status.success());
+        let text = tail.lock().map(|t| t.join("\n")).unwrap_or_default();
+        let _ = tx.send(Event::Output(key, if ok { Ok(text) } else { Err(text) }));
+    });
+}
+
+/// The green "Updated" pill shown when an update finishes.
+fn update_done_badge(n: usize) -> AnyElement {
+    let pill = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .h(px(24.))
+        .rounded_full()
+        .bg(rgb(settings::mix(c_green(), c_raised(), 0.18)))
+        .border_1()
+        .border_color(rgb(settings::mix(c_green(), c_border(), 0.5)))
+        .text_size(px(12.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(c_green()))
+        .child(icon(IconName::Check, 12., c_green()))
+        .child("Updated");
+    pill.animated(
+        ("up-done", n),
+        Animation::new(Duration::from_millis(420)).with_easing(ease_out_quint()),
+        |el, d| el.opacity(d).ml(px(8. * (1. - d))),
+    )
+}
+
 /// Something a session is waiting on the person for.
 pub(crate) enum Waiting {
     Denied(Vec<String>),
@@ -49,11 +261,15 @@ pub(crate) fn update_command(provider: &str, bin: &str) -> Option<Vec<String>> {
         "cursor" => own(&["update"]),
         _ => {
             let package = npm_package(provider)?;
+            // `--loglevel http` makes npm print each download as it happens, so the
+            // update card has live progress to show.
             vec![
                 "npm".into(),
                 "install".into(),
                 "-g".into(),
                 format!("{package}@latest"),
+                "--loglevel".into(),
+                "http".into(),
             ]
         }
     })
@@ -174,14 +390,36 @@ impl RunoApp {
         };
         let mut cmd = std::process::Command::new(&args[0]);
         cmd.args(&args[1..]);
-        self.updating.insert(provider);
-        agent::oneshot(
-            format!("update:{provider}"),
-            cmd,
-            &std::env::temp_dir().to_string_lossy(),
-            self.tx.clone(),
+        self.update_runs.insert(
+            provider,
+            UpdateRun {
+                started: std::time::Instant::now(),
+                line: format!("Starting {}…", args.join(" ")),
+                percent: None,
+                phase: 0.,
+                finished: None,
+            },
         );
+        run_streaming(format!("update:{provider}"), cmd, self.tx.clone());
         cx.notify();
+    }
+
+    /// Hide update cards whose success badge has been shown long enough.
+    pub(crate) fn prune_update_runs(&mut self) -> bool {
+        let done: Vec<&'static str> = self
+            .update_runs
+            .iter()
+            .filter(|(_, run)| {
+                run.finished
+                    .is_some_and(|at| at.elapsed() > UPDATE_DONE_SHOWN)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &done {
+            self.update_runs.remove(id);
+            self.updates.retain(|u| u.provider != *id);
+        }
+        !done.is_empty()
     }
 
     /// Results of update checks and update runs.
@@ -207,6 +445,15 @@ impl RunoApp {
                 .collect();
             return true;
         }
+        if let Some(provider) = key
+            .strip_prefix("update:")
+            .and_then(|k| k.strip_suffix("-line"))
+        {
+            if let (Some(run), Ok(line)) = (self.update_runs.get_mut(provider), result) {
+                run.take_line(&line);
+            }
+            return true;
+        }
         let Some(provider) = key.strip_prefix("update:") else {
             return false;
         };
@@ -217,7 +464,6 @@ impl RunoApp {
         else {
             return true;
         };
-        self.updating.remove(provider);
         let name = agent::provider(provider).name;
         match result {
             Ok(_) => {
@@ -227,15 +473,15 @@ impl RunoApp {
                     .find(|u| u.provider == provider)
                     .map(|u| u.latest.clone())
                     .unwrap_or_default();
-                self.updates.retain(|u| u.provider != provider);
-                self.info = Some((
-                    format!("{name} is updated to {latest}."),
-                    std::time::Instant::now(),
-                ));
+                // The card turns into a success badge, then hides itself.
+                if let Some(run) = self.update_runs.get_mut(provider) {
+                    run.finished = Some(std::time::Instant::now());
+                }
                 self.state.log(0, format!("Updated {name} to {latest}"));
                 caps::refresh();
             }
             Err(error) => {
+                self.update_runs.remove(provider);
                 let last = error
                     .lines()
                     .rev()
@@ -424,66 +670,93 @@ impl RunoApp {
         }
         for (n, update) in self.updates.iter().enumerate() {
             let key = format!("u:{}:{}", update.provider, update.latest);
-            if self.alerts_hidden.contains(&key) {
+            let run = self.update_runs.get(update.provider);
+            let done = run.is_some_and(|r| r.finished.is_some());
+            if self.alerts_hidden.contains(&key) && !done {
                 continue;
             }
             let provider = agent::provider(update.provider);
-            let busy = self.updating.contains(update.provider);
             let id = update.provider;
-            let actions = div()
-                .flex()
-                .gap_2()
-                .child(
-                    self.button(
-                        ("up-now", n),
-                        if busy { "Updating…" } else { "Update now" },
-                        true,
-                    )
-                    .h(px(26.))
-                    .when(busy, |el| el.opacity(0.6))
-                    .child(icon(
-                        if busy {
-                            IconName::LoaderCircle
-                        } else {
-                            IconName::Download
-                        },
-                        12.,
-                        c_canvas(),
-                    ))
-                    .when(!busy, |el| {
-                        el.on_click(cx.listener(move |this, _, _, cx| this.run_update(id, cx)))
-                    }),
-                )
-                .child({
-                    let later = key.clone();
-                    self.button(("up-later", n), "Later", false)
-                        .h(px(26.))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.alerts_hidden.insert(later.clone());
-                            cx.notify();
-                        }))
-                });
-            cards.push(self.alert_card(
+            let latest = update.latest.trim_start_matches('v').to_string();
+            let current = version_parts(&update.current)
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(".");
+            let (body, actions) = match run {
+                Some(_) if done => (
+                    format!("{} is now on version {latest}.", provider.name),
+                    div().flex().child(update_done_badge(n)),
+                ),
+                Some(run) => (
+                    format!("Updating from {current} to {latest}."),
+                    self.update_progress_view(n, run),
+                ),
+                None => (
+                    format!("Version {latest} is out. You have {current}."),
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            self.button(("up-now", n), "Update now", true)
+                                .h(px(26.))
+                                .child(icon(IconName::Download, 12., c_canvas()))
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.run_update(id, cx)),
+                                ),
+                        )
+                        .child({
+                            let later = key.clone();
+                            self.button(("up-later", n), "Later", false)
+                                .h(px(26.))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.alerts_hidden.insert(later.clone());
+                                    cx.notify();
+                                }))
+                        }),
+                ),
+            };
+            let card = self.alert_card(
                 SharedString::from(format!("alert-{key}")),
                 c_green(),
-                IconName::Download,
-                "Update available",
+                if done {
+                    IconName::CircleCheck
+                } else {
+                    IconName::Download
+                },
+                if done {
+                    "Update complete"
+                } else if run.is_some() {
+                    "Updating"
+                } else {
+                    "Update available"
+                },
                 Some(provider.name.to_string()),
                 Some(self.provider_badge(provider, 18.)),
-                format!(
-                    "Version {} is out. You have {}.",
-                    update.latest.trim_start_matches('v'),
-                    version_parts(&update.current)
-                        .iter()
-                        .map(u64::to_string)
-                        .collect::<Vec<_>>()
-                        .join(".")
-                ),
+                body,
                 actions,
-                key,
+                key.clone(),
                 None,
                 cx,
-            ));
+            );
+            cards.push(if done {
+                // Hold the badge, then fade out just before the card is removed.
+                let total = UPDATE_DONE_SHOWN.as_secs_f32();
+                div().child(card).animated(
+                    SharedString::from(format!("up-out-{key}")),
+                    Animation::new(UPDATE_DONE_SHOWN),
+                    move |el, d| {
+                        let fade_from = 1. - 0.5 / total;
+                        el.opacity(if d < fade_from {
+                            1.
+                        } else {
+                            1. - (d - fade_from) / (1. - fade_from)
+                        })
+                    },
+                )
+            } else {
+                card
+            });
         }
         if cards.is_empty() {
             return None;
@@ -539,6 +812,82 @@ impl RunoApp {
                 .child(list),
         );
         Some(stack.into_any_element())
+    }
+
+    /// The live progress of an update: a bar, what the updater is doing, and the time.
+    fn update_progress_view(&self, n: usize, run: &UpdateRun) -> Div {
+        let now = std::time::Instant::now();
+        let fraction = run.progress(now);
+        let secs = now.duration_since(run.started).as_secs();
+        let elapsed = if secs < 60 {
+            format!("{secs}s")
+        } else {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        };
+        let figure = match run.percent {
+            Some(p) => format!("{p:.0}% · {elapsed}"),
+            None => elapsed,
+        };
+        let bar = div()
+            .relative()
+            .h(px(5.))
+            .w_full()
+            .rounded_full()
+            .overflow_hidden()
+            .bg(rgb(settings::mix(c_green(), c_border(), 0.2)))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(relative(fraction))
+                    .rounded_full()
+                    .bg(rgb(c_green())),
+            )
+            .child(
+                // A light sweep across the filled part, so the bar always reads as alive.
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .w(relative(0.25))
+                    .bg(hsla(0., 0., 1., 0.35))
+                    .animated(
+                        ("up-sweep", n),
+                        Animation::new(Duration::from_millis(1400)).repeat(),
+                        move |el, d| el.left(relative(d * (fraction + 0.25) - 0.25)),
+                    ),
+            );
+        div().v_flex().gap(px(6.)).w_full().child(bar).child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_w_0()
+                .child(icon(IconName::LoaderCircle, 11., c_green()).animated(
+                    ("up-spin", n),
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |i, d| i.rotate(percentage(d)),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(self.mono_font.clone())
+                        .text_size(px(11.))
+                        .text_color(rgb(c_muted()))
+                        .child(run.line.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(rgb(c_secondary()))
+                        .child(figure),
+                ),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -673,9 +1022,45 @@ mod tests {
         );
         assert_eq!(
             update_command("codex", "codex").unwrap(),
-            vec!["npm", "install", "-g", "@openai/codex@latest"]
+            vec![
+                "npm",
+                "install",
+                "-g",
+                "@openai/codex@latest",
+                "--loglevel",
+                "http"
+            ]
         );
         assert!(update_command("grok", "grok").is_none());
+        assert_eq!(percent_of("Downloading 2.1.296 66%"), Some(66.));
+        assert_eq!(percent_of("[####    ] 42.5 %"), Some(42.5));
+        assert_eq!(percent_of("no number here %"), None);
+        assert_eq!(
+            clean_line("\x1b[32mDownloading\x1b[0m 12% \u{280b}"),
+            "Downloading 12%"
+        );
+        assert_eq!(
+            phase_of("npm http fetch GET 200 https://x 41ms"),
+            Some(0.35)
+        );
+        assert_eq!(phase_of("changed 1 package in 7s"), Some(0.95));
+        let start = std::time::Instant::now();
+        let mut run = UpdateRun {
+            started: start,
+            line: String::new(),
+            percent: None,
+            phase: 0.,
+            finished: None,
+        };
+        let early = run.progress(start);
+        let later = run.progress(start + Duration::from_secs(30));
+        assert!(early < later && later < 0.97, "time eases the bar forward");
+        run.take_line("Verifying checksum...");
+        assert!(run.progress(start) >= 0.8, "a later phase moves the bar");
+        run.take_line("Downloading 50%");
+        assert_eq!(run.progress(start), 0.5, "a printed percentage wins");
+        run.finished = Some(start);
+        assert_eq!(run.progress(start), 1.);
         assert_eq!(
             and_list(&["A".into(), "B".into(), "C".into()]),
             "A, B and C"
