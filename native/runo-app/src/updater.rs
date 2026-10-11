@@ -33,6 +33,8 @@ pub(crate) struct Failure {
     pub needs_you: bool,
     /// Offer "Update anyway" (the agent is busy in running sessions).
     pub force: bool,
+    /// Offer to install this version from npm into Runo's own folder and switch to it.
+    pub own_copy: Option<String>,
 }
 
 /// The file Runo starts for an agent: its Settings path, or the first match on PATH.

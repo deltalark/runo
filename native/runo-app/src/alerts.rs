@@ -38,6 +38,8 @@ pub(crate) struct UpdateRun {
     pub command: String,
     /// Where the updated CLI lands, when the updater says (npm with a prefix).
     pub installs_to: Option<std::path::PathBuf>,
+    /// Point Runo at `installs_to` once it succeeds (a copy installed just for Runo).
+    pub adopt: bool,
 }
 
 impl UpdateRun {
@@ -54,6 +56,7 @@ impl UpdateRun {
             failed: None,
             command: String::new(),
             installs_to: None,
+            adopt: false,
         }
     }
 
@@ -769,7 +772,7 @@ impl RunoApp {
                 let why = if run.command.starts_with("brew") {
                     // Homebrew updated the copy Runo runs; its formula just lags the release.
                     format!(
-                        "Homebrew finished, but its newest {name} is still {now} and {latest} is out. Homebrew usually catches up within a few days. To get {latest} now, install it from npm with the command below, then pick that copy under Settings › {name}."
+                        "Homebrew is done, but its newest {name} is still {now} while {latest} is out. Homebrew usually catches up within a few days. To use {latest} now, let Runo install it from npm into its own folder and switch to it. Your Homebrew copy stays as it is."
                     )
                 } else if fresh.is_some() {
                     format!(
@@ -777,16 +780,19 @@ impl RunoApp {
                     )
                 } else {
                     format!(
-                        "The updater finished, but {runs} still reports {now}, not {latest}. The release may not have reached this installer yet."
+                        "The updater finished, but {runs} still reports {now}, not {latest}, so this installer hasn't got the release yet. Runo can install {latest} from npm into its own folder and switch to it, leaving this copy as it is."
                     )
                 };
-                let command = (run.command.starts_with("brew") || fresh.is_none())
+                let lagging = run.command.starts_with("brew") || fresh.is_none();
+                let command = lagging
                     .then(|| package.map(|p| format!("npm install -g {p}@latest")))
                     .flatten();
+                let own_copy = (lagging && package.is_some()).then(|| latest.clone());
                 run.failed = Some(updater::Failure {
                     why,
                     command,
                     use_copy: fresh,
+                    own_copy,
                     needs_you: true,
                     ..Default::default()
                 });
@@ -800,11 +806,20 @@ impl RunoApp {
         }
         match result {
             Ok(_) => {
+                let mut bin = caps::binary(agent::provider(provider));
                 if let Some(run) = self.update_runs.get_mut(provider) {
                     run.line = "Checking the version Runo runs now…".into();
                     run.phase = 0.97;
+                    // A copy installed just for Runo: use it from now on, and check that one.
+                    if let Some(path) = run
+                        .installs_to
+                        .as_ref()
+                        .filter(|p| run.adopt && p.is_file())
+                    {
+                        bin = path.to_string_lossy().into_owned();
+                        self.pending_binary = Some((provider, bin.clone()));
+                    }
                 }
-                let bin = caps::binary(agent::provider(provider));
                 let mut check = std::process::Command::new(&bin);
                 check.arg("--version");
                 agent::oneshot(
@@ -1233,6 +1248,66 @@ impl RunoApp {
 
     /// What the person can do about a failed or blocked run: switch to a newer copy, copy
     /// a command, update anyway, retry, read the log, or dismiss.
+    /// Install the latest release from npm into Runo's own folder (no sudo, no clash with
+    /// Homebrew's links), then switch Runo to it when it succeeds.
+    pub(crate) fn install_own_copy(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+        let Some(package) = npm_package(provider) else {
+            return;
+        };
+        let Some(npm) = install::locate("npm") else {
+            self.update_runs.insert(
+                provider,
+                UpdateRun::blocked(
+                    false,
+                    updater::Failure {
+                        why: "Runo needs npm (part of Node.js) to install this. Install Node.js from nodejs.org, then try again.".into(),
+                        needs_you: true,
+                        ..Default::default()
+                    },
+                ),
+            );
+            return;
+        };
+        let prefix = crate::store::data_dir().join("agents");
+        let _ = std::fs::create_dir_all(&prefix);
+        let bin = agent::provider(provider).bin;
+        let installs_to = if cfg!(windows) {
+            prefix.join(format!("{bin}.cmd"))
+        } else {
+            prefix.join("bin").join(bin)
+        };
+        // Run npm with node by path: a GUI app's PATH may have no node at all.
+        let mut program: Vec<String> = Vec::new();
+        if !cfg!(windows) {
+            if let Some(node) = install::locate("node") {
+                program.push(node.to_string_lossy().into_owned());
+            }
+        }
+        program.push(npm.to_string_lossy().into_owned());
+        program.extend([
+            "install".into(),
+            "-g".into(),
+            "--prefix".into(),
+            prefix.to_string_lossy().into_owned(),
+            format!("{package}@latest"),
+            "--loglevel".into(),
+            "http".into(),
+        ]);
+        let mut cmd = std::process::Command::new(&program[0]);
+        cmd.args(&program[1..]);
+        let shown = format!(
+            "npm install -g --prefix {} {package}@latest",
+            prefix.display()
+        );
+        let mut run = UpdateRun::new(false, format!("Running {shown}…"));
+        run.command = shown;
+        run.installs_to = Some(installs_to);
+        run.adopt = true;
+        self.update_runs.insert(provider, run);
+        run_streaming(format!("update:{provider}"), cmd, self.tx.clone());
+        let _ = cx;
+    }
+
     fn failure_actions(
         &self,
         id: (&'static str, usize),
@@ -1285,6 +1360,23 @@ impl RunoApp {
                             run.finished = Some(std::time::Instant::now());
                             this.update_runs.insert(provider, run);
                         }
+                        cx.notify();
+                    })),
+            );
+        }
+        if let Some(version) = failure.own_copy.clone() {
+            let first = !primary_used;
+            primary_used = true;
+            row = row.child(
+                self.button(bid("own"), format!("Install {version} for Runo"), first)
+                    .h(px(26.))
+                    .child(icon(
+                        IconName::Download,
+                        12.,
+                        if first { c_canvas() } else { c_secondary() },
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.install_own_copy(provider, cx);
                         cx.notify();
                     })),
             );
