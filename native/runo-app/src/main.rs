@@ -1,13 +1,15 @@
-
 mod agent;
 mod caps;
 mod git;
 mod github;
 mod history;
+mod pty;
 mod settings;
 mod settings_ui;
+mod split;
 mod store;
 mod stream;
+mod terminal;
 mod turns;
 mod workspace;
 
@@ -75,6 +77,18 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-k", QuickOpen, Some("Runo")),
         KeyBinding::new("secondary-p", QuickOpen, Some("Runo")),
     ]);
+    // Inside a shell, keys belong to the shell: Ctrl-P is history, Escape is vi.
+    let mut shell_keys = vec!["escape"];
+    if !cfg!(target_os = "macos") {
+        shell_keys.extend([
+            "ctrl-n", "ctrl-,", "ctrl-.", "ctrl-b", "ctrl-\\", "ctrl-k", "ctrl-p",
+        ]);
+    }
+    cx.bind_keys(
+        shell_keys
+            .into_iter()
+            .map(|k| KeyBinding::new(k, NoAction {}, Some("RunoTerminal"))),
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -118,6 +132,16 @@ struct RunoApp {
     view: View,
     right_tab: RightTab,
     cli_tab: bool,
+    /// Interactive shells, across all sessions.
+    shells: Vec<pty::Shell>,
+    /// The shell tab shown in the terminal panel, when one is selected.
+    shell_tab: Option<u64>,
+    next_shell: u64,
+    term_focus: FocusHandle,
+    term_tall: bool,
+    cell_w: f32,
+    cell_measured: bool,
+    focus_shell: u8,
     menu: Option<String>,
     settings_page: SettingsPage,
     settings_search: Entity<InputState>,
@@ -136,6 +160,11 @@ struct RunoApp {
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
     chat_scroll: ScrollHandle,
+    /// Second session shown beside the selected one.
+    split: Option<u64>,
+    split_menu: bool,
+    split_input: Entity<InputState>,
+    split_scroll: ScrollHandle,
     stderr: HashMap<u64, Vec<String>>,
     /// Parsers for Claude runs, which print stream-json rather than plain text.
     streams: HashMap<u64, stream::ClaudeStream>,
@@ -504,6 +533,16 @@ impl RunoApp {
                 this.run_terminal(line, cx);
             }
         });
+        let split_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Reply to this session…"));
+        let split_sub = cx.subscribe_in(&split_input, window, |this, input, event, window, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                let text = input.read(cx).value().to_string();
+                input.update(cx, |input, cx| input.set_value("", window, cx));
+                this.send_split(text, cx);
+                cx.notify();
+            }
+        });
         let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
         let rename_sub = cx.subscribe_in(&rename, window, |this, input, event, _, cx| {
             match event {
@@ -609,6 +648,14 @@ impl RunoApp {
             selected,
             right_tab: RightTab::Changes,
             cli_tab: false,
+            shells: Vec::new(),
+            shell_tab: None,
+            next_shell: 0,
+            term_focus: cx.focus_handle(),
+            term_tall: false,
+            cell_w: 7.2,
+            cell_measured: false,
+            focus_shell: 0,
             menu: None,
             settings_page: SettingsPage::General,
             settings_search,
@@ -627,6 +674,10 @@ impl RunoApp {
             handles: HashMap::new(),
             tx,
             chat_scroll: ScrollHandle::new(),
+            split: None,
+            split_menu: false,
+            split_input,
+            split_scroll: ScrollHandle::new(),
             stderr: HashMap::new(),
             streams: HashMap::new(),
             search,
@@ -723,7 +774,8 @@ impl RunoApp {
                     _ => {}
                 },
             );
-        app._subscriptions.extend([branch_sub, task_sub, notes_sub]);
+        app._subscriptions
+            .extend([branch_sub, task_sub, notes_sub, split_sub]);
         app.restore_layout();
         // Scheduled automations are checked twice a minute.
         cx.spawn(async move |this, cx| loop {
@@ -946,6 +998,9 @@ impl RunoApp {
                 if self.selected == Some(id) && autoscroll() {
                     self.chat_scroll.scroll_to_bottom();
                 }
+                if self.split == Some(id) && autoscroll() {
+                    self.split_scroll.scroll_to_bottom();
+                }
             }
             Event::Err(Target::Session(id), line) => {
                 let log = self.stderr.entry(id).or_default();
@@ -1033,6 +1088,9 @@ impl RunoApp {
                 }
                 self.finish_turn(id, ok, stopped, cx);
                 self.save();
+                if self.split == Some(id) {
+                    self.split_scroll.scroll_to_bottom();
+                }
                 if self.selected == Some(id) {
                     self.refresh();
                     if autoscroll() {
@@ -1041,6 +1099,17 @@ impl RunoApp {
                 }
             }
             Event::Output(key, result) => self.handle_output(key, result),
+            // A shell printed or exited; repaint it.
+            Event::Pty(id) => {
+                if let Some(shell) = self.shells.iter().find(|s| s.id == id && s.exited()) {
+                    if self.shell_tab == Some(id) {
+                        self.info = Some((
+                            format!("{} exited.", shell.title),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                }
+            }
             Event::Done(Target::Terminal(id), ok) => {
                 self.handles.remove(&Target::Terminal(id));
                 if !ok {
@@ -1947,6 +2016,7 @@ impl RunoApp {
             return;
         };
         let session = self.state.sessions.remove(pos);
+        self.prune_shells();
         self.tabs.retain(|t| *t != id);
         self.stats.remove(&id);
         if session.isolated && !self.demo && remove_worktree() {
@@ -3600,6 +3670,13 @@ impl RunoApp {
             })
             .when(!confirming, |el| {
                 el.child(
+                    self.ghost_button("split", IconName::PanelRightOpen, "Split view")
+                        .when(self.split_session().is_some(), |el| {
+                            el.bg(rgb(c_active())).text_color(rgb(c_text()))
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_split(cx))),
+                )
+                .child(
                     self.ghost_button("delete", IconName::Trash, "Delete session")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if confirm_delete() {
@@ -3611,7 +3688,7 @@ impl RunoApp {
                         })),
                 )
             });
-        div()
+        let main = div()
             .flex_1()
             .min_w_0()
             .v_flex()
@@ -3625,7 +3702,14 @@ impl RunoApp {
                     .track_scroll(&self.chat_scroll)
                     .child(list),
             )
-            .child(self.composer(provider, working, cx))
+            .child(self.composer(provider, working, cx));
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .child(main)
+            .children(self.split_pane(cx))
             .into_any_element()
     }
 
@@ -5640,7 +5724,11 @@ impl RunoApp {
         cli: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected = self.cli_tab == cli;
+        let selected = if cli {
+            self.cli_tab
+        } else {
+            !self.cli_tab && self.active_shell().is_none()
+        };
         div()
             .id(label)
             .h(px(22.))
@@ -5660,14 +5748,20 @@ impl RunoApp {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.cli_tab = cli;
+                this.shell_tab = None;
                 cx.notify();
             }))
             .child(label)
     }
 
-    fn terminal_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn terminal_panel(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.selected.unwrap_or(0);
-        let running = self.handles.contains_key(&Target::Terminal(id));
+        let shell = if self.cli_tab {
+            None
+        } else {
+            self.active_shell()
+        };
+        let running = shell.is_none() && self.handles.contains_key(&Target::Terminal(id));
         let has_output = self.terminal.get(&id).is_some_and(|l| !l.is_empty());
         let mut log = div()
             .v_flex()
@@ -5720,8 +5814,12 @@ impl RunoApp {
                 .selectable(true),
             );
         }
+        let shell_tabs: Vec<Div> = self
+            .session_shells(id)
+            .map(|sh| self.shell_tab_button(sh, cx))
+            .collect();
         div()
-            .h(px(230.))
+            .h(px(self.term_height()))
             .flex_none()
             .v_flex()
             .border_t_1()
@@ -5741,7 +5839,17 @@ impl RunoApp {
                             .gap_1()
                             .child(self.terminal_tab("Terminal", false, cx))
                             .child(self.terminal_tab("CLI", true, cx))
-                            .when(!self.cli_tab, |el| {
+                            .children(shell_tabs)
+                            .child(
+                                self.ghost_button_sized(
+                                    "shell-new",
+                                    IconName::Plus,
+                                    "New shell",
+                                    22.,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.new_shell(cx))),
+                            )
+                            .when(!self.cli_tab && shell.is_none(), |el| {
                                 el.child(div().w(px(1.)).h(px(14.)).mx_1().bg(rgb(c_border())))
                                     .children(self.quick_bar(cx))
                             }),
@@ -5771,30 +5879,57 @@ impl RunoApp {
                                             })),
                                     )
                             })
-                            .when(!running && !self.cli_tab && has_output, |el| {
-                                el.child(
-                                    self.ghost_button_sized(
-                                        "term-clear",
-                                        IconName::Eraser,
-                                        "Clear output",
-                                        22.,
+                            .when(
+                                !running && !self.cli_tab && shell.is_none() && has_output,
+                                |el| {
+                                    el.child(
+                                        self.ghost_button_sized(
+                                            "term-clear",
+                                            IconName::Eraser,
+                                            "Clear output",
+                                            22.,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.terminal.remove(&id);
+                                                cx.notify();
+                                            }),
+                                        ),
                                     )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.terminal.remove(&id);
-                                            cx.notify();
-                                        },
-                                    )),
+                                },
+                            )
+                            .child(
+                                self.ghost_button_sized(
+                                    "term-tall",
+                                    IconName::ChevronsUpDown,
+                                    if self.term_tall {
+                                        "Shrink terminal"
+                                    } else {
+                                        "Expand terminal"
+                                    },
+                                    22.,
                                 )
-                            }),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.term_tall = !this.term_tall;
+                                        if !this.cli_tab && this.active_shell().is_some() {
+                                            this.focus_shell = 1;
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
                     ),
             )
-            .child(fade(
-                div().flex_1().min_h_0().overflow_y_scrollbar().child(log),
-                SharedString::from(format!("termbody-{}-{}", self.cli_tab, id)),
-                220,
-            ))
-            .when(!self.cli_tab, |el| {
+            .map(|el| match shell {
+                Some(sh) => el.child(self.shell_view(sh, window, cx)),
+                None => el.child(fade(
+                    div().flex_1().min_h_0().overflow_y_scrollbar().child(log),
+                    SharedString::from(format!("termbody-{}-{}", self.cli_tab, id)),
+                    220,
+                )),
+            })
+            .when(!self.cli_tab && shell.is_none(), |el| {
                 el.child(
                     div()
                         .px_3()
@@ -5820,7 +5955,7 @@ impl RunoApp {
             })
     }
 
-    fn right_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn right_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .w(px(460.))
             .flex_none()
@@ -5880,7 +6015,7 @@ impl RunoApp {
                 )),
                 260,
             ))
-            .child(self.terminal_panel(cx))
+            .child(self.terminal_panel(window, cx))
     }
 }
 
@@ -5896,6 +6031,15 @@ impl Render for RunoApp {
             ),
         };
         set_dark(dark);
+        self.measure_cell(window);
+        // A new shell takes focus once its element has been drawn.
+        if self.focus_shell > 0 {
+            self.focus_shell -= 1;
+            if self.focus_shell == 0 {
+                window.focus(&self.term_focus, cx);
+            }
+            cx.notify();
+        }
         if self.applied_dark != Some(dark) {
             self.applied_dark = Some(dark);
             gpui_kit::component::Theme::change(
@@ -6038,7 +6182,7 @@ impl Render for RunoApp {
                         Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
                         |el, delta| el.opacity(0.35 + 0.65 * delta),
                     ))
-                    .when(show_right, |el| el.child(self.right_pane(cx))),
+                    .when(show_right, |el| el.child(self.right_pane(window, cx))),
             )
             .child(
                 div()
