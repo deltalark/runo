@@ -71,6 +71,8 @@ pub struct AppSettings {
     pub memory_server: bool,
     /// The first-run tour was finished or skipped.
     pub tour_seen: bool,
+    /// How new sessions open: "chat" or "cli" (the agent's own CLI, where supported).
+    pub default_view: String,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -112,6 +114,7 @@ impl Default for AppSettings {
             glass_cards: true,
             memory_server: true,
             tour_seen: false,
+            default_view: "chat".into(),
         }
     }
 }

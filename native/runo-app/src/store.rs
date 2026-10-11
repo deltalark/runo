@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
     Agent,
@@ -214,6 +214,9 @@ pub struct Session {
     /// The last handoff, kept for agents that cannot resume their own conversation.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub carried: String,
+    /// Shown in the CLI view: the agent's own CLI on the same conversation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cli: bool,
 }
 
 /// A review comment on one line of the session's diff.

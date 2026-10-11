@@ -17,6 +17,17 @@ impl RunoApp {
         opts: &AgentOptions,
     ) {
         self.stderr.remove(&id);
+        // The CLI view owns the conversation while it is open; two writers would fork it.
+        if self.cli_runs.contains_key(&id) {
+            if let Some(s) = self.state.session_mut(id) {
+                s.queue.insert(0, prompt);
+            }
+            self.notice = Some(
+                "This session is open in the CLI. The prompt is queued for when you switch back to Chat."
+                    .into(),
+            );
+            return;
+        }
         let demo = self.demo;
         let Some(session) = self.state.session_mut(id) else {
             return;

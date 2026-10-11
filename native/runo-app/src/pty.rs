@@ -2,7 +2,7 @@
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Lines kept above the visible screen.
@@ -20,6 +20,26 @@ pub struct Shell {
     /// Set by the reader when output arrives, cleared when the UI repaints.
     dirty: Arc<AtomicBool>,
     size: Mutex<(u16, u16)>,
+    /// When output last arrived, in milliseconds since the Unix epoch.
+    last_output: Arc<AtomicU64>,
+    /// When the person last typed, in the same clock.
+    last_input: AtomicU64,
+}
+
+/// A program to run in the PTY instead of the login shell.
+pub struct Program {
+    pub bin: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    /// Variables to drop from the inherited environment.
+    pub unset: Vec<String>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl Shell {
@@ -33,6 +53,19 @@ impl Shell {
         cols: u16,
         wake: impl Fn(u64) + Send + 'static,
     ) -> Result<Self, String> {
+        Self::spawn_program(id, session, dir, rows, cols, None, wake)
+    }
+
+    /// Start `program` (or the login shell) in `dir`.
+    pub fn spawn_program(
+        id: u64,
+        session: u64,
+        dir: &str,
+        rows: u16,
+        cols: u16,
+        program: Option<Program>,
+        wake: impl Fn(u64) + Send + 'static,
+    ) -> Result<Self, String> {
         let (rows, cols) = (rows.max(2), cols.max(10));
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -42,7 +75,21 @@ impl Shell {
                 pixel_height: 0,
             })
             .map_err(|e| e.to_string())?;
-        let mut cmd = CommandBuilder::new_default_prog();
+        let custom = program.is_some();
+        let mut cmd = match &program {
+            Some(p) => {
+                let mut c = CommandBuilder::new(&p.bin);
+                c.args(&p.args);
+                for k in &p.unset {
+                    c.env_remove(k);
+                }
+                for (k, v) in &p.env {
+                    c.env(k, v);
+                }
+                c
+            }
+            None => CommandBuilder::new_default_prog(),
+        };
         if !dir.is_empty() {
             cmd.cwd(dir);
         }
@@ -55,14 +102,21 @@ impl Shell {
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
         let exited = Arc::new(AtomicBool::new(false));
         let dirty = Arc::new(AtomicBool::new(false));
+        let last_output = Arc::new(AtomicU64::new(now_ms()));
         {
-            let (parser, exited, dirty) = (parser.clone(), exited.clone(), dirty.clone());
+            let (parser, exited, dirty, last) = (
+                parser.clone(),
+                exited.clone(),
+                dirty.clone(),
+                last_output.clone(),
+            );
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            last.store(now_ms(), Ordering::Release);
                             if let Ok(mut p) = parser.lock() {
                                 p.process(&buf[..n]);
                             }
@@ -76,9 +130,11 @@ impl Shell {
                 wake(id);
             });
         }
-        let name = std::env::var("SHELL")
-            .ok()
-            .and_then(|s| s.rsplit('/').next().map(str::to_string))
+        let name = program
+            .filter(|_| custom)
+            .map(|p| p.bin)
+            .or_else(|| std::env::var("SHELL").ok())
+            .and_then(|s| s.rsplit(['/', '\\']).next().map(str::to_string))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| if cfg!(windows) { "pwsh" } else { "shell" }.into());
         Ok(Self {
@@ -92,10 +148,13 @@ impl Shell {
             exited,
             dirty,
             size: Mutex::new((rows, cols)),
+            last_output,
+            last_input: AtomicU64::new(0),
         })
     }
 
     pub fn write(&self, bytes: &[u8]) {
+        self.last_input.store(now_ms(), Ordering::Release);
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(bytes);
             let _ = w.flush();
@@ -150,6 +209,14 @@ impl Shell {
         if let Ok(mut p) = self.parser.lock() {
             p.set_scrollback(lines);
         }
+    }
+
+    /// Whether the program is redrawing on its own, the way an agent CLI animates while it
+    /// works: output in the last `window` ms that is not just the echo of recent typing.
+    pub fn busy(&self, window: u64) -> bool {
+        let out = self.last_output.load(Ordering::Acquire);
+        let typed = self.last_input.load(Ordering::Acquire);
+        now_ms().saturating_sub(out) < window && out.saturating_sub(typed) > window
     }
 
     pub fn exited(&self) -> bool {

@@ -2,6 +2,7 @@ mod agent;
 mod alerts;
 mod browser;
 mod caps;
+mod cliview;
 mod ctxmenu;
 mod fileview;
 mod git;
@@ -69,7 +70,8 @@ actions!(
         ToggleSidebar,
         SaveFile,
         Dismiss,
-        QuickOpen
+        QuickOpen,
+        ToggleView
     ]
 );
 
@@ -85,6 +87,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-s", SaveFile, Some("Runo")),
         KeyBinding::new("secondary-k", QuickOpen, Some("Runo")),
         KeyBinding::new("secondary-p", QuickOpen, Some("Runo")),
+        KeyBinding::new("secondary-shift-m", ToggleView, Some("Runo")),
     ]);
     // Inside a shell, keys belong to the shell: Ctrl-P is history, Escape is vi.
     let mut shell_keys = vec!["escape"];
@@ -148,6 +151,13 @@ struct RunoApp {
     /// The shell tab shown in the terminal panel, when one is selected.
     shell_tab: Option<u64>,
     next_shell: u64,
+    /// Agent CLIs open in the CLI view, by session.
+    cli_runs: HashMap<u64, cliview::CliRun>,
+    cli_focus: FocusHandle,
+    /// Frames to wait before focusing a CLI that just opened.
+    focus_cli: u8,
+    /// The session whose view last switched between Chat and CLI, and when.
+    view_changed: Option<(u64, std::time::Instant)>,
     term_focus: FocusHandle,
     term_tall: bool,
     cell_w: f32,
@@ -784,6 +794,10 @@ impl RunoApp {
             shells: Vec::new(),
             shell_tab: None,
             next_shell: 0,
+            cli_runs: HashMap::new(),
+            cli_focus: cx.focus_handle(),
+            focus_cli: 0,
+            view_changed: None,
             term_focus: cx.focus_handle(),
             term_tall: false,
             cell_w: 7.2,
@@ -1265,6 +1279,7 @@ impl RunoApp {
             Event::Output(key, result) => self.handle_output(key, result),
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
+                self.cli_exited(id);
                 if let Some(shell) = self.shells.iter().find(|s| s.id == id && s.exited()) {
                     if self.shell_tab == Some(id) {
                         self.info = Some((
@@ -1407,9 +1422,14 @@ impl RunoApp {
         let mut jumps: Vec<Vec<Jump>> = Vec::new();
         let mut commands = CommandGroup::new().label("Commands");
         let mut command_jumps = Vec::new();
-        let actions: [(&str, IconName, Box<dyn Action>); 5] = [
+        let actions: [(&str, IconName, Box<dyn Action>); 6] = [
             ("New session", IconName::Plus, Box::new(NewSession)),
             ("Open settings", IconName::Settings, Box::new(OpenSettings)),
+            (
+                "Switch between Chat and CLI",
+                IconName::SquareTerminal,
+                Box::new(ToggleView),
+            ),
             (
                 "Toggle the Changes panel",
                 IconName::PanelRightOpen,
@@ -1984,6 +2004,17 @@ impl RunoApp {
             };
             let opts = cx.global::<AppSettings>().agent(&provider);
             self.start_agent(id, task, &opts);
+            return;
+        }
+        // CLI-first people get the agent's own CLI, with the task as its first prompt.
+        if cx.global::<AppSettings>().default_view == "cli" && agent::has_cli_view(&provider) {
+            if let Some(s) = self.state.session_mut(id) {
+                s.cli = true;
+                s.status = Status::Done;
+            }
+            self.view_changed = Some((id, std::time::Instant::now()));
+            self.open_cli(id, &task, cx);
+            self.save();
             return;
         }
         let opts = cx.global::<AppSettings>().agent(&provider);
@@ -3425,7 +3456,10 @@ impl RunoApp {
             .into_any_element();
         }
         if let Some(divider) = (message.role == Role::System)
-            .then(|| self.switch_divider(index, &message.meta))
+            .then(|| {
+                self.switch_divider(index, &message.meta)
+                    .or_else(|| self.cli_divider(index, &message.meta))
+            })
             .flatten()
         {
             return divider;
@@ -3741,7 +3775,7 @@ impl RunoApp {
             .child(chips)
     }
 
-    fn session_view(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn session_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(session) = self.current() else {
             return self.empty_state(cx).into_any_element();
         };
@@ -3900,6 +3934,7 @@ impl RunoApp {
                     }),
             )
             .child(div().flex_1())
+            .child(self.view_toggle(session, cx))
             .child(
                 div()
                     .flex()
@@ -3972,21 +4007,36 @@ impl RunoApp {
                         })),
                 )
             });
-        let main = div()
-            .flex_1()
-            .min_w_0()
-            .v_flex()
-            .child(header)
-            .child(
-                div()
-                    .id("chat")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.chat_scroll)
-                    .child(list),
-            )
-            .child(self.composer(provider, working, cx));
+        // Chat and CLI are two views of one conversation; the swap crossfades.
+        let cli = session.cli;
+        let body = if cli {
+            self.cli_body(session, window, cx)
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .v_flex()
+                .child(
+                    div()
+                        .id("chat")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.chat_scroll)
+                        .child(list),
+                )
+                .child(self.composer(provider, working, cx))
+                .into_any_element()
+        };
+        let body = div().flex_1().min_h_0().v_flex().child(body).animated(
+            SharedString::from(format!("view-{id}-{cli}")),
+            Animation::new(Duration::from_millis(280)).with_easing(ease_out_quint()),
+            move |el, d| {
+                el.opacity(0.2 + 0.8 * d)
+                    .top(px(if cli { 10. } else { -10. } * (1. - d)))
+            },
+        );
+        let main = div().flex_1().min_w_0().v_flex().child(header).child(body);
         div()
             .flex_1()
             .min_w_0()
@@ -6469,6 +6519,18 @@ impl Render for RunoApp {
             self.open_file(&path, window, cx);
         }
         // A new shell takes focus once its element has been drawn.
+        if let Some(id) = self.selected.filter(|_| self.view == View::Session) {
+            let wants = self.state.session(id).is_some_and(|s| s.cli);
+            if wants && !self.cli_runs.contains_key(&id) {
+                self.open_cli(id, "", cx);
+            }
+        }
+        if self.focus_cli > 0 {
+            self.focus_cli -= 1;
+            if self.focus_cli == 0 {
+                window.focus(&self.cli_focus, cx);
+            }
+        }
         if self.focus_shell > 0 {
             self.focus_shell -= 1;
             if self.focus_shell == 0 {
@@ -6517,7 +6579,7 @@ impl Render for RunoApp {
             self.view
         };
         let center = match shown {
-            View::Session | View::NewSession => self.session_view(cx),
+            View::Session | View::NewSession => self.session_view(window, cx),
             View::Inbox => self.list_view(View::Inbox, cx),
             View::AllSessions => self.list_view(View::AllSessions, cx),
             View::History => self.history_view(cx),
@@ -6582,6 +6644,12 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_file(cx)))
+            .on_action(cx.listener(|this, _: &ToggleView, _, cx| {
+                if let Some(s) = this.current().filter(|_| this.view == View::Session) {
+                    let (id, cli) = (s.id, s.cli);
+                    this.set_cli_view(id, !cli, cx);
+                }
+            }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if this.tour.is_some() && this.tour_key(&e.keystroke.key, cx) {
                     cx.stop_propagation();
