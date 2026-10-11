@@ -7113,8 +7113,9 @@ impl Render for RunoApp {
 }
 
 /// The UI typeface, bundled so the app looks the same on every platform.
-/// Runo's own interface font, bundled with the app.
-const BUNDLED_FONT: &str = "Inter";
+/// Runo's own interface font, bundled with the app: Geist, which stays crisp at small
+/// sizes on non-Retina displays.
+const BUNDLED_FONT: &str = "Geist";
 
 /// The interface font for the "Interface font" setting. "system" is the platform's UI
 /// font where it can be named; elsewhere Runo's own font.
@@ -7128,10 +7129,10 @@ fn ui_font(setting: &str) -> &'static str {
 
 fn load_fonts(cx: &mut App) {
     let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
-        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.otf")),
-        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.otf")),
-        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.otf")),
-        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Bold.otf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Geist-Regular.otf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Geist-Medium.otf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Geist-SemiBold.otf")),
+        std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/Geist-Bold.otf")),
     ];
     let _ = cx.text_system().add_fonts(fonts);
 }
