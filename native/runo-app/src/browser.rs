@@ -269,7 +269,7 @@ impl RunoApp {
             div()
                 .mt_2()
                 .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(c_muted()))
                 .child(title)
         };
@@ -348,7 +348,7 @@ impl RunoApp {
                             .child(
                                 div()
                                     .text_size(px(12.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(color))
                                     .child(check.status.clone()),
                             )

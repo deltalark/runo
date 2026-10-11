@@ -312,7 +312,7 @@ impl RunoApp {
                                 .flex_none()
                                 .text_color(rgb(fg))
                                 .when_some(bg, |el, bg| el.bg(rgb(bg)))
-                                .when(bold, |el| el.font_weight(FontWeight::BOLD))
+                                .when(bold, |el| el.font_weight(FontWeight::SEMIBOLD))
                                 .when(underline, |el| el.underline())
                                 .when(cursor && !focused, |el| {
                                     el.border_1().border_color(rgb(c_secondary()))

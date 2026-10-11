@@ -259,7 +259,7 @@ impl RunoApp {
                             .child(
                                 div()
                                     .text_size(px(15.))
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .font_weight(FontWeight::MEDIUM)
                                     .child(step.title),
                             ),
                     ),

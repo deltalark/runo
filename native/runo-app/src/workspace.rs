@@ -86,7 +86,7 @@ impl RunoApp {
                     .items_center()
                     .justify_between()
                     .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_secondary()))
                     .child(*name)
                     .child(
@@ -253,7 +253,7 @@ impl RunoApp {
                         .mt_4()
                         .mb_1()
                         .text_size(px(11.))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(c_muted()))
                         .child(day.clone()),
                 );
@@ -591,7 +591,7 @@ impl RunoApp {
         let label = |text: &'static str| {
             div()
                 .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(c_muted()))
                 .child(text)
         };
@@ -619,7 +619,7 @@ impl RunoApp {
                         .child(
                             div()
                                 .text_size(px(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::MEDIUM)
                                 .child("New automation"),
                         )
                         .child(label("NAME"))
