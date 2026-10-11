@@ -110,7 +110,7 @@ pub struct Frame {
 }
 
 /// What a page shows now, kept current by the reader thread.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PageInfo {
     pub url: String,
     pub title: String,
@@ -140,7 +140,7 @@ struct Shared {
 pub struct Engine {
     child: Child,
     writer: Mutex<std::fs::File>,
-    next_id: AtomicU64,
+    next_id: Arc<AtomicU64>,
     shared: Arc<Mutex<Shared>>,
     /// Bumped on every new frame or page change, so the UI knows to repaint.
     pub seq: Arc<AtomicU64>,
@@ -211,15 +211,24 @@ impl Engine {
         let engine = Engine {
             child,
             writer: Mutex::new(writer),
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             shared: Arc::new(Mutex::new(Shared::default())),
             seq: Arc::new(AtomicU64::new(0)),
         };
-        let (shared, seq) = (engine.shared.clone(), engine.seq.clone());
-        let writer = engine.writer.lock().unwrap().try_clone().map_err(|e| e.to_string())?;
+        let (shared, seq, ids) = (
+            engine.shared.clone(),
+            engine.seq.clone(),
+            engine.next_id.clone(),
+        );
+        let writer = engine
+            .writer
+            .lock()
+            .unwrap()
+            .try_clone()
+            .map_err(|e| e.to_string())?;
         std::thread::Builder::new()
             .name("runo-cdp".into())
-            .spawn(move || read_loop(reader, writer, shared, seq))
+            .spawn(move || read_loop(reader, writer, shared, seq, ids))
             .map_err(|e| e.to_string())?;
         engine.send("Target.setDiscoverTargets", json!({"discover": true}), None);
         Ok(engine)
@@ -245,6 +254,9 @@ impl Engine {
         let mut msg = json!({"id": id, "method": method, "params": params});
         if let Some(s) = session.filter(|s| !s.is_empty()) {
             msg["sessionId"] = json!(s);
+        }
+        if std::env::var_os("RUNO_CDP_LOG").is_some() {
+            eprintln!("cdp> {msg}");
         }
         let _ = self.writer.lock().unwrap().write_all(&frame_message(&msg));
     }
@@ -327,6 +339,12 @@ impl Engine {
         let s = Some(session.as_str());
         self.send("Page.enable", json!({}), s);
         self.send("Runtime.enable", json!({}), s);
+        // Pages behave as focused (caret, :focus, focus events) though no window is.
+        self.send(
+            "Emulation.setFocusEmulationEnabled",
+            json!({"enabled": true}),
+            s,
+        );
         self.metrics(&session, viewport);
         self.send("Page.navigate", json!({"url": url}), s);
         if self.shared.lock().unwrap().active == Some(key) {
@@ -343,6 +361,10 @@ impl Engine {
     }
 
     fn screencast(&self, session: &str, (w, h, scale): (u32, u32, f32)) {
+        // Headless Chromium only renders the tab in front; others stop sending frames.
+        // Coming to the front resets the size override, so set it again after.
+        self.send("Page.bringToFront", json!({}), Some(session));
+        self.metrics(session, (w, h, scale));
         self.send(
             "Page.startScreencast",
             json!({
@@ -362,7 +384,10 @@ impl Engine {
             if shared.active == key {
                 return;
             }
-            let old = shared.active.and_then(|k| shared.pages.get(&k)).map(|p| p.session.clone());
+            let old = shared
+                .active
+                .and_then(|k| shared.pages.get(&k))
+                .map(|p| p.session.clone());
             shared.active = key;
             shared.frame = None;
             let new = key
@@ -408,16 +433,9 @@ impl Engine {
         self.shared.lock().unwrap().frame.take()
     }
 
-    pub fn info(&self, key: u64) -> Option<(String, String, bool, Option<(String, String)>)> {
+    pub fn info(&self, key: u64) -> Option<PageInfo> {
         let shared = self.shared.lock().unwrap();
-        shared.pages.get(&key).map(|p| {
-            (
-                p.info.url.clone(),
-                p.info.title.clone(),
-                p.info.loading,
-                p.info.dialog.clone(),
-            )
-        })
+        shared.pages.get(&key).map(|p| p.info.clone())
     }
 
     fn on_page(&self, key: u64, method: &str, params: Value) {
@@ -431,14 +449,20 @@ impl Engine {
     }
 
     pub fn history(&self, key: u64, back: bool) {
-        let js = if back { "history.back()" } else { "history.forward()" };
+        let js = if back {
+            "history.back()"
+        } else {
+            "history.forward()"
+        };
         self.on_page(key, "Runtime.evaluate", json!({"expression": js}));
     }
 
     pub fn answer_dialog(&self, key: u64, accept: bool) {
-        if let Some(page) = self.shared.lock().unwrap().pages.get_mut(&key) {
+        let mut shared = self.shared.lock().unwrap();
+        if let Some(page) = shared.pages.get_mut(&key) {
             page.info.dialog = None;
         }
+        drop(shared);
         self.on_page(
             key,
             "Page.handleJavaScriptDialog",
@@ -487,6 +511,8 @@ impl Engine {
         }
         if down && !commands.is_empty() {
             params["commands"] = json!(commands);
+        } else if down && !k.command.is_empty() {
+            params["commands"] = json!([k.command]);
         }
         self.on_page(key, "Input.dispatchKeyEvent", params);
     }
@@ -515,27 +541,35 @@ pub struct KeySpec {
     pub code: &'static str,
     pub vk: u32,
     pub text: &'static str,
+    /// The editing command macOS would run for the key; headless Chromium needs it named.
+    pub command: &'static str,
 }
 
 /// The CDP description of a GPUI key name, for keys that do something besides type.
 pub fn key_spec(name: &str) -> Option<KeySpec> {
-    let (key, code, vk, text) = match name {
-        "enter" => ("Enter", "Enter", 13, "\r"),
-        "backspace" => ("Backspace", "Backspace", 8, ""),
-        "tab" => ("Tab", "Tab", 9, ""),
-        "escape" => ("Escape", "Escape", 27, ""),
-        "delete" => ("Delete", "Delete", 46, ""),
-        "left" => ("ArrowLeft", "ArrowLeft", 37, ""),
-        "up" => ("ArrowUp", "ArrowUp", 38, ""),
-        "right" => ("ArrowRight", "ArrowRight", 39, ""),
-        "down" => ("ArrowDown", "ArrowDown", 40, ""),
-        "home" => ("Home", "Home", 36, ""),
-        "end" => ("End", "End", 35, ""),
-        "pageup" => ("PageUp", "PageUp", 33, ""),
-        "pagedown" => ("PageDown", "PageDown", 34, ""),
+    let (key, code, vk, text, command) = match name {
+        "enter" => ("Enter", "Enter", 13, "\r", ""),
+        "backspace" => ("Backspace", "Backspace", 8, "", "deleteBackward"),
+        "tab" => ("Tab", "Tab", 9, "", ""),
+        "escape" => ("Escape", "Escape", 27, "", ""),
+        "delete" => ("Delete", "Delete", 46, "", "deleteForward"),
+        "left" => ("ArrowLeft", "ArrowLeft", 37, "", "moveLeft"),
+        "up" => ("ArrowUp", "ArrowUp", 38, "", "moveUp"),
+        "right" => ("ArrowRight", "ArrowRight", 39, "", "moveRight"),
+        "down" => ("ArrowDown", "ArrowDown", 40, "", "moveDown"),
+        "home" => ("Home", "Home", 36, "", "moveToBeginningOfLine"),
+        "end" => ("End", "End", 35, "", "moveToEndOfLine"),
+        "pageup" => ("PageUp", "PageUp", 33, "", ""),
+        "pagedown" => ("PageDown", "PageDown", 34, "", ""),
         _ => return None,
     };
-    Some(KeySpec { key, code, vk, text })
+    Some(KeySpec {
+        key,
+        code,
+        vk,
+        text,
+        command,
+    })
 }
 
 /// Read CDP messages until the pipe closes: route replies, track pages, decode frames.
@@ -544,10 +578,10 @@ fn read_loop(
     mut writer: std::fs::File,
     shared: Arc<Mutex<Shared>>,
     seq: Arc<AtomicU64>,
+    ids: Arc<AtomicU64>,
 ) {
     let mut buf = Vec::new();
     let mut chunk = vec![0u8; 1 << 16];
-    let mut ack_id = 1u64 << 40;
     loop {
         let n = match reader.read(&mut chunk) {
             Ok(0) | Err(_) => break,
@@ -567,11 +601,25 @@ fn read_loop(
             }
             let session = msg["sessionId"].as_str().unwrap_or_default();
             let params = &msg["params"];
+            if std::env::var_os("RUNO_CDP_LOG").is_some() {
+                if msg["method"] != "Page.screencastFrame" {
+                    eprintln!(
+                        "cdp< {}",
+                        msg.to_string().chars().take(300).collect::<String>()
+                    );
+                } else {
+                    let m = &msg["params"]["metadata"];
+                    eprintln!(
+                        "cdp< frame css {}x{} scale {}",
+                        m["deviceWidth"], m["deviceHeight"], m["pageScaleFactor"]
+                    );
+                }
+            }
             match msg["method"].as_str().unwrap_or_default() {
                 "Page.screencastFrame" => {
                     // Ack first so Chromium can render the next frame while this one decodes.
-                    ack_id += 1;
-                    let ack = json!({"id": ack_id, "sessionId": session,
+                    // Ids share the engine's counter: Chromium wants them to fit an int.
+                    let ack = json!({"id": ids.fetch_add(1, Ordering::Relaxed), "sessionId": session,
                         "method": "Page.screencastFrameAck",
                         "params": {"sessionId": params["sessionId"]}});
                     let _ = writer.write_all(&frame_message(&ack));
@@ -635,11 +683,16 @@ fn read_loop(
 /// A base64 JPEG as a BGRA image GPUI can draw.
 fn decode_frame(data: &str) -> Option<Arc<RenderImage>> {
     use base64::Engine as _;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
     let mut rgba = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
         .ok()?
         .into_rgba8();
-    for px in rgba.chunks_exact_mut(4) {
+    if std::env::var_os("RUNO_CDP_LOG").is_some() {
+        eprintln!("cdp  decoded {}x{}", rgba.width(), rgba.height());
+    }
+    for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
@@ -669,7 +722,10 @@ mod tests {
         // Same size: unchanged.
         assert_eq!(to_page((10., 20.), (400., 300.), (400., 300.)), (10., 20.));
         // The page is still at the old size after the panel grew: scale.
-        assert_eq!(to_page((200., 150.), (400., 300.), (800., 600.)), (400., 300.));
+        assert_eq!(
+            to_page((200., 150.), (400., 300.), (800., 600.)),
+            (400., 300.)
+        );
         // Outside the panel clamps to its edge; an empty panel maps to the origin.
         assert_eq!(to_page((-5., 999.), (400., 300.), (400., 300.)), (0., 300.));
         assert_eq!(to_page((5., 5.), (0., 0.), (400., 300.)), (0., 0.));

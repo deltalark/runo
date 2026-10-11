@@ -83,8 +83,6 @@ pub(crate) struct BrowserView {
     /// Mouse buttons held down over the page, as CDP's bit mask.
     buttons: u8,
     pub error: Option<String>,
-    /// Frames received, for a rough frame rate.
-    frames: u64,
 }
 
 /// A frame-area size as the page viewport: CSS width, height and device pixel ratio.
@@ -240,23 +238,25 @@ impl RunoApp {
             }
             self.browser_view.stale = self.browser_view.frame.take().map(|(img, _)| img);
             self.browser_view.frame = Some((frame.image, frame.css));
-            self.browser_view.frames += 1;
         }
         cx.notify();
     }
 
-    /// Put the page's URL in the address field when it navigates, unless it is being edited.
+    /// Put the page's URL in the address field when it navigates or the session changes,
+    /// unless the field is being edited.
     pub(crate) fn sync_browser_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(engine) = self.browser.clone() else {
-            return;
-        };
-        let Some((url, ..)) = engine.info(self.browser_key()) else {
-            return;
-        };
-        if url == self.browser_view.synced_url || url.is_empty() || url == "about:blank" {
-            return;
-        }
-        if self.address.read(cx).focus_handle(cx).is_focused(window) {
+        let key = self.browser_key();
+        let url = self
+            .browser
+            .as_ref()
+            .filter(|_| self.browser_view.pages.contains(&key))
+            .and_then(|e| e.info(key))
+            .map(|info| info.url)
+            .filter(|url| url != "about:blank")
+            .unwrap_or_default();
+        if url == self.browser_view.synced_url
+            || self.address.read(cx).focus_handle(cx).is_focused(window)
+        {
             return;
         }
         self.browser_view.synced_url = url.clone();
@@ -281,10 +281,7 @@ impl RunoApp {
         let b = self.browser_view.bounds.get();
         let panel = (f32::from(b.size.width), f32::from(b.size.height));
         let page = self.browser_view.frame.as_ref().map_or(panel, |f| f.1);
-        let local = (
-            f32::from(pos.x - b.origin.x),
-            f32::from(pos.y - b.origin.y),
-        );
+        let local = (f32::from(pos.x - b.origin.x), f32::from(pos.y - b.origin.y));
         to_page(local, panel, page)
     }
 
@@ -331,7 +328,13 @@ impl RunoApp {
         let mods = modifier_bits(m.alt, m.control, m.platform, m.shift);
         if m.platform {
             let edit = |command: &'static str, k: &'static str, code: &'static str, vk: u32| {
-                let spec = KeySpec { key: k, code, vk, text: "" };
+                let spec = KeySpec {
+                    key: k,
+                    code,
+                    vk,
+                    text: "",
+                    command,
+                };
                 engine.key(key, true, &spec, mods, &[command]);
                 engine.key(key, false, &spec, mods, &[]);
             };
@@ -365,8 +368,7 @@ impl RunoApp {
     }
 
     fn page_key_up(&mut self, ev: &KeyUpEvent) {
-        let (Some(engine), Some(spec)) = (self.browser.clone(), key_spec(&ev.keystroke.key))
-        else {
+        let (Some(engine), Some(spec)) = (self.browser.clone(), key_spec(&ev.keystroke.key)) else {
             return;
         };
         let m = ev.keystroke.modifiers;
@@ -389,24 +391,32 @@ impl RunoApp {
             .gap_1()
             .border_b_1()
             .border_color(rgb(c_border()))
-            .child(nav("page-back", IconName::ArrowLeft, "Back").on_click(cx.listener(
-                |this, _, _, _| {
-                    if let Some(e) = &this.browser {
-                        e.history(this.browser_key(), true);
-                    }
-                },
-            )))
-            .child(nav("page-forward", IconName::ArrowRight, "Forward").on_click(cx.listener(
-                |this, _, _, _| {
-                    if let Some(e) = &this.browser {
-                        e.history(this.browser_key(), false);
-                    }
-                },
-            )))
+            .child(
+                nav("page-back", IconName::ArrowLeft, "Back").on_click(cx.listener(
+                    |this, _, _, _| {
+                        if let Some(e) = &this.browser {
+                            e.history(this.browser_key(), true);
+                        }
+                    },
+                )),
+            )
+            .child(
+                nav("page-forward", IconName::ArrowRight, "Forward").on_click(cx.listener(
+                    |this, _, _, _| {
+                        if let Some(e) = &this.browser {
+                            e.history(this.browser_key(), false);
+                        }
+                    },
+                )),
+            )
             .child(
                 nav(
                     "page-reload",
-                    if loading { IconName::Loader } else { IconName::RotateCw },
+                    if loading {
+                        IconName::Loader
+                    } else {
+                        IconName::RotateCw
+                    },
                     "Reload",
                 )
                 .on_click(cx.listener(|this, _, _, _| {
@@ -445,7 +455,6 @@ impl RunoApp {
 
     /// The live page, filling the panel, with input forwarded to Chromium.
     fn page_view(&self, dialog: Option<(String, String)>, cx: &mut Context<Self>) -> AnyElement {
-        let (bounds, scale) = (self.browser_view.bounds.clone(), self.browser_view.scale.clone());
         let mouse_down = |button: MouseButton| {
             cx.listener(move |this: &mut Self, ev: &MouseDownEvent, window, cx| {
                 window.focus(&this.browser_focus, cx);
@@ -482,19 +491,6 @@ impl RunoApp {
             .overflow_hidden()
             .bg(rgb(0xffffff))
             .cursor_default()
-            .child(
-                canvas(
-                    move |b, window, _| {
-                        bounds.set(b);
-                        scale.set(window.scale_factor());
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full(),
-            )
             .on_mouse_down(MouseButton::Left, mouse_down(MouseButton::Left))
             .on_mouse_down(MouseButton::Right, mouse_down(MouseButton::Right))
             .on_mouse_up(MouseButton::Left, mouse_up(MouseButton::Left))
@@ -508,9 +504,9 @@ impl RunoApp {
                 this.page_mouse("mouseWheel", ev.position, None, 0, ev.modifiers, wheel);
                 cx.stop_propagation();
             }))
-            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
-                this.page_key(ev, window, cx)
-            }))
+            .on_key_down(
+                cx.listener(|this, ev: &KeyDownEvent, window, cx| this.page_key(ev, window, cx)),
+            )
             .on_key_up(cx.listener(|this, ev: &KeyUpEvent, _, _| this.page_key_up(ev)));
         match &self.browser_view.frame {
             Some((image, _)) => {
@@ -566,14 +562,16 @@ impl RunoApp {
                                     .justify_end()
                                     .gap_2()
                                     .when(kind != "alert", |el| {
-                                        el.child(self.button("dialog-cancel", "Cancel", false).on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                if let Some(e) = &this.browser {
-                                                    e.answer_dialog(this.browser_key(), false);
-                                                }
-                                                cx.notify();
-                                            }),
-                                        ))
+                                        el.child(
+                                            self.button("dialog-cancel", "Cancel", false).on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    if let Some(e) = &this.browser {
+                                                        e.answer_dialog(this.browser_key(), false);
+                                                    }
+                                                    cx.notify();
+                                                }),
+                                            ),
+                                        )
                                     })
                                     .child(self.button("dialog-ok", "OK", true).on_click(
                                         cx.listener(|this, _, _, cx| {
@@ -742,17 +740,42 @@ impl RunoApp {
             .filter(|_| self.browser_view.pages.contains(&key))
             .and_then(|e| e.info(key));
         let page = info.is_some();
-        let (loading, dialog) = info.map(|(_, _, l, d)| (l, d)).unwrap_or((false, None));
+        let (loading, dialog) = info.map_or((false, None), |i| (i.loading, i.dialog));
+        let (bounds, scale) = (
+            self.browser_view.bounds.clone(),
+            self.browser_view.scale.clone(),
+        );
         div()
             .flex_1()
             .min_h_0()
             .v_flex()
             .child(self.browser_bar(page, loading, cx))
-            .child(if page {
-                self.page_view(dialog, cx)
-            } else {
-                self.start_page(cx)
-            })
+            .child(
+                // Measured on the start page too, so a page opens at the panel's size.
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .v_flex()
+                    .child(
+                        canvas(
+                            move |b, window, _| {
+                                bounds.set(b);
+                                scale.set(window.scale_factor());
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
+                    .child(if page {
+                        self.page_view(dialog, cx)
+                    } else {
+                        self.start_page(cx)
+                    }),
+            )
             .into_any_element()
     }
 }

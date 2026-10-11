@@ -386,8 +386,7 @@ impl RunoApp {
     /// agents may use the built-in browser.
     pub(crate) fn browser_offer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let st = cx.global::<AppSettings>();
-        if !st.tour_seen || st.browser_asked || self.tour.is_some() || self.view == View::Settings
-        {
+        if !st.tour_seen || st.browser_asked || self.tour.is_some() || self.view == View::Settings {
             return None;
         }
         let found = browser_engine::find_chromium();
