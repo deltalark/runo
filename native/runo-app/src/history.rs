@@ -195,6 +195,209 @@ pub fn parse_codex(text: &str) -> Option<Past> {
     })
 }
 
+/// The transcript of one conversation, found by its id.
+pub fn transcript(home: &Path, provider: &str, id: &str) -> Option<PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    match provider {
+        "claude" => read_dirs(&home.join(".claude").join("projects"))
+            .into_iter()
+            .map(|d| d.join(format!("{id}.jsonl")))
+            .find(|p| p.is_file()),
+        "codex" => {
+            let mut stack = vec![home.join(".codex").join("sessions")];
+            while let Some(dir) = stack.pop() {
+                stack.extend(read_dirs(&dir));
+                if let Some(file) = jsonl_in(&dir).into_iter().find(|p| {
+                    p.file_stem()
+                        .is_some_and(|s| s.to_string_lossy().ends_with(id))
+                }) {
+                    return Some(file);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The newest Codex conversation that ran in `dir` and was written after `since`.
+pub fn newest_codex(home: &Path, dir: &str, since: SystemTime) -> Option<(String, PathBuf)> {
+    scan(home)
+        .into_iter()
+        .filter(|p| p.provider == "codex" && p.cwd == dir && p.modified >= since)
+        .max_by_key(|p| p.modified)
+        .and_then(|p| transcript(home, "codex", &p.id).map(|path| (p.id, path)))
+}
+
+/// Size of a file, or 0: where to start reading new turns later.
+pub fn length(path: Option<&Path>) -> u64 {
+    path.and_then(|p| p.metadata().ok()).map_or(0, |m| m.len())
+}
+
+/// The transcript from byte `from` on.
+pub fn read_from(path: &Path, from: u64) -> String {
+    use std::io::{Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    if file.seek(SeekFrom::Start(from)).is_ok() {
+        let _ = file.read_to_end(&mut bytes);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Full text a person typed, or `None` for tool results and harness wrappers.
+fn prompt_text(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| matches!(b["type"].as_str(), Some("text" | "input_text")))
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty() && !text.starts_with('<')).then(|| text.to_string())
+}
+
+/// A short label for a tool call, such as "Ran cargo test" or "Edited src/main.rs".
+fn step_label(name: &str, input: &Value) -> String {
+    let field = |k: &str| input[k].as_str().unwrap_or("").to_string();
+    let short = |t: String| {
+        let line = t.lines().next().unwrap_or("").to_string();
+        if line.chars().count() > 70 {
+            format!("{}…", line.chars().take(70).collect::<String>())
+        } else {
+            line
+        }
+    };
+    match name {
+        "Bash" | "shell" | "exec_command" | "local_shell" => {
+            let cmd = match &input["command"] {
+                Value::Array(parts) => parts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                v => v.as_str().unwrap_or("").to_string(),
+            };
+            format!("Ran {}", short(cmd))
+        }
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => {
+            format!("Edited {}", short(field("file_path")))
+        }
+        "Read" => format!("Read {}", short(field("file_path"))),
+        "apply_patch" => "Edited files".to_string(),
+        other => format!("Used {other}"),
+    }
+}
+
+/// Turns recorded by the agent's CLI, as chat messages: each prompt, then one reply
+/// holding the agent's text, its tool steps and its token use.
+pub fn turns(provider: &str, text: &str) -> Vec<crate::store::Message> {
+    use crate::store::{Message, Role};
+    let mut out: Vec<Message> = Vec::new();
+    let reply = |out: &mut Vec<Message>| -> usize {
+        if out.last().is_none_or(|m| m.role != Role::Agent) {
+            out.push(Message::new(Role::Agent, ""));
+        }
+        out.len() - 1
+    };
+    let add_text = |m: &mut Message, t: &str| {
+        let t = t.trim();
+        if t.is_empty() {
+            return;
+        }
+        if !m.text.is_empty() {
+            m.text.push_str("\n\n");
+        }
+        m.text.push_str(t);
+    };
+    for line in text.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if provider == "claude" {
+            if event["isSidechain"] == true || event["isMeta"] == true {
+                continue;
+            }
+            let message = &event["message"];
+            match event["type"].as_str().unwrap_or("") {
+                "user" if message["role"] == "user" => {
+                    if let Some(t) = prompt_text(&message["content"]) {
+                        out.push(Message::new(Role::User, t));
+                    }
+                }
+                "assistant" => {
+                    let i = reply(&mut out);
+                    for block in message["content"].as_array().into_iter().flatten() {
+                        match block["type"].as_str().unwrap_or("") {
+                            "text" => add_text(&mut out[i], block["text"].as_str().unwrap_or("")),
+                            "tool_use" => {
+                                let label = step_label(
+                                    block["name"].as_str().unwrap_or("a tool"),
+                                    &block["input"],
+                                );
+                                out[i].steps.push(label);
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Output adds up over the turn; the prompt side is the context size, so
+                    // the latest call's figure is the one that counts.
+                    let usage = &message["usage"];
+                    if usage.is_object() {
+                        let u = &mut out[i].usage;
+                        u.input = usage["input_tokens"].as_u64().unwrap_or(0);
+                        u.output += usage["output_tokens"].as_u64().unwrap_or(0);
+                        u.cached = usage["cache_read_input_tokens"].as_u64().unwrap_or(0)
+                            + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            let payload = &event["payload"];
+            if event["type"] != "response_item" {
+                continue;
+            }
+            match payload["type"].as_str().unwrap_or("") {
+                "message" if payload["role"] == "user" => {
+                    if let Some(t) = prompt_text(&payload["content"]) {
+                        out.push(Message::new(Role::User, t));
+                    }
+                }
+                "message" if payload["role"] == "assistant" => {
+                    let i = reply(&mut out);
+                    for block in payload["content"].as_array().into_iter().flatten() {
+                        if block["type"] == "output_text" {
+                            add_text(&mut out[i], block["text"].as_str().unwrap_or(""));
+                        }
+                    }
+                }
+                "function_call" | "local_shell_call" | "custom_tool_call" => {
+                    let i = reply(&mut out);
+                    let name = payload["name"].as_str().unwrap_or("shell");
+                    let input = payload["arguments"]
+                        .as_str()
+                        .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                        .unwrap_or_else(|| payload["action"].clone());
+                    out[i].steps.push(step_label(name, &input));
+                }
+                _ => {}
+            }
+        }
+    }
+    // A prompt the agent never answered (the CLI was closed first) still shows.
+    out.retain(|m| m.role == Role::User || !m.text.is_empty() || !m.steps.is_empty());
+    out
+}
+
 /// "3m ago", "2h ago", "5d ago" or the date, for list rows.
 pub fn ago(time: SystemTime) -> String {
     let secs = SystemTime::now()
@@ -223,6 +426,34 @@ mod tests {
 {"type":"user","message":{"role":"user","content":[{"type":"text","text":"Fix the login bug\nIt fails on Safari"}]},"cwd":"/work/app","sessionId":"abc"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"On it"}]}}
 "#;
+
+    #[test]
+    fn cli_turns_become_chat_messages() {
+        use crate::store::Role;
+        let claude = r#"{"type":"user","message":{"role":"user","content":"Add a test"},"sessionId":"abc"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Adding it."},{"type":"tool_use","name":"Edit","input":{"file_path":"src/lib.rs"}}],"usage":{"input_tokens":10,"output_tokens":5}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}],"usage":{"input_tokens":3,"output_tokens":2}}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}]}}
+{"type":"user","isSidechain":true,"message":{"role":"user","content":"sub agent"}}
+"#;
+        let m = turns("claude", claude);
+        assert_eq!(m.len(), 2);
+        assert_eq!((m[0].role, m[0].text.as_str()), (Role::User, "Add a test"));
+        assert_eq!(m[1].text, "Adding it.\n\nDone.");
+        assert_eq!(m[1].steps, vec!["Edited src/lib.rs", "Ran cargo test"]);
+        assert_eq!((m[1].usage.input, m[1].usage.output), (3, 7));
+        let codex = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context></environment_context>"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"List files"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\",\"-a\"]}"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Two files."}]}}
+"#;
+        let m = turns("codex", codex);
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].text, "List files");
+        assert_eq!(m[1].steps, vec!["Ran ls -a"]);
+        assert_eq!(m[1].text, "Two files.");
+    }
 
     const CODEX: &str = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"0199-uuid","cwd":"/work/api"}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n</environment_context>"}]}}

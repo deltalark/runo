@@ -64,6 +64,7 @@ impl RunoApp {
     pub(crate) fn prune_shells(&mut self) {
         let state = &self.state;
         self.shells.retain(|s| state.session(s.session).is_some());
+        self.cli_runs.retain(|id, _| state.session(*id).is_some());
     }
 
     /// Rows and columns that fit the terminal body.
@@ -108,6 +109,24 @@ impl RunoApp {
         let Some(shell) = self.active_shell() else {
             return;
         };
+        if self.pty_key(shell, event, cx) {
+            self.info = Some((
+                "Copied the terminal screen.".into(),
+                std::time::Instant::now(),
+            ));
+            cx.notify();
+        }
+        let _ = window;
+    }
+
+    /// Send a keystroke to a PTY program, handling copy and paste. Returns whether it
+    /// changed something the UI shows.
+    pub(crate) fn pty_key(
+        &self,
+        shell: &pty::Shell,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let ks = &event.keystroke;
         let m = ks.modifiers;
         // Paste: Cmd-V on macOS, Ctrl-Shift-V elsewhere.
@@ -117,21 +136,16 @@ impl RunoApp {
                 shell.paste(&text);
             }
             cx.stop_propagation();
-            return;
+            return false;
         }
         let copy = (m.platform && ks.key == "c") || (m.control && m.shift && ks.key == "c");
         if copy {
             cx.write_to_clipboard(ClipboardItem::new_string(shell.text()));
-            self.info = Some((
-                "Copied the terminal screen.".into(),
-                std::time::Instant::now(),
-            ));
             cx.stop_propagation();
-            cx.notify();
-            return;
+            return true;
         }
         if m.platform {
-            return;
+            return false;
         }
         let app_cursor = shell.with_screen(|s| s.application_cursor());
         if let Some(bytes) = pty::key_bytes(
@@ -145,7 +159,7 @@ impl RunoApp {
             shell.write(&bytes);
             cx.stop_propagation();
         }
-        let _ = window;
+        false
     }
 
     pub(crate) fn shell_tab_button(&self, shell: &pty::Shell, cx: &mut Context<Self>) -> Div {
@@ -214,10 +228,28 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let (rows, cols) = self.term_grid();
+        self.pty_view(shell, (rows, cols), None, window, cx)
+    }
+
+    /// A PTY screen. `cli` is the session whose agent CLI this is, or `None` for a shell
+    /// tab in the terminal panel.
+    pub(crate) fn pty_view(
+        &self,
+        shell: &pty::Shell,
+        (rows, cols): (u16, u16),
+        cli: Option<u64>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         shell.resize(rows, cols);
         shell.take_dirty();
         let dark = is_dark();
-        let focused = self.term_focus.is_focused(window);
+        let focus = if cli.is_some() {
+            &self.cli_focus
+        } else {
+            &self.term_focus
+        };
+        let focused = focus.is_focused(window);
         let default_fg = c_text();
         let color = |c: vt100::Color, default: u32| match c {
             vt100::Color::Default => default,
@@ -305,7 +337,7 @@ impl RunoApp {
         div()
             .id(SharedString::from(format!("shell-{}", shell.id)))
             .key_context("RunoTerminal")
-            .track_focus(&self.term_focus)
+            .track_focus(focus)
             .flex_1()
             .min_h_0()
             .px_3()
@@ -317,24 +349,38 @@ impl RunoApp {
             .line_height(px(TERM_LINE))
             .cursor_text()
             .on_key_down(
-                cx.listener(|this, ev: &KeyDownEvent, window, cx| this.shell_key(ev, window, cx)),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    window.focus(&this.term_focus, cx);
-                    cx.notify();
+                cx.listener(move |this, ev: &KeyDownEvent, window, cx| match cli {
+                    Some(id) => this.cli_key(id, ev, cx),
+                    None => this.shell_key(ev, window, cx),
                 }),
             )
             .on_mouse_down(
-                MouseButton::Right,
-                self.on_context(ctxmenu::CtxTarget::Terminal, cx),
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    let focus = if cli.is_some() {
+                        &this.cli_focus
+                    } else {
+                        &this.term_focus
+                    };
+                    window.focus(focus, cx);
+                    cx.notify();
+                }),
             )
-            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
+            .when(cli.is_none(), |el| {
+                el.on_mouse_down(
+                    MouseButton::Right,
+                    self.on_context(ctxmenu::CtxTarget::Terminal, cx),
+                )
+            })
+            .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, _, cx| {
                 let dy = f32::from(ev.delta.pixel_delta(px(TERM_LINE)).y);
                 let lines = (dy / TERM_LINE).round() as isize;
                 if lines != 0 {
-                    if let Some(shell) = this.active_shell() {
+                    let shell = match cli {
+                        Some(id) => this.cli_runs.get(&id).map(|r| &r.shell),
+                        None => this.active_shell(),
+                    };
+                    if let Some(shell) = shell {
                         shell.scroll_by(lines);
                     }
                     cx.notify();
@@ -357,11 +403,11 @@ impl RunoApp {
                 )
             })
             .when(shell.exited(), |el| {
-                el.child(
-                    div()
-                        .text_color(rgb(c_muted()))
-                        .child("Process exited. Close this tab or open a new shell."),
-                )
+                el.child(div().text_color(rgb(c_muted())).child(if cli.is_some() {
+                    "The CLI closed. Switching back to Chat."
+                } else {
+                    "Process exited. Close this tab or open a new shell."
+                }))
             })
     }
 }

@@ -458,6 +458,114 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
     args
 }
 
+/// Agents whose own interactive CLI can open the same conversation the chat uses, so
+/// the Chat and CLI views of a session can be swapped without sending anything.
+pub fn has_cli_view(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex")
+}
+
+/// Arguments that open the agent's interactive CLI on this session's conversation, with
+/// the same model, mode and tools as the chat. `spec.resume` picks up the conversation
+/// in `spec.session_id`; otherwise a new one starts (named up front for Claude Code).
+pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
+    let args = provider_args(spec);
+    match spec.provider {
+        "codex" => {
+            // `exec [flags] [resume <id>] <prompt>` becomes `[resume <id>] [flags]`.
+            let mut flags: Vec<String> = Vec::new();
+            let mut iter = args.into_iter().skip(1).peekable();
+            while let Some(arg) = iter.next() {
+                match arg.as_str() {
+                    "--skip-git-repo-check" => {}
+                    "-i" => {
+                        iter.next();
+                    }
+                    "resume" => {
+                        iter.next();
+                    }
+                    _ if iter.peek().is_none() => {} // the prompt
+                    _ => flags.push(arg),
+                }
+            }
+            let mut out = Vec::new();
+            if spec.resume && !spec.session_id.is_empty() {
+                out.extend(["resume".to_string(), spec.session_id.to_string()]);
+            }
+            out.extend(flags);
+            if !spec.prompt.is_empty() {
+                out.push(spec.prompt.to_string());
+            }
+            out
+        }
+        _ => {
+            // Drop print mode, streaming output and the prompt; keep everything else.
+            let end = args.iter().rposition(|a| a == "--").unwrap_or(args.len());
+            let mut out: Vec<String> = args[..end]
+                .iter()
+                .filter(|a| {
+                    !matches!(
+                        a.as_str(),
+                        "-p" | "--output-format"
+                            | "stream-json"
+                            | "--verbose"
+                            | "--include-partial-messages"
+                    )
+                })
+                .cloned()
+                .collect();
+            // A first prompt, typed into the CLI as it opens.
+            if !spec.prompt.is_empty() {
+                out.extend(["--".to_string(), spec.prompt.to_string()]);
+            }
+            out
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::*;
+
+    #[test]
+    fn interactive_args_drop_print_mode_and_keep_the_conversation() {
+        let sel = std::collections::HashMap::from([
+            ("model".to_string(), "haiku".to_string()),
+            ("mode".to_string(), "edit".to_string()),
+        ]);
+        let opts = AgentOptions::default();
+        let spec = |provider, resume, prompt| RunSpec {
+            provider,
+            prompt,
+            resume,
+            sel: &sel,
+            opts: &opts,
+            in_git: true,
+            session_id: "abc-123",
+            images: &[],
+            memory: None,
+        };
+        let claude = interactive_args(&spec("claude", true, ""));
+        assert!(!claude
+            .iter()
+            .any(|a| a == "-p" || a == "stream-json" || a == "--"));
+        assert!(claude.windows(2).any(|w| w == ["--resume", "abc-123"]));
+        assert!(claude.windows(2).any(|w| w == ["--model", "haiku"]));
+        assert!(claude
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "acceptEdits"]));
+        let fresh = interactive_args(&spec("claude", false, "Fix it"));
+        assert!(fresh.windows(2).any(|w| w == ["--session-id", "abc-123"]));
+        assert!(fresh.ends_with(&["--".to_string(), "Fix it".to_string()]));
+        let codex = interactive_args(&spec("codex", true, ""));
+        assert_eq!(&codex[..2], ["resume", "abc-123"]);
+        assert!(!codex
+            .iter()
+            .any(|a| a == "exec" || a == "--skip-git-repo-check"));
+        assert!(codex.windows(2).any(|w| w == ["-m", "haiku"]));
+        assert_eq!(codex.iter().filter(|a| *a == "resume").count(), 1);
+    }
+}
+
 /// Name of Runo's memory MCP server in the agents' config.
 pub const MEMORY_SERVER: &str = "runo_memory";
 
