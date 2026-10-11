@@ -28,8 +28,31 @@ impl RunoApp {
         let (provider, dir) = (session.provider.clone(), session.dir.clone());
         let in_git = !demo && git::is_repo(&dir);
         // Agents that cannot resume their own conversation get it written into the prompt.
-        let sent = if resume && !agent::resumes(&provider) {
-            context_prompt(&session.messages[session.conversation_start..], &prompt)
+        let handoff = std::mem::take(&mut session.handoff);
+        let sent = if !handoff.is_empty() {
+            format!("{handoff}\n\n## Your next instruction\n{prompt}")
+        } else if resume && !agent::resumes(&provider) {
+            let memory = std::path::Path::new(&dir).join(handoff::MEMORY_FILE);
+            if memory.is_file() {
+                // The memory file holds the history; only the latest exchange is resent.
+                let recent = context_prompt_last(
+                    &session.messages[session.conversation_start..],
+                    &prompt,
+                    2,
+                );
+                format!(
+                    "Session memory with the full history and code state is in {}. Read it if you need earlier context.\n\n{recent}",
+                    handoff::MEMORY_FILE
+                )
+            } else {
+                let recent =
+                    context_prompt(&session.messages[session.conversation_start..], &prompt);
+                if session.carried.is_empty() {
+                    recent
+                } else {
+                    format!("{}\n\n{recent}", session.carried)
+                }
+            }
         } else {
             prompt.clone()
         };
@@ -231,6 +254,16 @@ impl RunoApp {
         let Some(provider) = self.current().map(|s| s.provider.clone()) else {
             return;
         };
+        self.allow_tools_for(&provider, tools, cx);
+    }
+
+    pub(crate) fn allow_tools_for(
+        &mut self,
+        provider: &str,
+        tools: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let provider = provider.to_string();
         let mut st = cx.global::<AppSettings>().clone();
         let entry = st.agents.entry(provider).or_default();
         let mut list: Vec<String> = entry
@@ -403,6 +436,7 @@ impl RunoApp {
                     self.notice = Some(format!("Could not write a commit message: {first}"));
                 }
             }
+        } else if self.handle_alert_job(&key, result.clone()) {
         } else if !self.handle_browser_job(&key, result.clone()) {
             self.handle_job(key, result);
         }
@@ -903,11 +937,16 @@ fn cx_keep_awake() -> bool {
 
 /// Earlier turns, for CLIs that do not keep a conversation, ahead of the new request.
 pub fn context_prompt(messages: &[Message], prompt: &str) -> String {
+    context_prompt_last(messages, prompt, CONTEXT_MESSAGES)
+}
+
+/// The last `keep` messages of the conversation, then the new prompt.
+pub fn context_prompt_last(messages: &[Message], prompt: &str, keep: usize) -> String {
     let recent: Vec<&Message> = messages
         .iter()
         .filter(|m| m.role != Role::System && !m.text.is_empty())
         .collect();
-    let start = recent.len().saturating_sub(CONTEXT_MESSAGES);
+    let start = recent.len().saturating_sub(keep);
     let mut out = String::from("Our conversation so far:\n");
     for m in &recent[start..] {
         let who = if m.role == Role::User { "Me" } else { "You" };

@@ -208,6 +208,12 @@ pub struct Session {
     /// Prompts typed while the agent was working; each is sent when the turn ends.
     #[serde(default)]
     pub queue: Vec<String>,
+    /// A handoff brief from the previous agent, sent with the next prompt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub handoff: String,
+    /// The last handoff, kept for agents that cannot resume their own conversation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub carried: String,
 }
 
 /// A review comment on one line of the session's diff.

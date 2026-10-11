@@ -267,6 +267,7 @@ impl RunoApp {
                 _ if t.starts_with("Stopped") => (IconName::CircleStop, c_amber()),
                 _ if t.starts_with("Started") => (IconName::Play, c_blue()),
                 _ if t.starts_with("Committed") => (IconName::GitCommitHorizontal, c_green()),
+                _ if t.starts_with("Updated") => (IconName::Download, c_green()),
                 _ if t.starts_with("Pushed") => (IconName::CloudUpload, c_blue()),
                 _ if t.starts_with("Undid") => (IconName::Undo2, c_amber()),
                 _ if t.starts_with("Discarded") => (IconName::Trash, c_amber()),

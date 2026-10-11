@@ -25,6 +25,36 @@ fn git(dir: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Keep `pattern` out of `git status` for this repository and all its worktrees,
+/// without touching any tracked file (.git/info/exclude).
+pub fn exclude(dir: &str, pattern: &str) {
+    let Ok(common) = git(dir, &["rev-parse", "--git-common-dir"]) else {
+        return;
+    };
+    let common = Path::new(dir).join(common.trim());
+    let file = common.join("info").join("exclude");
+    let current = std::fs::read_to_string(&file).unwrap_or_default();
+    if current.lines().any(|l| l.trim() == pattern) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(common.join("info"));
+    let sep = if current.is_empty() || current.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = std::fs::write(&file, format!("{current}{sep}{pattern}\n"));
+}
+
+/// The last `n` commits, one line each.
+pub fn recent_commits(dir: &str, n: usize) -> String {
+    git(
+        dir,
+        &["log", &format!("-{n}"), "--oneline", "--no-decorate"],
+    )
+    .unwrap_or_default()
+}
+
 pub fn is_repo(dir: &str) -> bool {
     git(dir, &["rev-parse", "--is-inside-work-tree"]).is_ok()
 }

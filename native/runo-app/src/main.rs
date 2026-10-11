@@ -1,9 +1,11 @@
 mod agent;
+mod alerts;
 mod browser;
 mod caps;
 mod fileview;
 mod git;
 mod github;
+mod handoff;
 mod history;
 mod pty;
 mod settings;
@@ -199,6 +201,16 @@ struct RunoApp {
     race_mode: bool,
     /// The New session dialog lists every agent, not just the main ones.
     new_more_agents: bool,
+    /// Newer releases of installed agents, from the last update check.
+    updates: Vec<alerts::AgentUpdate>,
+    updating: std::collections::HashSet<&'static str>,
+    update_checked: Option<std::time::Instant>,
+    /// Popups the person hid ("s:<session>:<message>" or "u:<agent>:<version>").
+    alerts_hidden: std::collections::HashSet<String>,
+    alerts_expanded: bool,
+    /// Switching agents, waiting for the person to confirm.
+    switch_plan: Option<handoff::SwitchPlan>,
+    switch_preview: bool,
     /// Past Claude and Codex conversations found on this machine.
     history: Vec<history::Past>,
     /// Change counts (files, added, removed) of each session racing the selected one.
@@ -566,7 +578,11 @@ impl RunoApp {
                 // Every ~2s, re-read git status for the session being watched while its
                 // agent works, so the Changes panel fills in as files are edited.
                 let rescan = ticks.is_multiple_of(40);
+                let check = ticks % 1200 == 2;
                 let alive = this.update(cx, |this, cx| {
+                    if check && !this.demo {
+                        this.maybe_check_updates();
+                    }
                     let watching = this.view == View::Session
                         && this
                             .selected
@@ -810,6 +826,13 @@ impl RunoApp {
                 .unwrap_or(0),
             new_isolated: true,
             new_more_agents: false,
+            updates: Vec::new(),
+            updating: Default::default(),
+            update_checked: None,
+            alerts_hidden: Default::default(),
+            alerts_expanded: false,
+            switch_plan: None,
+            switch_preview: false,
             race_mode: false,
             history: Vec::new(),
             race_stats: HashMap::new(),
@@ -1210,6 +1233,7 @@ impl RunoApp {
                     }
                 }
                 self.finish_turn(id, ok, stopped, cx);
+                self.write_memory(id);
                 self.save();
                 if self.split == Some(id) {
                     self.split_scroll.scroll_to_bottom();
@@ -3327,6 +3351,12 @@ impl RunoApp {
             )
             .into_any_element();
         }
+        if let Some(divider) = (message.role == Role::System)
+            .then(|| self.switch_divider(index, &message.meta))
+            .flatten()
+        {
+            return divider;
+        }
         if message.role == Role::System {
             return fade(
                 div()
@@ -3677,7 +3707,7 @@ impl RunoApp {
             list = list.child(self.message_view(
                 i,
                 message,
-                provider,
+                handoff::provider_at(session, i),
                 show,
                 working && Some(i) == last_agent,
                 cx,
@@ -4038,12 +4068,7 @@ impl RunoApp {
                 self.menu_popup(
                     "provider",
                     items,
-                    move |this, i| {
-                        if let Some(s) = this.state.session_mut(sid) {
-                            s.switch_provider(agent::PROVIDERS[i].id);
-                        }
-                        this.save();
-                    },
+                    move |this, i| this.request_switch(sid, i),
                     cx,
                 ),
             ));
@@ -4096,13 +4121,18 @@ impl RunoApp {
         let mut chips = div().flex().flex_wrap().items_center().gap_1().child(
             div()
                 .relative()
-                .child(self.menu_button(
-                    SharedString::from("chip-provider"),
-                    "provider",
-                    Some(self.provider_mark(provider, 13.).into_any_element()),
-                    None,
-                    provider.name.to_string(),
-                    cx,
+                // A new agent pops in when the session switches.
+                .child(slide_in(
+                    div().child(self.menu_button(
+                        SharedString::from("chip-provider"),
+                        "provider",
+                        Some(self.provider_mark(provider, 13.).into_any_element()),
+                        None,
+                        provider.name.to_string(),
+                        cx,
+                    )),
+                    SharedString::from(format!("chip-provider-{}", provider.id)),
+                    420,
                 ))
                 .when(popup.as_ref().is_some_and(|(k, _)| k == "provider"), |el| {
                     el.children(popup.take().map(|(_, p)| p))
@@ -6459,7 +6489,9 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
-                if this.palette.is_some() {
+                if this.switch_plan.is_some() {
+                    this.switch_plan = None;
+                } else if this.palette.is_some() {
                     this.close_palette(window, cx);
                 } else if this.menu.is_some() || this.settings_menu.is_some() {
                     this.menu = None;
@@ -6655,6 +6687,8 @@ impl Render for RunoApp {
                     cx,
                 ))
             })
+            .children(self.alerts_view(cx))
+            .children(self.switch_modal(cx))
             .children(palette);
         fade(root, "app-root", 450)
     }
