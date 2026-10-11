@@ -12,6 +12,7 @@ mod history;
 mod install;
 mod memory_mcp;
 mod models;
+mod projects;
 mod pty;
 mod settings;
 mod settings_ui;
@@ -161,6 +162,8 @@ struct RunoApp {
     json_text: std::collections::HashSet<u64>,
     /// The agent whose install confirm card is open.
     install_confirm: Option<&'static str>,
+    project_form: Option<projects::ProjectForm>,
+    project_name: Entity<InputState>,
     /// A freshly installed CLI found off PATH, to save as the agent's binary.
     pending_binary: Option<(&'static str, String)>,
     cli_focus: FocusHandle,
@@ -739,6 +742,7 @@ impl RunoApp {
                 }
             });
         let term_input = cx.new(|cx| InputState::new(window, cx).placeholder("Run a command…"));
+        let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
         let term_sub = cx.subscribe_in(&term_input, window, |this, input, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 let line = input.read(cx).value().to_string();
@@ -881,6 +885,8 @@ impl RunoApp {
             cli_runs: HashMap::new(),
             json_text: Default::default(),
             install_confirm: None,
+            project_form: None,
+            project_name,
             pending_binary: None,
             cli_focus: cx.focus_handle(),
             focus_cli: 0,
@@ -1869,11 +1875,17 @@ impl RunoApp {
         cx.notify();
     }
 
-    fn add_project(&mut self, path: &std::path::Path) {
+    fn add_project(
+        &mut self,
+        path: &std::path::Path,
+        name: String,
+        color: String,
+        icon: String,
+        start_session: bool,
+    ) -> Result<(), String> {
         let path_str = path.to_string_lossy().into_owned();
         if !path.is_dir() {
-            self.notice = Some(format!("{path_str} is not a folder."));
-            return;
+            return Err(format!("{path_str} is not a folder."));
         }
         if self.demo {
             // Leave the sample workspace behind and start from the real state on disk.
@@ -1884,44 +1896,30 @@ impl RunoApp {
             self.terminal.clear();
         }
         if self.state.projects.iter().any(|p| p.path == path_str) {
-            self.notice = Some("That project is already added.".into());
-            return;
+            return Err("That folder is already a project.".into());
         }
         let id = self.state.next_id();
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path_str.clone());
+        let name = if name.is_empty() {
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path_str.clone())
+        } else {
+            name
+        };
         self.state.projects.push(Project {
             id,
             name,
             path: path_str,
+            color,
+            icon,
         });
         self.expanded.push(id);
         self.new_project = Some(id);
-        self.open_new_session();
+        if start_session {
+            self.open_new_session();
+        }
         self.save();
-    }
-
-    fn pick_project(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Add project".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(path) = paths.first() {
-                    let path = path.clone();
-                    let _ = this.update(cx, |this, cx| {
-                        this.add_project(&path);
-                        cx.notify();
-                    });
-                }
-            }
-        })
-        .detach();
+        Ok(())
     }
 
     fn create_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2173,6 +2171,7 @@ impl RunoApp {
                     id,
                     name,
                     path: past.cwd.clone(),
+                    ..Default::default()
                 });
                 id
             }
@@ -3068,6 +3067,16 @@ impl RunoApp {
                         12.,
                         c_muted(),
                     ))
+                    .when(
+                        projects::color_of(project).is_some() || !project.icon.is_empty(),
+                        |el| {
+                            el.child(icon(
+                                projects::icon_of(project),
+                                13.,
+                                projects::color_of(project).unwrap_or(c_muted()),
+                            ))
+                        },
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -6684,6 +6693,7 @@ impl Render for RunoApp {
         set_dark(dark);
         self.measure_cell(window);
         self.tour_rects = self.anchors.take();
+        self.sync_project_form(window, cx);
         if let Some((id, path)) = self.pending_binary.take() {
             settings::update(cx, |s| {
                 let mut options = s.agent(id);
@@ -6881,6 +6891,8 @@ impl Render for RunoApp {
                     this.end_tour(cx);
                 } else if this.install_confirm.is_some() {
                     this.install_confirm = None;
+                } else if this.project_form.is_some() {
+                    this.project_form = None;
                 } else if this.ctx_menu.is_some() {
                     this.ctx_menu = None;
                 } else if this.switch_plan.is_some() {
@@ -7091,6 +7103,7 @@ impl Render for RunoApp {
             .children(palette)
             .children(self.ctx_menu_view(cx))
             .children(self.install_modal(cx))
+            .children(self.project_modal(cx))
             .children(self.tour_view(window, cx));
         fade(root, "app-root", 450)
     }

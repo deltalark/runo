@@ -152,11 +152,17 @@ impl Message {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Project {
     pub id: u64,
     pub name: String,
     pub path: String,
+    /// Accent color key from the New project popup ("" for none).
+    #[serde(default)]
+    pub color: String,
+    /// Icon key from the New project popup ("" for the plain folder).
+    #[serde(default)]
+    pub icon: String,
 }
 
 fn default_mode() -> String {
@@ -423,6 +429,7 @@ impl State {
             id,
             name: name.into(),
             path: format!("/demo/{name}"),
+            ..Default::default()
         };
         let session =
             |id, project_id, title: &str, provider: &str, branch: &str, status, messages| Session {
