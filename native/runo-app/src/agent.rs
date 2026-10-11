@@ -191,6 +191,8 @@ pub struct RunSpec<'a> {
     pub session_id: &'a str,
     /// Image files attached to the prompt.
     pub images: &'a [String],
+    /// Runo's memory server for this folder: (Runo's executable, the session folder).
+    pub memory: Option<(&'a str, &'a str)>,
 }
 
 /// A random version-4 UUID, for naming a Claude Code conversation up front.
@@ -262,6 +264,17 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             }
             if !spec.in_git {
                 args.push(s("--skip-git-repo-check"));
+            }
+            if let Some((exe, dir)) = spec.memory {
+                args.extend([
+                    s("-c"),
+                    format!("mcp_servers.{MEMORY_SERVER}.command={}", toml_string(exe)),
+                    s("-c"),
+                    format!(
+                        "mcp_servers.{MEMORY_SERVER}.args=[\"--mcp-memory\", {}]",
+                        toml_string(dir)
+                    ),
+                ]);
             }
             args.extend(split_args(&opts.extra_args));
             for image in spec.images {
@@ -406,7 +419,15 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             if !opts.append_prompt.trim().is_empty() {
                 args.extend([s("--append-system-prompt"), opts.append_prompt.clone()]);
             }
-            let allowed = list(&opts.allowed_tools);
+            let mut allowed = list(&opts.allowed_tools);
+            if let Some((exe, dir)) = spec.memory {
+                let config = serde_json::json!({
+                    "mcpServers": { MEMORY_SERVER: { "command": exe, "args": ["--mcp-memory", dir] } }
+                });
+                args.extend([s("--mcp-config"), config.to_string()]);
+                // Reading and searching memory needs no approval.
+                allowed.push(format!("mcp__{MEMORY_SERVER}"));
+            }
             if !allowed.is_empty() {
                 args.extend([s("--allowed-tools"), allowed.join(",")]);
             }
@@ -435,6 +456,14 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
         }
     }
     args
+}
+
+/// Name of Runo's memory MCP server in the agents' config.
+pub const MEMORY_SERVER: &str = "runo_memory";
+
+/// A TOML basic string.
+fn toml_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// The prompt with attached image paths listed, for CLIs that read images from disk.
@@ -698,6 +727,7 @@ mod arg_tests {
             in_git,
             session_id: "",
             images: &[],
+            memory: None,
         })
     }
 
@@ -715,6 +745,7 @@ mod arg_tests {
                 in_git: true,
                 session_id,
                 images: &[],
+                memory: None,
             })
         };
         assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
@@ -734,6 +765,7 @@ mod arg_tests {
             in_git: true,
             session_id,
             images: &[],
+            memory: None,
         };
         let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
         let first = provider_args(&spec(false, id));
@@ -806,6 +838,7 @@ mod arg_tests {
             in_git: true,
             session_id: "",
             images: &[],
+            memory: None,
         };
         run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), tx).unwrap();
         let (mut out, mut err) = (vec![], vec![]);
@@ -848,6 +881,7 @@ mod arg_tests {
             in_git: false,
             session_id: "",
             images: &[],
+            memory: None,
         };
         let error = run_agent(Target::Session(1), &spec, "/", tx).err().unwrap();
         assert!(error.contains("could not start"));

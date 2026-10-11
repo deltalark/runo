@@ -67,6 +67,8 @@ pub struct AppSettings {
     pub glass: String,
     /// Cards, menus and dialogs are translucent too.
     pub glass_cards: bool,
+    /// Pass Runo's memory MCP server to agents that accept one per run.
+    pub memory_server: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -106,6 +108,7 @@ impl Default for AppSettings {
             group_by_status: false,
             glass: "off".into(),
             glass_cards: true,
+            memory_server: true,
         }
     }
 }
@@ -158,6 +161,7 @@ impl AppSettings {
         ANIMATIONS.store(self.animations, Ordering::Relaxed);
         GLASS.store(glass_alpha(&self.glass), Ordering::Relaxed);
         GLASS_CARDS.store(self.glass_cards, Ordering::Relaxed);
+        MEMORY_SERVER.store(self.memory_server, Ordering::Relaxed);
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
@@ -182,6 +186,7 @@ static DARK: AtomicBool = AtomicBool::new(false);
 /// Opacity of the window background in glass mode (255 when glass is off).
 static GLASS: AtomicU8 = AtomicU8::new(255);
 static GLASS_CARDS: AtomicBool = AtomicBool::new(true);
+static MEMORY_SERVER: AtomicBool = AtomicBool::new(true);
 static ACCENT: AtomicU32 = AtomicU32::new(0x3b5bdb);
 static DIFF: AtomicU8 = AtomicU8::new(0);
 static ANIMATIONS: AtomicBool = AtomicBool::new(true);
@@ -225,6 +230,10 @@ pub fn glass_alpha(style: &str) -> u8 {
         "clear" => 150,
         _ => 255,
     }
+}
+
+pub fn memory_server() -> bool {
+    MEMORY_SERVER.load(Ordering::Relaxed)
 }
 
 pub fn glass_on() -> bool {

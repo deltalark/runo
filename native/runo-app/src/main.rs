@@ -8,6 +8,7 @@ mod git;
 mod github;
 mod handoff;
 mod history;
+mod memory_mcp;
 mod pty;
 mod settings;
 mod settings_ui;
@@ -4416,7 +4417,6 @@ impl RunoApp {
                     .gap_2()
                     .child(
                         self.button("empty-new", "New session", true)
-                        .child(icon(IconName::Plus, 12., c_canvas()))
                             .child(icon(IconName::Plus, 14., c_canvas()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_new_session();
@@ -4425,7 +4425,6 @@ impl RunoApp {
                     )
                     .child(
                         self.button("empty-add", "Add project", false)
-                        .child(icon(IconName::FolderPlus, 12., c_secondary()))
                             .child(icon(IconName::FolderPlus, 14., c_secondary()))
                             .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
                     ),
@@ -6400,6 +6399,10 @@ impl Render for RunoApp {
         };
         set_dark(dark);
         self.measure_cell(window);
+        // Keep shortcuts working when nothing has focus, such as right after launch.
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus, cx);
+        }
         if let Some(path) = self.pending_file.take() {
             self.open_file(&path, window, cx);
         }
@@ -6415,12 +6418,12 @@ impl Render for RunoApp {
         let glass = glass_on();
         if self.applied_glass != Some(glass) {
             self.applied_glass = Some(glass);
-            window.set_background_appearance(if !glass {
-                WindowBackgroundAppearance::Opaque
-            } else if cfg!(target_os = "windows") {
-                WindowBackgroundAppearance::MicaBackdrop
-            } else {
+            // Blurred maps to vibrancy on macOS, acrylic on Windows 10 and 11, and the
+            // compositor's blur on Linux; without a compositor the window stays opaque.
+            window.set_background_appearance(if glass {
                 WindowBackgroundAppearance::Blurred
+            } else {
+                WindowBackgroundAppearance::Opaque
             });
         }
         if self.applied_dark != Some(dark) {
@@ -6762,6 +6765,12 @@ fn load_fonts(cx: &mut App) {
 }
 
 fn main() {
+    // `runo --mcp-memory <folder>`: serve the memory tools to an agent, without a window.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--mcp-memory") {
+        memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."));
+        return;
+    }
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         load_fonts(cx);
