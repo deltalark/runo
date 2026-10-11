@@ -45,6 +45,9 @@ gpui-kit = { version = "0.7.1", features = [
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 portable-pty = { path = "../../vendor/portable-pty" }
 vt100 = "0.15"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 
