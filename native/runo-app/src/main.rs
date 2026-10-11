@@ -157,8 +157,6 @@ struct RunoApp {
     /// Sessions whose JSON output already gave text this turn, so the final result is not
     /// shown twice.
     json_text: std::collections::HashSet<u64>,
-    /// Agents being installed right now.
-    installing: std::collections::HashSet<&'static str>,
     /// The agent whose install confirm card is open.
     install_confirm: Option<&'static str>,
     /// A freshly installed CLI found off PATH, to save as the agent's binary.
@@ -228,7 +226,7 @@ struct RunoApp {
     new_more_agents: bool,
     /// Newer releases of installed agents, from the last update check.
     updates: Vec<alerts::AgentUpdate>,
-    /// Agent updates running now, or just finished and showing their success badge.
+    /// Agent updates and installs running now, just finished, or failed.
     update_runs: HashMap<&'static str, alerts::UpdateRun>,
     update_checked: Option<std::time::Instant>,
     /// Popups the person hid ("s:<session>:<message>" or "u:<agent>:<version>").
@@ -625,7 +623,8 @@ impl RunoApp {
                         cx.notify();
                     } else if repaint
                         || (tick && (!this.started.is_empty() || this.info.is_some()))
-                        || (ticks.is_multiple_of(5) && !this.update_runs.is_empty())
+                        || (ticks.is_multiple_of(5)
+                            && this.update_runs.values().any(|r| r.failed.is_none()))
                     {
                         this.prune_update_runs();
                         cx.notify();
@@ -810,7 +809,6 @@ impl RunoApp {
             next_shell: 0,
             cli_runs: HashMap::new(),
             json_text: Default::default(),
-            installing: Default::default(),
             install_confirm: None,
             pending_binary: None,
             cli_focus: cx.focus_handle(),

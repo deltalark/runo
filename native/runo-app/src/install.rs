@@ -32,7 +32,15 @@ fn script(command: &str, windows: bool) -> Install {
 fn npm(package: &str) -> Install {
     Install {
         shown: format!("npm install -g {package}"),
-        program: vec!["npm".into(), "install".into(), "-g".into(), package.into()],
+        // `--loglevel http` prints each download, so the install card shows live progress.
+        program: vec![
+            "npm".into(),
+            "install".into(),
+            "-g".into(),
+            package.into(),
+            "--loglevel".into(),
+            "http".into(),
+        ],
     }
 }
 
@@ -134,7 +142,7 @@ pub(crate) fn locate(bin: &str) -> Option<PathBuf> {
 impl RunoApp {
     /// Ask before installing: the confirm card shows the exact command.
     pub(crate) fn ask_install(&mut self, provider: &'static str) {
-        if self.installing.contains(provider) {
+        if self.update_runs.get(provider).is_some_and(|r| r.running()) {
             self.notice = Some(format!(
                 "{} is already installing.",
                 agent::provider(provider).name
@@ -156,13 +164,11 @@ impl RunoApp {
         };
         let mut cmd = std::process::Command::new(&plan.program[0]);
         cmd.args(&plan.program[1..]);
-        self.installing.insert(provider);
-        agent::oneshot(
-            format!("install:{provider}"),
-            cmd,
-            &std::env::temp_dir().to_string_lossy(),
-            self.tx.clone(),
+        self.update_runs.insert(
+            provider,
+            alerts::UpdateRun::new(true, format!("Running {}…", plan.shown)),
         );
+        alerts::run_streaming(format!("install:{provider}"), cmd, self.tx.clone());
         cx.notify();
     }
 
@@ -171,21 +177,11 @@ impl RunoApp {
         let Some(p) = agent::PROVIDERS.iter().find(|p| p.id == provider) else {
             return;
         };
-        self.installing.remove(p.id);
         if let Err(error) = result {
-            let last = error
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("");
-            self.notice = Some(if error.contains("EACCES") {
-                format!(
-                    "Installing {} failed: npm can't write to its global folder. Run `npm config set prefix ~/.npm-global` in a terminal, then try again.",
-                    p.name
-                )
-            } else {
-                format!("Installing {} failed: {last}", p.name)
-            });
+            // The install card stays and says what went wrong, with the log and a retry.
+            if let Some(run) = self.update_runs.get_mut(p.id) {
+                run.failed = Some((alerts::failure_summary(&error), alerts::log_path(&error)));
+            }
             return;
         }
         // Cursor's installer names its CLI `agent`; installers may also use a folder that
@@ -200,6 +196,19 @@ impl RunoApp {
         }
         caps::refresh();
         let installed = found.is_some() || agent::installed(p.bin);
+        if let Some(run) = self.update_runs.get_mut(p.id) {
+            if installed {
+                run.finished = Some(std::time::Instant::now());
+            } else {
+                run.failed = Some((
+                    format!(
+                        "The installer finished, but `{}` wasn't found. Restart Runo, or set its path in Settings.",
+                        p.bin
+                    ),
+                    None,
+                ));
+            }
+        }
         self.info = Some((
             if installed {
                 format!(
@@ -341,7 +350,10 @@ impl RunoApp {
         provider: &'static str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let busy = self.installing.contains(provider);
+        let busy = self
+            .update_runs
+            .get(provider)
+            .is_some_and(|r| r.install && r.running());
         div()
             .id(SharedString::from(format!("install-{provider}")))
             .flex_none()

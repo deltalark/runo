@@ -75,6 +75,8 @@ Tested with real Claude Code only: Chat → CLI → Chat → CLI, `/cost` unchan
 | --- | --- |
 | Real `claude update`, `opencode upgrade` and `cursor update`, and npm for the others | "Update now" upgrades the CLI, and the version refreshes. Only a fake npm has been used |
 | An update check with no network | No popup and no error spam |
+| Real updates through the card, for each agent (npm with `--loglevel http`, `claude update`, `opencode upgrade`, `cursor update`) | The bar and the current line keep moving, then "Updated" shows and the card fades out. Only fake updaters printing percentages and npm lines have been tested |
+| A real npm failure (EACCES, ENOTEMPTY, EEXIST, offline) | The card turns into "Update failed" with a plain-words reason, Try again and View log. ENOTEMPTY names the leftover folder to delete |
 | Desktop notifications on macOS, Linux and Windows | Notifications appear when an agent finishes or fails |
 | Keep the computer awake (caffeinate, systemd-inhibit) | The machine doesn't sleep while agents run, and sleeps again afterwards |
 | Permission popups from three sessions at once | Each answer reaches the right session |
@@ -108,7 +110,8 @@ Tested in the cloud with a fake `npm` only: the confirm card, the "Installing…
 | OpenCode without npm on macOS and Linux | The `opencode.ai/install` script runs and `~/.opencode/bin/opencode` is found |
 | Grok CLI install script | Installs and is found. On Windows the card says to use WSL |
 | Codex, Gemini, Copilot, Amp and Qwen through real npm | Each installs globally and is detected |
-| npm with a system prefix (EACCES) | The notice suggests `npm config set prefix ~/.npm-global` |
+| npm with a system prefix (EACCES) | The install card fails with a hint to run `npm config set prefix ~/.npm-global` |
+| Progress during a real install | An "Installing" card shows the bar and the installer's output, then "Installed" with the sign-in hint, and fades out |
 | No Node.js at all | The card explains that Node.js is needed instead of offering Install |
 | An installer that asks a question on stdin | It does not hang Runo; the install fails with a message |
 | A desktop launch on macOS (Finder/Dock, so PATH is minimal) | The newly installed CLI is still found, through the saved binary path |
