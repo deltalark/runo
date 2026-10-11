@@ -288,6 +288,9 @@ pub struct Automation {
     pub project_id: u64,
     pub provider: String,
     pub prompt: String,
+    /// One line on what it does, for menus and agents; empty uses the prompt's first sentence.
+    #[serde(default)]
+    pub description: String,
     /// Minutes between scheduled runs; 0 runs it only when started by hand.
     pub every_minutes: u64,
     /// Unix seconds of the last run; 0 if it never ran.
@@ -302,6 +305,44 @@ fn yes() -> bool {
 }
 
 impl Automation {
+    /// The description, or the prompt's first sentence when there is none.
+    pub fn summary(&self) -> String {
+        let text = if self.description.trim().is_empty() {
+            let p = self.prompt.trim();
+            match p.find(". ") {
+                Some(end) => &p[..=end],
+                None => p.lines().next().unwrap_or(""),
+            }
+        } else {
+            self.description.trim()
+        };
+        let mut out: String = text.chars().take(100).collect();
+        if text.chars().count() > 100 {
+            out.push('…');
+        }
+        out
+    }
+
+    /// A name usable as a slash command or MCP prompt: `Find bugs` → `find-bugs`.
+    pub fn slug(&self) -> String {
+        let mut out = String::new();
+        for c in self.name.trim().chars() {
+            if c.is_alphanumeric() {
+                out.extend(c.to_lowercase());
+            } else if !out.ends_with('-') && !out.is_empty() {
+                out.push('-');
+            }
+        }
+        while out.ends_with('-') {
+            out.pop();
+        }
+        if out.is_empty() {
+            format!("playbook-{}", self.id)
+        } else {
+            out
+        }
+    }
+
     /// Whether the automation should run now.
     pub fn due(&self, now: u64) -> bool {
         self.scheduled() && self.enabled && now >= self.last_run + self.every_minutes * 60
@@ -335,6 +376,55 @@ impl State {
             self.activity.drain(..100);
         }
     }
+}
+
+/// Where agents and the `runo` command leave requests for the running app.
+pub fn inbox_dir() -> PathBuf {
+    data_dir().join("inbox")
+}
+
+/// A request to start a playbook, left in the inbox by Runo's MCP server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaybookRequest {
+    pub playbook: u64,
+    pub project: u64,
+    /// Who asked, such as "claude-code".
+    pub from: String,
+}
+
+/// Leave a request in `inbox`. Written under a temporary name and renamed, so the app
+/// never reads half a file.
+pub fn send_request(inbox: &Path, request: &PlaybookRequest) -> std::io::Result<()> {
+    std::fs::create_dir_all(inbox)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let name = format!("{stamp}-{}", std::process::id());
+    let tmp = inbox.join(format!("{name}.tmp"));
+    std::fs::write(&tmp, serde_json::to_vec(request)?)?;
+    std::fs::rename(tmp, inbox.join(format!("{name}.json")))
+}
+
+/// Take every request waiting in `inbox`, oldest first, removing them.
+pub fn take_requests(inbox: &Path) -> Vec<PlaybookRequest> {
+    let Ok(entries) = std::fs::read_dir(inbox) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let text = std::fs::read(&path).ok();
+            let _ = std::fs::remove_file(&path);
+            serde_json::from_slice(&text?).ok()
+        })
+        .collect()
 }
 
 /// Read a JSON file, or the default when it is missing. A file that exists but cannot be

@@ -364,6 +364,22 @@ impl RunoApp {
             .or_else(|| self.state.projects.first().map(|p| p.id))
     }
 
+    /// Start the playbooks agents asked for through Runo's MCP server.
+    pub(crate) fn take_playbook_requests(&mut self, cx: &mut Context<Self>) {
+        if self.demo {
+            return;
+        }
+        for request in store::take_requests(&store::inbox_dir()) {
+            self.start_playbook(
+                request.playbook,
+                Some(request.project),
+                Some(&request.from),
+                cx,
+            );
+            cx.notify();
+        }
+    }
+
     /// Run a playbook as a new session: in its own project when it has one, else in `in_project`.
     pub(crate) fn run_playbook(
         &mut self,
@@ -374,6 +390,18 @@ impl RunoApp {
         if self.demo_guard(cx) {
             return;
         }
+        self.start_playbook(playbook, in_project, None, cx);
+    }
+
+    /// Start a playbook; `from` names the agent that asked, which leaves the person's view
+    /// where it is.
+    fn start_playbook(
+        &mut self,
+        playbook: u64,
+        in_project: Option<u64>,
+        from: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(auto) = self
             .state
             .automations
@@ -418,11 +446,28 @@ impl RunoApp {
                 if !self.expanded.contains(&project.id) {
                     self.expanded.push(project.id);
                 }
-                self.state.log(id, format!("Playbook: {}", auto.name));
+                self.state.log(
+                    id,
+                    match from {
+                        Some(agent) => format!("Playbook: {} (started by {agent})", auto.name),
+                        None => format!("Playbook: {}", auto.name),
+                    },
+                );
                 let opts = cx.global::<AppSettings>().agent(&auto.provider);
                 self.start_agent(id, auto.prompt.clone(), &opts);
                 self.measure(id);
-                self.select(id);
+                match from {
+                    Some(agent) => {
+                        self.info = Some((
+                            format!(
+                                "{agent} started the playbook “{}” in {}.",
+                                auto.name, project.name
+                            ),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                    None => self.select(id),
+                }
             }
             Err(error) => {
                 self.notice = Some(format!("Playbook “{}” could not start: {error}", auto.name));
@@ -439,6 +484,7 @@ impl RunoApp {
             project_id,
             provider: agent::PROVIDERS[self.auto_provider].id.into(),
             prompt,
+            description: String::new(),
             every_minutes: every,
             // A scheduled first run waits one interval.
             last_run: unix_now(),
