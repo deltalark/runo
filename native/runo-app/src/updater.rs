@@ -109,13 +109,7 @@ pub(crate) fn plan(provider: &str, name: &str, runs: &Path, real: &Path) -> Plan
     if let Some(app) = owner_app(real) {
         return Plan::Manual {
             why: format!(
-                "The {name} Runo uses comes with {app}, so {app} keeps it updated. It lives at {}{}. To have your own copy, install it with the command below, then pick it under Settings › {name}.",
-                real.display(),
-                if runs != real {
-                    format!(" ({} links there)", runs.display())
-                } else {
-                    String::new()
-                }
+                "This {name} comes with {app}, so only {app} can update it. Install for Runo adds the latest {name} to Runo's own folder and switches to it. Nothing in {app} changes."
             ),
             command: package.map(npm_cmd),
         };
@@ -351,11 +345,7 @@ mod tests {
         ) {
             Plan::Manual { why, command } => {
                 assert!(why.contains("comes with Orca"), "{why}");
-                assert!(why.contains("Application Support/orca"), "{why}");
-                assert!(
-                    why.contains("/Users/a/.local/bin/codex links there"),
-                    "{why}"
-                );
+                assert!(!why.contains("/Users/a"), "no long paths: {why}");
                 assert_eq!(
                     command.as_deref(),
                     Some("npm install -g @openai/codex@latest")
