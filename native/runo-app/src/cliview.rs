@@ -10,25 +10,28 @@ use std::time::SystemTime;
 /// A CLI still redrawing within this long is treated as working.
 const BUSY_MS: u64 = 1500;
 
-/// Whether the agent in the CLI is in the middle of a reply. Claude Code, Codex and Gemini
-/// show "esc to interrupt" (or "esc to cancel") only while they work, so the screen says it
-/// for them; an idle CLI can still redraw on its own (focus, resize, its status line).
-/// Other CLIs fall back to "is it redrawing without being typed at".
+/// Whether the agent in the CLI is in the middle of a reply. Claude Code and Codex show
+/// "esc to interrupt" only while they work, and Gemini "(esc to cancel, 3s)" with the time
+/// so far, so the screen says it for them; an idle CLI can still redraw on its own (focus,
+/// resize, its status line), and their dialogs say a plain "Esc to cancel". Other CLIs
+/// fall back to "is it redrawing without being typed at".
 fn cli_working(run: &CliRun) -> bool {
     if run.shell.exited() {
         return false;
     }
-    let screen = run.shell.text().to_lowercase();
-    if WORKING_MARKS.iter().any(|m| screen.contains(m)) {
-        return true;
+    match run.provider.as_str() {
+        "claude" | "codex" | "gemini" => working_on_screen(&run.shell.text()),
+        _ => run.shell.busy(BUSY_MS),
     }
-    if matches!(run.provider.as_str(), "claude" | "codex" | "gemini") {
-        return false;
-    }
-    run.shell.busy(BUSY_MS)
 }
 
-const WORKING_MARKS: [&str; 2] = ["esc to interrupt", "esc to cancel"];
+fn working_on_screen(screen: &str) -> bool {
+    let screen = screen.to_lowercase();
+    screen.contains("esc to interrupt")
+        || screen
+            .match_indices("(esc to cancel, ")
+            .any(|(i, m)| screen[i + m.len()..].starts_with(|c: char| c.is_ascii_digit()))
+}
 
 pub(crate) struct CliRun {
     pub shell: pty::Shell,
@@ -605,5 +608,20 @@ mod tests {
             Some(("gemini", None))
         );
         assert_eq!(parse_divider("switch:claude:codex:1:20"), None);
+    }
+
+    #[test]
+    fn working_lines_not_dialogs() {
+        assert!(working_on_screen("✻ Thinking… (esc to interrupt)"));
+        assert!(working_on_screen("Working (12s • esc to interrupt)"));
+        assert!(working_on_screen("⠋ Reading files (esc to cancel, 4s)"));
+        assert!(!working_on_screen("Enter to retry, or Esc to cancel"));
+        assert!(!working_on_screen(
+            "New Task: Enter to submit; Esc to cancel"
+        ));
+        assert!(!working_on_screen("(Press Enter to submit, Esc to cancel)"));
+        assert!(!working_on_screen(
+            "> Try \"fix lint errors\"\n  accept edits on"
+        ));
     }
 }
