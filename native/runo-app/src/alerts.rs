@@ -186,6 +186,10 @@ impl RunoApp {
 
     /// Results of update checks and update runs.
     pub(crate) fn handle_alert_job(&mut self, key: &str, result: Result<String, String>) -> bool {
+        if let Some(provider) = key.strip_prefix("install:") {
+            self.finish_install(provider, result);
+            return true;
+        }
         if key == "updates" {
             let text = result.unwrap_or_default();
             self.updates = text
