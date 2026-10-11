@@ -7113,6 +7113,42 @@ impl Render for RunoApp {
 }
 
 /// The UI typeface, bundled so the app looks the same on every platform.
+/// Turn macOS font smoothing on or off for Runo. The renderer reads Runo's own
+/// `AppleFontSmoothing` preference once, the first time it draws text; with smoothing on,
+/// CoreGraphics thickens every glyph whose colour isn't near black, which makes grey
+/// and light text look bold. Off draws text with plain antialiasing, crisp and light.
+#[cfg(target_os = "macos")]
+fn set_font_smoothing(on: bool) {
+    use std::ffi::c_void;
+    type Ref = *const c_void;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFPreferencesCurrentApplication: Ref;
+        fn CFStringCreateWithCString(alloc: Ref, s: *const std::ffi::c_char, encoding: u32) -> Ref;
+        fn CFNumberCreate(alloc: Ref, kind: isize, value: *const c_void) -> Ref;
+        fn CFPreferencesSetAppValue(key: Ref, value: Ref, app: Ref);
+        fn CFRelease(r: Ref);
+    }
+    const UTF8: u32 = 0x0800_0100;
+    const SINT32: isize = 3;
+    let level: i32 = if on { 2 } else { 0 };
+    unsafe {
+        let key = CFStringCreateWithCString(std::ptr::null(), c"AppleFontSmoothing".as_ptr(), UTF8);
+        let value = CFNumberCreate(std::ptr::null(), SINT32, (&level as *const i32).cast());
+        if !key.is_null() && !value.is_null() {
+            CFPreferencesSetAppValue(key, value, kCFPreferencesCurrentApplication);
+        }
+        for r in [key, value] {
+            if !r.is_null() {
+                CFRelease(r);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_font_smoothing(_on: bool) {}
+
 /// Runo's own interface font, bundled with the app: Geist, which stays crisp at small
 /// sizes on non-Retina displays.
 const BUNDLED_FONT: &str = "Geist";
@@ -7152,6 +7188,8 @@ fn main() {
         bind_keys(cx);
         let settings = AppSettings::load();
         settings.apply();
+        // Before any text is drawn: the renderer reads this once.
+        set_font_smoothing(settings.font_smoothing);
         cx.set_global(settings);
         let glass = settings::glass_alpha(&cx.global::<AppSettings>().glass) < 255;
         let options = WindowOptions {

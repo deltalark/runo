@@ -69,6 +69,8 @@ pub struct AppSettings {
     pub glass_cards: bool,
     /// Interface font: "bundled" (Runo's own, tuned for sharp small text) or "system".
     pub font: String,
+    /// macOS font smoothing, which thickens text strokes. Off keeps text crisp and light.
+    pub font_smoothing: bool,
     /// Pass Runo's memory MCP server to agents that accept one per run.
     pub memory_server: bool,
     /// The first-run tour was finished or skipped.
@@ -127,6 +129,7 @@ impl Default for AppSettings {
             glass: "off".into(),
             glass_cards: true,
             font: "bundled".into(),
+            font_smoothing: false,
             memory_server: true,
             tour_seen: false,
             default_view: "chat".into(),
