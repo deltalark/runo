@@ -33,6 +33,8 @@ enum Act {
     CloseOthers(u64),
     NewIn(u64),
     EditProject(u64),
+    ProjectNotes(u64),
+    RemoveProject(u64),
     /// Run a playbook (id) in a project (id).
     Playbook(u64, u64),
     ManagePlaybooks,
@@ -205,6 +207,11 @@ impl RunoApp {
                         Act::Toggle(*pid),
                     ),
                     item("Edit project…", IconName::Palette, Act::EditProject(*pid)),
+                    item(
+                        "Project notes",
+                        IconName::NotebookPen,
+                        Act::ProjectNotes(*pid),
+                    ),
                 ]
                 .into_iter()
                 .chain(
@@ -235,6 +242,12 @@ impl RunoApp {
                         "Reveal in file manager",
                         IconName::FolderOpen,
                         Act::Reveal(PathBuf::from(&p.path)),
+                    ),
+                    None,
+                    danger(
+                        "Remove project…",
+                        IconName::FolderMinus,
+                        Act::RemoveProject(*pid),
                     ),
                 ])
                 .collect()
@@ -358,8 +371,12 @@ impl RunoApp {
             }
             Act::Archive(id) => self.toggle_archive(id),
             Act::Delete(id) => {
-                self.select(id);
-                self.confirm_delete = Some(id);
+                if confirm_delete() {
+                    self.select(id);
+                    self.confirm_delete = Some(id);
+                } else {
+                    self.delete_session(id);
+                }
             }
             Act::Shell(id) => {
                 if self.selected != Some(id) {
@@ -377,6 +394,11 @@ impl RunoApp {
                 self.save();
             }
             Act::EditProject(pid) => self.edit_project(pid),
+            Act::ProjectNotes(pid) => {
+                self.notes_project = Some(pid);
+                self.open_notes(window, cx);
+            }
+            Act::RemoveProject(pid) => self.ask_remove_project(pid, window, cx),
             Act::Playbook(id, pid) => self.run_playbook(id, Some(pid), cx),
             Act::ManagePlaybooks => self.view = View::Automations,
             Act::NewIn(pid) => {

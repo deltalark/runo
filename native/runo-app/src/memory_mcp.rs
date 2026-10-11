@@ -473,6 +473,7 @@ mod tests {
             every_minutes: 0,
             last_run: 0,
             enabled: true,
+            ran: 0,
         };
         state.automations = vec![
             book(10, "Find bugs", 0, "Review the code for bugs. List them."),

@@ -92,6 +92,7 @@ pub fn take_updated() -> bool {
 /// Discover every provider on a background thread.
 pub fn refresh() {
     std::thread::spawn(|| {
+        crate::install::refresh_node();
         for provider in crate::agent::PROVIDERS.iter() {
             let bin = binary(provider);
             let caps = match provider.id {

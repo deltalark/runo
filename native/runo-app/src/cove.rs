@@ -292,10 +292,25 @@ mod tests {
         let dir = dir.to_str().unwrap();
         let sandbox = Sandbox::for_session(900_000 + std::process::id() as u64, dir);
         let mut command = Command::new("sh");
-        command.args(["-c", "pwd; echo \"$GREETING\""]).env("GREETING", "hi from runo");
-        let out = sandbox.wrap(&command, dir, false).unwrap().output().unwrap();
-        let _ = Command::new(binary().unwrap()).args(["rm", &sandbox.name]).output();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{dir}\nhi from runo\n"));
+        command
+            .args(["-c", "pwd; echo \"$GREETING\""])
+            .env("GREETING", "hi from runo");
+        let out = sandbox
+            .wrap(&command, dir, false)
+            .unwrap()
+            .output()
+            .unwrap();
+        let _ = Command::new(binary().unwrap())
+            .args(["rm", &sandbox.name])
+            .output();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{dir}\nhi from runo\n")
+        );
     }
 }
