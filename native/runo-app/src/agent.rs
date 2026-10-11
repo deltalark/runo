@@ -834,6 +834,125 @@ pub fn oneshot(key: String, mut command: Command, dir: &str, tx: Sender<Event>) 
     });
 }
 
+/// Like `oneshot`, but the command is killed after `limit` and reported as an error.
+pub fn oneshot_within(
+    key: String,
+    mut command: Command,
+    dir: &str,
+    limit: std::time::Duration,
+    tx: Sender<Event>,
+) {
+    command
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    std::thread::spawn(move || {
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let program = command.get_program().to_owned();
+                let _ = tx.send(Event::Output(
+                    key,
+                    Err(format!("could not start {program:?}: {error}")),
+                ));
+                return;
+            }
+        };
+        let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_string(&mut text);
+                }
+                text
+            })
+        };
+        let out = drain(child.stdout.take().map(|p| Box::new(p) as _));
+        let err = drain(child.stderr.take().map(|p| Box::new(p) as _));
+        let deadline = std::time::Instant::now() + limit;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        // After a timeout a grandchild may still hold the pipes open, so they are not awaited.
+        let result = match status {
+            Some(status) => {
+                let stdout = out.join().unwrap_or_default();
+                let stderr = err.join().unwrap_or_default();
+                if status.success() {
+                    Ok(stdout.trim().to_string())
+                } else if stderr.trim().is_empty() {
+                    Err(stdout.trim().to_string())
+                } else {
+                    Err(stderr.trim().to_string())
+                }
+            }
+            None => Err(format!("timed out after {}s", limit.as_secs())),
+        };
+        let _ = tx.send(Event::Output(key, result));
+    });
+}
+
+/// A read-only follow-up in an agent's own conversation, for the recap it writes when
+/// a session switches away from it. `None` for CLIs this is not supported for.
+pub fn recap_command(
+    provider: &str,
+    configured_bin: &str,
+    conversation: &str,
+    prompt: &str,
+) -> Option<Command> {
+    let bin = if configured_bin.trim().is_empty() {
+        self::provider(provider).bin
+    } else {
+        configured_bin.trim()
+    };
+    let mut command = Command::new(bin);
+    match provider {
+        // A fork leaves the conversation itself untouched, so switching back resumes it as it was.
+        "claude" if !conversation.is_empty() => {
+            command.args([
+                "-p",
+                "--output-format",
+                "text",
+                "--permission-mode",
+                "plan",
+                "--resume",
+                conversation,
+                "--fork-session",
+                "--",
+                prompt,
+            ]);
+        }
+        "codex" => {
+            command.args([
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "resume",
+            ]);
+            if conversation.is_empty() {
+                command.arg("--last");
+            } else {
+                command.arg(conversation);
+            }
+            command.arg(prompt);
+        }
+        _ => return None,
+    }
+    Some(command)
+}
+
 /// A plain, one-shot run of an agent CLI with a prompt, for small jobs such as
 /// writing a commit message. Read-only where the CLI supports it.
 pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Command {
@@ -993,6 +1112,58 @@ fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_oneshots_report_output_and_time_out() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut echo = Command::new("sh");
+        echo.args(["-c", "echo recap"]);
+        oneshot_within("a".into(), echo, ".", Duration::from_secs(5), tx.clone());
+        let mut slow = Command::new("sh");
+        slow.args(["-c", "sleep 10"]);
+        oneshot_within("b".into(), slow, ".", Duration::from_millis(300), tx);
+        let mut got: Vec<(String, Result<String, String>)> = (0..2)
+            .map(|_| match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Output(key, result) => (key, result),
+                _ => unreachable!(),
+            })
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(got[0], ("a".into(), Ok("recap".into())));
+        assert!(got[1].1.as_ref().unwrap_err().contains("timed out"));
+    }
+
+    #[test]
+    fn recaps_are_read_only_and_leave_the_conversation_alone() {
+        let args = |c: Command| -> Vec<String> {
+            c.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let claude = args(recap_command("claude", "", "abc", "recap?").unwrap());
+        assert!(claude.windows(2).any(|w| w == ["--resume", "abc"]));
+        assert!(claude.contains(&"--fork-session".to_string()));
+        assert!(claude
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "plan"]));
+        assert_eq!(claude.last().unwrap(), "recap?");
+        assert!(recap_command("claude", "", "", "recap?").is_none());
+        let codex = args(recap_command("codex", "", "", "recap?").unwrap());
+        assert_eq!(
+            codex,
+            [
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "resume",
+                "--last",
+                "recap?"
+            ]
+        );
+        assert!(recap_command("gemini", "", "x", "recap?").is_none());
+    }
 
     #[test]
     fn shell_streams_lines_then_done() {

@@ -116,12 +116,66 @@ impl Session {
         if self.provider == provider {
             return;
         }
+        self.switched_from = None;
         self.provider = provider.to_string();
         self.opts.clear();
         self.model.clear();
         self.mode.clear();
         self.agent_session.clear();
         self.conversation_start = self.messages.len();
+    }
+
+    /// Switch to another agent, remembering the one it replaces so `switch_back` can
+    /// restore it while nothing has been sent yet.
+    pub fn switch_provider_keeping(&mut self, provider: &str) {
+        if self.provider == provider {
+            return;
+        }
+        let from = SwitchedFrom {
+            provider: self.provider.clone(),
+            agent_session: self.agent_session.clone(),
+            model: self.model.clone(),
+            mode: self.mode.clone(),
+            opts: self.opts.clone(),
+            conversation_start: self.conversation_start,
+            carried: self.carried.clone(),
+        };
+        self.switch_provider(provider);
+        self.switched_from = Some(from);
+    }
+
+    /// The agent a switch can still be undone to: nothing was sent since the switch.
+    pub fn undoable_switch(&self) -> Option<&SwitchedFrom> {
+        let from = self.switched_from.as_ref()?;
+        let sent = self.messages[self.conversation_start.min(self.messages.len())..]
+            .iter()
+            .any(|m| m.role != Role::System);
+        (!sent).then_some(from)
+    }
+
+    /// Undo the last switch: the earlier agent resumes its own conversation, its settings
+    /// come back, and the pending handoff and switch divider are dropped.
+    pub fn switch_back(&mut self) -> bool {
+        let Some(from) = self.undoable_switch().cloned() else {
+            return false;
+        };
+        let start = self.conversation_start.min(self.messages.len());
+        if let Some(i) = self.messages[start.saturating_sub(1)..]
+            .iter()
+            .rposition(|m| m.role == Role::System && m.meta.starts_with("switch:"))
+        {
+            self.messages.remove(start.saturating_sub(1) + i);
+        }
+        self.provider = from.provider;
+        self.agent_session = from.agent_session;
+        self.model = from.model;
+        self.mode = from.mode;
+        self.opts = from.opts;
+        self.conversation_start = from.conversation_start.min(self.messages.len());
+        self.handoff.clear();
+        self.carried = from.carried;
+        self.switched_from = None;
+        true
     }
 }
 
@@ -223,9 +277,25 @@ pub struct Session {
     /// Shown in the CLI view: the agent's own CLI on the same conversation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cli: bool,
+    /// The agent this session just switched away from, kept until the next message so
+    /// switching straight back resumes its own conversation instead of starting over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switched_from: Option<SwitchedFrom>,
     /// Runs inside its own Cove VM (`runo-<id>`) instead of directly on this machine.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cove: bool,
+}
+
+/// What a switch replaced, enough to undo it before anything is sent.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct SwitchedFrom {
+    pub provider: String,
+    pub agent_session: String,
+    pub model: String,
+    pub mode: String,
+    pub opts: HashMap<String, String>,
+    pub conversation_start: usize,
+    pub carried: String,
 }
 
 impl Session {

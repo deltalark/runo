@@ -18,6 +18,61 @@ pub(crate) struct SwitchPlan {
     pub brief: String,
     pub files: Vec<git::Change>,
     pub exchanges: usize,
+    pub recap: Recap,
+}
+
+/// The outgoing agent's own recap of the session, asked for when the switch is requested.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Recap {
+    /// Not asked: the agent cannot be asked, or did no work worth recapping.
+    Skipped,
+    Asking,
+    Added,
+    Failed,
+}
+
+/// How long the outgoing agent gets to write its recap.
+const RECAP_LIMIT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Characters of the recap kept in the brief.
+const RECAP_CHARS: usize = 1500;
+const RECAP_HEADING: &str = "## Recap from ";
+
+/// What the outgoing agent is asked, in its own conversation, when the session switches away.
+pub(crate) fn recap_prompt(to: &str) -> String {
+    format!(
+        "The person is switching this session to another coding agent ({to}). Write a short recap of \
+         this conversation so it can continue the work. Under 150 words, plain markdown, no greeting \
+         and no title. Use only what happened in this conversation: do not run commands, read files \
+         or call tools. Include only what applies: what was done and why, decisions and dead ends \
+         worth knowing, files you edited, and the next step you would take."
+    )
+}
+
+/// Whether the outgoing agent did work worth asking it to recap: it ran tools in its
+/// current conversation, and its CLI can answer a read-only follow-up there.
+pub(crate) fn wants_recap(session: &Session) -> bool {
+    let askable = match session.provider.as_str() {
+        "claude" => !session.agent_session.is_empty(),
+        "codex" => true,
+        _ => false,
+    };
+    askable
+        && session.messages[session.conversation_start.min(session.messages.len())..]
+            .iter()
+            .any(|m| m.role == Role::Agent && !m.steps.is_empty())
+}
+
+/// The brief with the outgoing agent's recap added before the code state.
+pub(crate) fn with_recap(brief: &str, from: &str, recap: &str) -> String {
+    let recap = recap.trim();
+    if recap.is_empty() || brief.contains(RECAP_HEADING) {
+        return brief.to_string();
+    }
+    let section = format!("\n{RECAP_HEADING}{from}\n{}\n", clip(recap, RECAP_CHARS));
+    match brief.find("\n## Code state") {
+        Some(at) => format!("{}{section}{}", &brief[..at], &brief[at..]),
+        None => format!("{brief}\n{section}"),
+    }
 }
 
 /// What the brief is built from.
@@ -88,7 +143,7 @@ const STEPS_LISTED: usize = 12;
 pub(crate) fn brief(input: &BriefInput) -> String {
     let all = exchanges(input.messages);
     let mut out = format!(
-        "You are taking over a coding task from another agent ({}). It worked in this same folder, so its changes are already on disk.\n",
+        "You are continuing an existing session, handed over from another agent ({}). This is not a new session: do not say you have no prior context. It worked in this same folder, so its changes are already on disk.\n",
         input.from
     );
     out.push_str(&format!("Folder: {}\n", input.dir));
@@ -296,11 +351,28 @@ pub(crate) fn parse_divider(meta: &str) -> Option<(&str, &str, bool, usize)> {
 impl RunoApp {
     /// Picking another agent in the composer: switch at once in an empty session,
     /// otherwise ask first.
-    pub(crate) fn request_switch(&mut self, id: u64, to: usize) {
+    pub(crate) fn request_switch(&mut self, id: u64, to: usize, from_bin: &str) {
         let Some(session) = self.state.session(id) else {
             return;
         };
         if session.provider == agent::PROVIDERS[to].id {
+            return;
+        }
+        // Straight back to the agent just left, with nothing sent: resume its own conversation.
+        if session
+            .undoable_switch()
+            .is_some_and(|f| f.provider == agent::PROVIDERS[to].id)
+        {
+            if let Some(s) = self.state.session_mut(id) {
+                s.switch_back();
+            }
+            let name = agent::PROVIDERS[to].name;
+            self.state.log(id, format!("Switched back to {name}"));
+            self.save();
+            self.info = Some((
+                format!("Back to {name}, in its own conversation. Nothing was sent."),
+                std::time::Instant::now(),
+            ));
             return;
         }
         if self.handles.contains_key(&Target::Session(id)) {
@@ -335,14 +407,97 @@ impl RunoApp {
             commits: &commits,
             notes: &read_notes(&session.dir),
         });
+        let recap = if self.demo || !wants_recap(session) {
+            None
+        } else {
+            agent::recap_command(
+                &session.provider,
+                from_bin,
+                &session.agent_session,
+                &recap_prompt(agent::PROVIDERS[to].name),
+            )
+        };
+        let dir = session.dir.clone();
+        let exchanges = exchanges(&session.messages).len();
         self.switch_preview = false;
         self.switch_plan = Some(SwitchPlan {
             session: id,
             to,
             brief,
             files,
-            exchanges: exchanges(&session.messages).len(),
+            exchanges,
+            recap: if recap.is_some() {
+                Recap::Asking
+            } else {
+                Recap::Skipped
+            },
         });
+        if let Some(command) = recap {
+            agent::oneshot_within(
+                format!("handoff-recap:{id}:{to}"),
+                command,
+                &dir,
+                RECAP_LIMIT,
+                self.tx.clone(),
+            );
+        }
+    }
+
+    /// The outgoing agent's recap arrived: add it to the brief, whether the switch is still
+    /// waiting to be confirmed or was confirmed and nothing has been sent yet.
+    pub(crate) fn handle_recap(&mut self, key: &str, result: Result<String, String>) -> bool {
+        let Some(rest) = key.strip_prefix("handoff-recap:") else {
+            return false;
+        };
+        let mut parts = rest.split(':');
+        let (Some(id), Some(to)) = (
+            parts.next().and_then(|v| v.parse::<u64>().ok()),
+            parts.next().and_then(|v| v.parse::<usize>().ok()),
+        ) else {
+            return true;
+        };
+        let text = result
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        if let Some(plan) = self
+            .switch_plan
+            .as_mut()
+            .filter(|p| p.session == id && p.to == to && p.recap == Recap::Asking)
+        {
+            let from = self
+                .state
+                .session(id)
+                .map(|s| agent::provider(&s.provider).name)
+                .unwrap_or("the previous agent");
+            match text {
+                Some(text) => {
+                    plan.brief = with_recap(&plan.brief, from, &text);
+                    plan.recap = Recap::Added;
+                }
+                None => plan.recap = Recap::Failed,
+            }
+            return true;
+        }
+        let Some(text) = text else {
+            return true;
+        };
+        let Some(session) = self.state.session_mut(id) else {
+            return true;
+        };
+        // Confirmed already: only a handoff still waiting for the next message takes it.
+        let Some(from) = session
+            .switched_from
+            .as_ref()
+            .filter(|_| session.provider == agent::PROVIDERS[to].id && !session.handoff.is_empty())
+            .map(|f| agent::provider(&f.provider).name)
+        else {
+            return true;
+        };
+        session.handoff = with_recap(&session.handoff, from, &text);
+        session.carried = session.handoff.clone();
+        self.save();
+        true
     }
 
     /// Write the session's memory file after a turn, so any agent can catch up from it
@@ -388,7 +543,7 @@ impl RunoApp {
             return;
         };
         let from = session.provider.clone();
-        session.switch_provider(to.id);
+        session.switch_provider_keeping(to.id);
         let cost = if carry { tokens(&plan.brief) } else { 0 };
         if carry {
             session.handoff = plan.brief.clone();
@@ -639,15 +794,30 @@ impl RunoApp {
                         if plan.brief.contains("## Open items") {
                             parts.push("open questions and blocked tools".into());
                         }
+                        if plan.recap == Recap::Added {
+                            parts.push(format!("{}'s own recap", from.name));
+                        }
                         format!("Carries over: {}", alerts::and_list(&parts))
                     }))
+                    .when(plan.recap == Recap::Asking, |el| {
+                        el.child(row(
+                            IconName::Sparkles,
+                            c_blue(),
+                            format!(
+                                "Asking {} for a short recap of its work. It is added when it arrives.",
+                                from.name
+                            ),
+                        ))
+                    })
                     .child(row(IconName::Check, c_green(), format!("{place}, {files}")))
                     .child(row(
                         IconName::RotateCcw,
                         c_amber(),
                         format!(
-                            "Starts fresh: {}'s own memory, and the model and mode settings",
-                            from.name
+                            "Starts fresh: {to}'s model and mode settings. Switch back before \
+                             sending to resume {from}'s own conversation as it was.",
+                            to = to.name,
+                            from = from.name
                         ),
                     ))
                     .child(row(
@@ -820,7 +990,7 @@ mod tests {
         assert_eq!(short_count(1234), "1.2k");
         let memory = memory_text(&text);
         assert!(memory.starts_with("# Session memory\n"));
-        assert!(!memory.contains("You are taking over"));
+        assert!(!memory.contains("You are continuing"));
         assert!(memory.contains("## The task"));
     }
 
@@ -906,6 +1076,105 @@ mod tests {
         assert!(text.contains("Me: Request 299"));
         assert!(text.contains("- …and 460 more"));
         assert!(text.contains("did: …; Step 38"));
+    }
+
+    #[test]
+    fn briefs_say_the_session_continues() {
+        let text = brief(&input(&[], &[]));
+        assert!(text.contains("This is not a new session"));
+    }
+
+    #[test]
+    fn recaps_go_before_the_code_state_once() {
+        let messages = vec![
+            Message::new(Role::User, "Fix the build"),
+            Message::new(Role::Agent, "Fixed it."),
+        ];
+        let text = brief(&input(&messages, &[]));
+        let with = with_recap(&text, "Codex", "- Bumped Rust to 1.99\n- Next: wire SQLite");
+        let recap = with.find("## Recap from Codex\n- Bumped Rust").unwrap();
+        assert!(recap < with.find("## Code state").unwrap());
+        assert_eq!(with_recap(&with, "Codex", "again"), with);
+        assert_eq!(with_recap(&text, "Codex", "  "), text);
+        let long = with_recap(&text, "Codex", &"x".repeat(5000));
+        assert!(long.contains("x […]"));
+        assert_eq!(
+            with_recap("no state", "Codex", "r"),
+            "no state\n\n## Recap from Codex\nr\n"
+        );
+        assert!(recap_prompt("Claude Code").contains("(Claude Code)"));
+    }
+
+    #[test]
+    fn recaps_are_asked_only_after_real_work() {
+        let mut worked = Message::new(Role::Agent, "Done");
+        worked.steps = vec!["Edited src/a.rs".into()];
+        let mut session = Session {
+            provider: "claude".into(),
+            agent_session: "abc".into(),
+            messages: vec![
+                Message::new(Role::User, "Hi"),
+                Message::new(Role::Agent, "Hello"),
+            ],
+            ..Session::default()
+        };
+        assert!(!wants_recap(&session), "a chat with no tool steps");
+        session.messages.push(Message::new(Role::User, "Edit a.rs"));
+        session.messages.push(worked);
+        assert!(wants_recap(&session));
+        session.agent_session.clear();
+        assert!(!wants_recap(&session), "no Claude conversation to fork");
+        session.provider = "codex".into();
+        assert!(wants_recap(&session));
+        session.provider = "gemini".into();
+        assert!(!wants_recap(&session));
+        session.provider = "codex".into();
+        session.conversation_start = session.messages.len();
+        assert!(!wants_recap(&session), "work from before an earlier switch");
+    }
+
+    #[test]
+    fn switching_straight_back_restores_the_conversation() {
+        let mut session = Session {
+            provider: "codex".into(),
+            agent_session: "thread-1".into(),
+            model: "gpt-5".into(),
+            carried: "older brief".into(),
+            messages: vec![
+                Message::new(Role::User, "Go"),
+                Message::new(Role::Agent, "Done"),
+            ],
+            ..Session::default()
+        };
+        session.opts.insert("mode".into(), "plan".into());
+        session.switch_provider_keeping("claude");
+        session.handoff = "brief".into();
+        let mut divider = Message::new(Role::System, "");
+        divider.meta = divider_meta("codex", "claude", true, 10);
+        session.messages.push(divider);
+        session.conversation_start = session.messages.len();
+        assert_eq!(
+            session.undoable_switch().map(|f| f.provider.as_str()),
+            Some("codex")
+        );
+        assert!(session.switch_back());
+        assert_eq!(session.provider, "codex");
+        assert_eq!(session.agent_session, "thread-1");
+        assert_eq!(session.model, "gpt-5");
+        assert_eq!(session.opts.get("mode").map(String::as_str), Some("plan"));
+        assert_eq!(session.conversation_start, 0);
+        assert_eq!(session.messages.len(), 2, "the divider is dropped");
+        assert!(session.handoff.is_empty());
+        assert_eq!(session.carried, "older brief");
+        assert!(session.has_conversation());
+        assert!(!session.switch_back(), "nothing left to undo");
+
+        // After a message goes to the new agent the switch is final.
+        session.switch_provider_keeping("claude");
+        session.messages.push(Message::new(Role::User, "Next"));
+        assert!(session.undoable_switch().is_none());
+        assert!(!session.switch_back());
+        assert_eq!(session.provider, "claude");
     }
 
     #[test]

@@ -49,6 +49,8 @@ impl RunoApp {
         let in_git = !demo && git::is_repo(&dir);
         // Agents that cannot resume their own conversation get it written into the prompt.
         let handoff = std::mem::take(&mut session.handoff);
+        // Once a message goes out the switch is final.
+        session.switched_from = None;
         let sent = if !handoff.is_empty() {
             format!("{handoff}\n\n## Your next instruction\n{prompt}")
         } else if resume && !native {
@@ -592,7 +594,9 @@ impl RunoApp {
                     self.notice = Some(format!("Could not write a commit message: {first}"));
                 }
             }
-        } else if self.handle_alert_job(&key, result.clone()) {
+        } else if self.handle_recap(&key, result.clone())
+            || self.handle_alert_job(&key, result.clone())
+        {
         } else if !self.handle_browser_job(&key, result.clone()) {
             self.handle_job(key, result);
         }
