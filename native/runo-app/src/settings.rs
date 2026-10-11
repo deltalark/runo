@@ -61,7 +61,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             agents: HashMap::new(),
-            theme: "system".into(),
+            theme: "dark".into(),
             accent: "indigo".into(),
             diff_colors: "default".into(),
             animations: true,
@@ -189,29 +189,38 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
 
+// A neutral zinc scale: colour comes from the accent and status hues only.
 pub fn c_canvas() -> u32 {
-    pick(0xffffff, 0x14171c)
+    pick(0xffffff, 0x18181b)
 }
 pub fn c_sidebar() -> u32 {
-    pick(0xf8f9fb, 0x181b21)
+    pick(0xf7f7f8, 0x121214)
 }
 pub fn c_subtle() -> u32 {
-    pick(0xf3f5f8, 0x20242b)
+    pick(0xf1f1f3, 0x222226)
 }
 pub fn c_border() -> u32 {
-    pick(0xe6eaf0, 0x2b303a)
+    pick(0xe5e5e8, 0x2a2a2f)
 }
 pub fn c_text() -> u32 {
-    pick(0x1b2433, 0xe7eaf0)
+    pick(0x18181b, 0xe9e9ec)
 }
 pub fn c_secondary() -> u32 {
-    pick(0x5d6a7c, 0xa3aebe)
+    pick(0x55555e, 0xa1a1aa)
 }
 pub fn c_muted() -> u32 {
-    pick(0x93a0b1, 0x6f7b8d)
+    pick(0x9b9ba4, 0x6e6e78)
 }
 pub fn c_term_bg() -> u32 {
-    pick(0xfafbfc, 0x111419)
+    pick(0xfafafa, 0x111113)
+}
+/// Neutral fill for the selected row, so selection does not compete with status colours.
+pub fn c_active() -> u32 {
+    pick(0xe9e9ec, 0x27272c)
+}
+/// Raised surfaces such as the composer, menus and cards.
+pub fn c_raised() -> u32 {
+    pick(0xffffff, 0x1f1f23)
 }
 pub fn c_blue() -> u32 {
     let accent = ACCENT.load(Ordering::Relaxed);
@@ -221,17 +230,18 @@ pub fn c_blue() -> u32 {
         accent
     }
 }
+/// Background of a selected row or option: neutral, so the accent stays for text and focus.
 pub fn c_selected() -> u32 {
-    mix(c_blue(), c_canvas(), if is_dark() { 0.18 } else { 0.10 })
+    c_active()
 }
 pub fn c_green() -> u32 {
-    pick(0x1f9d55, 0x3ccf7a)
+    pick(0x16a34a, 0x4ade80)
 }
 pub fn c_amber() -> u32 {
     pick(0xf0a020, 0xf3b23f)
 }
 pub fn c_red() -> u32 {
-    pick(0xd0454c, 0xf0686e)
+    pick(0xdc2626, 0xf87171)
 }
 
 /// Text colour for added / removed lines, honouring the diff palette.
