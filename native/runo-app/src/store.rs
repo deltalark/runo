@@ -223,6 +223,17 @@ pub struct Session {
     /// Shown in the CLI view: the agent's own CLI on the same conversation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cli: bool,
+    /// Runs inside its own Cove VM (`runo-<id>`) instead of directly on this machine.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cove: bool,
+}
+
+impl Session {
+    /// The Cove VM this session runs in, if it runs in one.
+    pub fn sandbox(&self) -> Option<crate::cove::Sandbox> {
+        self.cove
+            .then(|| crate::cove::Sandbox::for_session(self.id, &self.dir))
+    }
 }
 
 /// A review comment on one line of the session's diff.

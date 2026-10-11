@@ -83,10 +83,12 @@ impl RunoApp {
         session.messages.push(Message::now(Role::Agent, ""));
         let sel = session.selections();
         let agent_session = session.agent_session.clone();
+        let sandbox = session.sandbox();
+        // Runo's memory server is a program on this machine, which a VM can't start.
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| !demo && memory_server());
+            .filter(|_| !demo && memory_server() && sandbox.is_none());
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: &sent,
@@ -98,7 +100,13 @@ impl RunoApp {
             images: &images,
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
         };
-        match agent::run_agent(Target::Session(id), &spec, &dir, self.tx.clone()) {
+        match agent::run_agent(
+            Target::Session(id),
+            &spec,
+            &dir,
+            sandbox.as_ref(),
+            self.tx.clone(),
+        ) {
             Ok(handle) => {
                 session.status = Status::Working;
                 if provider == "claude" {

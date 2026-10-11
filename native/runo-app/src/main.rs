@@ -4,6 +4,7 @@ mod browser;
 mod browser_engine;
 mod caps;
 mod cliview;
+mod cove;
 mod ctxmenu;
 mod fileview;
 mod git;
@@ -236,6 +237,8 @@ struct RunoApp {
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
+    /// Run the new session in its own Cove VM.
+    new_cove: bool,
     /// Race mode in the New session form, and the agents picked for it.
     race_mode: bool,
     /// The New session dialog lists every agent, not just the main ones.
@@ -980,6 +983,7 @@ impl RunoApp {
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
                 .unwrap_or(0),
             new_isolated: true,
+            new_cove: false,
             new_more_agents: false,
             updates: Vec::new(),
             update_runs: HashMap::new(),
@@ -1940,7 +1944,7 @@ impl RunoApp {
         if line.is_empty() {
             return;
         }
-        let (id, dir) = (session.id, session.dir.clone());
+        let (id, dir, sandbox) = (session.id, session.dir.clone(), session.sandbox());
         if self.handles.contains_key(&Target::Terminal(id)) {
             self.notice = Some("A command is already running in this terminal.".into());
             return;
@@ -1949,7 +1953,13 @@ impl RunoApp {
             .entry(id)
             .or_default()
             .push(format!("$ {line}"));
-        match agent::run_shell(Target::Terminal(id), &line, &dir, self.tx.clone()) {
+        match agent::run_shell(
+            Target::Terminal(id),
+            &line,
+            &dir,
+            sandbox.as_ref(),
+            self.tx.clone(),
+        ) {
             Ok(handle) => {
                 self.handles.insert(Target::Terminal(id), handle);
             }
@@ -2044,7 +2054,14 @@ impl RunoApp {
             };
             let isolated = (self.new_isolated || racing) && is_git;
             match self.spawn_session(&project, provider, &branch, isolated, is_git, &task, cx) {
-                Ok(id) => created.push(id),
+                Ok(id) => {
+                    if self.new_cove && cove::available() {
+                        if let Some(session) = self.state.session_mut(id) {
+                            session.cove = true;
+                        }
+                    }
+                    created.push(id)
+                }
                 Err(error) => {
                     self.notice = Some(error);
                     break;
@@ -2443,6 +2460,9 @@ impl RunoApp {
         self.prune_shells();
         self.tabs.retain(|t| *t != id);
         self.stats.remove(&id);
+        if session.cove && !self.demo {
+            cove::remove(id);
+        }
         if session.isolated && !self.demo && remove_worktree() {
             if let Some(project) = self
                 .state
@@ -5116,10 +5136,34 @@ impl RunoApp {
             Some(p) if is_git => format!("Runs on the current branch, directly in {}", p.path),
             Some(p) => format!("Runs directly in {}", p.path),
         };
+        let cove_ready = !self.demo && cove::available();
+        let where_to = if cove_ready && self.new_cove && project.is_some() {
+            format!("{where_to}, inside a Cove VM")
+        } else {
+            where_to
+        };
         let provider = &agent::PROVIDERS[self.new_provider];
         let task_empty = self.new_task.read(cx).value().trim().is_empty();
         let ready = project.is_some() && !task_empty && (!self.race_mode || racing);
 
+        let runs_on = |id: usize, title: &'static str, desc: &'static str, on: bool| {
+            card(("runs-on", id), on)
+                .child(icon(
+                    if id == 0 {
+                        IconName::Cpu
+                    } else {
+                        IconName::ShieldCheck
+                    },
+                    18.,
+                    if on { c_blue() } else { c_secondary() },
+                ))
+                .child(
+                    div()
+                        .v_flex()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(div().text_xs().text_color(rgb(c_muted())).child(desc)),
+                )
+        };
         let mode = |id: usize, title: &'static str, desc: &'static str, on: bool| {
             card(("iso", id), on)
                 .child(icon(
@@ -5256,6 +5300,27 @@ impl RunoApp {
                     })
                     .when(isolated, |el| {
                         el.child(Input::new(&self.branch).bordered(true).h(px(36.)))
+                    })
+                    .when(cove_ready && project.is_some(), |el| {
+                        el.child(label("RUNS ON")).child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    runs_on(0, "This computer", "Directly on your machine", !self.new_cove)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.new_cove = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    runs_on(1, "Cove VM", "Its own Linux VM, away from your files and keys", self.new_cove)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.new_cove = true;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
                     })
                     .child(
                         div()

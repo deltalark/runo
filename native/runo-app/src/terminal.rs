@@ -43,15 +43,39 @@ impl RunoApp {
             return;
         };
         let dir = self.current().map(|s| s.dir.clone()).unwrap_or_default();
+        // A Cove session's terminal is a shell inside its VM.
+        let program = match self.current().and_then(|s| s.sandbox()) {
+            Some(sandbox) => match crate::cove::binary() {
+                Some(bin) => Some(pty::Program {
+                    bin: bin.to_string_lossy().into_owned(),
+                    args: sandbox.shell_args(&dir),
+                    env: Vec::new(),
+                    unset: Vec::new(),
+                }),
+                None => {
+                    self.info = Some((
+                        "Cove is not installed, so this session's VM shell can't open.".into(),
+                        std::time::Instant::now(),
+                    ));
+                    cx.notify();
+                    return;
+                }
+            },
+            None => None,
+        };
+        let in_vm = program.is_some();
         self.next_shell += 1;
         let id = self.next_shell;
         let tx = self.tx.clone();
         let (rows, cols) = self.term_grid();
-        match pty::Shell::spawn(id, session, &dir, rows, cols, move |id| {
+        match pty::Shell::spawn_program(id, session, &dir, rows, cols, program, move |id| {
             let _ = tx.send(Event::Pty(id));
         }) {
             Ok(mut shell) => {
                 let n = self.session_shells(session).count() + 1;
+                if in_vm {
+                    shell.title = "cove".into();
+                }
                 shell.title = format!("{} {n}", shell.title);
                 self.shells.push(shell);
                 self.shell_tab = Some(id);
