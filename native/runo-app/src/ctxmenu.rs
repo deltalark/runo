@@ -30,6 +30,7 @@ enum Act {
     CloseTab(u64),
     CloseOthers(u64),
     NewIn(u64),
+    EditProject(u64),
     Toggle(u64),
     Diff(String),
     Preview(String),
@@ -198,6 +199,7 @@ impl RunoApp {
                         IconName::ChevronsUpDown,
                         Act::Toggle(*pid),
                     ),
+                    item("Edit project…", IconName::Palette, Act::EditProject(*pid)),
                     None,
                     item(
                         "Copy path",
@@ -332,6 +334,7 @@ impl RunoApp {
                 }
                 self.save();
             }
+            Act::EditProject(pid) => self.edit_project(pid),
             Act::NewIn(pid) => {
                 self.new_project = Some(pid);
                 self.open_new_session();
