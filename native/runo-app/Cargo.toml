@@ -3,7 +3,7 @@ name = "runo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Runo's native GPUI desktop client"
+description = "Runo's native desktop client"
 
 build = "build.rs"
 

@@ -6,7 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
-- Native desktop client in Rust on GPUI Kit for macOS, Windows and Linux.
+- Native desktop client in pure Rust for macOS, with Windows and Linux also targeted.
 - Projects and sessions with isolated git worktrees, live agent output, real git diffs, a file browser and a command terminal.
 - Claude Code, Codex and OpenCode support. Models, permission and sandbox modes, effort and reasoning levels, speed tiers and agents are discovered from each installed CLI.
 - Per-agent settings: default model, executable, extra arguments, environment variables and agent-specific options.
