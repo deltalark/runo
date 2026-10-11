@@ -355,7 +355,59 @@ pub struct McpInfo {
 pub struct Discovered {
     pub skills: Vec<SkillInfo>,
     pub mcp: Vec<McpInfo>,
+    pub hooks: Vec<HookInfo>,
+    /// Config files worth editing, as (label, path); they may not exist yet.
+    pub files: Vec<(&'static str, PathBuf)>,
     pub provider_paths: Vec<(&'static str, Option<PathBuf>)>,
+}
+
+#[derive(Clone)]
+pub struct HookInfo {
+    pub event: String,
+    pub commands: Vec<String>,
+    pub scope: &'static str,
+    pub path: PathBuf,
+}
+
+/// Claude Code hooks: `{"hooks": {"Event": [{"matcher": .., "hooks": [{"command": ..}]}]}}`.
+fn scan_hooks(path: &Path, scope: &'static str, out: &mut Vec<HookInfo>) {
+    let Some(value) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    else {
+        return;
+    };
+    let Some(events) = value.get("hooks").and_then(|v| v.as_object()) else {
+        return;
+    };
+    for (event, groups) in events {
+        let commands = groups
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|g| {
+                let matcher = g.get("matcher").and_then(|m| m.as_str()).unwrap_or("");
+                g.get("hooks")
+                    .and_then(|h| h.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(move |h| {
+                        let cmd = h.get("command").and_then(|c| c.as_str())?;
+                        Some(if matcher.is_empty() || matcher == "*" {
+                            cmd.to_string()
+                        } else {
+                            format!("{matcher}: {cmd}")
+                        })
+                    })
+            })
+            .collect();
+        out.push(HookInfo {
+            event: event.clone(),
+            commands,
+            scope,
+            path: path.to_path_buf(),
+        });
+    }
 }
 
 fn home() -> Option<PathBuf> {
@@ -526,6 +578,29 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
     found.skills.sort_by(|a, b| a.name.cmp(&b.name));
     if let Some(home) = home() {
         scan_mcp(&home, &mut found.mcp);
+        let user = home.join(".claude").join("settings.json");
+        scan_hooks(&user, "user", &mut found.hooks);
+        found.files.extend([
+            ("Claude settings and hooks", user),
+            ("Claude MCP servers", home.join(".claude.json")),
+            ("Codex config", home.join(".codex").join("config.toml")),
+        ]);
+    }
+    if let Some(dir) = project_dir {
+        let project = Path::new(dir).join(".claude").join("settings.json");
+        scan_hooks(&project, "project", &mut found.hooks);
+        found.files.extend([
+            ("Project Claude settings and hooks", project),
+            ("Project MCP servers", Path::new(dir).join(".mcp.json")),
+            (
+                "Project agent instructions",
+                Path::new(dir).join("AGENTS.md"),
+            ),
+            (
+                "Project Claude instructions",
+                Path::new(dir).join("CLAUDE.md"),
+            ),
+        ]);
     }
     found.provider_paths = crate::agent::PROVIDERS
         .iter()
@@ -536,7 +611,9 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
 
 #[cfg(test)]
 mod tests {
-    use super::{frontmatter, mix, parse_quick_commands, scan_mcp, scan_skills, AppSettings};
+    use super::{
+        frontmatter, mix, parse_quick_commands, scan_hooks, scan_mcp, scan_skills, AppSettings,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -668,5 +745,24 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn hooks_are_listed_per_event() {
+        let dir = std::env::temp_dir().join(format!("runo-hooks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"cargo fmt"}]}],"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        scan_hooks(&path, "user", &mut out);
+        out.sort_by(|a, b| a.event.cmp(&b.event));
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].commands, ["Edit: cargo fmt"]);
+        assert_eq!(out[1].commands, ["say done"]);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

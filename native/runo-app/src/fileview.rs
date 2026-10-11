@@ -146,12 +146,16 @@ impl RunoApp {
 
     /// Open a file of the selected session in the viewer (the next frame applies it).
     pub(crate) fn open_file(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(dir) = self.current().map(|s| s.dir.clone()) else {
-            return;
+        let abs = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            let Some(dir) = self.current().map(|s| s.dir.clone()) else {
+                return;
+            };
+            Path::new(&dir).join(path)
         };
-        let abs = Path::new(&dir).join(path);
         let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
-        let bytes = if self.demo {
+        let bytes = if self.demo && !Path::new(path).is_absolute() {
             b"(demo data)".to_vec()
         } else {
             std::fs::read(&abs).unwrap_or_default()
@@ -161,7 +165,7 @@ impl RunoApp {
             FileKind::Image | FileKind::Pdf | FileKind::Binary => String::new(),
             _ => String::from_utf8_lossy(&bytes).into_owned(),
         };
-        let read_only = self.demo || size > MAX_EDIT_BYTES;
+        let read_only = size > MAX_EDIT_BYTES || (self.demo && !Path::new(path).is_absolute());
         let language = match kind {
             FileKind::Code => language_for(path),
             FileKind::Markdown => "markdown",
@@ -171,7 +175,10 @@ impl RunoApp {
             e.set_highlighter(language, cx);
             e.set_value(text.clone(), window, cx);
         });
-        self.file_preview = matches!(
+        // New or empty files open straight into the editor.
+        self.file_preview =
+            !text.trim().is_empty() || kind == FileKind::Image || kind == FileKind::Pdf;
+        self.file_preview &= matches!(
             kind,
             FileKind::Markdown
                 | FileKind::Csv(_)
@@ -199,6 +206,9 @@ impl RunoApp {
             return;
         }
         let text = self.file_editor.read(cx).value().to_string();
+        if let Some(parent) = file.abs.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         match std::fs::write(&file.abs, &text) {
             Ok(()) => {
                 file.saved = text;
@@ -216,6 +226,13 @@ impl RunoApp {
             }
         }
         cx.notify();
+    }
+
+    /// Open a config file (absolute path) in the main-area editor, from Settings.
+    pub(crate) fn edit_path(&mut self, path: &Path) {
+        self.pending_file = Some(path.display().to_string());
+        self.editor_back = self.view;
+        self.view = View::Editor;
     }
 
     pub(crate) fn file_changed(&mut self, cx: &mut Context<Self>) {
@@ -299,8 +316,16 @@ impl RunoApp {
                     .truncate()
                     .font_family(self.mono_font.clone())
                     .text_size(px(12.5))
-                    .child(file.path.clone()),
+                    .child(match std::env::var("HOME") {
+                        Ok(home) if !home.is_empty() && file.path.starts_with(&home) => {
+                            format!("~{}", &file.path[home.len()..])
+                        }
+                        _ => file.path.clone(),
+                    }),
             )
+            .when(!file.abs.exists(), |el| {
+                el.child(div().text_xs().text_color(rgb(c_muted())).child("New file"))
+            })
             .when(dirty, |el| {
                 el.child(
                     div()
@@ -361,8 +386,9 @@ impl RunoApp {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if wide {
-                        this.view = View::Session;
+                        this.view = this.editor_back;
                     } else {
+                        this.editor_back = View::Session;
                         this.view = View::Editor;
                     }
                     cx.notify();
@@ -374,7 +400,7 @@ impl RunoApp {
                         this.open_file = None;
                         this.file_dirty = false;
                         if wide {
-                            this.view = View::Session;
+                            this.view = this.editor_back;
                         }
                         cx.notify();
                     })),
