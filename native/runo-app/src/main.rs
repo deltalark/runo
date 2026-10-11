@@ -2,6 +2,7 @@ mod agent;
 mod alerts;
 mod browser;
 mod caps;
+mod ctxmenu;
 mod fileview;
 mod git;
 mod github;
@@ -211,6 +212,8 @@ struct RunoApp {
     /// Switching agents, waiting for the person to confirm.
     switch_plan: Option<handoff::SwitchPlan>,
     switch_preview: bool,
+    /// The open right-click menu: where, and on what.
+    ctx_menu: Option<(Point<Pixels>, ctxmenu::CtxTarget)>,
     /// Past Claude and Codex conversations found on this machine.
     history: Vec<history::Past>,
     /// Change counts (files, added, removed) of each session racing the selected one.
@@ -833,6 +836,7 @@ impl RunoApp {
             alerts_expanded: false,
             switch_plan: None,
             switch_preview: false,
+            ctx_menu: None,
             race_mode: false,
             history: Vec::new(),
             race_stats: HashMap::new(),
@@ -2397,6 +2401,10 @@ impl RunoApp {
             tabs = tabs.child(
                 div()
                     .id(("tab", id as usize))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_context(ctxmenu::CtxTarget::Tab(id), cx),
+                    )
                     .group("tab")
                     .h(px(34.))
                     .min_w(px(120.))
@@ -2662,6 +2670,10 @@ impl RunoApp {
         let stats = self.stats.get(&id).copied();
         div()
             .id(("session", id as usize))
+            .on_mouse_down(
+                MouseButton::Right,
+                self.on_context(ctxmenu::CtxTarget::Session(id), cx),
+            )
             .relative()
             .group("session-row")
             .mx_1()
@@ -2824,6 +2836,10 @@ impl RunoApp {
             projects = projects.child(
                 div()
                     .id(("project", pid as usize))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_context(ctxmenu::CtxTarget::Project(pid), cx),
+                    )
                     .group("project")
                     .h(px(28.))
                     .mt_2()
@@ -3704,14 +3720,21 @@ impl RunoApp {
         }
         for (i, message) in session.messages.iter().enumerate() {
             let show = Some(i) == last_agent && !self.changes.is_empty();
-            list = list.child(self.message_view(
-                i,
-                message,
-                handoff::provider_at(session, i),
-                show,
-                working && Some(i) == last_agent,
-                cx,
-            ));
+            list = list.child(
+                div()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_context(ctxmenu::CtxTarget::Message(i), cx),
+                    )
+                    .child(self.message_view(
+                        i,
+                        message,
+                        handoff::provider_at(session, i),
+                        show,
+                        working && Some(i) == last_agent,
+                        cx,
+                    )),
+            );
         }
         if let Some(task) = self.pending_start.get(&session.id) {
             list = list.child(
@@ -4970,6 +4993,10 @@ impl RunoApp {
             rows = rows.child(stagger(
                 div()
                     .id(("row", id as usize))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_context(ctxmenu::CtxTarget::Session(id), cx),
+                    )
                     .group("list-row")
                     .p_3()
                     .flex()
@@ -5479,6 +5506,10 @@ impl RunoApp {
             list = list.child(stagger(
                 div()
                     .id(("chg", i))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_context(ctxmenu::CtxTarget::Change(change.path.clone()), cx),
+                    )
                     .group("change-row")
                     .h(px(28.))
                     .px_2()
@@ -6001,6 +6032,10 @@ impl RunoApp {
             list = list.child(
                 div()
                     .id(("file", i))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_context(ctxmenu::CtxTarget::File(path.clone()), cx),
+                    )
                     .h(px(28.))
                     .px_3()
                     .flex()
@@ -6489,7 +6524,9 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
-                if this.switch_plan.is_some() {
+                if this.ctx_menu.is_some() {
+                    this.ctx_menu = None;
+                } else if this.switch_plan.is_some() {
                     this.switch_plan = None;
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
@@ -6689,7 +6726,8 @@ impl Render for RunoApp {
             })
             .children(self.alerts_view(cx))
             .children(self.switch_modal(cx))
-            .children(palette);
+            .children(palette)
+            .children(self.ctx_menu_view(cx));
         fade(root, "app-root", 450)
     }
 }

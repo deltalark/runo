@@ -326,6 +326,10 @@ impl RunoApp {
                     cx.notify();
                 }),
             )
+            .on_mouse_down(
+                MouseButton::Right,
+                self.on_context(ctxmenu::CtxTarget::Terminal, cx),
+            )
             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, cx| {
                 let dy = f32::from(ev.delta.pixel_delta(px(TERM_LINE)).y);
                 let lines = (dy / TERM_LINE).round() as isize;
