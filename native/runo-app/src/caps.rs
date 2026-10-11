@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
+use std::time::Duration;
 
 #[derive(Clone, Default, PartialEq)]
 pub struct Choice {
@@ -36,6 +37,8 @@ pub struct Caps {
     /// OpenCode named agents.
     pub agents: Vec<Choice>,
     pub detected: bool,
+    /// The model the CLI uses when none is picked, by name ("Sonnet 5.5"), when it says.
+    pub default_model: String,
 }
 
 /// One dropdown shown in the composer.
@@ -95,7 +98,7 @@ pub fn refresh() {
                 "claude" => claude(&bin),
                 "codex" => codex(&bin),
                 "opencode" => opencode(&bin),
-                _ => generic(&bin),
+                id => generic(id, &bin),
             };
             if let Ok(mut map) = store().write() {
                 map.insert(provider.id.to_string(), caps);
@@ -107,7 +110,7 @@ pub fn refresh() {
 
 /// Agents without parseable help: the version, and Runo's three permission levels,
 /// which `agent::provider_args` maps onto each CLI's own flags.
-fn generic(bin: &str) -> Caps {
+fn generic(provider: &str, bin: &str) -> Caps {
     let installed = crate::agent::available(bin, bin);
     let version = if installed {
         run(bin, &["--version"])
@@ -126,9 +129,18 @@ fn generic(bin: &str) -> Caps {
         label: label.into(),
         desc: desc.into(),
     };
+    // Models: the CLI's own list when it has one, else the choices its help names.
+    let models = if !installed {
+        Vec::new()
+    } else if provider == "cursor" {
+        crate::models::parse_model_list(&run_quiet(bin, &["models"], Duration::from_secs(20)))
+    } else {
+        crate::models::help_model_choices(&run(bin, &["--help"]))
+    };
     Caps {
         installed,
         version,
+        models,
         modes: vec![
             level("edit", "Auto edit", "Edit files without asking"),
             level("plan", "Plan only", "Read and suggest; no edits"),
@@ -226,7 +238,65 @@ fn claude(bin: &str) -> Caps {
     if version.trim().is_empty() {
         return not_installed();
     }
-    parse_claude(&version, &run(bin, &["--help"]))
+    let mut caps = parse_claude(&version, &run(bin, &["--help"]));
+    // `/model` is answered by Claude Code itself (no model call, nothing saved): it names
+    // the default model with its version and lists the aliases.
+    let menu = run_quiet(
+        bin,
+        &["-p", "/model", "--no-session-persistence"],
+        Duration::from_secs(20),
+    );
+    // The model ids this build of Claude Code knows, and the ones used here before.
+    let known = crate::updater::resolve(bin)
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .filter(|p| p.metadata().is_ok_and(|m| m.len() < 600 << 20))
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|bytes| crate::models::claude_ids_in(&bytes))
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let used = crate::models::claude_used_ids(&home);
+    let aliases: Vec<String> = caps.models.iter().map(|m| m.choice.value.clone()).collect();
+    let (models, default) = crate::models::claude_menu(&menu, &aliases, &known, &used);
+    if !models.is_empty() {
+        caps.models = models;
+    }
+    caps.default_model = default;
+    caps
+}
+
+/// Run a CLI for a short answer, outside any agent session, giving up after `limit`.
+fn run_quiet(bin: &str, args: &[&str], limit: Duration) -> String {
+    use std::io::Read;
+    let Ok(mut child) = Command::new(bin)
+        .args(args)
+        .env_remove("CLAUDE_CODE_CHILD_SESSION")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return String::new();
+    };
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return String::new();
+            }
+        }
+    }
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut out);
+    }
+    out
 }
 
 /// Claude Code: modes, efforts and model aliases from `claude --help`.
@@ -493,7 +563,14 @@ fn controls_for(provider: &str, caps: &Caps, sel: &HashMap<String, String>) -> V
         out.push(Control {
             id: "model",
             label: "Model".into(),
-            choices: with_default("Default", model_choices),
+            choices: with_default(
+                &if caps.default_model.is_empty() {
+                    "Default".to_string()
+                } else {
+                    format!("Default · {}", caps.default_model)
+                },
+                model_choices,
+            ),
         });
     }
     // Effort / tier follow the selected model, or the first listed one when none is chosen.
