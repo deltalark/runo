@@ -107,8 +107,13 @@ pub(crate) fn plan(provider: &str, name: &str, runs: &Path, real: &Path) -> Plan
     if let Some(app) = owner_app(real) {
         return Plan::Manual {
             why: format!(
-                "The {name} Runo uses comes with {app} ({}), so {app} keeps it updated. To have your own copy, install it with the command below, then pick it under Settings › {name}.",
-                runs.display()
+                "The {name} Runo uses comes with {app}, so {app} keeps it updated. It lives at {}{}. To have your own copy, install it with the command below, then pick it under Settings › {name}.",
+                real.display(),
+                if runs != real {
+                    format!(" ({} links there)", runs.display())
+                } else {
+                    String::new()
+                }
             ),
             command: package.map(npm_cmd),
         };
@@ -131,11 +136,18 @@ pub(crate) fn plan(provider: &str, name: &str, runs: &Path, real: &Path) -> Plan
         // Use the npm that belongs to that prefix (nvm, Homebrew node, a bundled node),
         // so the update lands in the copy Runo runs, not in some other npm's folder.
         let own_npm = Path::new(&prefix).join(if cfg!(windows) { "npm.cmd" } else { "bin/npm" });
-        let npm = if own_npm.is_file() {
-            own_npm.to_string_lossy().into_owned()
+        // Run that npm with the node beside it: a GUI app's PATH often has no node, or a
+        // different one, and npm's `#!/usr/bin/env node` would then fail or mismatch.
+        let own_node = Path::new(&prefix).join("bin/node");
+        let mut program = Vec::new();
+        if own_npm.is_file() {
+            if !cfg!(windows) && own_node.is_file() {
+                program.push(own_node.to_string_lossy().into_owned());
+            }
+            program.push(own_npm.to_string_lossy().into_owned());
         } else {
-            "npm".into()
-        };
+            program.push("npm".into());
+        }
         let bin_dir = if cfg!(windows) {
             PathBuf::from(&prefix)
         } else {
@@ -143,16 +155,18 @@ pub(crate) fn plan(provider: &str, name: &str, runs: &Path, real: &Path) -> Plan
         };
         let file = runs.file_name().map(|f| bin_dir.join(f));
         return Plan::Run {
-            program: vec![
-                npm,
-                "install".into(),
-                "-g".into(),
-                "--prefix".into(),
-                prefix,
-                format!("{pkg}@latest"),
-                "--loglevel".into(),
-                "http".into(),
-            ],
+            program: program
+                .into_iter()
+                .chain([
+                    "install".into(),
+                    "-g".into(),
+                    "--prefix".into(),
+                    prefix,
+                    format!("{pkg}@latest"),
+                    "--loglevel".into(),
+                    "http".into(),
+                ])
+                .collect(),
             installs_to: file,
         };
     }
@@ -335,6 +349,11 @@ mod tests {
         ) {
             Plan::Manual { why, command } => {
                 assert!(why.contains("comes with Orca"), "{why}");
+                assert!(why.contains("Application Support/orca"), "{why}");
+                assert!(
+                    why.contains("/Users/a/.local/bin/codex links there"),
+                    "{why}"
+                );
                 assert_eq!(
                     command.as_deref(),
                     Some("npm install -g @openai/codex@latest")
@@ -381,6 +400,25 @@ mod tests {
                 );
             }
             other => panic!("{other:?}"),
+        }
+        // With node beside npm in that prefix, npm runs on that node, not whatever PATH has.
+        #[cfg(unix)]
+        {
+            let dir = std::env::temp_dir().join(format!("runo-nvm-{}", std::process::id()));
+            let bin = dir.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("node"), "").unwrap();
+            std::fs::write(bin.join("npm"), "").unwrap();
+            let real = dir.join("lib/node_modules/@openai/codex/bin/codex.js");
+            match plan("codex", "Codex", &bin.join("codex"), &real) {
+                Plan::Run { program, .. } => {
+                    assert_eq!(program[0], bin.join("node").to_string_lossy());
+                    assert_eq!(program[1], bin.join("npm").to_string_lossy());
+                    assert_eq!(program[2], "install");
+                }
+                other => panic!("{other:?}"),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
         }
         // Homebrew formula and cask.
         let brew = Path::new("/opt/homebrew/Cellar/opencode/0.9.1/bin/opencode");
