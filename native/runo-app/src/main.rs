@@ -134,6 +134,8 @@ enum Jump {
     Session(u64),
     File(String),
     Tour,
+    /// Run a playbook in the current project.
+    Playbook(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -822,13 +824,13 @@ impl RunoApp {
                 this.notes_changed(cx);
             }
         });
-        let auto_name =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Nightly dependency check"));
+        let auto_name = cx.new(|cx| InputState::new(window, cx).placeholder("Check dependencies"));
         let auto_prompt = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Check for outdated dependencies and update the safe ones")
         });
-        let auto_every = cx.new(|cx| InputState::new(window, cx).placeholder("1440"));
+        let auto_every =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Empty runs it by hand only"));
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("What would you like to change?")
@@ -1517,6 +1519,10 @@ impl RunoApp {
         match jump {
             Jump::Action => {}
             Jump::Tour => self.start_tour(),
+            Jump::Playbook(id) => {
+                let here = self.current_project();
+                self.run_playbook(id, here, cx);
+            }
             Jump::View(view) => match view {
                 View::History => self.open_history(),
                 View::Notes => self.open_notes(window, cx),
@@ -1584,11 +1590,7 @@ impl RunoApp {
                 IconName::GitPullRequest,
                 View::GitHub,
             ),
-            (
-                "Go to Scheduled prompts",
-                IconName::Timer,
-                View::Automations,
-            ),
+            ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
             ("Go to Project notes", IconName::NotebookPen, View::Notes),
         ] {
@@ -1603,6 +1605,31 @@ impl RunoApp {
         );
         command_jumps.push(Jump::Tour);
         jumps.push(command_jumps);
+
+        let mut playbooks = CommandGroup::new().label("Playbooks");
+        let mut playbook_jumps = Vec::new();
+        let here = self
+            .current_project()
+            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        for auto in &self.state.automations {
+            let project = self
+                .state
+                .projects
+                .iter()
+                .find(|p| p.id == auto.project_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| here.clone());
+            playbooks = playbooks.item(
+                CommandItem::new()
+                    .label(format!("Run {}  ·  {project}", auto.name))
+                    .icon(IconName::Play)
+                    .keywords(["playbook", "run", "automation"]),
+            );
+            playbook_jumps.push(Jump::Playbook(auto.id));
+        }
+        jumps.push(playbook_jumps);
 
         let mut sessions = CommandGroup::new().label("Sessions");
         let mut session_jumps = Vec::new();
@@ -3282,8 +3309,8 @@ impl RunoApp {
                             ))
                             .child(self.nav_item(
                                 "automations",
-                                IconName::Timer,
-                                "Scheduled",
+                                IconName::BookOpen,
+                                "Playbooks",
                                 self.state.automations.len(),
                                 View::Automations,
                                 cx,
