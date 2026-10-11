@@ -29,6 +29,9 @@ Runo has never run any of these CLIs for real. Their flags come from each vendor
 | OpenCode | CLI view | `opencode -s <id>` opens the same session |
 | Grok CLI | Chat | Not wired for resume yet: its docs don't say how to learn the session id. Context is still sent in the prompt. Check that it still works |
 | All of the above | Model, effort and permission chips | Each chip changes the run as expected |
+| Cursor | Model menu | Filled from `agent models`; check that the output format parses into ids and names |
+| Copilot, Gemini, Qwen, Amp, Droid, Grok | Model menu | Filled from the `--model` choices in each CLI's help, where the help lists them. Agents whose help lists none show only Default |
+| Claude Code on macOS (native and npm installs) | Model menu | "Default · <model>" plus versioned aliases and pinned versions; `/model` runs without creating a transcript |
 | All of the above | Switching agents mid-session (handoff dialog) | Cost shown, brief carried over, new agent continues the task |
 | All of the above | Memory server | Only Claude Code and Codex get it. Check that the others ignore `.runo/memory.md` without errors |
 
