@@ -3,7 +3,8 @@
 <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.04"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.08"/></linearGradient></defs>
 <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#t)"/>
 <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="url(#rim)" stroke-width="3"/>
-<g fill="none" stroke="#FAFAFA" stroke-width="76" stroke-linejoin="round" stroke-linecap="butt">
-<path d="M380 724 V300 H540 A122 122 0 0 1 540 544 H380"/>
-<path d="M512 544 L652 724"/></g>
+<g stroke-linecap="round" stroke-width="72">
+<line x1="300" y1="392" x2="600" y2="392" stroke="#FAFAFA" stroke-opacity="0.35"/>
+<line x1="424" y1="512" x2="724" y2="512" stroke="#FAFAFA"/>
+<line x1="352" y1="632" x2="560" y2="632" stroke="#FAFAFA" stroke-opacity="0.6"/></g>
 </svg>
