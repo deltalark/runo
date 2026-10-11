@@ -1,10 +1,28 @@
 //! Shell tabs in the terminal panel: real PTYs rendered from a VT100 screen.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// Text metrics of the terminal grid.
-pub(crate) const TERM_FONT: f32 = 12.;
-pub(crate) const TERM_LINE: f32 = 16.;
+static FONT_SIZE: AtomicU32 = AtomicU32::new(12);
+static SCROLL_SPEED: AtomicU32 = AtomicU32::new(1);
+static RIGHT_CLICK_PASTE: AtomicBool = AtomicBool::new(false);
+
+/// Apply the Terminal settings (size in points, wheel multiplier, right-click paste).
+pub(crate) fn configure(size: u32, scroll: u32, right_paste: bool) {
+    FONT_SIZE.store(size.clamp(9, 24), Ordering::Relaxed);
+    SCROLL_SPEED.store(scroll.max(1), Ordering::Relaxed);
+    RIGHT_CLICK_PASTE.store(right_paste, Ordering::Relaxed);
+}
+
+/// Terminal text size.
+pub(crate) fn term_font() -> f32 {
+    FONT_SIZE.load(Ordering::Relaxed) as f32
+}
+
+/// Terminal row height: a third taller than the text, on whole pixels.
+pub(crate) fn term_line() -> f32 {
+    (term_font() * 4. / 3.).round()
+}
 
 impl RunoApp {
     pub(crate) fn session_shells(&self, session: u64) -> impl Iterator<Item = &pty::Shell> {
@@ -71,7 +89,7 @@ impl RunoApp {
     pub(crate) fn term_grid(&self) -> (u16, u16) {
         let height = self.term_height() - 32. - 16.;
         let width = 460. - 24.;
-        let rows = (height / TERM_LINE).floor().max(2.) as u16;
+        let rows = (height / term_line()).floor().max(2.) as u16;
         let cols = (width / self.cell_w).floor().max(10.) as u16;
         (rows, cols)
     }
@@ -85,14 +103,26 @@ impl RunoApp {
     }
 
     /// Measure the monospace cell once a window is available.
-    pub(crate) fn measure_cell(&mut self, window: &mut Window) {
-        if self.cell_measured {
+    /// The terminal's font: the Terminal setting, or the theme's monospace font.
+    pub(crate) fn term_family(&self, cx: &App) -> SharedString {
+        let family = cx.global::<AppSettings>().term_font.trim();
+        if family.is_empty() {
+            self.mono_font.clone()
+        } else {
+            SharedString::from(family.to_string())
+        }
+    }
+
+    pub(crate) fn measure_cell(&mut self, window: &mut Window, cx: &App) {
+        let family = self.term_family(cx);
+        let key = (family.clone(), FONT_SIZE.load(Ordering::Relaxed));
+        if self.cell_key.as_ref() == Some(&key) {
             return;
         }
-        self.cell_measured = true;
+        self.cell_key = Some(key);
         let ts = window.text_system();
-        let id = ts.resolve_font(&font(self.mono_font.clone()));
-        if let Ok(size) = ts.advance(id, px(TERM_FONT), 'm') {
+        let id = ts.resolve_font(&font(family));
+        if let Ok(size) = ts.advance(id, px(term_font()), 'm') {
             let w = f32::from(size.width);
             if w > 3. {
                 self.cell_w = w;
@@ -262,7 +292,7 @@ impl RunoApp {
             let (cur_row, cur_col) = screen.cursor_position();
             let show_cursor = !screen.hide_cursor() && screen.scrollback() == 0 && !shell.exited();
             for row in 0..rows {
-                let mut line = div().h(px(TERM_LINE)).flex().whitespace_nowrap();
+                let mut line = div().h(px(term_line())).flex().whitespace_nowrap();
                 // Runs of cells that share a style become one text span.
                 let mut run = String::new();
                 let mut style: Option<(u32, Option<u32>, bool, bool, bool)> = None;
@@ -344,9 +374,9 @@ impl RunoApp {
             .py_2()
             .overflow_hidden()
             .relative()
-            .font_family(self.mono_font.clone())
-            .text_size(px(TERM_FONT))
-            .line_height(px(TERM_LINE))
+            .font_family(self.term_family(cx))
+            .text_size(px(term_font()))
+            .line_height(px(term_line()))
             .cursor_text()
             .on_key_down(
                 cx.listener(move |this, ev: &KeyDownEvent, window, cx| match cli {
@@ -366,15 +396,36 @@ impl RunoApp {
                     cx.notify();
                 }),
             )
-            .when(cli.is_none(), |el| {
+            .when(RIGHT_CLICK_PASTE.load(Ordering::Relaxed), |el| {
                 el.on_mouse_down(
                     MouseButton::Right,
-                    self.on_context(ctxmenu::CtxTarget::Terminal, cx),
+                    cx.listener(move |this, _, _, cx| {
+                        let shell = match cli {
+                            Some(id) => this.cli_runs.get(&id).map(|r| &r.shell),
+                            None => this.active_shell(),
+                        };
+                        if let (Some(shell), Some(text)) =
+                            (shell, cx.read_from_clipboard().and_then(|c| c.text()))
+                        {
+                            shell.paste(&text);
+                        }
+                        cx.stop_propagation();
+                    }),
                 )
             })
+            .when(
+                cli.is_none() && !RIGHT_CLICK_PASTE.load(Ordering::Relaxed),
+                |el| {
+                    el.on_mouse_down(
+                        MouseButton::Right,
+                        self.on_context(ctxmenu::CtxTarget::Terminal, cx),
+                    )
+                },
+            )
             .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, _, cx| {
-                let dy = f32::from(ev.delta.pixel_delta(px(TERM_LINE)).y);
-                let lines = (dy / TERM_LINE).round() as isize;
+                let dy = f32::from(ev.delta.pixel_delta(px(term_line())).y);
+                let lines = (dy / term_line()).round() as isize
+                    * SCROLL_SPEED.load(Ordering::Relaxed) as isize;
                 if lines != 0 {
                     let shell = match cli {
                         Some(id) => this.cli_runs.get(&id).map(|r| &r.shell),

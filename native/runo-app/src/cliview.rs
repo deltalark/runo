@@ -372,7 +372,7 @@ impl RunoApp {
                 let w = f32::from(b.size.width) - 24.;
                 let h = f32::from(b.size.height) - 16.;
                 (
-                    (h / terminal::TERM_LINE).floor().max(4.) as u16,
+                    (h / terminal::term_line()).floor().max(4.) as u16,
                     (w / self.cell_w).floor().max(20.) as u16,
                 )
             }

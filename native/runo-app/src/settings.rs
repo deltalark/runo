@@ -75,6 +75,16 @@ pub struct AppSettings {
     pub tour_seen: bool,
     /// How new sessions open: "chat" or "cli" (the agent's own CLI, where supported).
     pub default_view: String,
+    /// How wide the conversation runs: "comfortable", "wide" or "full".
+    pub content_width: String,
+    /// Terminal text size in points.
+    pub term_font_size: u32,
+    /// Terminal font family; empty uses the theme's monospace font.
+    pub term_font: String,
+    /// Mouse-wheel speed in the terminal: "normal", "fast" or "faster".
+    pub term_scroll: String,
+    /// Right-click in the terminal: "menu" or "paste".
+    pub term_right_click: String,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -118,6 +128,11 @@ impl Default for AppSettings {
             memory_server: true,
             tour_seen: false,
             default_view: "chat".into(),
+            content_width: "full".into(),
+            term_font_size: 12,
+            term_font: String::new(),
+            term_scroll: "normal".into(),
+            term_right_click: "menu".into(),
         }
     }
 }
@@ -182,6 +197,24 @@ impl AppSettings {
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
         AUTOSCROLL.store(self.autoscroll, Ordering::Relaxed);
         KEEP_AWAKE.store(self.keep_awake, Ordering::Relaxed);
+        crate::terminal::configure(
+            self.term_font_size,
+            match self.term_scroll.as_str() {
+                "fast" => 2,
+                "faster" => 4,
+                _ => 1,
+            },
+            self.term_right_click == "paste",
+        );
+    }
+
+    /// The widest the conversation column gets, or None to fill the window.
+    pub fn content_max_width(&self) -> Option<f32> {
+        match self.content_width.as_str() {
+            "comfortable" => Some(780.),
+            "wide" => Some(1120.),
+            _ => None,
+        }
     }
 }
 
