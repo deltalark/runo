@@ -197,6 +197,8 @@ struct RunoApp {
     new_isolated: bool,
     /// Race mode in the New session form, and the agents picked for it.
     race_mode: bool,
+    /// The New session dialog lists every agent, not just the main ones.
+    new_more_agents: bool,
     /// Past Claude and Codex conversations found on this machine.
     history: Vec<history::Past>,
     /// Change counts (files, added, removed) of each session racing the selected one.
@@ -807,6 +809,7 @@ impl RunoApp {
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
                 .unwrap_or(0),
             new_isolated: true,
+            new_more_agents: false,
             race_mode: false,
             history: Vec::new(),
             race_stats: HashMap::new(),
@@ -1341,7 +1344,12 @@ impl RunoApp {
         self.close_palette(window, cx);
         match jump {
             Jump::Action => {}
-            Jump::View(view) => self.view = view,
+            Jump::View(view) => match view {
+                View::History => self.open_history(),
+                View::Notes => self.open_notes(window, cx),
+                View::GitHub => self.load_github(),
+                _ => self.view = view,
+            },
             Jump::Session(id) => self.select(id),
             Jump::File(path) => {
                 self.view = View::Session;
@@ -1384,6 +1392,11 @@ impl RunoApp {
             ("Go to Inbox", IconName::BellDot, View::Inbox),
             ("Go to All sessions", IconName::Layers, View::AllSessions),
             ("Go to Worktrees", IconName::GitBranch, View::Worktrees),
+            ("Go to History", IconName::RotateCcwClock, View::History),
+            ("Go to GitHub", IconName::GitPullRequest, View::GitHub),
+            ("Go to Automations", IconName::Timer, View::Automations),
+            ("Go to Activity", IconName::Activity, View::Activity),
+            ("Go to Notes", IconName::NotebookPen, View::Notes),
         ] {
             commands = commands.item(CommandItem::new().label(label).icon(name));
             command_jumps.push(Jump::View(view));
@@ -4440,7 +4453,7 @@ impl RunoApp {
                         .id("new-session-card")
                         .w(px(760.))
                         .max_w(relative(0.94))
-                        .h(px(height.clamp(360., 820.)))
+                        .max_h(px(height.clamp(360., 820.)))
                         .relative()
                         .v_flex()
                         .rounded_2xl()
@@ -4489,8 +4502,9 @@ impl RunoApp {
             div()
                 .id(id)
                 .flex_1()
-                .min_w(px(180.))
-                .p_3()
+                .min_w(px(200.))
+                .px_3()
+                .py_2()
                 .flex()
                 .items_center()
                 .gap_3()
@@ -4528,10 +4542,29 @@ impl RunoApp {
                 .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
         );
 
+        // The main agents (the first three, anything installed, anything picked)
+        // show first; the rest wait behind "More agents".
+        let installed_all: Vec<bool> = agent::PROVIDERS
+            .iter()
+            .map(|p| agent::available(p.bin, &cx.global::<AppSettings>().agent(p.id).binary))
+            .collect();
+        let major = |i: usize| {
+            i < 3
+                || installed_all[i]
+                || if self.race_mode {
+                    self.new_race.contains(&i)
+                } else {
+                    self.new_provider == i
+                }
+        };
+        let hidden = (0..agent::PROVIDERS.len()).filter(|i| !major(*i)).count();
         let mut providers = div().flex().flex_wrap().gap_2();
         for (i, p) in agent::PROVIDERS.iter().enumerate() {
+            if !self.new_more_agents && !major(i) {
+                continue;
+            }
             let caps = caps::get(p.id);
-            let installed = agent::available(p.bin, &cx.global::<AppSettings>().agent(p.id).binary);
+            let installed = installed_all[i];
             let detail = if !installed {
                 format!("{} not found on PATH", p.bin)
             } else if caps.version.is_empty() {
@@ -4571,7 +4604,7 @@ impl RunoApp {
                             if picked { c_blue() } else { c_muted() },
                         ))
                     })
-                    .child(self.provider_badge(p, 30.))
+                    .child(self.provider_badge(p, 26.))
                     .child(
                         div()
                             .v_flex()
@@ -4590,6 +4623,48 @@ impl RunoApp {
                                     .child(detail),
                             ),
                     ),
+            );
+        }
+
+        if hidden > 0 {
+            let more = self.new_more_agents;
+            providers = providers.child(
+                div()
+                    .id("more-agents")
+                    .flex_1()
+                    .min_w(px(200.))
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .rounded_xl()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rgb(c_border()))
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(rgb(c_subtle())).text_color(rgb(c_text())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.new_more_agents = !this.new_more_agents;
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        if more {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        },
+                        14.,
+                        c_secondary(),
+                    ))
+                    .child(if more {
+                        "Fewer agents".to_string()
+                    } else {
+                        format!("More agents ({hidden})")
+                    }),
             );
         }
 
@@ -4667,16 +4742,17 @@ impl RunoApp {
                 div()
                     .max_w(px(780.))
                     .mx_auto()
-                    .p_8()
+                    .px_8()
+                    .py_6()
                     .v_flex()
-                    .gap_4()
+                    .gap_3()
                     .child(
                         div()
                             .v_flex()
                             .gap_1()
                             .child(
                                 div()
-                                    .text_2xl()
+                                    .text_xl()
                                     .font_weight(FontWeight::BOLD)
                                     .child("New session"),
                             )
@@ -4787,7 +4863,7 @@ impl RunoApp {
                             .child(div().min_w_0().truncate().child(where_to)),
                     )
                     .child(label("TASK"))
-                    .child(Textarea::new(&self.new_task).bordered(true).h(px(140.)))
+                    .child(Textarea::new(&self.new_task).bordered(true).h(px(110.)))
                     .child(
                         div()
                             .flex()
