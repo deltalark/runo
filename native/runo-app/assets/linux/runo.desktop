@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Runo
+GenericName=Coding agent workspace
+Comment=Run Claude Code, Codex and other coding agents side by side
+Exec=Runo %U
+Icon=runo
+Terminal=false
+Categories=Development;IDE;
+StartupWMClass=runo

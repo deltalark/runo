@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
+use std::time::Duration;
 
 #[derive(Clone, Default, PartialEq)]
 pub struct Choice {
@@ -36,6 +37,8 @@ pub struct Caps {
     /// OpenCode named agents.
     pub agents: Vec<Choice>,
     pub detected: bool,
+    /// The model the CLI uses when none is picked, by name ("Sonnet 5.5"), when it says.
+    pub default_model: String,
 }
 
 /// One dropdown shown in the composer.
@@ -48,13 +51,37 @@ pub struct Control {
 
 static CAPS: OnceLock<RwLock<HashMap<String, Caps>>> = OnceLock::new();
 static UPDATED: AtomicBool = AtomicBool::new(false);
+/// Binaries set in Settings, by agent, for CLIs installed off PATH.
+static BINARIES: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
+
+/// Remember the binaries set in Settings, so detection runs the right file.
+pub fn set_binaries(binaries: HashMap<String, String>) {
+    if let Ok(mut map) = BINARIES.write() {
+        *map = Some(binaries);
+    }
+}
+
+/// The program to run for an agent: its Settings binary, or the usual name on PATH.
+pub fn binary(provider: &'static crate::agent::Provider) -> String {
+    BINARIES
+        .read()
+        .ok()
+        .and_then(|map| map.as_ref()?.get(provider.id).cloned())
+        .filter(|b| !b.trim().is_empty())
+        .map(|b| b.trim().to_string())
+        .unwrap_or_else(|| provider.bin.to_string())
+}
 
 fn store() -> &'static RwLock<HashMap<String, Caps>> {
     CAPS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
 pub fn get(provider: &str) -> Caps {
-    store().read().ok().and_then(|m| m.get(provider).cloned()).unwrap_or_default()
+    store()
+        .read()
+        .ok()
+        .and_then(|m| m.get(provider).cloned())
+        .unwrap_or_default()
 }
 
 /// True once after discovery finished, so the UI can repaint.
@@ -66,10 +93,12 @@ pub fn take_updated() -> bool {
 pub fn refresh() {
     std::thread::spawn(|| {
         for provider in crate::agent::PROVIDERS.iter() {
+            let bin = binary(provider);
             let caps = match provider.id {
-                "claude" => claude(),
-                "codex" => codex(),
-                _ => opencode(),
+                "claude" => claude(&bin),
+                "codex" => codex(&bin),
+                "opencode" => opencode(&bin),
+                id => generic(id, &bin),
             };
             if let Ok(mut map) = store().write() {
                 map.insert(provider.id.to_string(), caps);
@@ -79,9 +108,53 @@ pub fn refresh() {
     });
 }
 
+/// Agents without parseable help: the version, and Runo's three permission levels,
+/// which `agent::provider_args` maps onto each CLI's own flags.
+fn generic(provider: &str, bin: &str) -> Caps {
+    let installed = crate::agent::available(bin, bin);
+    let version = if installed {
+        run(bin, &["--version"])
+            .lines()
+            .find(|l| l.chars().any(|c| c.is_ascii_digit()))
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(40)
+            .collect()
+    } else {
+        String::new()
+    };
+    let level = |value: &str, label: &str, desc: &str| Choice {
+        value: value.into(),
+        label: label.into(),
+        desc: desc.into(),
+    };
+    // Models: the CLI's own list when it has one, else the choices its help names.
+    let models = if !installed {
+        Vec::new()
+    } else if provider == "cursor" {
+        crate::models::parse_model_list(&run_quiet(bin, &["models"], Duration::from_secs(20)))
+    } else {
+        crate::models::help_model_choices(&run(bin, &["--help"]))
+    };
+    Caps {
+        installed,
+        version,
+        models,
+        modes: vec![
+            level("edit", "Auto edit", "Edit files without asking"),
+            level("plan", "Plan only", "Read and suggest; no edits"),
+            level("full", "Full access", "Run anything without asking"),
+        ],
+        detected: true,
+        ..Caps::default()
+    }
+}
+
 fn run(bin: &str, args: &[&str]) -> String {
     Command::new(bin)
         .args(args)
+        .stdin(std::process::Stdio::null())
         .output()
         .map(|o| {
             let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
@@ -104,11 +177,18 @@ fn pretty(value: &str) -> String {
         }
     }
     let mut chars = out.chars();
-    chars.next().map(|f| f.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+    chars
+        .next()
+        .map(|f| f.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
 }
 
 fn choice(value: &str) -> Choice {
-    Choice { value: value.to_string(), label: pretty(value), desc: String::new() }
+    Choice {
+        value: value.to_string(),
+        label: pretty(value),
+        desc: String::new(),
+    }
 }
 
 /// The text of one option in `--help`: from its flag line up to the next flag line.
@@ -132,33 +212,112 @@ fn flag_block(help: &str, flag: &str) -> String {
     block
 }
 
-fn between<'a>(text: &'a str, open: char, close: char) -> Option<&'a str> {
+fn between(text: &str, open: char, close: char) -> Option<&str> {
     let start = text.find(open)? + 1;
     let end = text[start..].find(close)? + start;
     Some(&text[start..end])
 }
 
 fn quoted(text: &str, quote: char) -> Vec<String> {
-    text.split(quote).enumerate().filter(|(i, _)| i % 2 == 1).map(|(_, s)| s.to_string()).collect()
+    text.split(quote)
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|(_, s)| s.to_string())
+        .collect()
 }
 
-fn claude() -> Caps {
-    let version = run("claude", &["--version"]);
-    if version.trim().is_empty() {
-        return Caps { detected: true, ..Default::default() };
+fn not_installed() -> Caps {
+    Caps {
+        detected: true,
+        ..Default::default()
     }
-    let help = run("claude", &["--help"]);
-    let mode_block = flag_block(&help, "--permission-mode").replace('\n', " ");
-    let modes = quoted(mode_block.split("choices:").nth(1).unwrap_or(""), '"').iter().map(|v| choice(v)).collect();
-    let effort_block = flag_block(&help, "--effort").replace('\n', " ");
+}
+
+fn claude(bin: &str) -> Caps {
+    let version = run(bin, &["--version"]);
+    if version.trim().is_empty() {
+        return not_installed();
+    }
+    let mut caps = parse_claude(&version, &run(bin, &["--help"]));
+    // `/model` is answered by Claude Code itself (no model call, nothing saved): it names
+    // the default model with its version and lists the aliases.
+    let menu = run_quiet(
+        bin,
+        &["-p", "/model", "--no-session-persistence"],
+        Duration::from_secs(20),
+    );
+    // The model ids this build of Claude Code knows, and the ones used here before.
+    let known = crate::updater::resolve(bin)
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .filter(|p| p.metadata().is_ok_and(|m| m.len() < 600 << 20))
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|bytes| crate::models::claude_ids_in(&bytes))
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let used = crate::models::claude_used_ids(&home);
+    let aliases: Vec<String> = caps.models.iter().map(|m| m.choice.value.clone()).collect();
+    let (models, default) = crate::models::claude_menu(&menu, &aliases, &known, &used);
+    if !models.is_empty() {
+        caps.models = models;
+    }
+    caps.default_model = default;
+    caps
+}
+
+/// Run a CLI for a short answer, outside any agent session, giving up after `limit`.
+fn run_quiet(bin: &str, args: &[&str], limit: Duration) -> String {
+    use std::io::Read;
+    let Ok(mut child) = Command::new(bin)
+        .args(args)
+        .env_remove("CLAUDE_CODE_CHILD_SESSION")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return String::new();
+    };
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return String::new();
+            }
+        }
+    }
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut out);
+    }
+    out
+}
+
+/// Claude Code: modes, efforts and model aliases from `claude --help`.
+fn parse_claude(version: &str, help: &str) -> Caps {
+    let mode_block = flag_block(help, "--permission-mode").replace('\n', " ");
+    let modes = quoted(mode_block.split("choices:").nth(1).unwrap_or(""), '"')
+        .iter()
+        .map(|v| choice(v))
+        .collect();
+    let effort_block = flag_block(help, "--effort").replace('\n', " ");
     let efforts = between(&effort_block, '(', ')')
         .map(|list| list.split(',').map(|v| choice(v.trim())).collect())
         .unwrap_or_default();
-    let model_block = flag_block(&help, "--model").replace('\n', " ");
+    let model_block = flag_block(help, "--model").replace('\n', " ");
     let models = quoted(&model_block, '\'')
         .into_iter()
         .filter(|v| !v.contains(' '))
-        .map(|alias| ModelInfo { choice: choice(&alias), ..Default::default() })
+        .map(|alias| ModelInfo {
+            choice: choice(&alias),
+            ..Default::default()
+        })
         .collect();
     Caps {
         installed: true,
@@ -171,18 +330,52 @@ fn claude() -> Caps {
     }
 }
 
-fn codex() -> Caps {
-    let version = run("codex", &["--version"]);
+fn codex(bin: &str) -> Caps {
+    let version = run(bin, &["--version"]);
     if version.trim().is_empty() {
-        return Caps { detected: true, ..Default::default() };
+        return not_installed();
     }
-    let exec_help = run("codex", &["exec", "--help"]).replace("\r", "");
-    let sandbox_block = flag_block(&exec_help, "--sandbox").replace('\n', " ");
-    let modes = between(sandbox_block.split("possible values:").nth(1).map(|s| format!("[{s}")).as_deref().unwrap_or(""), '[', ']')
-        .map(|list| list.split(',').map(|v| choice(v.trim())).collect())
-        .unwrap_or_default();
+    // Models, reasoning levels and service tiers come from Codex's own cache for this account.
+    let cache = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join(".codex")
+                .join("models_cache.json")
+        })
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    parse_codex(
+        &version,
+        &run(bin, &["exec", "--help"]),
+        &run(bin, &["--help"]),
+        cache.as_ref(),
+    )
+}
 
-    let top_help = run("codex", &["--help"]);
+/// Codex: sandbox modes from `codex exec --help`, approval policies from `codex --help`,
+/// and models from `~/.codex/models_cache.json`.
+fn parse_codex(
+    version: &str,
+    exec_help: &str,
+    top_help: &str,
+    cache: Option<&serde_json::Value>,
+) -> Caps {
+    let exec_help = exec_help.replace("\r", "");
+    let sandbox_block = flag_block(&exec_help, "--sandbox").replace('\n', " ");
+    let modes = between(
+        sandbox_block
+            .split("possible values:")
+            .nth(1)
+            .map(|s| format!("[{s}"))
+            .as_deref()
+            .unwrap_or(""),
+        '[',
+        ']',
+    )
+    .map(|list| list.split(',').map(|v| choice(v.trim())).collect())
+    .unwrap_or_default();
+
     let mut approvals = Vec::new();
     let mut inside = false;
     for line in top_help.lines() {
@@ -194,27 +387,33 @@ fn codex() -> Caps {
             let t = line.trim();
             if let Some(rest) = t.strip_prefix("- ") {
                 let (name, desc) = rest.split_once(':').unwrap_or((rest, ""));
-                approvals.push(Choice { value: name.trim().to_string(), label: pretty(name.trim()), desc: desc.trim().to_string() });
+                approvals.push(Choice {
+                    value: name.trim().to_string(),
+                    label: pretty(name.trim()),
+                    desc: desc.trim().to_string(),
+                });
             } else if t.starts_with('-') && !t.starts_with("- ") {
                 break;
             }
         }
     }
 
-    // Models, reasoning levels and service tiers come from Codex's own cache for this account.
     let mut models: Vec<(i64, ModelInfo)> = Vec::new();
-    let cache = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|h| std::path::PathBuf::from(h).join(".codex").join("models_cache.json"))
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    if let Some(list) = cache.as_ref().and_then(|v| v.get("models")).and_then(|m| m.as_array()) {
+    if let Some(list) = cache
+        .and_then(|v| v.get("models"))
+        .and_then(|m| m.as_array())
+    {
         for m in list {
             if m.get("visibility").and_then(|v| v.as_str()) != Some("list") {
                 continue;
             }
-            let Some(slug) = m.get("slug").and_then(|v| v.as_str()) else { continue };
-            let name = m.get("display_name").and_then(|v| v.as_str()).unwrap_or(slug);
+            let Some(slug) = m.get("slug").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let name = m
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(slug);
             let desc = m.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let pick = |key: &str, id_key: &str, name_key: &str| -> Vec<Choice> {
                 m.get(key)
@@ -225,8 +424,16 @@ fn codex() -> Caps {
                                 let id = e.get(id_key)?.as_str()?;
                                 Some(Choice {
                                     value: id.to_string(),
-                                    label: e.get(name_key).and_then(|n| n.as_str()).map(str::to_string).unwrap_or_else(|| pretty(id)),
-                                    desc: e.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+                                    label: e
+                                        .get(name_key)
+                                        .and_then(|n| n.as_str())
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| pretty(id)),
+                                    desc: e
+                                        .get("description")
+                                        .and_then(|d| d.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
                                 })
                             })
                             .collect()
@@ -236,7 +443,11 @@ fn codex() -> Caps {
             models.push((
                 m.get("priority").and_then(|p| p.as_i64()).unwrap_or(999),
                 ModelInfo {
-                    choice: Choice { value: slug.to_string(), label: name.to_string(), desc: desc.to_string() },
+                    choice: Choice {
+                        value: slug.to_string(),
+                        label: name.to_string(),
+                        desc: desc.to_string(),
+                    },
                     efforts: pick("supported_reasoning_levels", "effort", "effort"),
                     tiers: pick("service_tiers", "id", "name"),
                 },
@@ -246,7 +457,11 @@ fn codex() -> Caps {
     models.sort_by_key(|(p, _)| *p);
     Caps {
         installed: true,
-        version: version.trim().trim_start_matches("codex-cli").trim().to_string(),
+        version: version
+            .trim()
+            .trim_start_matches("codex-cli")
+            .trim()
+            .to_string(),
         models: models.into_iter().map(|(_, m)| m).collect(),
         modes,
         approvals,
@@ -255,62 +470,138 @@ fn codex() -> Caps {
     }
 }
 
-fn opencode() -> Caps {
-    let version = run("opencode", &["--version"]);
+fn opencode(bin: &str) -> Caps {
+    let version = run(bin, &["--version"]);
     if version.trim().is_empty() {
-        return Caps { detected: true, ..Default::default() };
+        return not_installed();
     }
-    let models = run("opencode", &["models"])
+    parse_opencode(
+        &version,
+        &run(bin, &["models"]),
+        &run(bin, &["agent", "list"]),
+        &run(bin, &["run", "--help"]),
+    )
+}
+
+/// OpenCode: models from `opencode models`, agents from `opencode agent list`, and whether
+/// `opencode run` accepts `--auto`.
+fn parse_opencode(version: &str, models: &str, agents: &str, run_help: &str) -> Caps {
+    let models = models
         .lines()
         .map(str::trim)
         .filter(|l| l.contains('/') && !l.contains(' '))
-        .map(|l| ModelInfo { choice: Choice { value: l.to_string(), label: l.to_string(), desc: String::new() }, ..Default::default() })
-        .collect();
-    // `opencode agent list` prints `name (primary|subagent)` followed by a JSON permission dump.
-    let agents = run("opencode", &["agent", "list"])
-        .lines()
-        .filter(|l| !l.starts_with(' ') && !l.is_empty() && !l.starts_with('[') && !l.starts_with(']'))
-        .filter(|l| !["compaction", "summary", "title"].iter().any(|hidden| l.starts_with(hidden)))
-        .filter_map(|l| {
-            let (name, kind) = l.split_once(" (")?;
-            Some(Choice { value: name.to_string(), label: pretty(name), desc: kind.trim_end_matches(')').to_string() })
+        .map(|l| ModelInfo {
+            choice: Choice {
+                value: l.to_string(),
+                label: l.to_string(),
+                desc: String::new(),
+            },
+            ..Default::default()
         })
         .collect();
-    let run_help = run("opencode", &["run", "--help"]);
+    // `opencode agent list` prints `name (primary|subagent)` followed by a JSON permission dump.
+    let agents = agents
+        .lines()
+        .filter(|l| {
+            !l.starts_with(' ') && !l.is_empty() && !l.starts_with('[') && !l.starts_with(']')
+        })
+        .filter(|l| {
+            !["compaction", "summary", "title"]
+                .iter()
+                .any(|hidden| l.starts_with(hidden))
+        })
+        .filter_map(|l| {
+            let (name, kind) = l.split_once(" (")?;
+            Some(Choice {
+                value: name.to_string(),
+                label: pretty(name),
+                desc: kind.trim_end_matches(')').to_string(),
+            })
+        })
+        .collect();
     let mut modes = Vec::new();
     if run_help.contains("--auto") {
-        modes.push(Choice { value: "auto".into(), label: "Auto-approve".into(), desc: "Approve permissions that are not explicitly denied".into() });
+        modes.push(Choice {
+            value: "auto".into(),
+            label: "Auto-approve".into(),
+            desc: "Approve permissions that are not explicitly denied".into(),
+        });
     }
-    Caps { installed: true, version: version.trim().to_string(), models, modes, agents, detected: true, ..Default::default() }
+    Caps {
+        installed: true,
+        version: version.trim().to_string(),
+        models,
+        modes,
+        agents,
+        detected: true,
+        ..Default::default()
+    }
 }
 
 fn with_default(label: &str, mut rest: Vec<Choice>) -> Vec<Choice> {
-    rest.insert(0, Choice { value: String::new(), label: label.to_string(), desc: String::new() });
+    rest.insert(
+        0,
+        Choice {
+            value: String::new(),
+            label: label.to_string(),
+            desc: String::new(),
+        },
+    );
     rest
 }
 
 /// The composer dropdowns for a provider, given the session's current selections.
 pub fn controls(provider: &str, sel: &HashMap<String, String>) -> Vec<Control> {
-    let caps = get(provider);
+    controls_for(provider, &get(provider), sel)
+}
+
+fn controls_for(provider: &str, caps: &Caps, sel: &HashMap<String, String>) -> Vec<Control> {
     let value = |id: &str| sel.get(id).cloned().unwrap_or_default();
     let mut out = Vec::new();
     let model_choices: Vec<Choice> = caps.models.iter().map(|m| m.choice.clone()).collect();
     if !model_choices.is_empty() {
-        out.push(Control { id: "model", label: "Model".into(), choices: with_default("Default", model_choices) });
+        out.push(Control {
+            id: "model",
+            label: "Model".into(),
+            choices: with_default(
+                &if caps.default_model.is_empty() {
+                    "Default".to_string()
+                } else {
+                    format!("Default · {}", caps.default_model)
+                },
+                model_choices,
+            ),
+        });
     }
     // Effort / tier follow the selected model, or the first listed one when none is chosen.
-    let current = caps.models.iter().find(|m| m.choice.value == value("model")).or_else(|| caps.models.first());
+    let current = caps
+        .models
+        .iter()
+        .find(|m| m.choice.value == value("model"))
+        .or_else(|| caps.models.first());
     let efforts = match current {
         Some(m) if !m.efforts.is_empty() => m.efforts.clone(),
         _ => caps.efforts.clone(),
     };
     if !efforts.is_empty() {
-        let label = if provider == "codex" { "Reasoning" } else { "Effort" };
-        out.push(Control { id: "effort", label: label.into(), choices: with_default("Default", efforts) });
+        let label = if provider == "codex" {
+            "Reasoning"
+        } else {
+            "Effort"
+        };
+        out.push(Control {
+            id: "effort",
+            label: label.into(),
+            choices: with_default("Default", efforts),
+        });
     }
     if let Some(m) = current {
         if !m.tiers.is_empty() {
-            out.push(Control { id: "tier", label: "Speed".into(), choices: with_default("Standard", m.tiers.clone()) });
+            out.push(Control {
+                id: "tier",
+                label: "Speed".into(),
+                choices: with_default("Standard", m.tiers.clone()),
+            });
         }
     }
     if !caps.modes.is_empty() {
@@ -319,15 +610,221 @@ pub fn controls(provider: &str, sel: &HashMap<String, String>) -> Vec<Control> {
             "opencode" => "Permissions",
             _ => "Permission",
         };
-        out.push(Control { id: "mode", label: label.into(), choices: with_default("Default", caps.modes.clone()) });
+        out.push(Control {
+            id: "mode",
+            label: label.into(),
+            choices: with_default("Default", caps.modes.clone()),
+        });
     }
     if !caps.approvals.is_empty() {
-        out.push(Control { id: "approval", label: "Approval".into(), choices: with_default("Default", caps.approvals.clone()) });
+        out.push(Control {
+            id: "approval",
+            label: "Approval".into(),
+            choices: with_default("Default", caps.approvals.clone()),
+        });
     }
     if !caps.agents.is_empty() {
-        out.push(Control { id: "agent", label: "Agent".into(), choices: with_default("Default", caps.agents.clone()) });
+        out.push(Control {
+            id: "agent",
+            label: "Agent".into(),
+            choices: with_default("Default", caps.agents.clone()),
+        });
     }
     out
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    fn values(choices: &[Choice]) -> Vec<&str> {
+        choices.iter().map(|c| c.value.as_str()).collect()
+    }
+
+    // Trimmed from `claude --help` 2.1.x; wrapping and apostrophes are as the CLI prints them.
+    const CLAUDE_HELP: &str = "Options:
+  --effort <level>                      Effort level for the current session
+                                        (low, medium, high, xhigh, max)
+  --fallback-model <model>              Enable automatic fallback
+  --model <model>                       Model for the current session. Provide
+                                        an alias for the latest model (e.g.
+                                        'fable', 'opus', or 'sonnet') or a
+                                        model's full name.
+  --permission-mode <mode>              Permission mode to use for the session
+                                        (choices: \"acceptEdits\", \"auto\",
+                                        \"bypassPermissions\", \"manual\",
+                                        \"dontAsk\", \"plan\")
+  -r, --resume [value]                  Resume a conversation by session ID
+";
+
+    #[test]
+    fn parses_claude_help() {
+        let caps = parse_claude("2.1.296 (Claude Code)\n", CLAUDE_HELP);
+        assert!(caps.installed && caps.detected);
+        assert_eq!(caps.version, "2.1.296");
+        assert_eq!(
+            values(&caps.modes),
+            [
+                "acceptEdits",
+                "auto",
+                "bypassPermissions",
+                "manual",
+                "dontAsk",
+                "plan"
+            ]
+        );
+        assert_eq!(caps.modes[0].label, "Accept edits");
+        assert_eq!(
+            values(&caps.efforts),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        let models: Vec<&str> = caps
+            .models
+            .iter()
+            .map(|m| m.choice.value.as_str())
+            .collect();
+        assert_eq!(models, ["fable", "opus", "sonnet"]);
+    }
+
+    #[test]
+    fn parses_codex_help_and_model_cache() {
+        let exec_help = "Usage: codex exec [OPTIONS] [PROMPT]\r
+  -m, --model <MODEL>\r
+          Model the agent should use\r
+  -s, --sandbox <SANDBOX_MODE>\r
+          Select the sandbox policy to use when executing model-generated shell commands\r
+\r
+          [possible values: read-only, workspace-write, danger-full-access]\r
+  -p, --profile <CONFIG_PROFILE>\r
+";
+        let top_help = "  -a, --ask-for-approval <APPROVAL_POLICY>
+          Configure when the model requires human approval before executing a command
+
+          Possible values:
+          - untrusted:  Only run trusted commands without asking
+          - on-request: The model decides when to ask the user for approval
+          - never:      Never ask for user approval
+
+  -c, --config <key=value>
+          - not: an approval
+";
+        let cache: serde_json::Value = serde_json::from_str(
+            r#"{"models":[
+              {"slug":"gpt-mini","display_name":"GPT mini","priority":5,"visibility":"list",
+               "supported_reasoning_levels":[{"effort":"low"},{"effort":"high","description":"Deep"}]},
+              {"slug":"hidden","visibility":"hide","priority":0},
+              {"slug":"gpt-big","priority":1,"visibility":"list","description":"Best",
+               "service_tiers":[{"id":"priority","name":"Fast"}]},
+              {"visibility":"list"}
+            ]}"#,
+        )
+        .unwrap();
+        let caps = parse_codex("codex-cli 0.50.1\n", exec_help, top_help, Some(&cache));
+        assert_eq!(caps.version, "0.50.1");
+        assert_eq!(
+            values(&caps.modes),
+            ["read-only", "workspace-write", "danger-full-access"]
+        );
+        assert_eq!(
+            values(&caps.approvals),
+            ["untrusted", "on-request", "never"]
+        );
+        assert_eq!(caps.approvals[2].desc, "Never ask for user approval");
+        let models: Vec<&str> = caps
+            .models
+            .iter()
+            .map(|m| m.choice.value.as_str())
+            .collect();
+        assert_eq!(
+            models,
+            ["gpt-big", "gpt-mini"],
+            "sorted by priority, hidden ones skipped"
+        );
+        assert_eq!(caps.models[0].choice.label, "gpt-big");
+        assert_eq!(caps.models[0].tiers[0].label, "Fast");
+        assert_eq!(values(&caps.models[1].efforts), ["low", "high"]);
+        assert_eq!(caps.models[1].efforts[1].desc, "Deep");
+
+        let bare = parse_codex("codex-cli 1.0", "", "", None);
+        assert!(bare.installed && bare.models.is_empty() && bare.modes.is_empty());
+    }
+
+    #[test]
+    fn parses_opencode_output() {
+        let models = "opencode/big-pickle\nanthropic/claude-x\nnot a model\n  \n";
+        let agents = "build (primary)\n  {\n    \"edit\": \"allow\"\n  }\nplan (primary)\ngeneral (subagent)\ntitle (primary)\n[\n]\n";
+        let caps = parse_opencode("1.2.3\n", models, agents, "  --auto  approve\n");
+        assert_eq!(caps.version, "1.2.3");
+        assert_eq!(caps.models.len(), 2);
+        assert_eq!(values(&caps.agents), ["build", "plan", "general"]);
+        assert_eq!(caps.agents[2].desc, "subagent");
+        assert_eq!(values(&caps.modes), ["auto"]);
+        assert!(parse_opencode("1", "", "", "").modes.is_empty());
+    }
+
+    #[test]
+    fn composer_controls_follow_the_selected_model() {
+        let level = |v: &str| Choice {
+            value: v.into(),
+            label: pretty(v),
+            desc: String::new(),
+        };
+        let caps = Caps {
+            installed: true,
+            detected: true,
+            models: vec![
+                ModelInfo {
+                    choice: level("a"),
+                    efforts: vec![level("low")],
+                    tiers: vec![],
+                },
+                ModelInfo {
+                    choice: level("b"),
+                    efforts: vec![level("high"), level("max")],
+                    tiers: vec![level("priority")],
+                },
+            ],
+            modes: vec![level("read-only")],
+            approvals: vec![level("never")],
+            ..Default::default()
+        };
+        let ids = |c: &[Control]| c.iter().map(|c| c.id).collect::<Vec<_>>();
+        let none = controls_for("codex", &caps, &HashMap::new());
+        assert_eq!(ids(&none), ["model", "effort", "mode", "approval"]);
+        assert_eq!(none[1].label, "Reasoning");
+        assert_eq!(
+            values(&none[1].choices),
+            ["", "low"],
+            "first model's levels, after Default"
+        );
+        assert_eq!(none[2].label, "Sandbox");
+
+        let sel = HashMap::from([("model".to_string(), "b".to_string())]);
+        let b = controls_for("codex", &caps, &sel);
+        assert_eq!(ids(&b), ["model", "effort", "tier", "mode", "approval"]);
+        assert_eq!(values(&b[1].choices), ["", "high", "max"]);
+        assert_eq!(b[2].choices[0].label, "Standard");
+
+        assert!(controls_for("claude", &Caps::default(), &HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn prettifies_cli_values() {
+        assert_eq!(pretty("acceptEdits"), "Accept edits");
+        assert_eq!(pretty("workspace-write"), "Workspace write");
+        assert_eq!(pretty("on_request"), "On request");
+        assert_eq!(pretty(""), "");
+    }
+
+    #[test]
+    fn flag_block_stops_at_the_next_flag() {
+        let help = "  --a <x>  first\n           more\n  --b      second\n";
+        assert_eq!(
+            flag_block(help, "--a"),
+            "  --a <x>  first\n           more\n"
+        );
+        assert_eq!(flag_block(help, "--zzz"), "");
+    }
 }
 
 #[cfg(test)]
@@ -340,11 +837,20 @@ mod tests {
 
     #[test]
     fn parses_claude_help_when_installed() {
-        let caps = claude();
+        let caps = claude("claude");
         if !caps.installed {
             return;
         }
-        println!("claude {} modes={:?} efforts={:?} models={:?}", caps.version, names(&caps.modes), names(&caps.efforts), caps.models.iter().map(|m| m.choice.value.as_str()).collect::<Vec<_>>());
+        println!(
+            "claude {} modes={:?} efforts={:?} models={:?}",
+            caps.version,
+            names(&caps.modes),
+            names(&caps.efforts),
+            caps.models
+                .iter()
+                .map(|m| m.choice.value.as_str())
+                .collect::<Vec<_>>()
+        );
         assert!(caps.modes.iter().any(|m| m.value == "plan"));
         assert!(caps.efforts.iter().any(|m| m.value == "high"));
         assert!(!caps.models.is_empty());
@@ -352,22 +858,37 @@ mod tests {
 
     #[test]
     fn parses_codex_when_installed() {
-        let caps = codex();
+        let caps = codex("codex");
         if !caps.installed {
             return;
         }
-        println!("codex {} modes={:?} approvals={:?} models={:?}", caps.version, names(&caps.modes), names(&caps.approvals), caps.models.iter().map(|m| (m.choice.value.as_str(), m.efforts.len(), m.tiers.len())).collect::<Vec<_>>());
+        println!(
+            "codex {} modes={:?} approvals={:?} models={:?}",
+            caps.version,
+            names(&caps.modes),
+            names(&caps.approvals),
+            caps.models
+                .iter()
+                .map(|m| (m.choice.value.as_str(), m.efforts.len(), m.tiers.len()))
+                .collect::<Vec<_>>()
+        );
         assert!(caps.modes.iter().any(|m| m.value == "read-only"));
         assert!(caps.approvals.iter().any(|m| m.value == "never"));
     }
 
     #[test]
     fn parses_opencode_when_installed() {
-        let caps = opencode();
+        let caps = opencode("opencode");
         if !caps.installed {
             return;
         }
-        println!("opencode {} models={} agents={:?} modes={:?}", caps.version, caps.models.len(), names(&caps.agents), names(&caps.modes));
+        println!(
+            "opencode {} models={} agents={:?} modes={:?}",
+            caps.version,
+            caps.models.len(),
+            names(&caps.agents),
+            names(&caps.modes)
+        );
         assert!(!caps.models.is_empty());
     }
 }

@@ -25,6 +25,36 @@ fn git(dir: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Keep `pattern` out of `git status` for this repository and all its worktrees,
+/// without touching any tracked file (.git/info/exclude).
+pub fn exclude(dir: &str, pattern: &str) {
+    let Ok(common) = git(dir, &["rev-parse", "--git-common-dir"]) else {
+        return;
+    };
+    let common = Path::new(dir).join(common.trim());
+    let file = common.join("info").join("exclude");
+    let current = std::fs::read_to_string(&file).unwrap_or_default();
+    if current.lines().any(|l| l.trim() == pattern) {
+        return;
+    }
+    let _ = std::fs::create_dir_all(common.join("info"));
+    let sep = if current.is_empty() || current.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = std::fs::write(&file, format!("{current}{sep}{pattern}\n"));
+}
+
+/// The last `n` commits, one line each.
+pub fn recent_commits(dir: &str, n: usize) -> String {
+    git(
+        dir,
+        &["log", &format!("-{n}"), "--oneline", "--no-decorate"],
+    )
+    .unwrap_or_default()
+}
+
 pub fn is_repo(dir: &str) -> bool {
     git(dir, &["rev-parse", "--is-inside-work-tree"]).is_ok()
 }
@@ -47,29 +77,41 @@ pub fn sanitize_branch(input: &str) -> String {
             }
         })
         .collect();
-    cleaned.trim_matches(|c| c == '-' || c == '/' || c == '.').to_string()
+    cleaned
+        .trim_matches(|c| c == '-' || c == '/' || c == '.')
+        .to_string()
 }
 
-/// Create `<repo-parent>/.runo-worktrees/<repo-name>/<branch>` on a new (or existing) branch.
-pub fn add_worktree(repo: &str, branch: &str) -> Result<String, String> {
+/// Where an isolated session's worktree lives: `<repo-parent>/.runo-worktrees/<repo>/<branch>`.
+pub fn worktree_path(repo: &str, branch: &str) -> std::path::PathBuf {
     let repo_path = Path::new(repo);
     let name = repo_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "repo".into());
-    let dest = repo_path
+    repo_path
         .parent()
         .unwrap_or(repo_path)
         .join(".runo-worktrees")
         .join(name)
-        .join(branch.replace('/', "-"));
+        .join(branch.replace('/', "-"))
+}
+
+/// Create the session worktree on a new (or existing) branch.
+pub fn add_worktree(repo: &str, branch: &str) -> Result<String, String> {
+    let dest = worktree_path(repo, branch);
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
     let dest_str = dest.to_string_lossy().into_owned();
     let exists = git(
         repo,
-        &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .is_ok();
     if exists {
@@ -86,7 +128,7 @@ pub fn remove_worktree(repo: &str, dir: &str) -> Result<(), String> {
 
 pub fn changes(dir: &str) -> Vec<Change> {
     let mut numstat = std::collections::HashMap::new();
-    if let Ok(out) = git(dir, &["diff", "HEAD", "--numstat"]) {
+    if let Ok(out) = git(dir, &["diff", "HEAD", "--numstat", "--no-renames"]) {
         for line in out.lines() {
             let mut parts = line.splitn(3, '\t');
             if let (Some(a), Some(r), Some(path)) = (parts.next(), parts.next(), parts.next()) {
@@ -104,7 +146,12 @@ pub fn changes(dir: &str) -> Vec<Change> {
             continue;
         }
         let code = line[..2].trim().to_string();
-        let path = line[3..].rsplit(" -> ").next().unwrap_or("").trim_matches('"').to_string();
+        let path = line[3..]
+            .rsplit(" -> ")
+            .next()
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_string();
         let (added, removed) = if code == "??" {
             let lines = std::fs::read_to_string(Path::new(dir).join(&path))
                 .map(|t| t.lines().count())
@@ -123,10 +170,17 @@ pub fn changes(dir: &str) -> Vec<Change> {
     result
 }
 
+#[cfg(test)]
 pub fn file_diff(dir: &str, path: &str) -> String {
+    file_diff_context(dir, path, false)
+}
+
+/// The diff of one file; with `whole` every unchanged line is included as context.
+pub fn file_diff_context(dir: &str, path: &str, whole: bool) -> String {
     let tracked = git(dir, &["ls-files", "--error-unmatch", "--", path]).is_ok();
     let out = if tracked {
-        git(dir, &["diff", "HEAD", "--", path])
+        let context = if whole { "-U100000" } else { "-U3" };
+        git(dir, &["diff", context, "HEAD", "--", path])
     } else {
         // `--no-index` exits 1 when files differ, which `git()` reports as an error.
         Command::new("git")
@@ -141,9 +195,368 @@ pub fn file_diff(dir: &str, path: &str) -> String {
 }
 
 pub fn tracked_files(dir: &str) -> Vec<String> {
-    git(dir, &["ls-files", "--cached", "--others", "--exclude-standard"])
-        .map(|out| out.lines().take(2000).map(str::to_string).collect())
+    git(
+        dir,
+        &["ls-files", "--cached", "--others", "--exclude-standard"],
+    )
+    .map(|out| out.lines().take(2000).map(str::to_string).collect())
+    .unwrap_or_default()
+}
+
+/// Copy git-ignored files that match the repository's `.worktreeinclude` patterns
+/// (gitignore syntax, e.g. `.env` or `config/*.local.json`) into a new worktree, so
+/// it has the local secrets and config a fresh checkout lacks. Returns the files copied.
+pub fn copy_included(repo: &str, worktree: &str) -> Result<Vec<String>, String> {
+    let include = Path::new(repo).join(".worktreeinclude");
+    if !include.is_file() {
+        return Ok(Vec::new());
+    }
+    let include = include.to_string_lossy().into_owned();
+    let listed = |extra: &[&str]| -> Result<Vec<String>, String> {
+        let mut args = vec!["ls-files", "--others", "--ignored"];
+        args.extend_from_slice(extra);
+        Ok(git(repo, &args)?.lines().map(str::to_string).collect())
+    };
+    // Only files that git ignores qualify: tracked files are already in the worktree.
+    let ignored: std::collections::HashSet<String> =
+        listed(&["--exclude-standard"])?.into_iter().collect();
+    let mut copied = Vec::new();
+    for path in listed(&[&format!("--exclude-from={include}")])? {
+        if !ignored.contains(&path) {
+            continue;
+        }
+        let dest = Path::new(worktree).join(&path);
+        if dest.exists() {
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::copy(Path::new(repo).join(&path), &dest).map_err(|e| format!("{path}: {e}"))?;
+        copied.push(path);
+    }
+    Ok(copied)
+}
+
+/// Throw away the working-tree and staged changes to one file. Files that are new
+/// since the last commit are deleted.
+pub fn discard(dir: &str, path: &str) -> Result<(), String> {
+    if git(dir, &["cat-file", "-e", &format!("HEAD:{path}")]).is_ok() {
+        git(
+            dir,
+            &[
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                path,
+            ],
+        )
+        .map(|_| ())
+    } else {
+        git(
+            dir,
+            &["rm", "-q", "--cached", "--ignore-unmatch", "--", path],
+        )?;
+        match std::fs::remove_file(Path::new(dir).join(path)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Stage everything and commit it. Returns the short hash of the new commit.
+pub fn commit_all(dir: &str, message: &str) -> Result<String, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("Write a commit message first.".into());
+    }
+    git(dir, &["add", "-A"])?;
+    git(dir, &["commit", "-q", "-m", message])?;
+    git(dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string())
+}
+
+/// Run git with a private index file, so snapshots never touch the user's staging area.
+fn git_index(dir: &str, index: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .output()
+        .map_err(|error| format!("could not run git: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+fn temp_index(dir: &str) -> std::path::PathBuf {
+    let git_dir = git(dir, &["rev-parse", "--absolute-git-dir"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Path::new(&git_dir).join(format!("runo-index-{}-{nanos}", std::process::id()))
+}
+
+/// Tree id of the whole working tree (tracked and untracked, minus ignored files).
+fn snapshot_tree(dir: &str) -> Result<(String, std::path::PathBuf), String> {
+    let index = temp_index(dir);
+    // Start from HEAD's index when there is one, so unchanged files cost nothing.
+    let _ = git_index(dir, &index, &["read-tree", "HEAD"]);
+    git_index(dir, &index, &["add", "-A", "--", "."])?;
+    let tree = git_index(dir, &index, &["write-tree"])?.trim().to_string();
+    Ok((tree, index))
+}
+
+/// Snapshot the working tree as a commit that no branch points at, so a turn can be undone.
+/// Returns its id. The commit is kept alive by a ref under `refs/runo/`.
+pub fn checkpoint(dir: &str) -> Result<String, String> {
+    let (tree, index) = snapshot_tree(dir)?;
+    let _ = std::fs::remove_file(&index);
+    let mut args = vec!["commit-tree", tree.as_str(), "-m", "runo checkpoint"];
+    let head = git(dir, &["rev-parse", "-q", "--verify", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if !head.is_empty() {
+        args.extend(["-p", head.as_str()]);
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(&args)
+        .env("GIT_AUTHOR_NAME", "Runo")
+        .env("GIT_AUTHOR_EMAIL", "runo@localhost")
+        .env("GIT_COMMITTER_NAME", "Runo")
+        .env("GIT_COMMITTER_EMAIL", "runo@localhost")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let _ = git(
+        dir,
+        &[
+            "update-ref",
+            &format!("refs/runo/checkpoints/{commit}"),
+            &commit,
+        ],
+    );
+    Ok(commit)
+}
+
+/// Files that differ between a checkpoint and the working tree now.
+pub fn changed_since(dir: &str, checkpoint: &str) -> Vec<String> {
+    let Ok((tree, index)) = snapshot_tree(dir) else {
+        return Vec::new();
+    };
+    let _ = std::fs::remove_file(&index);
+    git(dir, &["diff", "--name-only", checkpoint, &tree])
+        .map(|s| s.lines().map(String::from).collect())
         .unwrap_or_default()
+}
+
+/// Put the working tree back exactly as it was at the checkpoint: changed files are
+/// restored and files created since are deleted. Ignored files are left alone.
+pub fn restore(dir: &str, checkpoint: &str) -> Result<usize, String> {
+    let (tree, index) = snapshot_tree(dir)?;
+    let changed = git(
+        dir,
+        &["diff", "--name-status", "--no-renames", checkpoint, &tree],
+    );
+    let _ = std::fs::remove_file(&index);
+    let changed = changed?;
+    let mut count = 0;
+    for line in changed.lines() {
+        let Some((status, path)) = line.split_once('\t') else {
+            continue;
+        };
+        count += 1;
+        if status == "A" {
+            let _ = std::fs::remove_file(Path::new(dir).join(path));
+        } else {
+            let bytes = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["cat-file", "blob", &format!("{checkpoint}:{path}")])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !bytes.status.success() {
+                return Err(format!("could not read {path} from the checkpoint"));
+            }
+            let target = Path::new(dir).join(path);
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&target, bytes.stdout).map_err(|e| e.to_string())?;
+        }
+    }
+    // Keep the index in step for files that were staged or removed from it.
+    let _ = git(dir, &["add", "-u", "--", "."]);
+    let _ = git(dir, &["reset", "-q"]);
+    Ok(count)
+}
+
+/// The changes as one patch for writing a commit message: the diff against HEAD,
+/// plus the names of new files, cut to `limit` characters.
+pub fn patch_for_message(dir: &str, limit: usize) -> String {
+    let mut text = git(dir, &["diff", "HEAD", "--stat"]).unwrap_or_default();
+    let untracked = git(dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    if !untracked.trim().is_empty() {
+        text.push_str("\nNew files:\n");
+        text.push_str(&untracked);
+    }
+    text.push('\n');
+    text.push_str(&git(dir, &["diff", "HEAD"]).unwrap_or_default());
+    if text.len() > limit {
+        let mut cut = limit;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n[diff truncated]");
+    }
+    text
+}
+
+/// How the branch relates to its remote.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Sync {
+    /// The remote to push to, empty when the repository has none.
+    pub remote: String,
+    /// Whether the branch already tracks a remote branch.
+    pub upstream: bool,
+    /// Commits that are not on the remote yet.
+    pub ahead: usize,
+}
+
+pub fn sync_state(dir: &str) -> Sync {
+    let remotes = git(dir, &["remote"]).unwrap_or_default();
+    let remote = if remotes.lines().any(|r| r == "origin") {
+        "origin".to_string()
+    } else {
+        remotes.lines().next().unwrap_or("").to_string()
+    };
+    let count = |args: &[&str]| {
+        git(dir, args)
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+    };
+    let upstream_ahead = count(&["rev-list", "--count", "@{u}..HEAD"]);
+    let ahead = match upstream_ahead {
+        Some(n) => n,
+        // No upstream yet: count the commits no remote branch has.
+        None if !remote.is_empty() => {
+            count(&["rev-list", "--count", "HEAD", "--not", "--remotes"]).unwrap_or(0)
+        }
+        None => 0,
+    };
+    Sync {
+        remote,
+        upstream: upstream_ahead.is_some(),
+        ahead,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LineKind {
+    Hunk,
+    Added,
+    Removed,
+    Context,
+    /// Lines such as `\ No newline at end of file`.
+    Note,
+}
+
+/// One displayable row of a unified diff, with the line number to show beside it
+/// (the new file's number, or the old file's for removed lines).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DiffRow {
+    pub kind: LineKind,
+    pub number: Option<usize>,
+    pub text: String,
+}
+
+/// Start lines of a hunk header such as `@@ -12,7 +12,9 @@ fn x()`. A count may be
+/// omitted (`@@ -1 +1,3 @@`), so the numbers are read per side, not by position.
+fn hunk_starts(header: &str) -> Option<(usize, usize)> {
+    let mut parts = header.trim_start_matches('@').split_whitespace();
+    let start = |side: &str, sign: char| -> Option<usize> {
+        side.strip_prefix(sign)?.split(',').next()?.parse().ok()
+    };
+    let old = start(parts.next()?, '-')?;
+    let new = start(parts.next()?, '+')?;
+    Some((old, new))
+}
+
+/// Turn `git diff` output into rows, dropping file headers.
+pub fn diff_rows(diff: &str) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+    let (mut old, mut new) = (0usize, 0usize);
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("@@") {
+            if let Some((o, n)) = hunk_starts(line) {
+                (old, new) = (o, n);
+            }
+            in_hunk = true;
+            rows.push(DiffRow {
+                kind: LineKind::Hunk,
+                number: None,
+                text: line.to_string(),
+            });
+            continue;
+        }
+        if !in_hunk {
+            // `diff --git`, `index`, `---`, `+++`, `new file mode`… before the first hunk.
+            continue;
+        }
+        if line.starts_with("diff --git") {
+            in_hunk = false;
+            continue;
+        }
+        let text = line.get(1..).unwrap_or("").to_string();
+        let row = match line.chars().next() {
+            Some('+') => {
+                new += 1;
+                DiffRow {
+                    kind: LineKind::Added,
+                    number: Some(new - 1),
+                    text,
+                }
+            }
+            Some('-') => {
+                old += 1;
+                DiffRow {
+                    kind: LineKind::Removed,
+                    number: Some(old - 1),
+                    text,
+                }
+            }
+            Some('\\') => DiffRow {
+                kind: LineKind::Note,
+                number: None,
+                text: line.to_string(),
+            },
+            _ => {
+                old += 1;
+                new += 1;
+                DiffRow {
+                    kind: LineKind::Context,
+                    number: Some(new - 1),
+                    text,
+                }
+            }
+        };
+        rows.push(row);
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -151,8 +564,202 @@ mod tests {
     use super::*;
 
     fn sh(dir: &Path, args: &[&str]) {
-        let status = Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
         assert!(status.success());
+    }
+
+    fn repo(name: &str) -> std::path::PathBuf {
+        let repo = std::env::temp_dir().join(format!("runo-git-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q"]);
+        sh(&repo, &["config", "user.email", "t@t"]);
+        sh(&repo, &["config", "user.name", "t"]);
+        repo
+    }
+
+    #[test]
+    fn checkpoints_restore_the_working_tree() {
+        let repo = repo("checkpoint");
+        let dir = repo.to_str().unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        // Uncommitted work from before the turn must come back too.
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("draft.txt"), "draft\n").unwrap();
+        let cp = checkpoint(dir).unwrap();
+        // The "agent" edits, creates, deletes; ignored files are not touched.
+        std::fs::write(repo.join("a.txt"), "three\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        std::fs::remove_file(repo.join("draft.txt")).unwrap();
+        std::fs::write(repo.join("ignored.txt"), "keep\n").unwrap();
+        let mut changed = changed_since(dir, &cp);
+        changed.sort();
+        assert_eq!(changed, ["a.txt", "draft.txt", "new.txt"]);
+        assert_eq!(restore(dir, &cp).unwrap(), 3);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
+            "draft\n"
+        );
+        assert!(!repo.join("new.txt").exists());
+        assert!(repo.join("ignored.txt").exists());
+        assert!(changed_since(dir, &cp).is_empty());
+        // The user's own index was not used for snapshots.
+        assert!(git(dir, &["diff", "--cached", "--name-only"])
+            .unwrap()
+            .trim()
+            .is_empty());
+        assert!(patch_for_message(dir, 10_000).contains("draft.txt"));
+        assert!(file_diff_context(dir, "a.txt", true).contains("+two"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn diff_rows_number_each_side() {
+        let diff = "diff --git a/m.rs b/m.rs
+index 1..2 100644
+--- a/m.rs
++++ b/m.rs
+@@ -1 +1,3 @@
+-fn main() {}
++fn main() {
++    hi();
++}
+\\ No newline at end of file
+@@ -10,3 +12,3 @@ impl X {
+ keep
+-old
++new
+ 
+";
+        let rows = diff_rows(diff);
+        let shown: Vec<(LineKind, Option<usize>, &str)> = rows
+            .iter()
+            .map(|r| (r.kind, r.number, r.text.as_str()))
+            .collect();
+        use LineKind::*;
+        assert_eq!(
+            shown,
+            [
+                (Hunk, None, "@@ -1 +1,3 @@"),
+                (Removed, Some(1), "fn main() {}"),
+                (Added, Some(1), "fn main() {"),
+                (Added, Some(2), "    hi();"),
+                (Added, Some(3), "}"),
+                (Note, None, "\\ No newline at end of file"),
+                (Hunk, None, "@@ -10,3 +12,3 @@ impl X {"),
+                (Context, Some(12), "keep"),
+                (Removed, Some(11), "old"),
+                (Added, Some(13), "new"),
+                (Context, Some(14), ""),
+            ]
+        );
+        assert_eq!(hunk_starts("@@ -0,0 +1 @@"), Some((0, 1)));
+        assert_eq!(hunk_starts("@@ garbage @@"), None);
+        assert!(diff_rows("").is_empty());
+    }
+
+    #[test]
+    fn worktree_paths_sit_beside_the_repository() {
+        let p = worktree_path("/code/app", "feature/nav");
+        assert_eq!(p, Path::new("/code/.runo-worktrees/app/feature-nav"));
+    }
+
+    #[test]
+    fn branch_names_are_sanitized() {
+        assert_eq!(
+            sanitize_branch("  Fix the login bug! "),
+            "Fix-the-login-bug"
+        );
+        assert_eq!(sanitize_branch("feature/nav"), "feature/nav");
+        assert_eq!(sanitize_branch("/.weird-/"), "weird");
+        assert_eq!(sanitize_branch("ünïcode"), "n-code");
+        assert_eq!(sanitize_branch(""), "");
+    }
+
+    #[test]
+    fn non_repositories_are_detected() {
+        let dir = std::env::temp_dir().join(format!("runo-git-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The temp dir itself could sit inside a repository on some machines; only assert
+        // the parts that hold either way.
+        let d = dir.to_str().unwrap();
+        if !is_repo(d) {
+            assert!(changes(d).is_empty());
+            assert!(tracked_files(d).is_empty());
+            assert_eq!(current_branch(d), "");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deletions_renames_and_spaces() {
+        let repo = repo("kinds");
+        std::fs::write(repo.join("gone.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(repo.join("old name.txt"), "1\n2\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "init"]);
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        sh(&repo, &["mv", "old name.txt", "new name.txt"]);
+        let dir = repo.to_str().unwrap();
+        let found = changes(dir);
+        let gone = found.iter().find(|c| c.path == "gone.txt").unwrap();
+        assert_eq!(
+            (gone.status.as_str(), gone.added, gone.removed),
+            ("D", 0, 3)
+        );
+        let renamed = found.iter().find(|c| c.path == "new name.txt").unwrap();
+        assert_eq!(renamed.status, "R");
+        assert_eq!(renamed.added, 2, "renames count as the new file's lines");
+        assert!(file_diff(dir, "gone.txt").contains("-b"));
+        let files = tracked_files(dir);
+        assert!(files.contains(&"new name.txt".to_string()));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn fresh_repository_without_commits() {
+        let repo = repo("fresh");
+        std::fs::write(repo.join("first.txt"), "hello\n").unwrap();
+        let dir = repo.to_str().unwrap();
+        assert!(is_repo(dir));
+        let found = changes(dir);
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].status.as_str(), found[0].added), ("A", 1));
+        assert!(file_diff(dir, "first.txt").contains("+hello"));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn worktree_on_an_existing_branch() {
+        let repo = repo("existing");
+        std::fs::write(repo.join("a"), "a\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "init"]);
+        sh(&repo, &["branch", "topic"]);
+        let r = repo.to_str().unwrap();
+        let dir = add_worktree(r, "topic").unwrap();
+        assert_eq!(current_branch(&dir), "topic");
+        assert!(dir.contains(".runo-worktrees"));
+        remove_worktree(r, &dir).unwrap();
+        let _ = std::fs::remove_dir_all(
+            repo.parent()
+                .unwrap()
+                .join(".runo-worktrees")
+                .join(repo.file_name().unwrap()),
+        );
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     #[test]
@@ -186,5 +793,93 @@ mod tests {
         remove_worktree(repo_str, &dir).unwrap();
         assert!(!Path::new(&dir).exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discard_commit_and_sync() {
+        let repo = repo("ship");
+        let dir = repo.to_str().unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        assert_eq!(sync_state(dir), Sync::default());
+
+        // A modified tracked file goes back to its committed text, even when staged.
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        sh(&repo, &["add", "a.txt"]);
+        discard(dir, "a.txt").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        // New files are removed, staged or not.
+        std::fs::write(repo.join("new.txt"), "x").unwrap();
+        std::fs::write(repo.join("staged.txt"), "x").unwrap();
+        sh(&repo, &["add", "staged.txt"]);
+        discard(dir, "new.txt").unwrap();
+        discard(dir, "staged.txt").unwrap();
+        assert!(changes(dir).is_empty());
+
+        assert!(commit_all(dir, "  ").is_err());
+        std::fs::write(repo.join("b.txt"), "b").unwrap();
+        let hash = commit_all(dir, "Add b").unwrap();
+        assert!(!hash.is_empty());
+        assert!(changes(dir).is_empty());
+
+        // With a remote but no upstream, unpushed commits are counted.
+        let remote = repo.with_extension("remote");
+        let _ = std::fs::remove_dir_all(&remote);
+        sh(
+            Path::new("."),
+            &["init", "-q", "--bare", remote.to_str().unwrap()],
+        );
+        sh(
+            &repo,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        let s = sync_state(dir);
+        assert_eq!(
+            (s.remote.as_str(), s.upstream, s.ahead),
+            ("origin", false, 2)
+        );
+        sh(&repo, &["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(repo.join("c.txt"), "c").unwrap();
+        commit_all(dir, "Add c").unwrap();
+        let s = sync_state(dir);
+        assert_eq!((s.upstream, s.ahead), (true, 1));
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn worktreeinclude_copies_matching_ignored_files() {
+        let repo = repo("include");
+        let dir = repo.to_str().unwrap();
+        std::fs::write(repo.join(".gitignore"), ".env\n*.log\nsecrets/\n").unwrap();
+        std::fs::write(repo.join(".worktreeinclude"), ".env\nsecrets/\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join(".env"), "KEY=1").unwrap();
+        std::fs::write(repo.join("debug.log"), "noise").unwrap();
+        std::fs::create_dir_all(repo.join("secrets")).unwrap();
+        std::fs::write(repo.join("secrets/key.pem"), "pem").unwrap();
+        // Untracked but not ignored: the user's own work, never copied.
+        std::fs::write(repo.join("draft.txt"), "wip").unwrap();
+
+        let wt = add_worktree(dir, "include-test").unwrap();
+        let mut copied = copy_included(dir, &wt).unwrap();
+        copied.sort();
+        assert_eq!(copied, [".env", "secrets/key.pem"]);
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&wt).join(".env")).unwrap(),
+            "KEY=1"
+        );
+        assert!(!Path::new(&wt).join("debug.log").exists());
+        assert!(!Path::new(&wt).join("draft.txt").exists());
+        // Running again leaves existing files alone.
+        assert!(copy_included(dir, &wt).unwrap().is_empty());
+        remove_worktree(dir, &wt).unwrap();
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }

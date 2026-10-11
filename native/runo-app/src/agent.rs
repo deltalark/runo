@@ -16,22 +16,214 @@ pub struct Provider {
     pub color: u32,
 }
 
-pub const PROVIDERS: [Provider; 3] = [
-    Provider { id: "claude", name: "Claude Code", bin: "claude", mark: "✳", color: 0xd9633f },
-    Provider { id: "codex", name: "Codex", bin: "codex", mark: "◆", color: 0x1767e8 },
-    Provider { id: "opencode", name: "OpenCode", bin: "opencode", mark: ">_", color: 0x258a5b },
+pub const PROVIDERS: [Provider; 10] = [
+    Provider {
+        id: "claude",
+        name: "Claude Code",
+        bin: "claude",
+        mark: "✳",
+        color: 0xd9633f,
+    },
+    Provider {
+        id: "codex",
+        name: "Codex",
+        bin: "codex",
+        mark: "◆",
+        color: 0x1767e8,
+    },
+    Provider {
+        id: "opencode",
+        name: "OpenCode",
+        bin: "opencode",
+        mark: ">_",
+        color: 0x258a5b,
+    },
+    Provider {
+        id: "cursor",
+        name: "Cursor",
+        bin: "cursor-agent",
+        mark: "▲",
+        color: 0x7c7c86,
+    },
+    Provider {
+        id: "gemini",
+        name: "Gemini",
+        bin: "gemini",
+        mark: "✦",
+        color: 0x4f7cf7,
+    },
+    Provider {
+        id: "copilot",
+        name: "Copilot",
+        bin: "copilot",
+        mark: "◎",
+        color: 0x8957e5,
+    },
+    Provider {
+        id: "amp",
+        name: "Amp",
+        bin: "amp",
+        mark: "∿",
+        color: 0xe5484d,
+    },
+    Provider {
+        id: "droid",
+        name: "Droid",
+        bin: "droid",
+        mark: "◈",
+        color: 0xf27b2a,
+    },
+    Provider {
+        id: "qwen",
+        name: "Qwen Code",
+        bin: "qwen",
+        mark: "◇",
+        color: 0x615ced,
+    },
+    Provider {
+        id: "grok",
+        name: "Grok",
+        bin: "grok",
+        mark: "𝕏",
+        color: 0x9a9aa3,
+    },
 ];
 
+/// Whether the CLI keeps its own conversation that a follow-up can resume. Others get
+/// the recent conversation written into each follow-up prompt instead.
+pub fn resumes(provider: &str) -> bool {
+    matches!(
+        provider,
+        "claude"
+            | "codex"
+            | "opencode"
+            | "gemini"
+            | "qwen"
+            | "cursor"
+            | "copilot"
+            | "amp"
+            | "droid"
+    )
+}
+
+/// CLIs that take a conversation id chosen by Runo on the first run.
+pub fn names_conversation(provider: &str) -> bool {
+    matches!(provider, "claude" | "gemini" | "qwen")
+}
+
+/// CLIs whose JSON output carries the conversation id, read by `json_line`.
+pub fn reports_conversation(provider: &str) -> bool {
+    matches!(provider, "cursor" | "droid" | "amp" | "opencode")
+}
+
+/// What one line of JSON output from `cursor`, `droid`, `amp` or `opencode` holds.
+#[derive(Debug, Default, PartialEq)]
+pub struct JsonLine {
+    pub conversation: Option<String>,
+    pub text: Option<String>,
+    /// Final answer text, used only when no text arrived before it.
+    pub result: Option<String>,
+    pub steps: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// Read one line of an agent's JSON output; `None` when the line is not JSON.
+pub fn json_line(line: &str) -> Option<JsonLine> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if !v.is_object() {
+        return None;
+    }
+    let mut out = JsonLine {
+        conversation: ["session_id", "sessionID", "sessionId", "thread_id"]
+            .iter()
+            .find_map(|k| v[*k].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        ..Default::default()
+    };
+    let kind = v["type"].as_str().unwrap_or("");
+    match kind {
+        "result" => {
+            if v["is_error"] == true {
+                out.error = v["result"]
+                    .as_str()
+                    .or(v["error"].as_str())
+                    .map(str::to_string);
+            } else {
+                out.result = v["result"].as_str().map(str::to_string);
+            }
+        }
+        "assistant" => {
+            for block in v["message"]["content"].as_array().into_iter().flatten() {
+                match block["type"].as_str().unwrap_or("") {
+                    "text" => {
+                        let t = block["text"].as_str().unwrap_or("");
+                        if !t.trim().is_empty() {
+                            out.text = Some(match out.text.take() {
+                                Some(prev) => format!("{prev}\n{t}"),
+                                None => t.to_string(),
+                            });
+                        }
+                    }
+                    "tool_use" => out.steps.push(format!(
+                        "Used {}",
+                        block["name"].as_str().unwrap_or("a tool")
+                    )),
+                    _ => {}
+                }
+            }
+        }
+        // OpenCode: {"type":"text","part":{"text":…}} and {"type":"tool_use","part":{"tool":…}}.
+        "text" => out.text = v["part"]["text"].as_str().map(str::to_string),
+        "tool_use" => {
+            if let Some(tool) = v["part"]["tool"].as_str() {
+                out.steps.push(format!("Used {tool}"));
+            }
+        }
+        "error" => {
+            out.error = v["error"]["message"]
+                .as_str()
+                .or(v["error"].as_str())
+                .or(v["message"].as_str())
+                .map(str::to_string)
+        }
+        _ => {}
+    }
+    Some(out)
+}
+
 pub fn provider(id: &str) -> &'static Provider {
-    PROVIDERS.iter().find(|p| p.id == id).unwrap_or(&PROVIDERS[0])
+    PROVIDERS
+        .iter()
+        .find(|p| p.id == id)
+        .unwrap_or(&PROVIDERS[0])
+}
+
+/// Whether the agent can run: its configured executable exists, or with none
+/// configured, its default command is on PATH.
+pub fn available(bin: &str, configured: &str) -> bool {
+    let configured = configured.trim();
+    if configured.is_empty() {
+        installed(bin)
+    } else if configured.contains(std::path::MAIN_SEPARATOR) {
+        std::path::Path::new(configured).is_file()
+    } else {
+        installed(configured)
+    }
 }
 
 pub fn installed(bin: &str) -> bool {
-    let suffixes: &[&str] = if cfg!(windows) { &["", ".exe", ".cmd", ".bat"] } else { &[""] };
+    let suffixes: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
     std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths).any(|dir| {
-                suffixes.iter().any(|s| dir.join(format!("{bin}{s}")).is_file())
+                suffixes
+                    .iter()
+                    .any(|s| dir.join(format!("{bin}{s}")).is_file())
             })
         })
         .unwrap_or(false)
@@ -65,7 +257,22 @@ pub fn split_args(input: &str) -> Vec<String> {
 }
 
 fn list(input: &str) -> Vec<String> {
-    input.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect()
+    input
+        .split(',')
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+/// Display name for Runo's provider-neutral permission levels (Settings > Chat), which
+/// each agent maps to its closest mode when launched.
+pub fn generic_mode_label(mode: &str) -> Option<&'static str> {
+    match mode {
+        "edit" => Some("Auto edit"),
+        "plan" => Some("Plan only"),
+        "full" => Some("Full access"),
+        _ => None,
+    }
 }
 
 pub struct RunSpec<'a> {
@@ -77,6 +284,40 @@ pub struct RunSpec<'a> {
     pub opts: &'a AgentOptions,
     /// Whether the working directory is a git repository.
     pub in_git: bool,
+    /// Claude Code conversation id for this session; empty for sessions saved before ids.
+    pub session_id: &'a str,
+    /// Image files attached to the prompt.
+    pub images: &'a [String],
+    /// Runo's memory server for this folder: (Runo's executable, the session folder).
+    pub memory: Option<(&'a str, &'a str)>,
+}
+
+/// A random version-4 UUID, for naming a Claude Code conversation up front.
+pub fn new_uuid() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        hasher.write_usize(i);
+        chunk.copy_from_slice(&hasher.finish().to_le_bytes());
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 fn provider_args(spec: &RunSpec) -> Vec<String> {
@@ -121,16 +362,133 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             if !spec.in_git {
                 args.push(s("--skip-git-repo-check"));
             }
+            for over in crate::mcp::codex_overrides() {
+                args.extend([s("-c"), over]);
+            }
+            if let Some((exe, dir)) = spec.memory {
+                args.extend([
+                    s("-c"),
+                    format!("mcp_servers.{MEMORY_SERVER}.command={}", toml_string(exe)),
+                    s("-c"),
+                    format!(
+                        "mcp_servers.{MEMORY_SERVER}.args=[\"--mcp-memory\", {}]",
+                        toml_string(dir)
+                    ),
+                ]);
+            }
             args.extend(split_args(&opts.extra_args));
+            for image in spec.images {
+                args.extend([s("-i"), image.clone()]);
+            }
             if spec.resume {
-                args.extend([s("resume"), s("--last")]);
+                // A known conversation id resumes exactly that one; `--last` is the
+                // newest in the folder, which may belong to another session.
+                if spec.session_id.is_empty() {
+                    args.extend([s("resume"), s("--last")]);
+                } else {
+                    args.extend([s("resume"), spec.session_id.to_string()]);
+                }
             }
             args.push(spec.prompt.to_string());
         }
+        "cursor" => {
+            args.extend([s("-p"), s("--output-format"), s("json")]);
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("--resume"), spec.session_id.to_string()]);
+            }
+            if matches!(mode.as_str(), "" | "edit" | "full") {
+                args.push(s("--force"));
+            }
+            if !model.is_empty() {
+                args.extend([s("-m"), model]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.push(with_images(spec));
+        }
+        "gemini" | "qwen" => {
+            let approval = match mode.as_str() {
+                "plan" => "default",
+                "full" => "yolo",
+                _ => "auto_edit",
+            };
+            args.extend([s("--approval-mode"), s(approval)]);
+            if !model.is_empty() {
+                args.extend([s("-m"), model]);
+            }
+            for dir in list(&opts.add_dirs) {
+                args.extend([s("--include-directories"), dir]);
+            }
+            if !spec.session_id.is_empty() {
+                let flag = if spec.resume {
+                    "--resume"
+                } else {
+                    "--session-id"
+                };
+                args.extend([s(flag), spec.session_id.to_string()]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.extend([s("-p"), with_images(spec)]);
+        }
+        "copilot" => {
+            if mode != "plan" {
+                args.push(s("--allow-all-tools"));
+            }
+            if !model.is_empty() {
+                args.extend([s("--model"), model]);
+            }
+            for dir in list(&opts.add_dirs) {
+                args.extend([s("--add-dir"), dir]);
+            }
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("--resume"), spec.session_id.to_string()]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.extend([s("-p"), with_images(spec)]);
+        }
+        "amp" => {
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("threads"), s("continue"), spec.session_id.to_string()]);
+            }
+            if mode != "plan" {
+                args.push(s("--dangerously-allow-all"));
+            }
+            args.push(s("--stream-json"));
+            args.extend(split_args(&opts.extra_args));
+            args.extend([s("-x"), with_images(spec)]);
+        }
+        "droid" => {
+            args.extend([s("exec"), s("-o"), s("json")]);
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("-s"), spec.session_id.to_string()]);
+            }
+            match mode.as_str() {
+                "plan" => {}
+                "full" => args.extend([s("--auto"), s("high")]),
+                _ => args.extend([s("--auto"), s("medium")]),
+            }
+            if !model.is_empty() {
+                args.extend([s("-m"), model]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.push(with_images(spec));
+        }
+        "grok" => {
+            if !model.is_empty() {
+                args.extend([s("-m"), model]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.extend([s("-p"), with_images(spec)]);
+        }
         "opencode" => {
-            args.push(s("run"));
+            args.extend([s("run"), s("--format"), s("json")]);
             if spec.resume {
-                args.push(s("--continue"));
+                // A known id resumes exactly this session's conversation; `--continue` is the
+                // newest in the folder, which may belong to another session.
+                if spec.session_id.is_empty() {
+                    args.push(s("--continue"));
+                } else {
+                    args.extend([s("-s"), spec.session_id.to_string()]);
+                }
             }
             if !model.is_empty() {
                 args.extend([s("-m"), model]);
@@ -158,6 +516,9 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 args.push(s("--auto"));
             }
             args.extend(split_args(&opts.extra_args));
+            for image in spec.images {
+                args.extend([s("-f"), image.clone()]);
+            }
             args.push(spec.prompt.to_string());
         }
         _ => {
@@ -166,7 +527,16 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 "full" => "bypassPermissions",
                 other => other,
             };
-            args.extend([s("-p"), s("--permission-mode"), s(permission)]);
+            // Structured output lets the app show each tool step live instead of a wall of text.
+            args.extend([
+                s("-p"),
+                s("--output-format"),
+                s("stream-json"),
+                s("--verbose"),
+                s("--include-partial-messages"),
+                s("--permission-mode"),
+                s(permission),
+            ]);
             if !model.is_empty() {
                 args.extend([s("--model"), model]);
             }
@@ -176,7 +546,31 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             if !opts.append_prompt.trim().is_empty() {
                 args.extend([s("--append-system-prompt"), opts.append_prompt.clone()]);
             }
-            let allowed = list(&opts.allowed_tools);
+            let mut allowed = list(&opts.allowed_tools);
+            // Servers shared from other apps, plus Runo's memory server.
+            let mut servers: serde_json::Map<String, serde_json::Value> =
+                crate::mcp::claude_servers().into_iter().collect();
+            if let Some((exe, dir)) = spec.memory {
+                servers.insert(
+                    MEMORY_SERVER.into(),
+                    serde_json::json!({ "command": exe, "args": ["--mcp-memory", dir] }),
+                );
+                // Memory and reading playbooks need no approval; starting a playbook as a
+                // new session asks first.
+                for tool in [
+                    "read_memory",
+                    "search_history",
+                    "save_note",
+                    "list_playbooks",
+                    "get_playbook",
+                ] {
+                    allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
+                }
+            }
+            if !servers.is_empty() {
+                let config = serde_json::json!({ "mcpServers": servers });
+                args.extend([s("--mcp-config"), config.to_string()]);
+            }
             if !allowed.is_empty() {
                 args.extend([s("--allowed-tools"), allowed.join(",")]);
             }
@@ -191,15 +585,211 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 args.extend([s("--fallback-model"), opts.fallback_model.clone()]);
             }
             args.extend(split_args(&opts.extra_args));
-            if spec.resume {
-                args.push(s("--continue"));
+            match (spec.resume, spec.session_id.is_empty()) {
+                // Pin the conversation to this session: `--continue` would pick up whatever
+                // conversation ran last in the folder, which may belong to another session.
+                (true, false) => args.extend([s("--resume"), spec.session_id.to_string()]),
+                (false, false) => args.extend([s("--session-id"), spec.session_id.to_string()]),
+                (true, true) => args.push(s("--continue")),
+                (false, true) => {}
             }
             // Several Claude flags are variadic; `--` keeps them from swallowing the prompt.
             args.push(s("--"));
-            args.push(spec.prompt.to_string());
+            args.push(with_images(spec));
         }
     }
     args
+}
+
+/// Agents whose own interactive CLI can open the same conversation the chat uses, so
+/// the Chat and CLI views of a session can be swapped without sending anything.
+pub fn has_cli_view(provider: &str) -> bool {
+    resumes(provider)
+}
+
+/// Whether Runo can read the CLI's saved conversation to show CLI turns in the chat.
+pub fn imports_cli_turns(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex")
+}
+
+/// Arguments that open the agent's interactive CLI on this session's conversation, with
+/// the same model, mode and tools as the chat. `spec.resume` picks up the conversation
+/// in `spec.session_id`; otherwise a new one starts (named up front for Claude Code).
+pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
+    let s = |v: &str| v.to_string();
+    let id = spec.session_id.to_string();
+    let model = spec
+        .sel
+        .get("model")
+        .cloned()
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| spec.opts.model_override.clone());
+    let with_model = |mut args: Vec<String>, flag: &str| {
+        if !model.is_empty() {
+            args.extend([s(flag), model.clone()]);
+        }
+        args.extend(split_args(&spec.opts.extra_args));
+        args
+    };
+    let resume = spec.resume && !id.is_empty();
+    match spec.provider {
+        "gemini" | "qwen" => {
+            let flag = if spec.resume {
+                "--resume"
+            } else {
+                "--session-id"
+            };
+            let mut args = with_model(Vec::new(), "-m");
+            if !id.is_empty() {
+                args.extend([s(flag), id]);
+            }
+            return args;
+        }
+        "cursor" | "copilot" | "droid" => {
+            let flag = if spec.provider == "copilot" {
+                "--model"
+            } else {
+                "-m"
+            };
+            let mut args = with_model(Vec::new(), flag);
+            if resume {
+                args.extend([s("--resume"), id]);
+            }
+            return args;
+        }
+        "opencode" => {
+            let mut args = with_model(Vec::new(), "-m");
+            if resume {
+                args.extend([s("-s"), id]);
+            }
+            return args;
+        }
+        "amp" => {
+            return if resume {
+                vec![s("threads"), s("continue"), id]
+            } else {
+                Vec::new()
+            };
+        }
+        _ => {}
+    }
+    let args = provider_args(spec);
+    match spec.provider {
+        "codex" => {
+            // `exec [flags] [resume <id>] <prompt>` becomes `[resume <id>] [flags]`.
+            let mut flags: Vec<String> = Vec::new();
+            let mut iter = args.into_iter().skip(1).peekable();
+            while let Some(arg) = iter.next() {
+                match arg.as_str() {
+                    "--skip-git-repo-check" => {}
+                    "-i" => {
+                        iter.next();
+                    }
+                    "resume" => {
+                        iter.next();
+                    }
+                    _ if iter.peek().is_none() => {} // the prompt
+                    _ => flags.push(arg),
+                }
+            }
+            let mut out = Vec::new();
+            if spec.resume && !spec.session_id.is_empty() {
+                out.extend(["resume".to_string(), spec.session_id.to_string()]);
+            }
+            out.extend(flags);
+            if !spec.prompt.is_empty() {
+                out.push(spec.prompt.to_string());
+            }
+            out
+        }
+        _ => {
+            // Drop print mode, streaming output and the prompt; keep everything else.
+            let end = args.iter().rposition(|a| a == "--").unwrap_or(args.len());
+            let mut out: Vec<String> = args[..end]
+                .iter()
+                .filter(|a| {
+                    !matches!(
+                        a.as_str(),
+                        "-p" | "--output-format"
+                            | "stream-json"
+                            | "--verbose"
+                            | "--include-partial-messages"
+                    )
+                })
+                .cloned()
+                .collect();
+            // A first prompt, typed into the CLI as it opens.
+            if !spec.prompt.is_empty() {
+                out.extend(["--".to_string(), spec.prompt.to_string()]);
+            }
+            out
+        }
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::*;
+
+    #[test]
+    fn interactive_args_drop_print_mode_and_keep_the_conversation() {
+        let sel = std::collections::HashMap::from([
+            ("model".to_string(), "haiku".to_string()),
+            ("mode".to_string(), "edit".to_string()),
+        ]);
+        let opts = AgentOptions::default();
+        let spec = |provider, resume, prompt| RunSpec {
+            provider,
+            prompt,
+            resume,
+            sel: &sel,
+            opts: &opts,
+            in_git: true,
+            session_id: "abc-123",
+            images: &[],
+            memory: None,
+        };
+        let claude = interactive_args(&spec("claude", true, ""));
+        assert!(!claude
+            .iter()
+            .any(|a| a == "-p" || a == "stream-json" || a == "--"));
+        assert!(claude.windows(2).any(|w| w == ["--resume", "abc-123"]));
+        assert!(claude.windows(2).any(|w| w == ["--model", "haiku"]));
+        assert!(claude
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "acceptEdits"]));
+        let fresh = interactive_args(&spec("claude", false, "Fix it"));
+        assert!(fresh.windows(2).any(|w| w == ["--session-id", "abc-123"]));
+        assert!(fresh.ends_with(&["--".to_string(), "Fix it".to_string()]));
+        let codex = interactive_args(&spec("codex", true, ""));
+        assert_eq!(&codex[..2], ["resume", "abc-123"]);
+        assert!(!codex
+            .iter()
+            .any(|a| a == "exec" || a == "--skip-git-repo-check"));
+        assert!(codex.windows(2).any(|w| w == ["-m", "haiku"]));
+        assert_eq!(codex.iter().filter(|a| *a == "resume").count(), 1);
+    }
+}
+
+/// Name of Runo's memory MCP server in the agents' config.
+pub const MEMORY_SERVER: &str = "runo";
+
+/// A TOML basic string.
+fn toml_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The prompt with attached image paths listed, for CLIs that read images from disk.
+fn with_images(spec: &RunSpec) -> String {
+    if spec.images.is_empty() {
+        return spec.prompt.to_string();
+    }
+    let mut prompt = spec.prompt.to_string();
+    prompt.push_str("\n\nAttached images (read them):");
+    for image in spec.images {
+        prompt.push_str(&format!("\n- {image}"));
+    }
+    prompt
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -213,6 +803,76 @@ pub enum Event {
     /// stderr of an agent run: kept out of the conversation unless the run fails.
     Err(Target, String),
     Done(Target, bool),
+    /// Result of a one-off background command, by the key it was started with.
+    Output(String, Result<String, String>),
+    /// An interactive shell has new output, or exited.
+    Pty(u64),
+}
+
+/// Run a command to completion on a background thread and send its stdout back.
+pub fn oneshot(key: String, mut command: Command, dir: &str, tx: Sender<Event>) {
+    command.current_dir(dir).stdin(Stdio::null());
+    std::thread::spawn(move || {
+        let result = match command.output() {
+            Ok(out) if out.status.success() => {
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                Err(if err.is_empty() {
+                    String::from_utf8_lossy(&out.stdout).trim().to_string()
+                } else {
+                    err
+                })
+            }
+            Err(error) => Err(format!(
+                "could not start {:?}: {error}",
+                command.get_program()
+            )),
+        };
+        let _ = tx.send(Event::Output(key, result));
+    });
+}
+
+/// A plain, one-shot run of an agent CLI with a prompt, for small jobs such as
+/// writing a commit message. Read-only where the CLI supports it.
+pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Command {
+    let bin = if configured_bin.trim().is_empty() {
+        self::provider(provider).bin
+    } else {
+        configured_bin.trim()
+    };
+    let mut command = Command::new(bin);
+    match provider {
+        "codex" => {
+            command.args([
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                prompt,
+            ]);
+        }
+        "opencode" => {
+            command.args(["run", prompt]);
+        }
+        "cursor" => {
+            command.args(["-p", "--output-format", "text", prompt]);
+        }
+        "amp" => {
+            command.args(["-x", prompt]);
+        }
+        "droid" => {
+            command.args(["exec", prompt]);
+        }
+        "claude" => {
+            command.args(["-p", "--permission-mode", "plan", "--", prompt]);
+        }
+        _ => {
+            command.args(["-p", prompt]);
+        }
+    }
+    command
 }
 
 #[derive(Clone)]
@@ -226,8 +886,17 @@ impl Handle {
     }
 }
 
-pub fn run_agent(target: Target, spec: &RunSpec, dir: &str, tx: Sender<Event>) -> Result<Handle, String> {
-    let bin = if spec.opts.binary.trim().is_empty() { self::provider(spec.provider).bin } else { spec.opts.binary.trim() };
+pub fn run_agent(
+    target: Target,
+    spec: &RunSpec,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
+    let bin = if spec.opts.binary.trim().is_empty() {
+        self::provider(spec.provider).bin
+    } else {
+        spec.opts.binary.trim()
+    };
     let mut command = Command::new(bin);
     command.args(provider_args(spec));
     for line in spec.opts.env.lines() {
@@ -240,7 +909,12 @@ pub fn run_agent(target: Target, spec: &RunSpec, dir: &str, tx: Sender<Event>) -
     spawn(target, command, dir, tx)
 }
 
-pub fn run_shell(target: Target, line: &str, dir: &str, tx: Sender<Event>) -> Result<Handle, String> {
+pub fn run_shell(
+    target: Target,
+    line: &str,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
     let mut command = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.args(["/C", line]);
@@ -269,7 +943,12 @@ fn pump<R: Read + Send + 'static>(reader: R, target: Target, is_err: bool, tx: S
     });
 }
 
-fn spawn(target: Target, mut command: Command, dir: &str, tx: Sender<Event>) -> Result<Handle, String> {
+fn spawn(
+    target: Target,
+    mut command: Command,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
     let mut child = command
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -286,7 +965,10 @@ fn spawn(target: Target, mut command: Command, dir: &str, tx: Sender<Event>) -> 
     let child = Arc::new(Mutex::new(child));
     let waiter = child.clone();
     std::thread::spawn(move || loop {
-        let finished = waiter.lock().ok().and_then(|mut c| c.try_wait().ok().flatten());
+        let finished = waiter
+            .lock()
+            .ok()
+            .and_then(|mut c| c.try_wait().ok().flatten());
         if let Some(status) = finished {
             // Let the reader threads flush the final lines first.
             std::thread::sleep(Duration::from_millis(150));
@@ -306,7 +988,13 @@ mod tests {
     fn shell_streams_lines_then_done() {
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
-        run_shell(Target::Terminal(1), "echo hi && echo err 1>&2", dir.to_str().unwrap(), tx).unwrap();
+        run_shell(
+            Target::Terminal(1),
+            "echo hi && echo err 1>&2",
+            dir.to_str().unwrap(),
+            tx,
+        )
+        .unwrap();
         let mut lines = vec![];
         loop {
             match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -315,6 +1003,7 @@ mod tests {
                     assert!(ok);
                     break;
                 }
+                Event::Output(..) | Event::Pty(_) => {}
             }
         }
         lines.sort();
@@ -328,40 +1017,336 @@ mod arg_tests {
     use std::collections::HashMap;
 
     fn sel(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
-    fn args(provider: &str, resume: bool, selections: &[(&str, &str)], opts: &AgentOptions, in_git: bool) -> Vec<String> {
+    fn args(
+        provider: &str,
+        resume: bool,
+        selections: &[(&str, &str)],
+        opts: &AgentOptions,
+        in_git: bool,
+    ) -> Vec<String> {
         let sel = sel(selections);
-        provider_args(&RunSpec { provider, prompt: "hi", resume, sel: &sel, opts, in_git })
+        provider_args(&RunSpec {
+            provider,
+            prompt: "hi",
+            resume,
+            sel: &sel,
+            opts,
+            in_git,
+            session_id: "",
+            images: &[],
+            memory: None,
+        })
+    }
+
+    #[test]
+    fn codex_resumes_a_known_conversation_by_id() {
+        let sel = HashMap::new();
+        let o = AgentOptions::default();
+        let run = |session_id| {
+            provider_args(&RunSpec {
+                provider: "codex",
+                prompt: "hi",
+                resume: true,
+                sel: &sel,
+                opts: &o,
+                in_git: true,
+                session_id,
+                images: &[],
+                memory: None,
+            })
+        };
+        assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
+        assert!(run("").ends_with(&["resume".into(), "--last".into(), "hi".into()]));
+    }
+
+    #[test]
+    fn claude_pins_follow_ups_to_its_own_conversation() {
+        let sel = HashMap::new();
+        let o = AgentOptions::default();
+        let spec = |resume, session_id| RunSpec {
+            provider: "claude",
+            prompt: "hi",
+            resume,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id,
+            images: &[],
+            memory: None,
+        };
+        let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
+        let first = provider_args(&spec(false, id));
+        assert!(first.windows(2).any(|w| w == ["--session-id", id]));
+        assert!(!first.contains(&"--continue".to_string()));
+        let next = provider_args(&spec(true, id));
+        assert!(next.windows(2).any(|w| w == ["--resume", id]));
+        assert!(!next.contains(&"--continue".to_string()));
+        // The prompt always comes last, after `--`.
+        assert_eq!(&next[next.len() - 2..], ["--", "hi"]);
+    }
+
+    #[test]
+    fn uuids_are_v4_and_distinct() {
+        let a = new_uuid();
+        let b = new_uuid();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        let parts: Vec<&str> = a.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12]
+        );
+        assert!(parts[2].starts_with('4'));
+        assert!(matches!(
+            parts[3].chars().next(),
+            Some('8' | '9' | 'a' | 'b')
+        ));
+        assert!(a.chars().all(|c| c == '-' || c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn generic_modes_have_labels() {
+        assert_eq!(generic_mode_label("edit"), Some("Auto edit"));
+        assert_eq!(generic_mode_label("acceptEdits"), None);
+    }
+
+    #[test]
+    fn provider_lookup_falls_back_to_claude() {
+        assert_eq!(provider("codex").name, "Codex");
+        assert_eq!(provider("nope").id, "claude");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_gets_env_args_and_reports_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("runo-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-agent");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho \"env=$RUNO_T\"\necho \"args=$*\"\necho oops 1>&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sel = sel(&[("model", "opus")]);
+        let o = AgentOptions {
+            binary: script.to_string_lossy().into_owned(),
+            env: " RUNO_T = from-env \nNOT_A_PAIR\n=ignored".into(),
+            ..Default::default()
+        };
+        let spec = RunSpec {
+            provider: "claude",
+            prompt: "do it",
+            resume: false,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "",
+            images: &[],
+            memory: None,
+        };
+        run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), tx).unwrap();
+        let (mut out, mut err) = (vec![], vec![]);
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                Event::Line(_, l) => out.push(l),
+                Event::Err(_, l) => err.push(l),
+                Event::Done(target, ok) => {
+                    assert!(target == Target::Session(5));
+                    assert!(!ok);
+                    break;
+                }
+                Event::Output(..) | Event::Pty(_) => unreachable!(),
+            }
+        }
+        assert_eq!(out[0], "env=from-env");
+        assert_eq!(
+            out[1],
+            "args=-p --output-format stream-json --verbose --include-partial-messages --permission-mode acceptEdits --model opus -- do it"
+        );
+        // stderr from an agent stays out of the conversation stream.
+        assert_eq!(err, ["oops"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_binary_is_an_error_not_a_panic() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let sel = HashMap::new();
+        let o = AgentOptions {
+            binary: "/definitely/not/a/runo/binary".into(),
+            ..Default::default()
+        };
+        let spec = RunSpec {
+            provider: "claude",
+            prompt: "hi",
+            resume: false,
+            sel: &sel,
+            opts: &o,
+            in_git: false,
+            session_id: "",
+            images: &[],
+            memory: None,
+        };
+        let error = run_agent(Target::Session(1), &spec, "/", tx).err().unwrap();
+        assert!(error.contains("could not start"));
+    }
+
+    #[test]
+    fn kill_stops_a_running_command() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = std::env::temp_dir();
+        let handle = run_shell(Target::Terminal(7), "sleep 30", dir.to_str().unwrap(), tx).unwrap();
+        handle.kill();
+        loop {
+            if let Event::Done(_, ok) = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                assert!(!ok);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn configured_binaries_count_as_available() {
+        assert!(available("definitely-not-a-real-agent", "/bin/sh"));
+        assert!(!available("sh", "/no/such/agent"));
+        assert!(available("definitely-not-a-real-agent", "sh"));
+        assert!(!available("definitely-not-a-real-agent", " "));
     }
 
     #[test]
     fn claude_args() {
         let o = AgentOptions::default();
         assert_eq!(
-            args("claude", true, &[("mode", "plan"), ("model", "opus")], &o, true),
-            ["-p", "--permission-mode", "plan", "--model", "opus", "--continue", "--", "hi"]
+            args(
+                "claude",
+                true,
+                &[("mode", "plan"), ("model", "opus")],
+                &o,
+                true
+            ),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--permission-mode",
+                "plan",
+                "--model",
+                "opus",
+                "--continue",
+                "--",
+                "hi"
+            ]
         );
-        assert_eq!(args("claude", false, &[], &o, true), ["-p", "--permission-mode", "acceptEdits", "--", "hi"]);
-        let o = AgentOptions { effort: "high".into(), allowed_tools: "Read, Edit".into(), add_dirs: "/a,/b".into(), extra_args: "--verbose".into(), ..Default::default() };
         assert_eq!(
-            args("claude", false, &[("mode", "dontAsk"), ("effort", "max")], &o, true),
-            ["-p", "--permission-mode", "dontAsk", "--effort", "max", "--allowed-tools", "Read,Edit", "--add-dir", "/a", "--add-dir", "/b", "--verbose", "--", "hi"]
+            args("claude", false, &[], &o, true),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--permission-mode",
+                "acceptEdits",
+                "--",
+                "hi"
+            ]
+        );
+        let o = AgentOptions {
+            effort: "high".into(),
+            allowed_tools: "Read, Edit".into(),
+            add_dirs: "/a,/b".into(),
+            extra_args: "--verbose".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            args(
+                "claude",
+                false,
+                &[("mode", "dontAsk"), ("effort", "max")],
+                &o,
+                true
+            ),
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--include-partial-messages",
+                "--permission-mode",
+                "dontAsk",
+                "--effort",
+                "max",
+                "--allowed-tools",
+                "Read,Edit",
+                "--add-dir",
+                "/a",
+                "--add-dir",
+                "/b",
+                "--verbose",
+                "--",
+                "hi"
+            ]
         );
     }
 
     #[test]
     fn codex_args() {
         let o = AgentOptions::default();
-        assert_eq!(args("codex", false, &[], &o, true), ["exec", "--sandbox", "workspace-write", "hi"]);
-        assert_eq!(args("codex", false, &[("mode", "full")], &o, true), ["exec", "--sandbox", "danger-full-access", "hi"]);
-        let o = AgentOptions { profile: "work".into(), ..Default::default() };
         assert_eq!(
-            args("codex", true, &[("mode", "read-only"), ("model", "gpt-5.6-sol"), ("effort", "high"), ("tier", "priority"), ("approval", "never")], &o, false),
+            args("codex", false, &[], &o, true),
+            ["exec", "--sandbox", "workspace-write", "hi"]
+        );
+        assert_eq!(
+            args("codex", false, &[("mode", "full")], &o, true),
+            ["exec", "--sandbox", "danger-full-access", "hi"]
+        );
+        let o = AgentOptions {
+            profile: "work".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            args(
+                "codex",
+                true,
+                &[
+                    ("mode", "read-only"),
+                    ("model", "gpt-5.6-sol"),
+                    ("effort", "high"),
+                    ("tier", "priority"),
+                    ("approval", "never")
+                ],
+                &o,
+                false
+            ),
             [
-                "exec", "--sandbox", "read-only", "-m", "gpt-5.6-sol", "-c", "model_reasoning_effort=\"high\"", "-c", "service_tier=\"priority\"", "-c",
-                "approval_policy=\"never\"", "-p", "work", "--skip-git-repo-check", "resume", "--last", "hi"
+                "exec",
+                "--sandbox",
+                "read-only",
+                "-m",
+                "gpt-5.6-sol",
+                "-c",
+                "model_reasoning_effort=\"high\"",
+                "-c",
+                "service_tier=\"priority\"",
+                "-c",
+                "approval_policy=\"never\"",
+                "-p",
+                "work",
+                "--skip-git-repo-check",
+                "resume",
+                "--last",
+                "hi"
             ]
         );
     }
@@ -369,18 +1354,110 @@ mod arg_tests {
     #[test]
     fn opencode_args() {
         let o = AgentOptions::default();
-        assert_eq!(args("opencode", false, &[], &o, true), ["run", "hi"]);
-        assert_eq!(args("opencode", true, &[("mode", "plan")], &o, true), ["run", "--continue", "--agent", "plan", "hi"]);
-        let o = AgentOptions { variant: "high".into(), thinking: true, ..Default::default() };
         assert_eq!(
-            args("opencode", false, &[("mode", "auto"), ("model", "opencode/big-pickle"), ("agent", "build")], &o, true),
-            ["run", "-m", "opencode/big-pickle", "--agent", "build", "--variant", "high", "--thinking", "--auto", "hi"]
+            args("opencode", false, &[], &o, true),
+            ["run", "--format", "json", "hi"]
+        );
+        assert_eq!(
+            args("opencode", true, &[("mode", "plan")], &o, true),
+            [
+                "run",
+                "--format",
+                "json",
+                "--continue",
+                "--agent",
+                "plan",
+                "hi"
+            ]
+        );
+        let o = AgentOptions {
+            variant: "high".into(),
+            thinking: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            args(
+                "opencode",
+                false,
+                &[
+                    ("mode", "auto"),
+                    ("model", "opencode/big-pickle"),
+                    ("agent", "build")
+                ],
+                &o,
+                true
+            ),
+            [
+                "run",
+                "--format",
+                "json",
+                "-m",
+                "opencode/big-pickle",
+                "--agent",
+                "build",
+                "--variant",
+                "high",
+                "--thinking",
+                "--auto",
+                "hi"
+            ]
+        );
+    }
+
+    #[test]
+    fn json_output_gives_text_steps_and_the_conversation_id() {
+        let cursor = json_line(r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"c-1"}"#).unwrap();
+        assert_eq!(cursor.conversation.as_deref(), Some("c-1"));
+        assert_eq!(cursor.result.as_deref(), Some("Done."));
+        let amp = json_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hi"},{"type":"tool_use","name":"Bash"}]},"session_id":"T-9"}"#).unwrap();
+        assert_eq!(amp.text.as_deref(), Some("Hi"));
+        assert_eq!(amp.steps, vec!["Used Bash"]);
+        assert_eq!(amp.conversation.as_deref(), Some("T-9"));
+        let open =
+            json_line(r#"{"type":"text","sessionID":"ses_1","part":{"text":"Yes"}}"#).unwrap();
+        assert_eq!(
+            (open.text.as_deref(), open.conversation.as_deref()),
+            (Some("Yes"), Some("ses_1"))
+        );
+        assert_eq!(json_line("plain text"), None);
+        // Each CLI is given the conversation it should continue.
+        let o = AgentOptions::default();
+        let sel = std::collections::HashMap::new();
+        let spec = |provider, resume| RunSpec {
+            provider,
+            prompt: "hi",
+            resume,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "id-1",
+            images: &[],
+            memory: None,
+        };
+        let has = |p, resume, pair: [&str; 2]| {
+            provider_args(&spec(p, resume))
+                .windows(2)
+                .any(|w| w == pair)
+        };
+        assert!(has("gemini", false, ["--session-id", "id-1"]));
+        assert!(has("gemini", true, ["--resume", "id-1"]));
+        assert!(has("qwen", true, ["--resume", "id-1"]));
+        assert!(has("cursor", true, ["--resume", "id-1"]));
+        assert!(has("copilot", true, ["--resume", "id-1"]));
+        assert!(has("droid", true, ["-s", "id-1"]));
+        assert!(has("opencode", true, ["-s", "id-1"]));
+        assert_eq!(
+            &provider_args(&spec("amp", true))[..3],
+            ["threads", "continue", "id-1"]
         );
     }
 
     #[test]
     fn splits_quoted_args() {
-        assert_eq!(split_args(r#"--foo "a b" 'c d' e"#), ["--foo", "a b", "c d", "e"]);
+        assert_eq!(
+            split_args(r#"--foo "a b" 'c d' e"#),
+            ["--foo", "a b", "c d", "e"]
+        );
         assert!(split_args("   ").is_empty());
     }
 }

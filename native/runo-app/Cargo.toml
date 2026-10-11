@@ -1,15 +1,55 @@
 [package]
-name = "runo-native"
+name = "runo"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Runo's native GPUI desktop client"
 
+build = "build.rs"
+
 [[bin]]
-name = "runo-native"
+name = "Runo"
 path = "src/main.rs"
 
+# App bundle metadata for `cargo bundle` (macOS .app, Linux .deb).
+[package.metadata.bundle]
+name = "Runo"
+identifier = "dev.runo.app"
+icon = [
+    "assets/icon/png/runo-32.png",
+    "assets/icon/png/runo-128.png",
+    "assets/icon/png/runo-256.png",
+    "assets/icon/png/runo-512.png",
+    "assets/icon/png/runo-1024.png",
+    "assets/icon/runo.icns",
+]
+category = "public.app-category.developer-tools"
+short_description = "Run coding agents side by side"
+
 [dependencies]
-gpui-kit = "0.7.1"
+gpui-kit = { version = "0.7.1", features = [
+    "tree-sitter-bash",
+    "tree-sitter-css",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-javascript",
+    "tree-sitter-make",
+    "tree-sitter-markdown",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+portable-pty = { path = "../../vendor/portable-pty" }
+vt100 = "0.15"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
+libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
+
+[build-dependencies]
+embed-resource = "3.0.11"

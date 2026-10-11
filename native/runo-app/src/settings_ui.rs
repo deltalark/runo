@@ -9,68 +9,88 @@ use std::rc::Rc;
 pub enum SettingsPage {
     General,
     Appearance,
+    Terminal,
     Keybindings,
     Chat,
     Providers,
-    Claude,
-    Codex,
-    OpenCode,
+    /// One agent's settings, by provider id. Installed agents are listed under Providers.
+    Agent(&'static str),
     Mcp,
     Skills,
+    Hooks,
     Worktrees,
 }
 
 impl SettingsPage {
     const GROUPS: [(&'static str, &'static [SettingsPage]); 3] = [
-        ("App", &[SettingsPage::General, SettingsPage::Appearance, SettingsPage::Keybindings]),
+        (
+            "App",
+            &[
+                SettingsPage::General,
+                SettingsPage::Appearance,
+                SettingsPage::Terminal,
+                SettingsPage::Keybindings,
+            ],
+        ),
         (
             "Agents",
-            &[SettingsPage::Chat, SettingsPage::Providers, SettingsPage::Claude, SettingsPage::Codex, SettingsPage::OpenCode, SettingsPage::Mcp, SettingsPage::Skills],
+            &[
+                SettingsPage::Chat,
+                SettingsPage::Providers,
+                SettingsPage::Mcp,
+                SettingsPage::Skills,
+                SettingsPage::Hooks,
+            ],
         ),
         ("Workspace", &[SettingsPage::Worktrees]),
     ];
 
+    /// Every page, including each agent's, for searching.
     fn all() -> impl Iterator<Item = SettingsPage> {
-        Self::GROUPS.iter().flat_map(|(_, pages)| pages.iter().copied())
+        Self::GROUPS
+            .iter()
+            .flat_map(|(_, pages)| pages.iter().copied())
+            .chain(agent::PROVIDERS.iter().map(|p| SettingsPage::Agent(p.id)))
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
+            Self::Terminal => "Terminal",
             Self::Keybindings => "Keybindings",
             Self::Chat => "Chat",
             Self::Providers => "Providers",
-            Self::Claude => "Claude Code",
-            Self::Codex => "Codex",
-            Self::OpenCode => "OpenCode",
+            Self::Agent(id) => agent::provider(id).name,
             Self::Mcp => "MCP",
             Self::Skills => "Skills",
+            Self::Hooks => "Hooks",
             Self::Worktrees => "Worktrees",
         }
     }
 
     fn subtitle(self) -> &'static str {
         match self {
-            Self::General => "Alerts, motion and how deleting works.",
-            Self::Appearance => "Theme, accent color and how diffs are colored.",
-            Self::Keybindings => "The shortcuts Runo responds to.",
+            Self::General => "Alerts, the built-in browser, motion and how deleting works.",
+            Self::Appearance => "Theme, glass, fonts and how wide conversations run.",
+            Self::Terminal => "Text size, font, scrolling and mouse behavior in the terminal panel and agent CLIs.",
+            Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere.",
             Self::Chat => "How the composer behaves and what new sessions start with.",
-            Self::Providers => "The agent CLIs on this machine and what each one supports.",
-            Self::Claude => "Everything Runo can pass to the claude CLI, plus what it detected.",
-            Self::Codex => "Everything Runo can pass to codex exec, plus what it detected.",
-            Self::OpenCode => "Everything Runo can pass to opencode run, plus what it detected.",
+            Self::Providers => "The agent CLIs on this machine. Pick one to change its settings, or install another.",
+            Self::Agent("claude") => "Everything Runo can pass to the claude CLI, plus what it detected.",
+            Self::Agent("codex") => "Everything Runo can pass to codex exec, plus what it detected.",
+            Self::Agent("opencode") => "Everything Runo can pass to opencode run, plus what it detected.",
+            Self::Agent(_) => "What Runo detected from this CLI and what it passes on every run. Runo maps its permission levels onto the CLI's own flags.",
             Self::Mcp => "MCP servers found across your agents' config files.",
             Self::Skills => "Agent skills discovered in project, personal and agent folders.",
+            Self::Hooks => "Commands Claude Code runs on agent events, and the config files behind them.",
             Self::Worktrees => "Where isolated sessions and Runo's data live.",
         }
     }
 
     fn agent(self) -> Option<&'static str> {
         match self {
-            Self::Claude => Some("claude"),
-            Self::Codex => Some("codex"),
-            Self::OpenCode => Some("opencode"),
+            Self::Agent(id) => Some(id),
             _ => None,
         }
     }
@@ -79,11 +99,13 @@ impl SettingsPage {
         match self {
             Self::General => IconName::Settings,
             Self::Appearance => IconName::Palette,
+            Self::Terminal => IconName::SquareTerminal,
             Self::Keybindings => IconName::Keyboard,
             Self::Chat => IconName::MessageSquare,
             Self::Providers => IconName::Layers,
             Self::Mcp => IconName::Plug,
             Self::Skills => IconName::Sparkles,
+            Self::Hooks => IconName::Webhook,
             Self::Worktrees => IconName::GitBranch,
             _ => IconName::Bot,
         }
@@ -98,18 +120,30 @@ enum Ctl {
     Switch(bool, SetBool),
     Segment(Vec<(String, String)>, String, SetStr),
     Dropdown(Vec<(String, String)>, String, SetStr),
-    Text { key: String, value: String, placeholder: String, set: SetStr },
+    Text {
+        key: String,
+        value: String,
+        placeholder: String,
+        set: SetStr,
+    },
     Accent(String),
     Button(String, Action),
     Chip(String, u32),
     Keys(String),
-    Reveal(PathBuf),
+    /// Open the file in Runo's editor, or reveal it.
+    Edit(PathBuf),
+    /// A version chip and a chevron, for rows that open another page.
+    Open(String),
+    /// An MCP server: share it with Runo's sessions (key, shared), plus Edit and Reveal.
+    Mcp(Option<(String, bool)>, PathBuf),
 }
 
 struct Row {
     title: String,
     desc: String,
     ctl: Ctl,
+    /// Clicking the row opens this page.
+    open: Option<SettingsPage>,
 }
 
 struct Section {
@@ -119,22 +153,51 @@ struct Section {
 }
 
 fn section(title: &str, desc: &str, rows: Vec<Row>) -> Section {
-    Section { title: title.into(), desc: desc.into(), rows }
+    Section {
+        title: title.into(),
+        desc: desc.into(),
+        rows,
+    }
 }
 
 fn row(title: &str, desc: &str, ctl: Ctl) -> Row {
-    Row { title: title.into(), desc: desc.into(), ctl }
+    Row {
+        title: title.into(),
+        desc: desc.into(),
+        ctl,
+        open: None,
+    }
 }
 
 fn switch_row(title: &str, desc: &str, on: bool, set: fn(&mut AppSettings, bool)) -> Row {
     row(title, desc, Ctl::Switch(on, Rc::new(set)))
 }
 
-fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
-    items.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect()
+/// A path with the home folder shown as ~.
+fn tilde(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    match home.and_then(|h| path.strip_prefix(h).ok().map(|p| p.display().to_string())) {
+        Some(rest) => format!("~/{rest}"),
+        None => path.display().to_string(),
+    }
 }
 
-fn agent_text(pid: &'static str, st: &AppSettings, title: &str, desc: &str, placeholder: &str, get: fn(&AgentOptions) -> String, set: fn(&mut AgentOptions, String)) -> Row {
+fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
+    items
+        .iter()
+        .map(|(v, l)| (v.to_string(), l.to_string()))
+        .collect()
+}
+
+fn agent_text(
+    pid: &'static str,
+    st: &AppSettings,
+    title: &str,
+    desc: &str,
+    placeholder: &str,
+    get: fn(&AgentOptions) -> String,
+    set: fn(&mut AgentOptions, String),
+) -> Row {
     row(
         title,
         desc,
@@ -147,15 +210,35 @@ fn agent_text(pid: &'static str, st: &AppSettings, title: &str, desc: &str, plac
     )
 }
 
-fn agent_choice(pid: &'static str, st: &AppSettings, title: &str, desc: &str, opts: Vec<(String, String)>, get: fn(&AgentOptions) -> String, set: fn(&mut AgentOptions, String)) -> Row {
-    row(title, desc, Ctl::Dropdown(opts, get(&st.agent(pid)), Rc::new(move |s, v| set(s.agents.entry(pid.to_string()).or_default(), v))))
+fn agent_choice(
+    pid: &'static str,
+    st: &AppSettings,
+    title: &str,
+    desc: &str,
+    opts: Vec<(String, String)>,
+    get: fn(&AgentOptions) -> String,
+    set: fn(&mut AgentOptions, String),
+) -> Row {
+    row(
+        title,
+        desc,
+        Ctl::Dropdown(
+            opts,
+            get(&st.agent(pid)),
+            Rc::new(move |s, v| set(s.agents.entry(pid.to_string()).or_default(), v)),
+        ),
+    )
 }
 
 fn list_values(choices: &[caps::Choice]) -> String {
     if choices.is_empty() {
         "None reported".into()
     } else {
-        choices.iter().map(|c| c.value.as_str()).collect::<Vec<_>>().join(", ")
+        choices
+            .iter()
+            .map(|c| c.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -164,31 +247,93 @@ fn detected_section(pid: &'static str) -> Section {
     let mut rows = vec![row(
         "Installed version",
         "Read from the CLI with --version.",
-        if caps.installed { Ctl::Chip(caps.version.clone(), 0) } else if caps.detected { Ctl::Chip("Not installed".into(), 1) } else { Ctl::Chip("Detecting…".into(), 2) },
+        if caps.installed {
+            Ctl::Chip(caps.version.clone(), 0)
+        } else if caps.detected {
+            Ctl::Button(
+                "Install…".into(),
+                Rc::new(move |this, _| this.ask_install(pid)),
+            )
+        } else {
+            Ctl::Chip("Detecting…".into(), 2)
+        },
     )];
     if !caps.models.is_empty() {
-        let names: Vec<&str> = caps.models.iter().take(10).map(|m| m.choice.value.as_str()).collect();
+        let names: Vec<&str> = caps
+            .models
+            .iter()
+            .take(10)
+            .map(|m| m.choice.value.as_str())
+            .collect();
         let more = caps.models.len().saturating_sub(10);
-        rows.push(row("Models", &format!("{}{}", names.join(", "), if more > 0 { format!(" and {more} more") } else { String::new() }), Ctl::Chip(format!("{} found", caps.models.len()), 3)));
+        rows.push(row(
+            "Models",
+            &format!(
+                "{}{}",
+                names.join(", "),
+                if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                }
+            ),
+            Ctl::Chip(format!("{} found", caps.models.len()), 3),
+        ));
     }
     match pid {
         "claude" => {
-            rows.push(row("Permission modes", &list_values(&caps.modes), Ctl::Chip(format!("{}", caps.modes.len()), 3)));
-            rows.push(row("Effort levels", &list_values(&caps.efforts), Ctl::Chip(format!("{}", caps.efforts.len()), 3)));
+            rows.push(row(
+                "Permission modes",
+                &list_values(&caps.modes),
+                Ctl::Chip(format!("{}", caps.modes.len()), 3),
+            ));
+            rows.push(row(
+                "Effort levels",
+                &list_values(&caps.efforts),
+                Ctl::Chip(format!("{}", caps.efforts.len()), 3),
+            ));
         }
         "codex" => {
-            rows.push(row("Sandbox modes", &list_values(&caps.modes), Ctl::Chip(format!("{}", caps.modes.len()), 3)));
-            rows.push(row("Approval policies", &list_values(&caps.approvals), Ctl::Chip(format!("{}", caps.approvals.len()), 3)));
+            rows.push(row(
+                "Sandbox modes",
+                &list_values(&caps.modes),
+                Ctl::Chip(format!("{}", caps.modes.len()), 3),
+            ));
+            rows.push(row(
+                "Approval policies",
+                &list_values(&caps.approvals),
+                Ctl::Chip(format!("{}", caps.approvals.len()), 3),
+            ));
             if let Some(m) = caps.models.first() {
-                rows.push(row("Reasoning levels", &format!("{}: {}", m.choice.label, list_values(&m.efforts)), Ctl::Chip(format!("{}", m.efforts.len()), 3)));
+                rows.push(row(
+                    "Reasoning levels",
+                    &format!("{}: {}", m.choice.label, list_values(&m.efforts)),
+                    Ctl::Chip(format!("{}", m.efforts.len()), 3),
+                ));
                 if !m.tiers.is_empty() {
-                    rows.push(row("Speed tiers", &m.tiers.iter().map(|t| format!("{} ({})", t.label, t.value)).collect::<Vec<_>>().join(", "), Ctl::Chip(format!("{}", m.tiers.len()), 3)));
+                    rows.push(row(
+                        "Speed tiers",
+                        &m.tiers
+                            .iter()
+                            .map(|t| format!("{} ({})", t.label, t.value))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        Ctl::Chip(format!("{}", m.tiers.len()), 3),
+                    ));
                 }
             }
         }
         _ => {
-            rows.push(row("Agents", &list_values(&caps.agents), Ctl::Chip(format!("{}", caps.agents.len()), 3)));
-            rows.push(row("Permission styles", &list_values(&caps.modes), Ctl::Chip(format!("{}", caps.modes.len()), 3)));
+            rows.push(row(
+                "Agents",
+                &list_values(&caps.agents),
+                Ctl::Chip(format!("{}", caps.agents.len()), 3),
+            ));
+            rows.push(row(
+                "Permission styles",
+                &list_values(&caps.modes),
+                Ctl::Chip(format!("{}", caps.modes.len()), 3),
+            ));
         }
     }
     rows.push(row(
@@ -224,6 +369,16 @@ fn launch_section(pid: &'static str, st: &AppSettings, model_hint: &str) -> Sect
 fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec<Section> {
     match page {
         SettingsPage::General => vec![
+            section("Getting started", "A one-minute walk through the window and what each part does.", vec![
+                row("Welcome tour", "Highlights each part of Runo with a short explanation. Also in the palette as Take the tour.", Ctl::Button("Take the tour".into(), Rc::new(|this, _| this.start_tour()))),
+            ]),
+            section("Browser", "Show pages in the Browser tab with a headless copy of the Chrome, Edge, Brave or Chromium on this machine, using its own profile.", vec![
+                switch_row("Built-in browser", "Adds the Browser tab: open your dev server beside the conversation and click and type in it. Off, the tab is hidden.", st.browser_enabled, |s, v| s.browser_enabled = v),
+                match browser_engine::find_chromium() {
+                    Some(path) => row("Uses", &tilde(&path), Ctl::Chip(browser_engine::browser_name(&path), 0)),
+                    None => row("Uses", "No Chromium-based browser found in Applications. Downloading Chrome for Testing is coming next.", Ctl::Chip("Not found".into(), 1)),
+                },
+            ]),
             section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
                 switch_row("Notifications", "Show a desktop notification when an agent finishes or fails (macOS and Linux).", st.notifications, |s, v| s.notifications = v),
             ]),
@@ -231,51 +386,139 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
                 switch_row("Confirm before deleting", "Ask for a second click before deleting a session.", st.confirm_delete, |s, v| s.confirm_delete = v),
                 switch_row("Remove worktree with session", "Also delete the session's git worktree when the session is deleted. Uncommitted changes in it are lost.", st.remove_worktree_on_delete, |s, v| s.remove_worktree_on_delete = v),
+                switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
+                switch_row("Group sidebar by status", "Show Pinned, Working, Needs review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
+            ]),
+            section("Git", "How Runo commits for you.", vec![
+                switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
+                row(
+                    "Quick commands",
+                    "Buttons over the Terminal. Write Name = command, separated by semicolons.",
+                    Ctl::Text {
+                        key: "quick_commands".into(),
+                        value: st.quick_commands.replace('\n', "; "),
+                        placeholder: "Test = cargo test; Lint = cargo clippy".into(),
+                        set: Rc::new(|s, v| s.quick_commands = v.split(';').map(str::trim).collect::<Vec<_>>().join("\n")),
+                    },
+                ),
+            ]),
+            section("New worktrees", "Prepare each isolated worktree before the agent starts. Ignored files listed in the repository's .worktreeinclude (gitignore patterns, such as .env) are copied in automatically.", vec![
+                row(
+                    "Setup command",
+                    "Runs in the new worktree's Terminal, for example npm install. Leave empty to skip.",
+                    Ctl::Text {
+                        key: "worktree_setup".into(),
+                        value: st.worktree_setup.clone(),
+                        placeholder: "None".into(),
+                        set: Rc::new(|s, v| s.worktree_setup = v),
+                    },
+                ),
             ]),
         ],
         SettingsPage::Appearance => vec![
-            section("Theme", "System follows your OS appearance.", vec![
+            section("Interface", "System follows your OS appearance.", vec![
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
+                row("Glass", "A translucent window over a blurred desktop, like macOS glass. Clear shows the most of what is behind.", Ctl::Segment(options(&[("off", "Off"), ("subtle", "Subtle"), ("frosted", "Frosted"), ("clear", "Clear")]), st.glass.clone(), Rc::new(|s, v| s.glass = v))),
+                row("Interface font", "Runo's own font is tuned for sharp text at small sizes. System uses your operating system's font.", Ctl::Segment(options(&[("bundled", "Runo"), ("system", "System")]), st.font.clone(), Rc::new(|s, v| s.font = v))),
+                row("Font smoothing", "Thickens text strokes, like older macOS. Off keeps text crisp and light. Applies after you restart Runo.", Ctl::Switch(st.font_smoothing, Rc::new(|s, v| s.font_smoothing = v))),
+                row("Glass menus and dialogs", "Popups, menus and dialogs are translucent with a light rim too.", Ctl::Switch(st.glass_cards, Rc::new(|s, v| s.glass_cards = v))),
                 row("Diff colors", "Colorblind uses blue and orange instead of green and red. High contrast uses stronger tints.", Ctl::Segment(options(&[("default", "Default"), ("colorblind", "Colorblind"), ("contrast", "High contrast")]), st.diff_colors.clone(), Rc::new(|s, v| s.diff_colors = v))),
             ]),
+            section("Conversation", "How replies, errors and code use the space in a session.", vec![
+                row("Content width", "Full uses the whole width of the window so long output needs less scrolling. Comfortable keeps lines short for reading.", Ctl::Segment(options(&[("comfortable", "Comfortable"), ("wide", "Wide"), ("full", "Full")]), st.content_width.clone(), Rc::new(|s, v| s.content_width = v))),
+            ]),
         ],
-        SettingsPage::Keybindings => vec![section("Composer", "These shortcuts are fixed for now.", vec![
-            row("Send message", "Switch to ⌘/Ctrl+Enter in Chat settings.", Ctl::Keys(if st.send_on_enter { "Enter".into() } else { "⌘ Enter".into() })),
-            row("New line", "Insert a line break in the composer.", Ctl::Keys(if st.send_on_enter { "Shift Enter".into() } else { "Enter".into() })),
-            row("Copy selection", "Works in the conversation, terminal output and file previews.", Ctl::Keys("⌘ C".into())),
-        ])],
+        SettingsPage::Terminal => vec![
+            section("Typography", "Applies to shell tabs and to agents running in their own CLI.", vec![
+                row("Font size", "Text size in the terminal grid.", Ctl::Segment(options(&[("11", "11"), ("12", "12"), ("13", "13"), ("14", "14"), ("16", "16")]), st.term_font_size.to_string(), Rc::new(|s, v| s.term_font_size = v.parse().unwrap_or(12)))),
+                row(
+                    "Font family",
+                    "Any monospace font installed on this computer, for example JetBrains Mono or Menlo.",
+                    Ctl::Text {
+                        key: "term_font".into(),
+                        value: st.term_font.clone(),
+                        placeholder: "Theme monospace font".into(),
+                        set: Rc::new(|s, v| s.term_font = v.trim().to_string()),
+                    },
+                ),
+            ]),
+            section("Interaction", "How the mouse works in the terminal.", vec![
+                row("Scroll speed", "Lines moved per wheel step. Fast suits long logs.", Ctl::Segment(options(&[("normal", "Normal"), ("fast", "Fast"), ("faster", "Faster")]), st.term_scroll.clone(), Rc::new(|s, v| s.term_scroll = v))),
+                row("Right-click", "Show the terminal menu, or paste the clipboard straight in like many terminals do.", Ctl::Segment(options(&[("menu", "Menu"), ("paste", "Paste")]), st.term_right_click.clone(), Rc::new(|s, v| s.term_right_click = v))),
+            ]),
+        ],
+        SettingsPage::Keybindings => {
+            let m = MOD_KEY.trim_end_matches('+');
+            vec![
+                section("Workspace", "Available everywhere in the window.", vec![
+                    row("Quick open", "Jump to any session, file or command.", Ctl::Keys(format!("{m} K"))),
+                    row("New session", "Open the New session form.", Ctl::Keys(format!("{m} N"))),
+                    row("Settings", "Open this screen.", Ctl::Keys(format!("{m} ,"))),
+                    row("Changes panel", "Show or hide the Changes, Files and Terminal panel.", Ctl::Keys(format!("{m} B"))),
+                    row("Sidebar", "Show or hide the sessions sidebar.", Ctl::Keys(format!("{m} \\"))),
+                    row("Stop agent", "Stop the agent running in the selected session.", Ctl::Keys(format!("{m} ."))),
+                    row("Close", "Close a menu, cancel a delete, or go back to the workspace.", Ctl::Keys("Esc".into())),
+                ]),
+                section("Composer", "Change the send key in Chat settings.", vec![
+                    row("Send message", "Sends the prompt to the session's agent.", Ctl::Keys(if st.send_on_enter { "Enter".into() } else { format!("{m} Enter") })),
+                    row("New line", "Insert a line break in the composer.", Ctl::Keys(if st.send_on_enter { "Shift Enter".into() } else { "Enter".into() })),
+                    row("Start session", "In the New session form.", Ctl::Keys(format!("{m} Enter"))),
+                    row("Copy selection", "Works in the conversation, terminal output and file previews.", Ctl::Keys(format!("{m} C"))),
+                ]),
+            ]
+        }
         SettingsPage::Chat => vec![
             section("Composer", "What the composer does with what you type.", vec![
                 row("Send message with", "The other key inserts a new line.", Ctl::Segment(options(&[("enter", "Enter"), ("cmd", "⌘ / Ctrl Enter")]), if st.send_on_enter { "enter".into() } else { "cmd".into() }, Rc::new(|s, v| s.send_on_enter = v == "enter"))),
                 switch_row("Follow output", "Scroll the conversation to the latest output while an agent works.", st.autoscroll, |s, v| s.autoscroll = v),
             ]),
+            section("Memory", "Runo keeps a summary of each session in .runo/memory.md inside its folder, kept out of git.", vec![
+                switch_row("Runo tools for agents", "Give Claude Code and Codex Runo's tools: read the session memory, search earlier sessions, save notes, and use playbooks (as /mcp__runo__… commands in Claude Code).", st.memory_server, |s, v| s.memory_server = v),
+            ]),
             section("New sessions", "What a session starts with before you change it in the composer.", vec![
-                row("Default agent", "Preselected in New session.", Ctl::Segment(options(&[("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "OpenCode")]), st.default_provider.clone(), Rc::new(|s, v| s.default_provider = v))),
+                row("Default view", "How new sessions open. CLI shows the agent's own command line on the same conversation (Claude Code and Codex); switch any time from the session header at no token cost.", Ctl::Segment(vec![("chat".into(), "Chat".into()), ("cli".into(), "CLI".into())], st.default_view.clone(), Rc::new(|s, v| s.default_view = v))),
+                row("Default agent", "Preselected in New session.", Ctl::Dropdown(agent::PROVIDERS.iter().map(|p| (p.id.to_string(), p.name.to_string())).collect(), st.default_provider.clone(), Rc::new(|s, v| s.default_provider = v))),
                 row("Default permission level", "Maps to each agent's closest mode: auto edit, read-only, or full access.", Ctl::Segment(options(&[("edit", "Auto edit"), ("plan", "Plan only"), ("full", "Full access")]), st.default_mode.clone(), Rc::new(|s, v| s.default_mode = v))),
             ]),
         ],
         SettingsPage::Providers => {
-            let mut rows = Vec::new();
+            let (mut installed, mut available) = (Vec::new(), Vec::new());
             for p in agent::PROVIDERS.iter() {
                 let path = data.provider_paths.iter().find(|(id, _)| *id == p.id).and_then(|(_, path)| path.clone());
                 let caps = caps::get(p.id);
-                rows.push(row(
-                    p.name,
-                    &path.map(|p| p.display().to_string()).unwrap_or_else(|| format!("`{}` was not found on PATH", p.bin)),
-                    if caps.installed { Ctl::Chip(caps.version.clone(), 0) } else { Ctl::Chip("Not found".into(), 1) },
-                ));
+                if caps.installed {
+                    let mut r = row(p.name, &path.map(|p| tilde(&p)).unwrap_or_default(), Ctl::Open(caps.version.clone()));
+                    r.open = Some(SettingsPage::Agent(p.id));
+                    installed.push(r);
+                } else {
+                    let pid = p.id;
+                    available.push(row(
+                        p.name,
+                        &if caps.detected { format!("`{}` isn't installed on this computer.", p.bin) } else { "Checking whether it's installed…".into() },
+                        if caps.detected {
+                            Ctl::Button("Install…".into(), Rc::new(move |this, _| this.ask_install(pid)))
+                        } else {
+                            Ctl::Chip("Detecting…".into(), 2)
+                        },
+                    ));
+                }
             }
-            vec![
-                section("Agent CLIs", "Runo drives the CLIs you already have installed and signed in.", rows),
-                section("Detection", "Models, modes and reasoning levels come from the CLIs themselves.", vec![row(
-                    "Re-detect all agents",
-                    "Run detection again, for example after installing or updating a CLI.",
-                    Ctl::Button("Re-detect".into(), Rc::new(|_, _| caps::refresh())),
-                )]),
-            ]
+            let mut sections = Vec::new();
+            if !installed.is_empty() {
+                sections.push(section("Installed", "Pick an agent to change its model, flags and environment. Installed agents are also listed under Providers on the left.", installed));
+            }
+            if !available.is_empty() {
+                sections.push(section("More agents", "Install any of these with the vendor's official installer. Once installed it appears in the list above and in the sidebar.", available));
+            }
+            sections.push(section("Detection", "Models, modes and reasoning levels come from the CLIs themselves.", vec![row(
+                "Re-detect all agents",
+                "Run detection again, for example after installing or updating a CLI.",
+                Ctl::Button("Re-detect".into(), Rc::new(|_, _| caps::refresh())),
+            )]));
+            sections
         }
-        SettingsPage::Claude => vec![
+        SettingsPage::Agent("claude") => vec![
             detected_section("claude"),
             launch_section("claude", st, "Model alias or full name, used when the session has none selected."),
             section("Behavior", "Passed to claude on every run.", vec![
@@ -287,7 +530,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 agent_choice("claude", st, "Default effort", "How much thinking Claude does when the composer has none selected.", std::iter::once(("".to_string(), "Default".to_string())).chain(caps::get("claude").efforts.iter().map(|c| (c.value.clone(), c.label.clone()))).collect(), |o| o.effort.clone(), |o, v| o.effort = v),
             ]),
         ],
-        SettingsPage::Codex => vec![
+        SettingsPage::Agent("codex") => vec![
             detected_section("codex"),
             launch_section("codex", st, "Any model your account supports. Empty uses the model in ~/.codex/config.toml."),
             section("Behavior", "Passed to codex exec on every run.", vec![
@@ -296,7 +539,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 agent_choice("codex", st, "Default reasoning", "model_reasoning_effort when the composer has none selected.", std::iter::once(("".to_string(), "Default".to_string())).chain(caps::get("codex").models.first().map(|m| m.efforts.clone()).unwrap_or_default().iter().map(|c| (c.value.clone(), c.label.clone()))).collect(), |o| o.effort.clone(), |o, v| o.effort = v),
             ]),
         ],
-        SettingsPage::OpenCode => vec![
+        SettingsPage::Agent("opencode") => vec![
             detected_section("opencode"),
             launch_section("opencode", st, "In provider/model form, for example opencode/big-pickle."),
             section("Behavior", "Passed to opencode run on every run.", vec![
@@ -305,27 +548,71 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Show thinking", "Include thinking blocks in the output (--thinking).", Ctl::Switch(st.agent("opencode").thinking, Rc::new(|s, v| s.agents.entry("opencode".into()).or_default().thinking = v))),
             ]),
         ],
+        SettingsPage::Agent(id) => vec![
+            detected_section(id),
+            launch_section(id, st, "Passed with the CLI's model flag."),
+        ],
         SettingsPage::Mcp => {
             let mut sections = Vec::new();
-            for provider in ["Claude", "Codex"] {
-                let rows: Vec<Row> = data
-                    .mcp
+            let shared = data
+                .mcp
+                .iter()
+                .filter(|m| st.mcp_shared.contains(&crate::mcp::key(m)))
+                .count();
+            sections.push(section(
+                "Use across agents",
+                "Each agent loads its own servers. Turn on Use in Runo to hand a server from any app to Claude Code and Codex sessions too.",
+                vec![row(
+                    "Shared servers",
+                    if shared == 0 {
+                        "None yet. Switch one on below."
+                    } else {
+                        "Passed to every new run of Claude Code and Codex that doesn't already have them."
+                    },
+                    Ctl::Chip(format!("{shared} shared"), if shared == 0 { 3 } else { 0 }),
+                )],
+            ));
+            let mut providers: Vec<&'static str> = Vec::new();
+            for m in &data.mcp {
+                if !providers.contains(&m.provider) {
+                    providers.push(m.provider);
+                }
+            }
+            let order = |p: &str| match p {
+                "Claude Code" => 0,
+                "Codex" => 1,
+                "Project" => 99,
+                _ => 2,
+            };
+            providers.sort_by_key(|p| (order(p), p.to_string()));
+            for provider in providers {
+                let servers: Vec<&McpInfo> = data.mcp.iter().filter(|m| m.provider == provider).collect();
+                let path = servers.first().map(|m| tilde(&m.path)).unwrap_or_default();
+                let rows: Vec<Row> = servers
                     .iter()
-                    .filter(|m| m.provider == provider)
                     .map(|m| {
+                        let key = crate::mcp::key(m);
+                        let share = (provider != "Project" && m.transport != "unknown")
+                            .then(|| (key.clone(), st.mcp_shared.contains(&key)));
                         row(
                             &m.name,
                             &format!("{} · {}{}", m.transport, if m.enabled { "Configured" } else { "Disabled" }, if m.detail.is_empty() { String::new() } else { format!(" · {}", m.detail) }),
-                            Ctl::Reveal(m.path.clone()),
+                            Ctl::Mcp(share, m.path.clone()),
                         )
                     })
                     .collect();
-                if !rows.is_empty() {
-                    sections.push(section(&format!("{provider} servers"), &format!("Read from the {provider} config file. Reveal shows where to edit them."), rows));
-                }
+                let title = if provider == "Project" { "This project (.mcp.json)".to_string() } else { format!("{provider} servers") };
+                sections.push(section(&title, &format!("From {path}"), rows));
             }
-            if sections.is_empty() {
-                sections.push(section("MCP servers", "Servers are read from ~/.claude.json and ~/.codex/config.toml.", vec![row("No servers found", "Add one with your agent's own commands and it will appear here.", Ctl::Chip("0".into(), 3))]));
+            let files: Vec<Row> = data
+                .files
+                .iter()
+                .filter(|(label, _)| label.contains("MCP") || label.contains("Codex"))
+                .map(|(label, path)| row(label, &path.display().to_string(), Ctl::Edit(path.clone())))
+                .collect();
+            sections.push(section("Config files", "Edit servers directly. Files that do not exist yet are created when you save.", files));
+            if data.mcp.is_empty() {
+                sections.insert(1, section("MCP servers", "Runo looks in Claude Code, Codex, Claude Desktop, Cursor, VS Code, Windsurf, Cline, Gemini CLI, Qwen Code, Amp, LM Studio and OpenCode.", vec![row("No servers found", "Add one in any of those apps and it will appear here.", Ctl::Chip("0".into(), 3))]));
             }
             sections
         }
@@ -336,7 +623,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     .skills
                     .iter()
                     .filter(|k| k.source == source)
-                    .map(|k| row(&k.name, &k.description.chars().take(200).collect::<String>(), Ctl::Reveal(k.path.clone())))
+                    .map(|k| row(&k.name, &k.description.chars().take(200).collect::<String>(), Ctl::Edit(k.path.clone())))
                     .collect();
                 if !rows.is_empty() {
                     let title = match source {
@@ -353,6 +640,36 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             }
             sections
         }
+        SettingsPage::Hooks => {
+            let mut sections = Vec::new();
+            for scope in ["project", "user"] {
+                let rows: Vec<Row> = data
+                    .hooks
+                    .iter()
+                    .filter(|h| h.scope == scope)
+                    .map(|h| {
+                        let n = h.commands.len();
+                        let summary = format!("{n} command{} · {}", if n == 1 { "" } else { "s" }, h.commands.join(" · "));
+                        row(&h.event, &summary.chars().take(200).collect::<String>(), Ctl::Edit(h.path.clone()))
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    let title = if scope == "project" { "Project hooks" } else { "Your hooks (~/.claude/settings.json)" };
+                    sections.push(section(title, &format!("{} events", rows.len()), rows));
+                }
+            }
+            if sections.is_empty() {
+                sections.push(section("Hooks", "Hooks run a shell command when the agent uses a tool, finishes, or asks for permission.", vec![row("No hooks found", "Add a \"hooks\" block to a settings file below, for example PostToolUse with matcher Edit running your formatter.", Ctl::Chip("0".into(), 3))]));
+            }
+            let files: Vec<Row> = data
+                .files
+                .iter()
+                .filter(|(label, _)| !label.contains("MCP") && !label.contains("Codex"))
+                .map(|(label, path)| row(label, &path.display().to_string(), Ctl::Edit(path.clone())))
+                .collect();
+            sections.push(section("Config files", "Open in Runo's editor. Files that do not exist yet are created when you save.", files));
+            sections
+        }
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
             row("Worktree folder", "Created next to each repository as .runo-worktrees/<repo>/<branch>.", Ctl::Chip(".runo-worktrees".into(), 3)),
             row("Runo data", "Projects and sessions are saved here. Settings live next to it in settings.json.", Ctl::Chip("~/.runo/state.json".into(), 3)),
@@ -361,11 +678,23 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
 }
 
 impl RunoApp {
-    fn ensure_input(&mut self, key: &str, value: &str, placeholder: &str, set: SetStr, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+    fn ensure_input(
+        &mut self,
+        key: &str,
+        value: &str,
+        placeholder: &str,
+        set: SetStr,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
         if let Some(entity) = self.settings_inputs.get(key) {
             return entity.clone();
         }
-        let entity = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()).default_value(value.to_string()));
+        let entity = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder.to_string())
+                .default_value(value.to_string())
+        });
         let sub = cx.subscribe_in(&entity, window, move |_, input, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 let value = input.read(cx).value().to_string();
@@ -378,7 +707,13 @@ impl RunoApp {
         entity
     }
 
-    fn control(&mut self, ix: usize, ctl: Ctl, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn control(
+        &mut self,
+        ix: usize,
+        ctl: Ctl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match ctl {
             Ctl::Switch(on, set) => Switch::new(("setting-switch", ix))
                 .checked(on)
@@ -388,14 +723,37 @@ impl RunoApp {
                 })
                 .into_any_element(),
             Ctl::Segment(opts, current, set) => {
-                let mut group = div().flex().items_center().p(px(3.)).gap(px(2.)).rounded_lg().border_1().border_color(rgb(c_border())).bg(rgb(c_canvas()));
+                let mut group = div()
+                    .flex()
+                    .items_center()
+                    .p(px(3.))
+                    .gap(px(2.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(rgb(c_canvas()));
                 for (j, (value, label)) in opts.into_iter().enumerate() {
                     let selected = value == current;
                     let set = set.clone();
                     group = group.child(
-                        div().id(("setting-seg", ix * 16 + j)).h(px(28.)).px_3().flex().items_center().rounded_md().cursor_pointer().text_sm()
-                            .when(selected, |el| el.bg(rgb(c_selected())).text_color(rgb(c_blue())).font_weight(FontWeight::SEMIBOLD))
-                            .when(!selected, |el| el.text_color(rgb(c_secondary())).hover(|el| el.bg(rgb(c_subtle()))))
+                        div()
+                            .id(("setting-seg", ix * 16 + j))
+                            .h(px(28.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_sm()
+                            .when(selected, |el| {
+                                el.bg(tint(c_selected()))
+                                    .text_color(rgb(c_blue()))
+                                    .font_weight(FontWeight::MEDIUM)
+                            })
+                            .when(!selected, |el| {
+                                el.text_color(rgb(c_secondary()))
+                                    .hover(|el| el.bg(tint(c_subtle())))
+                            })
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 let (set, value) = (set.clone(), value.clone());
                                 settings::update(cx, move |s| set(s, value));
@@ -408,51 +766,124 @@ impl RunoApp {
             Ctl::Dropdown(opts, current, set) => {
                 let key = format!("dd-{ix}");
                 let open = self.settings_menu.as_deref() == Some(key.as_str());
-                let label = opts.iter().find(|(v, _)| *v == current).map(|(_, l)| l.clone()).unwrap_or_else(|| current.clone());
+                let label = opts
+                    .iter()
+                    .find(|(v, _)| *v == current)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| current.clone());
                 let toggle_key = key.clone();
                 let mut list = div().v_flex().p_1();
                 for (j, (value, text)) in opts.iter().cloned().enumerate() {
                     let selected = value == current;
                     let set = set.clone();
                     list = list.child(
-                        div().id(("setting-dd-item", ix * 64 + j)).h(px(32.)).px_2().flex().items_center().justify_between().gap_3().rounded_md().cursor_pointer().text_sm()
-                            .when(selected, |el| el.bg(rgb(c_selected())).text_color(rgb(c_blue())))
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                        div()
+                            .id(("setting-dd-item", ix * 64 + j))
+                            .h(px(32.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_sm()
+                            .when(selected, |el| {
+                                el.bg(tint(c_selected())).text_color(rgb(c_blue()))
+                            })
+                            .hover(|el| el.bg(tint(c_subtle())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.settings_menu = None;
                                 let (set, value) = (set.clone(), value.clone());
                                 settings::update(cx, move |s| set(s, value));
                             }))
                             .child(text)
-                            .when(selected, |el| el.child(icon(IconName::Check, 14., c_blue()))),
+                            .when(selected, |el| {
+                                el.child(icon(IconName::Check, 14., c_blue()))
+                            }),
                     );
                 }
-                div().relative()
+                div()
+                    .relative()
                     .child(
-                        div().id(("setting-dd", ix)).h(px(34.)).min_w(px(200.)).px_3().flex().items_center().justify_between().gap_3().rounded_lg().border_1().cursor_pointer().text_sm().bg(rgb(c_canvas()))
+                        div()
+                            .id(("setting-dd", ix))
+                            .h(px(34.))
+                            .min_w(px(200.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .rounded_lg()
+                            .border_1()
+                            .cursor_pointer()
+                            .text_sm()
+                            .bg(rgb(c_canvas()))
                             .border_color(rgb(if open { c_blue() } else { c_border() }))
-                            .hover(|el| el.bg(rgb(c_subtle())))
+                            .hover(|el| el.bg(tint(c_subtle())))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.settings_menu = if this.settings_menu.as_deref() == Some(toggle_key.as_str()) { None } else { Some(toggle_key.clone()) };
+                                this.settings_menu =
+                                    if this.settings_menu.as_deref() == Some(toggle_key.as_str()) {
+                                        None
+                                    } else {
+                                        Some(toggle_key.clone())
+                                    };
                                 cx.notify();
                             }))
                             .child(label)
-                            .child(icon(if open { IconName::ChevronUp } else { IconName::ChevronDown }, 14., c_muted())),
+                            .child(icon(
+                                if open {
+                                    IconName::ChevronUp
+                                } else {
+                                    IconName::ChevronDown
+                                },
+                                14.,
+                                c_muted(),
+                            )),
                     )
                     .when(open, |el| {
                         el.child(fade(
-                            div().absolute().top(px(40.)).right_0().min_w(px(220.)).max_h(px(320.)).rounded_xl().border_1().border_color(rgb(c_border())).bg(rgb(c_canvas())).shadow_lg().occlude()
-                                .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.settings_menu = None; cx.notify(); }))
-                                .child(div().id(("setting-dd-scroll", ix)).max_h(px(320.)).overflow_y_scroll().child(list)),
+                            div()
+                                .absolute()
+                                .top(px(40.))
+                                .right_0()
+                                .min_w(px(220.))
+                                .max_h(px(320.))
+                                .rounded_xl()
+                                .border_1()
+                                .border_color(rgb(c_border()))
+                                .bg(rgb(c_canvas()))
+                                .shadow_lg()
+                                .occlude()
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.settings_menu = None;
+                                    cx.notify();
+                                }))
+                                .child(
+                                    div()
+                                        .id(("setting-dd-scroll", ix))
+                                        .max_h(px(320.))
+                                        .overflow_y_scroll()
+                                        .child(list),
+                                ),
                             SharedString::from(format!("dd-pop-{ix}")),
                             140,
                         ))
                     })
                     .into_any_element()
             }
-            Ctl::Text { key, value, placeholder, set } => {
+            Ctl::Text {
+                key,
+                value,
+                placeholder,
+                set,
+            } => {
                 let input = self.ensure_input(&key, &value, &placeholder, set, window, cx);
-                div().w(px(340.)).child(Input::new(&input).bordered(true).h(px(34.))).into_any_element()
+                div()
+                    .w(px(340.))
+                    .child(Input::new(&input).bordered(true).h(px(34.)))
+                    .into_any_element()
             }
             Ctl::Accent(current) => {
                 let mut dots = div().flex().items_center().gap_2();
@@ -460,14 +891,28 @@ impl RunoApp {
                     let selected = *id == current;
                     let id = id.to_string();
                     dots = dots.child(
-                        div().id(("setting-accent", ix * 16 + j)).size(px(28.)).flex().items_center().justify_center().rounded_full().cursor_pointer().border_2()
-                            .border_color(if selected { rgb(*color).into() } else { gpui_kit::transparent_black() })
+                        div()
+                            .id(("setting-accent", ix * 16 + j))
+                            .size(px(28.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .border_2()
+                            .border_color(if selected {
+                                rgb(*color).into()
+                            } else {
+                                gpui_kit::transparent_black()
+                            })
                             .on_click(cx.listener(move |_, _, _, cx| {
                                 let id = id.clone();
                                 settings::update(cx, move |s| s.accent = id);
                             }))
                             .child(div().size(px(18.)).rounded_full().bg(rgb(*color)))
-                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(*name).build(window, cx)),
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(*name).build(window, cx)
+                            }),
                     );
                 }
                 dots.into_any_element()
@@ -486,44 +931,222 @@ impl RunoApp {
                     2 => c_amber(),
                     _ => c_secondary(),
                 };
-                div().px_3().py_1().rounded_full().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(color)).bg(rgb(c_canvas())).border_1().border_color(rgb(c_border())).child(text).into_any_element()
+                div()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(color))
+                    .bg(rgb(c_canvas()))
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .child(text)
+                    .into_any_element()
             }
             Ctl::Keys(text) => {
                 let mut keys = div().flex().items_center().gap_1();
                 for part in text.split(' ') {
-                    keys = keys.child(div().min_w(px(26.)).h(px(26.)).px_2().flex().items_center().justify_center().rounded_md().border_1().border_color(rgb(c_border())).bg(rgb(c_canvas())).text_xs().font_weight(FontWeight::SEMIBOLD).child(part.to_string()));
+                    keys = keys.child(
+                        div()
+                            .min_w(px(26.))
+                            .h(px(26.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(c_border()))
+                            .bg(rgb(c_canvas()))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(part.to_string()),
+                    );
                 }
                 keys.into_any_element()
             }
-            Ctl::Reveal(path) => self
-                .button(("setting-reveal", ix), "Reveal", false)
-                .on_click(move |_, _, cx| cx.reveal_path(&path))
+            Ctl::Mcp(share, path) => {
+                let reveal = path.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(share, |el, (key, on)| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_muted()))
+                                .child("Use in Runo")
+                                .child(Switch::new(("mcp-share", ix)).checked(on).on_click(
+                                    move |value, _, cx| {
+                                        let (key, value) = (key.clone(), *value);
+                                        settings::update(cx, move |s| {
+                                            s.mcp_shared.retain(|k| *k != key);
+                                            if value {
+                                                s.mcp_shared.push(key);
+                                            }
+                                        });
+                                    },
+                                )),
+                        )
+                    })
+                    .child(
+                        self.button(("setting-edit", ix), "Edit", false)
+                            .child(icon(IconName::Pencil, 12., c_secondary()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.edit_path(&path);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button(("setting-reveal", ix), "Reveal", false)
+                            .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+                    )
+                    .into_any_element()
+            }
+            Ctl::Open(version) => div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .when(!version.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .px_2()
+                            .py(px(2.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(c_border()))
+                            .bg(rgb(c_raised()))
+                            .text_xs()
+                            .text_color(rgb(c_green()))
+                            .child(version),
+                    )
+                })
+                .child(icon(IconName::ChevronRight, 14., c_muted()))
                 .into_any_element(),
+            Ctl::Edit(path) => {
+                let exists = path.exists();
+                let edit = path.clone();
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        self.button(
+                            ("setting-edit", ix),
+                            if exists { "Edit" } else { "Create" },
+                            false,
+                        )
+                        .child(icon(IconName::Pencil, 12., c_secondary()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit_path(&edit);
+                            cx.notify();
+                        })),
+                    )
+                    .when(exists, |el| {
+                        el.child(
+                            self.button(("setting-reveal", ix), "Reveal", false)
+                                .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                        )
+                    })
+                    .into_any_element()
+            }
         }
     }
 
-    fn settings_card(&mut self, sec: Section, counter: &mut usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut card = div().v_flex().rounded_xl().border_1().border_color(rgb(c_border())).bg(rgb(c_subtle())).overflow_hidden();
+    fn settings_card(
+        &mut self,
+        sec: Section,
+        counter: &mut usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut card = div()
+            .v_flex()
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(tint(c_subtle()))
+            .overflow_hidden();
         let count = sec.rows.len();
         for (i, r) in sec.rows.into_iter().enumerate() {
             *counter += 1;
             let control = self.control(*counter, r.ctl, window, cx);
+            let open = r.open;
             card = card.child(
-                div().px_5().py_4().flex().items_center().justify_between().gap_8()
-                    .when(i + 1 < count, |el| el.border_b_1().border_color(rgb(c_border())))
+                div()
+                    .id(("setting-row", *counter))
+                    .when_some(open, |el, page| {
+                        el.cursor_pointer()
+                            .hover(|el| el.bg(tint(c_active())))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.settings_page = page;
+                                this.settings_search
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                cx.notify();
+                            }))
+                    })
+                    .px_5()
+                    .py_4()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_8()
+                    .when(i + 1 < count, |el| {
+                        el.border_b_1().border_color(rgb(c_border()))
+                    })
                     .child(
-                        div().flex_1().min_w_0().v_flex().gap(px(3.))
-                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(rgb(c_text())).child(r.title))
-                            .when(!r.desc.is_empty(), |el| el.child(div().text_xs().text_color(rgb(c_secondary())).whitespace_normal().child(r.desc))),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(c_text()))
+                                    .child(r.title),
+                            )
+                            .when(!r.desc.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(c_secondary()))
+                                        .whitespace_normal()
+                                        .child(r.desc),
+                                )
+                            }),
                     )
                     .child(div().flex_none().child(control)),
             );
         }
-        div().v_flex().gap_3()
+        div()
+            .v_flex()
+            .gap_3()
             .child(
-                div().v_flex().gap(px(2.)).px_1()
-                    .child(div().text_base().font_weight(FontWeight::BOLD).text_color(rgb(c_text())).child(sec.title))
-                    .when(!sec.desc.is_empty(), |el| el.child(div().text_sm().text_color(rgb(c_secondary())).child(sec.desc))),
+                div()
+                    .v_flex()
+                    .gap(px(2.))
+                    .px_1()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
+                            .child(sec.title),
+                    )
+                    .when(!sec.desc.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(c_secondary()))
+                                .child(sec.desc),
+                        )
+                    }),
             )
             .child(card)
             .into_any_element()
@@ -532,93 +1155,330 @@ impl RunoApp {
     fn settings_nav_item(&self, page: SettingsPage, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.settings_page == page;
         let lead: AnyElement = match page.agent() {
-            Some(id) => self.provider_badge(agent::provider(id), 20.).into_any_element(),
-            None => icon(page.icon(), 16., if selected { c_blue() } else { c_secondary() }).into_any_element(),
+            Some(id) => self
+                .provider_badge(agent::provider(id), 20.)
+                .into_any_element(),
+            None => icon(
+                page.icon(),
+                16.,
+                if selected { c_blue() } else { c_secondary() },
+            )
+            .into_any_element(),
         };
-        div().id(SharedString::from(format!("snav-{}", page.label()))).h(px(36.)).px_3().flex().items_center().gap_3().rounded_lg().cursor_pointer().text_sm()
-            .when(selected, |el| el.bg(rgb(c_selected())).text_color(rgb(c_blue())).font_weight(FontWeight::SEMIBOLD))
-            .when(!selected, |el| el.text_color(rgb(c_text())).hover(|el| el.bg(rgb(c_subtle()))))
+        div()
+            .id(SharedString::from(format!("snav-{}", page.label())))
+            .h(px(34.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_3()
+            .rounded_lg()
+            .cursor_pointer()
+            .text_sm()
+            .when(selected, |el| {
+                el.bg(tint(c_selected()))
+                    .text_color(rgb(c_blue()))
+                    .font_weight(FontWeight::MEDIUM)
+            })
+            .when(!selected, |el| {
+                el.text_color(rgb(c_text()))
+                    .hover(|el| el.bg(tint(c_subtle())))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_page = page;
                 this.settings_menu = None;
                 cx.notify();
             }))
-            .child(div().w(px(20.)).flex().items_center().justify_center().child(lead))
+            .child(
+                div()
+                    .w(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(lead),
+            )
             .child(page.label())
     }
 
-    pub(crate) fn settings_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn settings_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let st = cx.global::<AppSettings>().clone();
         let data = self.discovered.clone().unwrap_or_default();
         let query = self.settings_search.read(cx).value().trim().to_lowercase();
 
         // Navigation
-        let mut nav = div().w(px(252.)).flex_none().h_full().v_flex().p_3().border_r_1().border_color(rgb(c_border())).bg(rgb(c_sidebar()));
-        let mut groups = div().id("settings-nav").flex_1().min_h_0().overflow_y_scroll().v_flex().gap_4();
+        let mut nav = div()
+            .w(px(252.))
+            .flex_none()
+            .h_full()
+            .v_flex()
+            .p_3()
+            .border_r_1()
+            .border_color(divider())
+            .bg(pane(c_sidebar()));
+        let mut groups = div()
+            .id("settings-nav")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .v_flex()
+            .gap_4();
         for (title, pages) in SettingsPage::GROUPS.iter() {
-            let mut group = div().v_flex().gap(px(2.)).child(div().px_3().pb_1().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(c_muted())).child(title.to_uppercase()));
-            for page in pages.iter() {
-                group = group.child(self.settings_nav_item(*page, cx));
+            let group = div().v_flex().gap(px(2.)).child(
+                div()
+                    .px_3()
+                    .pb_1()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(c_muted()))
+                    .child(title.to_uppercase()),
+            );
+            // Pages hang off their group like a file tree; agent pages hang off Providers.
+            let mut items = div()
+                .ml(px(14.))
+                .pl(px(6.))
+                .border_l_1()
+                .border_color(rgb(c_border()))
+                .v_flex()
+                .gap(px(2.));
+            let mut i = 0;
+            while i < pages.len() {
+                let page = pages[i];
+                items = items.child(self.settings_nav_item(page, cx));
+                // Installed agents hang off Providers.
+                let children: Vec<SettingsPage> = if page == SettingsPage::Providers {
+                    agent::PROVIDERS
+                        .iter()
+                        .filter(|p| caps::get(p.id).installed)
+                        .map(|p| SettingsPage::Agent(p.id))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if !children.is_empty() {
+                    let last = children.len() - 1;
+                    let mut sub = div().ml(px(24.)).v_flex().gap(px(2.));
+                    for (n, child) in children.iter().enumerate() {
+                        sub = sub.child(
+                            div()
+                                .relative()
+                                // The elbow into this row.
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(-12.))
+                                        .top(px(-2.))
+                                        .w(px(10.))
+                                        .h(px(20.))
+                                        .border_l_1()
+                                        .border_b_1()
+                                        .border_color(rgb(c_border()))
+                                        .rounded_bl(px(6.)),
+                                )
+                                // The trunk on to the next sibling.
+                                .when(n < last, |el| {
+                                    el.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(-12.))
+                                            .top(px(-2.))
+                                            .bottom(px(-2.))
+                                            .w(px(1.))
+                                            .bg(rgb(c_border())),
+                                    )
+                                })
+                                .child(self.settings_nav_item(*child, cx)),
+                        );
+                    }
+                    items = items.child(sub);
+                }
+                i += 1;
             }
-            groups = groups.child(group);
+            groups = groups.child(group.child(items));
         }
         nav = nav.child(groups).child(
-            div().pt_2().border_t_1().border_color(rgb(c_border())).child(
-                div().id("settings-back").h(px(38.)).px_3().flex().items_center().gap_3().rounded_lg().cursor_pointer().text_sm().text_color(rgb(c_secondary())).hover(|el| el.bg(rgb(c_subtle())))
-                    .on_click(cx.listener(|this, _, _, cx| { this.view = View::Session; cx.notify(); }))
-                    .child(icon(IconName::ArrowLeft, 16., c_secondary()))
-                    .child("Back to workspace"),
-            ),
+            div()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(c_border()))
+                .child(
+                    div()
+                        .id("settings-back")
+                        .h(px(38.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .rounded_lg()
+                        .cursor_pointer()
+                        .text_sm()
+                        .text_color(rgb(c_secondary()))
+                        .hover(|el| el.bg(tint(c_subtle())))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.view = View::Session;
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::ArrowLeft, 16., c_secondary()))
+                        .child("Back to workspace"),
+                ),
         );
 
         // Content
         let mut counter = 0usize;
         let (title, subtitle, sections): (String, String, Vec<Section>) = if query.is_empty() {
-            (self.settings_page.label().into(), self.settings_page.subtitle().into(), page_sections(self.settings_page, &st, &data))
+            (
+                self.settings_page.label().into(),
+                self.settings_page.subtitle().into(),
+                page_sections(self.settings_page, &st, &data),
+            )
         } else {
             let mut found = Vec::new();
             for page in SettingsPage::all() {
                 for sec in page_sections(page, &st, &data) {
-                    let rows: Vec<Row> = sec.rows.into_iter().filter(|r| r.title.to_lowercase().contains(&query) || r.desc.to_lowercase().contains(&query)).collect();
+                    let rows: Vec<Row> = sec
+                        .rows
+                        .into_iter()
+                        .filter(|r| {
+                            r.title.to_lowercase().contains(&query)
+                                || r.desc.to_lowercase().contains(&query)
+                        })
+                        .collect();
                     if !rows.is_empty() {
-                        found.push(Section { title: format!("{}  ›  {}", page.label(), sec.title), desc: String::new(), rows });
+                        found.push(Section {
+                            title: format!("{}  ›  {}", page.label(), sec.title),
+                            desc: String::new(),
+                            rows,
+                        });
                     }
                 }
             }
-            ("Search results".into(), format!("Matches for “{query}” across all settings."), found)
+            (
+                "Search results".into(),
+                format!("Matches for “{query}” across all settings."),
+                found,
+            )
         };
-        let mut body = div().max_w(px(920.)).mx_auto().px_10().py_8().v_flex().gap_8().child(
-            div().v_flex().gap_1()
-                .child(div().text_3xl().font_weight(FontWeight::BOLD).text_color(rgb(c_text())).child(title.clone()))
-                .child(div().text_sm().text_color(rgb(c_secondary())).child(subtitle)),
-        );
+        let mut body = div()
+            .max_w(px(920.))
+            .mx_auto()
+            .px_10()
+            .py_8()
+            .v_flex()
+            .gap_8()
+            .child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_3xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
+                            .child(title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(c_secondary()))
+                            .child(subtitle),
+                    ),
+            );
         if sections.is_empty() {
-            body = body.child(div().text_sm().text_color(rgb(c_muted())).child("No settings match your search."));
+            body = body.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(c_muted()))
+                    .child("No settings match your search."),
+            );
         }
         for sec in sections {
             body = body.child(self.settings_card(sec, &mut counter, window, cx));
         }
 
-        let header = div().h(px(52.)).flex_none().px_8().flex().items_center().justify_between().border_b_1().border_color(rgb(c_border()))
+        let header = div()
+            .h(px(52.))
+            .flex_none()
+            .px_8()
+            .flex()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(c_border()))
             .child(
-                div().flex().items_center().gap_2().text_sm()
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
                     .child(div().text_color(rgb(c_muted())).child("Settings"))
                     .child(icon(IconName::ChevronRight, 14., c_muted()))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(c_text())).child(if query.is_empty() { self.settings_page.label().to_string() } else { "Search".to_string() })),
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(c_text()))
+                            .child(if query.is_empty() {
+                                self.settings_page.label().to_string()
+                            } else {
+                                "Search".to_string()
+                            }),
+                    ),
             )
             .child(
-                div().w(px(300.)).h(px(34.)).px_3().flex().items_center().gap_2().rounded_lg().border_1().border_color(rgb(c_border())).bg(rgb(c_subtle()))
+                div()
+                    .w(px(300.))
+                    .h(px(34.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(tint(c_subtle()))
                     .child(icon(IconName::Search, 14., c_muted()))
-                    .child(Input::new(&self.settings_search).appearance(false).h(px(30.))),
+                    .child(
+                        Input::new(&self.settings_search)
+                            .appearance(false)
+                            .h(px(30.)),
+                    ),
             );
 
-        let main = div().flex_1().min_w_0().h_full().v_flex().child(header).child(
-            fade(
-                div().id("settings-scroll").flex_1().min_h_0().overflow_y_scroll().child(body),
-                SharedString::from(format!("settings-page-{}", if query.is_empty() { self.settings_page.label() } else { "search" })),
-                220,
-            ),
-        );
-        div().size_full().flex().child(nav).child(main).into_any_element()
+        let main = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .v_flex()
+            .child(header)
+            .child({
+                // Pages cross-fade inside Settings, but opening Settings shows it at once.
+                let still = self.settings_switching();
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(body)
+                    .animated(
+                        SharedString::from(format!(
+                            "settings-page-{}",
+                            if query.is_empty() {
+                                self.settings_page.label()
+                            } else {
+                                "search"
+                            }
+                        )),
+                        Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                        move |el, d| if still { el } else { el.opacity(d) },
+                    )
+            });
+        div()
+            .size_full()
+            .flex()
+            .child(nav)
+            .child(main)
+            .into_any_element()
     }
 }

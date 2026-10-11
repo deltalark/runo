@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["native/runo-app"]
-exclude = ["vendor/portable-pty"]
+exclude = ["vendor/portable-pty", "vendor/gpui-pre-apple"]
 
 [workspace.package]
 version = "0.1.0"
@@ -31,3 +31,8 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = "none"
+
+# gpui's macOS renderer with one blending fix for translucent (glass) windows; see
+# vendor/gpui-pre-apple/src/metal_renderer.rs.
+[patch.crates-io]
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
