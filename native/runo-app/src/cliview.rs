@@ -10,6 +10,26 @@ use std::time::SystemTime;
 /// A CLI still redrawing within this long is treated as working.
 const BUSY_MS: u64 = 1500;
 
+/// Whether the agent in the CLI is in the middle of a reply. Claude Code, Codex and Gemini
+/// show "esc to interrupt" (or "esc to cancel") only while they work, so the screen says it
+/// for them; an idle CLI can still redraw on its own (focus, resize, its status line).
+/// Other CLIs fall back to "is it redrawing without being typed at".
+fn cli_working(run: &CliRun) -> bool {
+    if run.shell.exited() {
+        return false;
+    }
+    let screen = run.shell.text().to_lowercase();
+    if WORKING_MARKS.iter().any(|m| screen.contains(m)) {
+        return true;
+    }
+    if matches!(run.provider.as_str(), "claude" | "codex" | "gemini") {
+        return false;
+    }
+    run.shell.busy(BUSY_MS)
+}
+
+const WORKING_MARKS: [&str; 2] = ["esc to interrupt", "esc to cancel"];
+
 pub(crate) struct CliRun {
     pub shell: pty::Shell,
     provider: String,
@@ -81,8 +101,11 @@ impl RunoApp {
                 return;
             }
             if self.handles.contains_key(&Target::Session(id)) {
-                self.notice =
-                    Some("The agent is answering. Switch to the CLI when this turn ends.".into());
+                self.info = Some((
+                    "The agent is still answering. You can switch to the CLI when it's done."
+                        .into(),
+                    std::time::Instant::now(),
+                ));
                 return;
             }
             if let Some(s) = self.state.session_mut(id) {
@@ -238,11 +261,12 @@ impl RunoApp {
     /// that is still working is left alone and `false` is returned.
     pub(crate) fn close_cli(&mut self, id: u64, force: bool) -> bool {
         if let Some(run) = self.cli_runs.get(&id) {
-            if !force && !run.shell.exited() && run.shell.busy(BUSY_MS) {
-                self.notice = Some(
-                    "The agent is still working in the CLI. Switch back when it finishes, or press Esc in the CLI to stop it."
+            if !force && cli_working(run) {
+                self.info = Some((
+                    "The agent is still replying in the CLI. Switch to Chat when it's done, or press Esc there to stop it."
                         .into(),
-                );
+                    std::time::Instant::now(),
+                ));
                 return false;
             }
         }
