@@ -167,6 +167,8 @@ struct RunoApp {
     file_dirty: bool,
     /// Where the main-area editor returns to.
     editor_back: View,
+    /// The view shown behind the New session dialog.
+    new_back: View,
     terminal: HashMap<u64, Vec<String>>,
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
@@ -765,6 +767,7 @@ impl RunoApp {
             file_preview: false,
             file_dirty: false,
             editor_back: View::Session,
+            new_back: View::Session,
             terminal,
             handles: HashMap::new(),
             tx,
@@ -1679,7 +1682,7 @@ impl RunoApp {
         });
         self.expanded.push(id);
         self.new_project = Some(id);
-        self.view = View::NewSession;
+        self.open_new_session();
         self.save();
     }
 
@@ -2832,7 +2835,7 @@ impl RunoApp {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.new_project = Some(pid);
-                                this.view = View::NewSession;
+                                this.open_new_session();
                                 cx.notify();
                             }))
                             .child(icon(IconName::Plus, 13., c_secondary())),
@@ -2894,7 +2897,7 @@ impl RunoApp {
                             .font_weight(FontWeight::MEDIUM)
                             .hover(|el| el.bg(rgb(c_subtle())))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.view = View::NewSession;
+                                this.open_new_session();
                                 cx.notify();
                             }))
                             .child(icon(IconName::SquarePen, 14., c_text()))
@@ -4327,7 +4330,7 @@ impl RunoApp {
                         .child(icon(IconName::Plus, 12., c_canvas()))
                             .child(icon(IconName::Plus, 14., c_canvas()))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.view = View::NewSession;
+                                this.open_new_session();
                                 cx.notify();
                             })),
                     )
@@ -4371,6 +4374,86 @@ impl RunoApp {
                     .child(body),
             )
             .into_any_element()
+    }
+
+    fn open_new_session(&mut self) {
+        if self.view != View::NewSession {
+            self.new_back = if self.view == View::Settings {
+                View::Session
+            } else {
+                self.view
+            };
+        }
+        self.view = View::NewSession;
+    }
+
+    fn close_new_session(&mut self) {
+        if self.view == View::NewSession {
+            self.view = self.new_back;
+        }
+    }
+
+    /// New session as a dialog over the current view, on a dimmed backdrop.
+    fn new_session_modal(&self, height: f32, cx: &mut Context<Self>) -> AnyElement {
+        let backdrop = if is_dark() {
+            hsla(0., 0., 0., 0.55)
+        } else {
+            hsla(0., 0., 0., 0.28)
+        };
+        fade(
+            div()
+                .id("new-session-backdrop")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(backdrop)
+                .occlude()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.close_new_session();
+                    cx.notify();
+                }))
+                .child(rise(
+                    div()
+                        .id("new-session-card")
+                        .w(px(760.))
+                        .max_w(relative(0.94))
+                        .h(px(height.clamp(360., 820.)))
+                        .relative()
+                        .v_flex()
+                        .rounded_2xl()
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .bg(rgb(c_canvas()))
+                        .shadow_2xl()
+                        .overflow_hidden()
+                        // Clicks inside the dialog must not reach the backdrop.
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(self.new_session_view(cx))
+                        .child(
+                            div().absolute().top_4().right_4().child(
+                                self.ghost_button_sized(
+                                    "new-session-close",
+                                    IconName::X,
+                                    "Close (Esc)",
+                                    28.,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.close_new_session();
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                        ),
+                    "new-session-rise",
+                    320,
+                )),
+            "new-session-fade",
+            200,
+        )
     }
 
     fn new_session_view(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4419,7 +4502,6 @@ impl RunoApp {
         }
         projects = projects.child(
             self.button("add-proj", "Add project…", false)
-                .child(icon(IconName::FolderPlus, 12., c_secondary()))
                 .h(px(32.))
                 .child(icon(IconName::FolderPlus, 14., c_secondary()))
                 .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
@@ -6202,9 +6284,14 @@ impl Render for RunoApp {
             self.prompt
                 .update(cx, |p, cx| p.set_submit_on_enter(st.send_on_enter, cx));
         }
-        let center = match self.view {
-            View::Session => self.session_view(cx),
-            View::NewSession => self.new_session_view(cx),
+        // New session is a dialog; the view it was opened from stays behind it.
+        let shown = if self.view == View::NewSession {
+            self.new_back
+        } else {
+            self.view
+        };
+        let center = match shown {
+            View::Session | View::NewSession => self.session_view(cx),
             View::Inbox => self.list_view(View::Inbox, cx),
             View::AllSessions => self.list_view(View::AllSessions, cx),
             View::History => self.history_view(cx),
@@ -6228,7 +6315,7 @@ impl Render for RunoApp {
             self.panel_wide = Some(wide);
             self.show_panel = wide;
         }
-        let show_right = self.view == View::Session && self.current().is_some() && self.show_panel;
+        let show_right = shown == View::Session && self.current().is_some() && self.show_panel;
         if self
             .info
             .as_ref()
@@ -6270,7 +6357,7 @@ impl Render for RunoApp {
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_file(cx)))
             .on_action(cx.listener(|this, _: &NewSession, _, cx| {
-                this.view = View::NewSession;
+                this.open_new_session();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
@@ -6303,6 +6390,8 @@ impl Render for RunoApp {
                     this.confirm_delete = None;
                 } else if this.notice.is_some() {
                     this.notice = None;
+                } else if this.view == View::NewSession {
+                    this.close_new_session();
                 } else if this.view != View::Session {
                     this.view = View::Session;
                 }
@@ -6324,7 +6413,7 @@ impl Render for RunoApp {
                     .child(div().flex_1().min_w_0().flex().child(center).animated(
                         SharedString::from(format!(
                             "center-{}-{}",
-                            self.view as u8,
+                            shown as u8,
                             self.selected.unwrap_or(0)
                         )),
                         Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
@@ -6478,6 +6567,12 @@ impl Render for RunoApp {
                             ),
                     ),
             )
+            .when(self.view == View::NewSession, |el| {
+                el.child(self.new_session_modal(
+                    f32::from(window.viewport_size().height) - 96.,
+                    cx,
+                ))
+            })
             .children(palette);
         fade(root, "app-root", 450)
     }
