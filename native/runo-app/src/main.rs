@@ -308,6 +308,78 @@ fn fade<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, ms: 
     )
 }
 
+/// Fade in while sliding up a few pixels: cards and toasts arriving.
+fn rise<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, ms: u64) -> AnyElement {
+    el.animated(
+        id,
+        Animation::new(Duration::from_millis(ms)).with_easing(ease_out_quint()),
+        |el, d| el.opacity(d).top(px(8. * (1. - d))),
+    )
+}
+
+/// Slide in from the right: panes opening beside the main view.
+fn slide_in<E: IntoElement + Styled + 'static>(
+    el: E,
+    id: impl Into<ElementId>,
+    ms: u64,
+) -> AnyElement {
+    el.animated(
+        id,
+        Animation::new(Duration::from_millis(ms)).with_easing(ease_out_quint()),
+        |el, d| el.opacity(d).left(px(24. * (1. - d))),
+    )
+}
+
+/// A friendly empty state: a softly breathing icon, a title and a hint.
+fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyElement {
+    rise(
+        div()
+            .w_full()
+            .py_10()
+            .v_flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .size(px(48.))
+                    .mb_1()
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgb(c_subtle()))
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .child(
+                        icon(name, 20., c_secondary()).animated(
+                            (id, 1usize),
+                            Animation::new(Duration::from_millis(2400))
+                                .repeat()
+                                .with_easing(pulsating_between(0.55, 1.)),
+                            |el, t| el.opacity(t),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(c_text()))
+                    .child(title.to_string()),
+            )
+            .child(
+                div()
+                    .max_w(px(360.))
+                    .text_center()
+                    .text_size(px(12.5))
+                    .text_color(rgb(c_muted()))
+                    .child(body.to_string()),
+            ),
+        (id, 0usize),
+        420,
+    )
+}
+
 /// Fade-in whose start is delayed by `i` steps, so lists cascade in.
 fn stagger<E: IntoElement + Styled + 'static>(
     el: E,
@@ -474,17 +546,17 @@ impl RunoApp {
         let mut ticks = 0u32;
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(80))
+                .timer(Duration::from_millis(50))
                 .await;
             ticks = ticks.wrapping_add(1);
             let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             if events.is_empty() {
                 // Repaint about once a second while agents run, for their elapsed time.
-                let tick = ticks.is_multiple_of(12);
+                let tick = ticks.is_multiple_of(20);
                 let repaint = caps::take_updated();
                 // Every ~2s, re-read git status for the session being watched while its
                 // agent works, so the Changes panel fills in as files are edited.
-                let rescan = ticks.is_multiple_of(25);
+                let rescan = ticks.is_multiple_of(40);
                 let alive = this.update(cx, |this, cx| {
                     let watching = this.view == View::Session
                         && this
@@ -1493,6 +1565,10 @@ impl RunoApp {
                     format!("Committed {hash}: {message}"),
                     std::time::Instant::now(),
                 ));
+                if let Some(id) = self.selected {
+                    let first = message.lines().next().unwrap_or_default().to_string();
+                    self.state.log(id, format!("Committed {hash}: {first}"));
+                }
                 self.refresh();
             }
             Err(error) => self.notice = Some(format!("Commit failed: {error}")),
@@ -1510,6 +1586,9 @@ impl RunoApp {
         match git::discard(&dir, path) {
             Ok(()) => {
                 self.info = Some((format!("Discarded {path}."), std::time::Instant::now()));
+                if let Some(id) = self.selected {
+                    self.state.log(id, format!("Discarded {path}"));
+                }
                 self.refresh();
             }
             Err(error) => self.notice = Some(format!("Could not discard {path}: {error}")),
@@ -1523,6 +1602,16 @@ impl RunoApp {
         if remote.is_empty() {
             self.notice = Some("This repository has no remote to push to.".into());
             return;
+        }
+        if let Some(id) = self.selected {
+            self.state.log(
+                id,
+                if open_pr {
+                    "Pushed and opened a pull request"
+                } else {
+                    "Pushed the branch"
+                },
+            );
         }
         let mut line = format!("git push -u {remote} HEAD");
         if open_pr {
@@ -3308,19 +3397,48 @@ impl RunoApp {
                     )
                 })
                 .when(!message.plan.is_empty(), |el| {
-                    el.child(self.plan_card(index, &message.plan, is_last, cx))
+                    el.child(rise(
+                        div().child(self.plan_card(index, &message.plan, is_last, cx)),
+                        ("plan-rise", index),
+                        320,
+                    ))
                 })
                 .when(!message.questions.is_empty(), |el| {
-                    el.child(self.question_card(index, &message.questions, is_last && !working, cx))
+                    el.child(rise(
+                        div().child(self.question_card(
+                            index,
+                            &message.questions,
+                            is_last && !working,
+                            cx,
+                        )),
+                        ("question-rise", index),
+                        320,
+                    ))
                 })
                 .when(!message.denied.is_empty(), |el| {
-                    el.child(self.denied_card(index, &message.denied, is_last && !working, cx))
+                    el.child(rise(
+                        div().child(self.denied_card(
+                            index,
+                            &message.denied,
+                            is_last && !working,
+                            cx,
+                        )),
+                        ("denied-rise", index),
+                        320,
+                    ))
                 })
                 .when(show_changes && !working, |el| {
-                    el.child(self.changes_card(cx))
+                    el.child(rise(
+                        div().child(self.changes_card(cx)),
+                        ("changes-rise", index),
+                        300,
+                    ))
                 })
                 .when(is_last && !working, |el| {
-                    el.children(self.turn_bar(index, cx))
+                    el.children(
+                        self.turn_bar(index, cx)
+                            .map(|bar| rise(div().child(bar), ("turn-rise", index), 360)),
+                    )
                 })
                 .when(!message.text.is_empty(), |el| {
                     el.child(
@@ -3463,6 +3581,7 @@ impl RunoApp {
                     .when(others > 0, |el| {
                         el.child(
                             self.button("keep-racer", "Keep this one", false)
+                        .child(icon(IconName::Trophy, 12., c_secondary()))
                                 .h(px(28.))
                                 .text_xs()
                                 .tooltip(|window, cx| {
@@ -3660,6 +3779,7 @@ impl RunoApp {
             .when(confirming, |el| {
                 el.child(
                     self.button("cancel-delete", "Cancel", false)
+                        .child(icon(IconName::X, 12., c_secondary()))
                         .h(px(26.))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.confirm_delete = None;
@@ -4204,6 +4324,7 @@ impl RunoApp {
                     .gap_2()
                     .child(
                         self.button("empty-new", "New session", true)
+                        .child(icon(IconName::Plus, 12., c_canvas()))
                             .child(icon(IconName::Plus, 14., c_canvas()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.view = View::NewSession;
@@ -4212,6 +4333,7 @@ impl RunoApp {
                     )
                     .child(
                         self.button("empty-add", "Add project", false)
+                        .child(icon(IconName::FolderPlus, 12., c_secondary()))
                             .child(icon(IconName::FolderPlus, 14., c_secondary()))
                             .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
                     ),
@@ -4297,6 +4419,7 @@ impl RunoApp {
         }
         projects = projects.child(
             self.button("add-proj", "Add project…", false)
+                .child(icon(IconName::FolderPlus, 12., c_secondary()))
                 .h(px(32.))
                 .child(icon(IconName::FolderPlus, 14., c_secondary()))
                 .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
@@ -5516,6 +5639,7 @@ impl RunoApp {
                         )
                         .child(
                             self.button("clear-notes", "Clear", false)
+                        .child(icon(IconName::Eraser, 12., c_secondary()))
                                 .h(px(28.))
                                 .text_xs()
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -5530,6 +5654,7 @@ impl RunoApp {
                         )
                         .child(
                             self.button("send-notes", "Send to agent", true)
+                        .child(icon(IconName::Send, 12., c_canvas()))
                                 .h(px(28.))
                                 .text_xs()
                                 .child(icon(IconName::ArrowUp, 13., c_canvas()))
@@ -5662,7 +5787,8 @@ impl RunoApp {
             .child(div().text_base().font_weight(FontWeight::BOLD).child("Browser"))
             .child(div().text_sm().text_color(rgb(c_secondary())).child("Embedded pages are not available in the native build yet. Open a URL, such as a worktree dev server, in your system browser."))
             .child(Input::new(&self.address).bordered(true).h(px(36.)))
-            .child(div().flex().child(self.button("open-url", "Open in browser", true).on_click(cx.listener(|this, _, _, cx| {
+            .child(div().flex().child(self.button("open-url", "Open in browser", true)
+                        .child(icon(IconName::ExternalLink, 12., c_canvas())).on_click(cx.listener(|this, _, _, cx| {
                 let raw = this.address.read(cx).value().trim().to_string();
                 if raw.starts_with("http://") || raw.starts_with("https://") {
                     cx.open_url(&raw);
@@ -5752,6 +5878,16 @@ impl RunoApp {
                 this.shell_tab = None;
                 cx.notify();
             }))
+            .gap(px(5.))
+            .child(icon(
+                if cli {
+                    IconName::Bot
+                } else {
+                    IconName::SquareTerminal
+                },
+                12.,
+                if selected { c_text() } else { c_muted() },
+            ))
             .child(label)
     }
 
@@ -6192,7 +6328,7 @@ impl Render for RunoApp {
                             self.selected.unwrap_or(0)
                         )),
                         Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
-                        |el, delta| el.opacity(0.35 + 0.65 * delta),
+                        |el, delta| el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta))),
                     ))
                     .when(show_right, |el| el.child(self.right_pane(window, cx))),
             )

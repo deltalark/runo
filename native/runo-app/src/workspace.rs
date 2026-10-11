@@ -229,11 +229,12 @@ impl RunoApp {
                         )
                         .into_any_element()
                 } else {
-                    div()
-                        .text_size(px(13.))
-                        .text_color(rgb(c_muted()))
-                        .child("Add a project to keep notes for it.")
-                        .into_any_element()
+                    empty_hint(
+                        "notes-empty",
+                        IconName::NotebookPen,
+                        "No project yet",
+                        "Add a project to keep notes for it.",
+                    )
                 }),
         )
     }
@@ -259,21 +260,26 @@ impl RunoApp {
             }
             let sid = event.session;
             let exists = self.state.session(sid).is_some();
-            let (mark, color) = if event.text.starts_with("Failed") {
-                (IconName::CircleX, c_red())
-            } else if event.text.starts_with("Finished") {
-                (IconName::CircleCheck, c_green())
-            } else if event.text.starts_with("Started") {
-                (IconName::Play, c_blue())
-            } else {
-                (IconName::Dot, c_muted())
+            let t = event.text.as_str();
+            let (mark, color) = match () {
+                _ if t.starts_with("Failed") => (IconName::CircleX, c_red()),
+                _ if t.starts_with("Finished") => (IconName::CircleCheck, c_green()),
+                _ if t.starts_with("Stopped") => (IconName::CircleStop, c_amber()),
+                _ if t.starts_with("Started") => (IconName::Play, c_blue()),
+                _ if t.starts_with("Committed") => (IconName::GitCommitHorizontal, c_green()),
+                _ if t.starts_with("Pushed") => (IconName::CloudUpload, c_blue()),
+                _ if t.starts_with("Undid") => (IconName::Undo2, c_amber()),
+                _ if t.starts_with("Discarded") => (IconName::Trash, c_amber()),
+                _ if t.starts_with("Edited") => (IconName::Pencil, c_secondary()),
+                _ if t.starts_with("Automation") => (IconName::Timer, c_blue()),
+                _ => (IconName::Dot, c_muted()),
             };
             let provider = self
                 .state
                 .session(sid)
                 .map(|s| agent::provider(&s.provider).name)
                 .unwrap_or("");
-            rows = rows.child(
+            rows = rows.child(stagger(
                 div()
                     .id(("activity", i))
                     .h(px(30.))
@@ -312,15 +318,17 @@ impl RunoApp {
                             .text_color(rgb(c_muted()))
                             .child(provider),
                     ),
-            );
+                ("activity-in", i),
+                i,
+            ));
         }
         if self.state.activity.is_empty() {
-            rows = rows.child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(rgb(c_muted()))
-                    .child("Agent runs show up here as they start and finish."),
-            );
+            rows = rows.child(empty_hint(
+                "activity-empty",
+                IconName::Activity,
+                "No activity yet",
+                "Agent runs, commits, undos and edits show up here as they happen.",
+            ));
         }
         self.page("Activity", rows)
     }
@@ -467,7 +475,7 @@ impl RunoApp {
             } else {
                 "paused".into()
             };
-            list = list.child(
+            list = list.child(stagger(
                 div()
                     .id(("auto", i))
                     .p_3()
@@ -503,6 +511,7 @@ impl RunoApp {
                     )
                     .child(
                         self.button(("auto-run", i), "Run now", false)
+                            .child(icon(IconName::Play, 12., c_secondary()))
                             .h(px(26.))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.run_automation(id, cx);
@@ -534,7 +543,17 @@ impl RunoApp {
                                 cx.notify();
                             })),
                     ),
-            );
+                ("auto-in", i),
+                i,
+            ));
+        }
+        if self.state.automations.is_empty() {
+            list = list.child(empty_hint(
+                "auto-empty",
+                IconName::Timer,
+                "No automations yet",
+                "Schedule a prompt below and Runo starts a session for it on time.",
+            ));
         }
         let mut projects = div().flex().flex_wrap().gap_2();
         let picked_project = self
@@ -615,6 +634,7 @@ impl RunoApp {
                         .child(
                             div().child(
                                 self.button("auto-add", "Add automation", true)
+                        .child(icon(IconName::Plus, 12., c_canvas()))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.add_automation(window, cx);
                                         cx.notify();

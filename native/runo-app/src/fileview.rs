@@ -261,11 +261,12 @@ impl RunoApp {
                 .flex()
                 .items_center()
                 .justify_center()
-                .gap_2()
-                .text_sm()
-                .text_color(rgb(c_muted()))
-                .child(icon(IconName::MousePointerClick, 14., c_muted()))
-                .child("Select a file to view or edit it.")
+                .child(empty_hint(
+                    "file-empty",
+                    IconName::FileCode,
+                    "No file open",
+                    "Pick a file above to view it, or edit and save with Ctrl+S.",
+                ))
                 .into_any_element();
         };
         let kind = file.kind;
@@ -363,6 +364,7 @@ impl RunoApp {
             .when(dirty, |el| {
                 el.child(
                     self.button("file-save", "Save", true)
+                        .child(icon(IconName::Save, 12., c_canvas()))
                         .h(px(24.))
                         .px_2()
                         .text_xs()

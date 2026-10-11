@@ -275,7 +275,7 @@ impl RunoApp {
                         .child(items),
                 )
         });
-        Some(
+        Some(slide_in(
             div()
                 .flex_1()
                 .min_w(px(320.))
@@ -309,8 +309,9 @@ impl RunoApp {
                                 .child(Input::new(&self.split_input).appearance(false).h(px(34.))),
                         ),
                 )
-                .children(menu)
-                .into_any_element(),
-        )
+                .children(menu.map(|m| rise(m, "split-menu-rise", 180))),
+            SharedString::from(format!("split-pane-{id}")),
+            260,
+        ))
     }
 }
