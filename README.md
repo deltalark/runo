@@ -12,6 +12,15 @@ Install and sign in to at least one agent CLI first (see [provider setup](docs/p
 cargo run -p runo-native --release
 ```
 
+To build an app with Runo's icon, use [cargo-bundle](https://github.com/burtonageo/cargo-bundle). It makes `Runo.app` on macOS and a `.deb` on Linux:
+
+```bash
+cargo install cargo-bundle
+cd native/runo-app && cargo bundle --release
+```
+
+On Windows the icon is built into `runo-native.exe`. On Linux, `native/runo-app/assets/linux/runo.desktop` and the PNGs in `assets/icon/png` install the launcher icon. To change the icon, edit `assets/icon/runo.svg` and run `python3 build.py` in that folder.
+
 ## What it does
 
 - **Projects and sessions.** Add any local folder. Start a session on a task with an agent of your choice. Git repositories can use an isolated worktree per session so agents never collide.

@@ -231,7 +231,10 @@ impl RunoApp {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(
+                    .child(if at == 0 {
+                        // The welcome step introduces the app with its own icon.
+                        img(app_icon()).size(px(40.)).flex_none().into_any_element()
+                    } else {
                         div()
                             .size(px(32.))
                             .flex_none()
@@ -240,8 +243,9 @@ impl RunoApp {
                             .items_center()
                             .justify_center()
                             .bg(rgb(settings::mix(c_blue(), c_raised(), 0.16)))
-                            .child(icon(step.glyph, 16., c_blue())),
-                    )
+                            .child(icon(step.glyph, 16., c_blue()))
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .flex_1()
