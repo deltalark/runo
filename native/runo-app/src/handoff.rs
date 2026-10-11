@@ -510,13 +510,17 @@ impl RunoApp {
         };
         let badge = |p: &agent::Provider, key: &'static str, dx: f32| {
             div()
+                .w(px(120.))
                 .v_flex()
                 .items_center()
-                .gap_1()
-                .child(self.provider_badge(p, 44.))
+                .gap_2()
+                .child(self.provider_badge(p, 48.))
                 .child(
                     div()
-                        .text_size(px(12.))
+                        .w_full()
+                        .text_center()
+                        .truncate()
+                        .text_size(px(12.5))
                         .font_weight(FontWeight::MEDIUM)
                         .child(p.name),
                 )
@@ -526,25 +530,49 @@ impl RunoApp {
                     move |el, d| el.opacity(d).left(px(dx * (1. - d))),
                 )
         };
-        let arrow = div().flex().gap_1().children((0..3i32).map(|i| {
-            div()
-                .size(px(5.))
-                .rounded_full()
-                .bg(rgb(c_blue()))
-                .with_animation(
-                    ("switch-dot", i as usize),
-                    Animation::new(Duration::from_millis(1200)).repeat(),
-                    move |el, d| {
-                        let phase = (d * 3. - i as f32).rem_euclid(3.);
-                        let on = if phase < 1. {
-                            1. - (phase - 0.5).abs() * 2.
-                        } else {
-                            0.
-                        };
-                        el.opacity(0.25 + 0.75 * on.max(0.))
-                    },
-                )
-        }));
+        // A track between the two badges, centred on them, with pulses flowing to the new agent.
+        const TRACK: f32 = 84.;
+        let arrow = div()
+            .h(px(48.))
+            .w(px(TRACK + 14.))
+            .relative()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(23.))
+                    .w(px(TRACK))
+                    .h(px(2.))
+                    .rounded_full()
+                    .bg(rgb(c_border())),
+            )
+            .children((0..3i32).map(|i| {
+                div()
+                    .absolute()
+                    .top(px(20.))
+                    .size(px(8.))
+                    .rounded_full()
+                    .bg(rgb(c_blue()))
+                    .shadow_md()
+                    .with_animation(
+                        ("switch-pulse", i as usize),
+                        Animation::new(Duration::from_millis(1500)).repeat(),
+                        move |el, d| {
+                            let t = (d + i as f32 / 3.).fract();
+                            let fade = (t * std::f32::consts::PI).sin();
+                            el.left(px(t * (TRACK - 8.))).opacity(fade)
+                        },
+                    )
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(TRACK - 2.))
+                    .top(px(17.))
+                    .child(icon(IconName::ChevronRight, 14., c_blue())),
+            );
         let card = div()
             .id("switch-card")
             .w(px(520.))
@@ -561,9 +589,9 @@ impl RunoApp {
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .justify_center()
-                    .gap_6()
+                    .gap_3()
                     .py_2()
                     .child(badge(from, "switch-from", 24.))
                     .child(arrow)
@@ -574,14 +602,19 @@ impl RunoApp {
                     .v_flex()
                     .items_center()
                     .gap_1()
+                    .text_center()
                     .child(
                         div()
+                            .w_full()
+                            .text_center()
                             .text_lg()
                             .font_weight(FontWeight::BOLD)
                             .child(format!("Switch this session to {}?", to.name)),
                     )
                     .child(
                         div()
+                            .w_full()
+                            .text_center()
                             .text_sm()
                             .text_color(rgb(c_secondary()))
                             .child("Nothing is sent until your next message."),
