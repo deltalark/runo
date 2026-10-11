@@ -174,7 +174,8 @@ struct RunoApp {
     term_focus: FocusHandle,
     term_tall: bool,
     cell_w: f32,
-    cell_measured: bool,
+    /// Font family and size the terminal cell width was measured for.
+    cell_key: Option<(SharedString, u32)>,
     focus_shell: u8,
     menu: Option<String>,
     settings_page: SettingsPage,
@@ -894,7 +895,7 @@ impl RunoApp {
             term_focus: cx.focus_handle(),
             term_tall: false,
             cell_w: 7.2,
-            cell_measured: false,
+            cell_key: None,
             focus_shell: 0,
             menu: None,
             settings_page: SettingsPage::General,
@@ -3925,11 +3926,13 @@ impl RunoApp {
         let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
         let mut list = div()
             .w_full()
-            .max_w(px(780.))
+            .when_some(cx.global::<AppSettings>().content_max_width(), |el, w| {
+                el.max_w(px(w))
+            })
             .mx_auto()
             .v_flex()
             .gap_6()
-            .px_6()
+            .px_8()
             .pt_6()
             .pb_8();
         if session.race != 0 {
@@ -6691,7 +6694,7 @@ impl Render for RunoApp {
             ),
         };
         set_dark(dark);
-        self.measure_cell(window);
+        self.measure_cell(window, cx);
         self.tour_rects = self.anchors.take();
         self.sync_project_form(window, cx);
         if let Some((id, path)) = self.pending_binary.take() {

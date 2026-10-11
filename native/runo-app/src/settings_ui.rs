@@ -9,6 +9,7 @@ use std::rc::Rc;
 pub enum SettingsPage {
     General,
     Appearance,
+    Terminal,
     Keybindings,
     Chat,
     Providers,
@@ -29,6 +30,7 @@ impl SettingsPage {
             &[
                 SettingsPage::General,
                 SettingsPage::Appearance,
+                SettingsPage::Terminal,
                 SettingsPage::Keybindings,
             ],
         ),
@@ -70,6 +72,7 @@ impl SettingsPage {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
+            Self::Terminal => "Terminal",
             Self::Keybindings => "Keybindings",
             Self::Chat => "Chat",
             Self::Providers => "Providers",
@@ -87,7 +90,8 @@ impl SettingsPage {
     fn subtitle(self) -> &'static str {
         match self {
             Self::General => "Alerts, motion and how deleting works.",
-            Self::Appearance => "Theme, accent color and how diffs are colored.",
+            Self::Appearance => "Theme, glass, fonts and how wide conversations run.",
+            Self::Terminal => "Text size, font, scrolling and mouse behavior in the terminal panel and agent CLIs.",
             Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere.",
             Self::Chat => "How the composer behaves and what new sessions start with.",
             Self::Providers => "The agent CLIs on this machine and what each one supports.",
@@ -115,6 +119,7 @@ impl SettingsPage {
         match self {
             Self::General => IconName::Settings,
             Self::Appearance => IconName::Palette,
+            Self::Terminal => IconName::SquareTerminal,
             Self::Keybindings => IconName::Keyboard,
             Self::Chat => IconName::MessageSquare,
             Self::Providers => IconName::Layers,
@@ -408,13 +413,35 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
         ],
         SettingsPage::Appearance => vec![
-            section("Theme", "System follows your OS appearance.", vec![
+            section("Interface", "System follows your OS appearance.", vec![
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
                 row("Glass", "A translucent window over a blurred desktop, like macOS glass. Clear shows the most of what is behind.", Ctl::Segment(options(&[("off", "Off"), ("subtle", "Subtle"), ("frosted", "Frosted"), ("clear", "Clear")]), st.glass.clone(), Rc::new(|s, v| s.glass = v))),
                 row("Interface font", "Runo's own font is tuned for sharp text at small sizes. System uses your operating system's font.", Ctl::Segment(options(&[("bundled", "Runo"), ("system", "System")]), st.font.clone(), Rc::new(|s, v| s.font = v))),
                 row("Glass menus and dialogs", "Popups, menus and dialogs are translucent with a light rim too.", Ctl::Switch(st.glass_cards, Rc::new(|s, v| s.glass_cards = v))),
                 row("Diff colors", "Colorblind uses blue and orange instead of green and red. High contrast uses stronger tints.", Ctl::Segment(options(&[("default", "Default"), ("colorblind", "Colorblind"), ("contrast", "High contrast")]), st.diff_colors.clone(), Rc::new(|s, v| s.diff_colors = v))),
+            ]),
+            section("Conversation", "How replies, errors and code use the space in a session.", vec![
+                row("Content width", "Full uses the whole width of the window so long output needs less scrolling. Comfortable keeps lines short for reading.", Ctl::Segment(options(&[("comfortable", "Comfortable"), ("wide", "Wide"), ("full", "Full")]), st.content_width.clone(), Rc::new(|s, v| s.content_width = v))),
+            ]),
+        ],
+        SettingsPage::Terminal => vec![
+            section("Typography", "Applies to shell tabs and to agents running in their own CLI.", vec![
+                row("Font size", "Text size in the terminal grid.", Ctl::Segment(options(&[("11", "11"), ("12", "12"), ("13", "13"), ("14", "14"), ("16", "16")]), st.term_font_size.to_string(), Rc::new(|s, v| s.term_font_size = v.parse().unwrap_or(12)))),
+                row(
+                    "Font family",
+                    "Any monospace font installed on this computer, for example JetBrains Mono or Menlo.",
+                    Ctl::Text {
+                        key: "term_font".into(),
+                        value: st.term_font.clone(),
+                        placeholder: "Theme monospace font".into(),
+                        set: Rc::new(|s, v| s.term_font = v.trim().to_string()),
+                    },
+                ),
+            ]),
+            section("Interaction", "How the mouse works in the terminal.", vec![
+                row("Scroll speed", "Lines moved per wheel step. Fast suits long logs.", Ctl::Segment(options(&[("normal", "Normal"), ("fast", "Fast"), ("faster", "Faster")]), st.term_scroll.clone(), Rc::new(|s, v| s.term_scroll = v))),
+                row("Right-click", "Show the terminal menu, or paste the clipboard straight in like many terminals do.", Ctl::Segment(options(&[("menu", "Menu"), ("paste", "Paste")]), st.term_right_click.clone(), Rc::new(|s, v| s.term_right_click = v))),
             ]),
         ],
         SettingsPage::Keybindings => {
