@@ -27,6 +27,10 @@ pub(crate) struct UpdateRun {
     pub percent: Option<f32>,
     /// How far the updater's own messages say it got (downloading, installing, done).
     pub phase: f32,
+    /// The installer's current step, as (step, of, label), when its output shows it.
+    pub stage: Option<(u8, u8, &'static str)>,
+    /// Packages npm has downloaded so far.
+    pub fetched: u32,
     pub finished: Option<std::time::Instant>,
     /// Why it failed or is waiting on the person, and what they can do.
     pub failed: Option<updater::Failure>,
@@ -44,6 +48,8 @@ impl UpdateRun {
             line: first_line,
             percent: None,
             phase: 0.,
+            stage: None,
+            fetched: 0,
             finished: None,
             failed: None,
             command: String::new(),
@@ -137,6 +143,16 @@ impl UpdateRun {
         if let Some(phase) = phase_of(line) {
             self.phase = self.phase.max(phase);
         }
+        if line.contains("http fetch") {
+            self.fetched += 1;
+        }
+        if let Some((step, of, label)) = stage_of(&self.command, line) {
+            if self.stage.is_none_or(|(at, _, _)| step >= at) {
+                self.stage = Some((step, of, label));
+                // The bar reaches the middle of the step the installer is on.
+                self.phase = self.phase.max((step as f32 - 0.5) / of as f32);
+            }
+        }
         self.line = line.chars().take(160).collect();
     }
 }
@@ -157,6 +173,51 @@ fn percent_of(line: &str) -> Option<f32> {
         .parse::<f32>()
         .ok()
         .filter(|p| (0. ..=100.).contains(p))
+}
+
+/// Which step an installer is on, from its own messages: Homebrew's `==>` headings,
+/// npm's fetch and install lines, or the words a vendor installer prints.
+fn stage_of(command: &str, line: &str) -> Option<(u8, u8, &'static str)> {
+    let l = line.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| l.contains(w));
+    if command.starts_with("brew") {
+        if !l.starts_with("==>") && !l.contains('🍺') {
+            return None;
+        }
+        return if has(&["summary", "caveats", "🍺"]) {
+            Some((5, 5, "Finishing"))
+        } else if has(&["pouring", "linking"]) {
+            Some((4, 5, "Linking"))
+        } else if has(&["upgrading", "installing"]) {
+            Some((3, 5, "Installing"))
+        } else if has(&["fetching", "downloading"]) {
+            Some((2, 5, "Downloading"))
+        } else if has(&["updating homebrew", "auto-updat"]) {
+            Some((1, 5, "Updating Homebrew"))
+        } else {
+            None
+        };
+    }
+    if command.contains("npm") {
+        return if has(&["added ", "changed ", "up to date"]) {
+            Some((3, 3, "Finishing"))
+        } else if has(&["reify", "postinstall", "build", "linking"]) {
+            Some((2, 3, "Installing"))
+        } else if has(&["http fetch"]) {
+            Some((1, 3, "Downloading"))
+        } else {
+            None
+        };
+    }
+    if has(&["successfully", "complete", "up to date", "installed"]) {
+        Some((3, 3, "Finishing"))
+    } else if has(&["install", "extract", "unpack", "verif"]) {
+        Some((2, 3, "Installing"))
+    } else if has(&["download", "fetch"]) {
+        Some((1, 3, "Downloading"))
+    } else {
+        None
+    }
 }
 
 /// How far along an updater is, from the words in its output.
@@ -180,6 +241,53 @@ fn phase_of(line: &str) -> Option<f32> {
         Some(0.35)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn installers_report_their_step() {
+        let brew = "brew upgrade gemini-cli";
+        assert_eq!(
+            stage_of(brew, "==> Fetching downloads for: gemini-cli"),
+            Some((2, 5, "Downloading"))
+        );
+        assert_eq!(
+            stage_of(
+                brew,
+                "==> Pouring gemini-cli--0.47.0.arm64_sequoia.bottle.tar.gz"
+            ),
+            Some((4, 5, "Linking"))
+        );
+        assert_eq!(
+            stage_of(
+                brew,
+                "🍺  /opt/homebrew/Cellar/gemini-cli/0.47.0: 9,001 files"
+            ),
+            Some((5, 5, "Finishing"))
+        );
+        assert_eq!(stage_of(brew, "Removing: /opt/homebrew/Cellar/x"), None);
+        let npm = "npm install -g @google/gemini-cli@latest";
+        assert_eq!(
+            stage_of(
+                npm,
+                "npm http fetch GET 200 https://registry.npmjs.org/x 12ms"
+            ),
+            Some((1, 3, "Downloading"))
+        );
+        assert_eq!(
+            stage_of(npm, "added 412 packages in 9s"),
+            Some((3, 3, "Finishing"))
+        );
+        let mut run = UpdateRun::new(false, String::new());
+        run.command = npm.into();
+        run.take_line("npm http fetch GET 200 https://registry.npmjs.org/a 3ms");
+        run.take_line("npm http fetch GET 200 https://registry.npmjs.org/b 3ms");
+        assert_eq!((run.fetched, run.stage), (2, Some((1, 3, "Downloading"))));
     }
 }
 
@@ -652,20 +760,32 @@ impl RunoApp {
                     .filter(|p| p.is_file())
                     .map(|p| (p.display().to_string(), updater::version_of(p)))
                     .filter(|(_, v)| !v.is_empty() && !is_newer(&latest, v));
+                let now = version_parts(&found)
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                let package = npm_package(provider);
+                let why = if run.command.starts_with("brew") {
+                    // Homebrew updated the copy Runo runs; its formula just lags the release.
+                    format!(
+                        "Homebrew finished, but its newest {name} is still {now} and {latest} is out. Homebrew usually catches up within a few days. To get {latest} now, install it from npm with the command below, then pick that copy under Settings › {name}."
+                    )
+                } else if fresh.is_some() {
+                    format!(
+                        "The update finished, but Runo still runs {runs}, which is {now}. Another copy comes first on your PATH. Switch Runo to the new copy below."
+                    )
+                } else {
+                    format!(
+                        "The updater finished, but {runs} still reports {now}, not {latest}. The release may not have reached this installer yet."
+                    )
+                };
+                let command = (run.command.starts_with("brew") || fresh.is_none())
+                    .then(|| package.map(|p| format!("npm install -g {p}@latest")))
+                    .flatten();
                 run.failed = Some(updater::Failure {
-                    why: format!(
-                        "The update finished, but Runo still runs {runs}, which is {}. Another copy comes first on your PATH.{}",
-                        version_parts(&found)
-                            .iter()
-                            .map(u64::to_string)
-                            .collect::<Vec<_>>()
-                            .join("."),
-                        if fresh.is_some() {
-                            " Switch Runo to the new copy below."
-                        } else {
-                            ""
-                        }
-                    ),
+                    why,
+                    command,
                     use_copy: fresh,
                     needs_you: true,
                     ..Default::default()
@@ -1267,9 +1387,23 @@ impl RunoApp {
         } else {
             format!("{}m {:02}s", secs / 60, secs % 60)
         };
-        let figure = match run.percent {
-            Some(p) => format!("{p:.0}% · {elapsed}"),
-            None => elapsed,
+        // The installer's own percentage when it prints one; otherwise the step it is on,
+        // since Homebrew and npm print no percentage when they aren't in a terminal.
+        let figure = match (run.percent, run.stage) {
+            (Some(p), _) => format!("{p:.0}% · {elapsed}"),
+            (None, Some((step, of, label))) => {
+                let packages = if run.fetched > 0 && label == "Downloading" {
+                    format!(
+                        " {} package{}",
+                        run.fetched,
+                        if run.fetched == 1 { "" } else { "s" }
+                    )
+                } else {
+                    String::new()
+                };
+                format!("Step {step} of {of} · {label}{packages} · {elapsed}")
+            }
+            (None, None) => format!("Starting · {elapsed}"),
         };
         let bar = div()
             .relative()
