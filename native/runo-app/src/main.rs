@@ -4373,12 +4373,13 @@ impl RunoApp {
                     )
                 })
                 .collect();
+            let from_bin = cx.global::<AppSettings>().agent(&session.provider).binary;
             popup = Some((
                 "provider".into(),
                 self.menu_popup(
                     "provider",
                     items,
-                    move |this, i| this.request_switch(sid, i),
+                    move |this, i| this.request_switch(sid, i, &from_bin),
                     cx,
                 ),
             ));
