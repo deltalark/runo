@@ -10,6 +10,7 @@ mod github;
 mod handoff;
 mod history;
 mod install;
+mod mcp;
 mod memory_mcp;
 mod models;
 mod projects;
@@ -668,6 +669,10 @@ fn icon(name: IconName, size: f32, color: u32) -> Icon {
 impl RunoApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         caps::refresh();
+        // Find MCP servers in every app's config, so shared ones reach the first run.
+        std::thread::spawn(|| {
+            settings::discover(None);
+        });
         let (tx, rx) = channel::<Event>();
         let mut ticks = 0u32;
         cx.spawn(async move |this, cx| loop {

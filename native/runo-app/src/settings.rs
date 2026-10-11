@@ -85,6 +85,8 @@ pub struct AppSettings {
     pub term_scroll: String,
     /// Right-click in the terminal: "menu" or "paste".
     pub term_right_click: String,
+    /// MCP servers (`<app>/<name>`) handed to every agent that doesn't load them itself.
+    pub mcp_shared: Vec<String>,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -133,6 +135,7 @@ impl Default for AppSettings {
             term_font: String::new(),
             term_scroll: "normal".into(),
             term_right_click: "menu".into(),
+            mcp_shared: Vec::new(),
         }
     }
 }
@@ -197,6 +200,7 @@ impl AppSettings {
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
         AUTOSCROLL.store(self.autoscroll, Ordering::Relaxed);
         KEEP_AWAKE.store(self.keep_awake, Ordering::Relaxed);
+        crate::mcp::set_shared(&self.mcp_shared);
         crate::terminal::configure(
             self.term_font_size,
             match self.term_scroll.as_str() {
@@ -551,6 +555,8 @@ pub struct McpInfo {
     pub enabled: bool,
     pub detail: String,
     pub path: PathBuf,
+    /// How to start or reach it, for sharing with other agents.
+    pub spec: crate::mcp::McpSpec,
 }
 
 #[derive(Clone, Default)]
@@ -667,21 +673,15 @@ fn scan_mcp(home: &Path, out: &mut Vec<McpInfo>) {
     {
         if let Some(servers) = value.get("mcpServers").and_then(|v| v.as_object()) {
             for (name, cfg) in servers {
-                let (transport, detail) = match (
-                    cfg.get("command").and_then(|v| v.as_str()),
-                    cfg.get("url").and_then(|v| v.as_str()),
-                ) {
-                    (Some(cmd), _) => ("stdio", cmd.to_string()),
-                    (None, Some(url)) => ("http", url.to_string()),
-                    _ => ("unknown", String::new()),
-                };
+                let spec = crate::mcp::spec_from_json(cfg);
                 out.push(McpInfo {
                     name: name.clone(),
-                    provider: "Claude",
-                    transport,
+                    provider: "Claude Code",
+                    transport: spec.transport(),
                     enabled: true,
-                    detail,
+                    detail: spec.detail(),
                     path: claude.clone(),
+                    spec,
                 });
             }
         }
@@ -690,6 +690,8 @@ fn scan_mcp(home: &Path, out: &mut Vec<McpInfo>) {
     let codex = home.join(".codex").join("config.toml");
     if let Ok(text) = std::fs::read_to_string(&codex) {
         let mut current: Option<McpInfo> = None;
+        // Inside `[mcp_servers.<name>.env]` or `.http_headers`.
+        let mut sub: Option<&str> = None;
         for line in text.lines() {
             let line = line.trim();
             if let Some(header) = line
@@ -697,8 +699,17 @@ fn scan_mcp(home: &Path, out: &mut Vec<McpInfo>) {
                 .and_then(|h| h.strip_suffix(']'))
             {
                 if header.contains('.') && !header.starts_with('"') {
-                    continue; // sub-table such as `.env`
+                    // A sub-table of the current server, such as `.env`.
+                    sub = if header.ends_with(".env") {
+                        Some("env")
+                    } else if header.ends_with(".http_headers") {
+                        Some("headers")
+                    } else {
+                        Some("other")
+                    };
+                    continue;
                 }
+                sub = None;
                 if let Some(done) = current.take() {
                     out.push(done);
                 }
@@ -709,22 +720,45 @@ fn scan_mcp(home: &Path, out: &mut Vec<McpInfo>) {
                     enabled: true,
                     detail: String::new(),
                     path: codex.clone(),
+                    spec: Default::default(),
                 });
             } else if line.starts_with('[') {
+                sub = None;
                 if let Some(done) = current.take() {
                     out.push(done);
                 }
             } else if let Some(info) = current.as_mut() {
+                if let Some(kind) = sub {
+                    if let Some((k, v)) = line.split_once('=') {
+                        let pair = (
+                            k.trim().trim_matches('"').to_string(),
+                            v.trim().trim_matches('"').to_string(),
+                        );
+                        match kind {
+                            "env" => info.spec.env.push(pair),
+                            "headers" => info.spec.headers.push(pair),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 let value = |key: &str| {
                     line.strip_prefix(key)
                         .and_then(|r| r.trim_start().strip_prefix('='))
                         .map(|v| v.trim().trim_matches('"').to_string())
                 };
                 if let Some(cmd) = value("command") {
-                    info.detail = cmd;
+                    info.detail = cmd.clone();
+                    info.spec.command = cmd;
+                } else if let Some(args) = line
+                    .strip_prefix("args")
+                    .and_then(|r| r.trim_start().strip_prefix('='))
+                {
+                    info.spec.args = serde_json::from_str(args.trim()).unwrap_or_default();
                 } else if let Some(url) = value("url") {
                     info.transport = "http";
-                    info.detail = url;
+                    info.detail = url.clone();
+                    info.spec.url = url;
                 } else if value("enabled").as_deref() == Some("false") {
                     info.enabled = false;
                 }
@@ -733,6 +767,9 @@ fn scan_mcp(home: &Path, out: &mut Vec<McpInfo>) {
         if let Some(done) = current {
             out.push(done);
         }
+    }
+    for (provider, path, field) in crate::mcp::other_sources(home) {
+        crate::mcp::scan_json(provider, &path, field, out);
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
 }
@@ -749,6 +786,21 @@ fn which(bin: &str) -> Option<PathBuf> {
             .map(|s| dir.join(format!("{bin}{s}")))
             .find(|p| p.is_file())
     })
+}
+
+fn provider_mcp_label(provider: &str) -> &'static str {
+    match provider {
+        "Claude Desktop" => "Claude Desktop MCP servers",
+        "Cursor" => "Cursor MCP servers",
+        "Windsurf" => "Windsurf MCP servers",
+        "VS Code" => "VS Code MCP servers",
+        "Cline" => "Cline MCP servers",
+        "Gemini CLI" => "Gemini CLI MCP servers",
+        "Qwen Code" => "Qwen Code MCP servers",
+        "Amp" => "Amp MCP servers",
+        "LM Studio" => "LM Studio MCP servers",
+        _ => "OpenCode MCP servers",
+    }
 }
 
 pub fn discover(project_dir: Option<&str>) -> Discovered {
@@ -787,7 +839,21 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
             ("Claude MCP servers", home.join(".claude.json")),
             ("Codex config", home.join(".codex").join("config.toml")),
         ]);
+        for (provider, path, _) in crate::mcp::other_sources(&home) {
+            if found.mcp.iter().any(|m| m.provider == provider) {
+                found.files.push((provider_mcp_label(provider), path));
+            }
+        }
     }
+    if let Some(dir) = project_dir {
+        crate::mcp::scan_json(
+            "Project",
+            &Path::new(dir).join(".mcp.json"),
+            "mcpServers",
+            &mut found.mcp,
+        );
+    }
+    crate::mcp::set_found(&found.mcp);
     if let Some(dir) = project_dir {
         let project = Path::new(dir).join(".claude").join("settings.json");
         scan_hooks(&project, "project", &mut found.hooks);
@@ -933,15 +999,21 @@ mod tests {
                 ),
                 (
                     "files".to_string(),
-                    "Claude",
+                    "Claude Code",
                     "stdio",
                     true,
                     "npx".to_string()
                 ),
-                ("odd".to_string(), "Claude", "unknown", true, String::new()),
+                (
+                    "odd".to_string(),
+                    "Claude Code",
+                    "unknown",
+                    true,
+                    String::new()
+                ),
                 (
                     "remote".to_string(),
-                    "Claude",
+                    "Claude Code",
                     "http",
                     true,
                     "https://x.dev/mcp".to_string()

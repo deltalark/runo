@@ -152,6 +152,8 @@ enum Ctl {
     Keys(String),
     /// Open the file in Runo's editor, or reveal it.
     Edit(PathBuf),
+    /// An MCP server: share it with Runo's sessions (key, shared), plus Edit and Reveal.
+    Mcp(Option<(String, bool)>, PathBuf),
 }
 
 struct Row {
@@ -184,6 +186,15 @@ fn row(title: &str, desc: &str, ctl: Ctl) -> Row {
 
 fn switch_row(title: &str, desc: &str, on: bool, set: fn(&mut AppSettings, bool)) -> Row {
     row(title, desc, Ctl::Switch(on, Rc::new(set)))
+}
+
+/// A path with the home folder shown as ~.
+fn tilde(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    match home.and_then(|h| path.strip_prefix(h).ok().map(|p| p.display().to_string())) {
+        Some(rest) => format!("~/{rest}"),
+        None => path.display().to_string(),
+    }
 }
 
 fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -547,22 +558,55 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         }
         SettingsPage::Mcp => {
             let mut sections = Vec::new();
-            for provider in ["Claude", "Codex"] {
-                let rows: Vec<Row> = data
-                    .mcp
+            let shared = data
+                .mcp
+                .iter()
+                .filter(|m| st.mcp_shared.contains(&crate::mcp::key(m)))
+                .count();
+            sections.push(section(
+                "Use across agents",
+                "Each agent loads its own servers. Turn on Use in Runo to hand a server from any app to Claude Code and Codex sessions too.",
+                vec![row(
+                    "Shared servers",
+                    if shared == 0 {
+                        "None yet. Switch one on below."
+                    } else {
+                        "Passed to every new run of Claude Code and Codex that doesn't already have them."
+                    },
+                    Ctl::Chip(format!("{shared} shared"), if shared == 0 { 3 } else { 0 }),
+                )],
+            ));
+            let mut providers: Vec<&'static str> = Vec::new();
+            for m in &data.mcp {
+                if !providers.contains(&m.provider) {
+                    providers.push(m.provider);
+                }
+            }
+            let order = |p: &str| match p {
+                "Claude Code" => 0,
+                "Codex" => 1,
+                "Project" => 99,
+                _ => 2,
+            };
+            providers.sort_by_key(|p| (order(p), p.to_string()));
+            for provider in providers {
+                let servers: Vec<&McpInfo> = data.mcp.iter().filter(|m| m.provider == provider).collect();
+                let path = servers.first().map(|m| tilde(&m.path)).unwrap_or_default();
+                let rows: Vec<Row> = servers
                     .iter()
-                    .filter(|m| m.provider == provider)
                     .map(|m| {
+                        let key = crate::mcp::key(m);
+                        let share = (provider != "Project" && m.transport != "unknown")
+                            .then(|| (key.clone(), st.mcp_shared.contains(&key)));
                         row(
                             &m.name,
                             &format!("{} · {}{}", m.transport, if m.enabled { "Configured" } else { "Disabled" }, if m.detail.is_empty() { String::new() } else { format!(" · {}", m.detail) }),
-                            Ctl::Edit(m.path.clone()),
+                            Ctl::Mcp(share, m.path.clone()),
                         )
                     })
                     .collect();
-                if !rows.is_empty() {
-                    sections.push(section(&format!("{provider} servers"), &format!("Read from the {provider} config file. Reveal shows where to edit them."), rows));
-                }
+                let title = if provider == "Project" { "This project (.mcp.json)".to_string() } else { format!("{provider} servers") };
+                sections.push(section(&title, &format!("From {path}"), rows));
             }
             let files: Vec<Row> = data
                 .files
@@ -572,7 +616,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 .collect();
             sections.push(section("Config files", "Edit servers directly. Files that do not exist yet are created when you save.", files));
             if data.mcp.is_empty() {
-                sections.insert(0, section("MCP servers", "Servers are read from ~/.claude.json and ~/.codex/config.toml.", vec![row("No servers found", "Add one with your agent's own commands and it will appear here.", Ctl::Chip("0".into(), 3))]));
+                sections.insert(1, section("MCP servers", "Runo looks in Claude Code, Codex, Claude Desktop, Cursor, VS Code, Windsurf, Cline, Gemini CLI, Qwen Code, Amp, LM Studio and OpenCode.", vec![row("No servers found", "Add one in any of those apps and it will appear here.", Ctl::Chip("0".into(), 3))]));
             }
             sections
         }
@@ -925,6 +969,48 @@ impl RunoApp {
                     );
                 }
                 keys.into_any_element()
+            }
+            Ctl::Mcp(share, path) => {
+                let reveal = path.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when_some(share, |el, (key, on)| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_muted()))
+                                .child("Use in Runo")
+                                .child(Switch::new(("mcp-share", ix)).checked(on).on_click(
+                                    move |value, _, cx| {
+                                        let (key, value) = (key.clone(), *value);
+                                        settings::update(cx, move |s| {
+                                            s.mcp_shared.retain(|k| *k != key);
+                                            if value {
+                                                s.mcp_shared.push(key);
+                                            }
+                                        });
+                                    },
+                                )),
+                        )
+                    })
+                    .child(
+                        self.button(("setting-edit", ix), "Edit", false)
+                            .child(icon(IconName::Pencil, 12., c_secondary()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.edit_path(&path);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button(("setting-reveal", ix), "Reveal", false)
+                            .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+                    )
+                    .into_any_element()
             }
             Ctl::Edit(path) => {
                 let exists = path.exists();
