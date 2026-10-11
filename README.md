@@ -35,6 +35,10 @@ Projects and sessions are stored in `~/.runo/state.json` and settings in `~/.run
 
 Early. Not built yet: an interactive terminal, an embedded browser, structured tool-step output from agents, and remote machines.
 
+## Sandboxed sessions with Cove
+
+[Cove](https://github.com/deltalark/cove) runs Linux VMs on your Mac. When it is installed and `cove serve` is running, New session offers **Runs on: Cove VM**. The agent, the worktree setup command and terminal tabs then run inside the session's own VM (`runo-<id>`), with the session folder shared in at the same path. Git, diffs, commits and pull requests stay on your Mac. The VM sees only that folder (and the repository's `.git`, read-only) plus `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY` and `OPENROUTER_API_KEY` when Runo has them; Claude Code, Codex and OpenCode are installed in the VM on first use. Deleting the session deletes its VM.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).

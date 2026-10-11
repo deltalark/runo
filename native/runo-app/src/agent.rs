@@ -886,10 +886,12 @@ impl Handle {
     }
 }
 
+/// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
 pub fn run_agent(
     target: Target,
     spec: &RunSpec,
     dir: &str,
+    sandbox: Option<&crate::cove::Sandbox>,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
     let bin = if spec.opts.binary.trim().is_empty() {
@@ -906,13 +908,18 @@ pub fn run_agent(
             }
         }
     }
+    if let Some(sandbox) = sandbox {
+        command = sandbox.wrap(&command, dir, false)?;
+    }
     spawn(target, command, dir, tx)
 }
 
+/// Run a shell command, inside the session's Cove VM when `sandbox` is given.
 pub fn run_shell(
     target: Target,
     line: &str,
     dir: &str,
+    sandbox: Option<&crate::cove::Sandbox>,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
     let mut command = if cfg!(windows) {
@@ -925,6 +932,9 @@ pub fn run_shell(
         c
     };
     command.env("TERM", "dumb");
+    if let Some(sandbox) = sandbox {
+        command = sandbox.wrap(&command, dir, false)?;
+    }
     spawn(target, command, dir, tx)
 }
 
@@ -992,6 +1002,7 @@ mod tests {
             Target::Terminal(1),
             "echo hi && echo err 1>&2",
             dir.to_str().unwrap(),
+            None,
             tx,
         )
         .unwrap();
@@ -1153,7 +1164,7 @@ mod arg_tests {
             images: &[],
             memory: None,
         };
-        run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), tx).unwrap();
+        run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), None, tx).unwrap();
         let (mut out, mut err) = (vec![], vec![]);
         loop {
             match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
@@ -1196,7 +1207,9 @@ mod arg_tests {
             images: &[],
             memory: None,
         };
-        let error = run_agent(Target::Session(1), &spec, "/", tx).err().unwrap();
+        let error = run_agent(Target::Session(1), &spec, "/", None, tx)
+            .err()
+            .unwrap();
         assert!(error.contains("could not start"));
     }
 
@@ -1204,7 +1217,14 @@ mod arg_tests {
     fn kill_stops_a_running_command() {
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
-        let handle = run_shell(Target::Terminal(7), "sleep 30", dir.to_str().unwrap(), tx).unwrap();
+        let handle = run_shell(
+            Target::Terminal(7),
+            "sleep 30",
+            dir.to_str().unwrap(),
+            None,
+            tx,
+        )
+        .unwrap();
         handle.kill();
         loop {
             if let Event::Done(_, ok) = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
