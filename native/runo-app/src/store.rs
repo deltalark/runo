@@ -281,6 +281,9 @@ pub struct Session {
     /// switching straight back resumes its own conversation instead of starting over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switched_from: Option<SwitchedFrom>,
+    /// Runs inside its own Cove VM (`runo-<id>`) instead of directly on this machine.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cove: bool,
 }
 
 /// What a switch replaced, enough to undo it before anything is sent.
@@ -293,6 +296,14 @@ pub struct SwitchedFrom {
     pub opts: HashMap<String, String>,
     pub conversation_start: usize,
     pub carried: String,
+}
+
+impl Session {
+    /// The Cove VM this session runs in, if it runs in one.
+    pub fn sandbox(&self) -> Option<crate::cove::Sandbox> {
+        self.cove
+            .then(|| crate::cove::Sandbox::for_session(self.id, &self.dir))
+    }
 }
 
 /// A review comment on one line of the session's diff.
