@@ -73,7 +73,8 @@ pub fn refresh() {
             let caps = match provider.id {
                 "claude" => claude(),
                 "codex" => codex(),
-                _ => opencode(),
+                "opencode" => opencode(),
+                _ => generic(provider.bin),
             };
             if let Ok(mut map) = store().write() {
                 map.insert(provider.id.to_string(), caps);
@@ -81,6 +82,40 @@ pub fn refresh() {
             UPDATED.store(true, Ordering::Relaxed);
         }
     });
+}
+
+/// Agents without parseable help: the version, and Runo's three permission levels,
+/// which `agent::provider_args` maps onto each CLI's own flags.
+fn generic(bin: &str) -> Caps {
+    let installed = crate::agent::installed(bin);
+    let version = if installed {
+        run(bin, &["--version"])
+            .lines()
+            .find(|l| l.chars().any(|c| c.is_ascii_digit()))
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(40)
+            .collect()
+    } else {
+        String::new()
+    };
+    let level = |value: &str, label: &str, desc: &str| Choice {
+        value: value.into(),
+        label: label.into(),
+        desc: desc.into(),
+    };
+    Caps {
+        installed,
+        version,
+        modes: vec![
+            level("edit", "Auto edit", "Edit files without asking"),
+            level("plan", "Plan only", "Read and suggest; no edits"),
+            level("full", "Full access", "Run anything without asking"),
+        ],
+        detected: true,
+        ..Caps::default()
+    }
 }
 
 fn run(bin: &str, args: &[&str]) -> String {
