@@ -5,9 +5,26 @@ edition.workspace = true
 license.workspace = true
 description = "Runo's native GPUI desktop client"
 
+build = "build.rs"
+
 [[bin]]
 name = "runo-native"
 path = "src/main.rs"
+
+# App bundle metadata for `cargo bundle` (macOS .app, Linux .deb).
+[package.metadata.bundle]
+name = "Runo"
+identifier = "dev.runo.app"
+icon = [
+    "assets/icon/png/runo-32.png",
+    "assets/icon/png/runo-128.png",
+    "assets/icon/png/runo-256.png",
+    "assets/icon/png/runo-512.png",
+    "assets/icon/png/runo-1024.png",
+    "assets/icon/runo.icns",
+]
+category = "public.app-category.developer-tools"
+short_description = "Run coding agents side by side"
 
 [dependencies]
 gpui-kit = { version = "0.7.1", features = [
@@ -30,3 +47,6 @@ portable-pty = { path = "../../vendor/portable-pty" }
 vt100 = "0.15"
 serde.workspace = true
 serde_json.workspace = true
+
+[build-dependencies]
+embed-resource = "3.0.11"

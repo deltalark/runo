@@ -439,6 +439,18 @@ fn ease_in_out_cubic(t: f32) -> f32 {
     }
 }
 
+/// Runo's app icon, for showing inside the app.
+fn app_icon() -> std::sync::Arc<Image> {
+    static ICON: std::sync::OnceLock<std::sync::Arc<Image>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        std::sync::Arc::new(Image::from_bytes(
+            ImageFormat::Png,
+            include_bytes!("../assets/icon/png/runo-128.png").to_vec(),
+        ))
+    })
+    .clone()
+}
+
 /// A friendly empty state: a softly breathing icon, a title and a hint.
 fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyElement {
     rise(
@@ -7120,6 +7132,8 @@ fn main() {
                 appears_transparent: cfg!(target_os = "macos"),
                 traffic_light_position: Some(point(px(16.), px(16.))),
             }),
+            // Matches StartupWMClass in assets/linux/runo.desktop, so docks show the icon.
+            app_id: Some("runo".into()),
             ..Default::default()
         };
         open_window(options, cx, |window, cx| {
