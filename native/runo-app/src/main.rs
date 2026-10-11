@@ -20,6 +20,7 @@ mod stream;
 mod terminal;
 mod tour;
 mod turns;
+mod updater;
 mod workspace;
 
 use agent::{Event, Handle, Target};
