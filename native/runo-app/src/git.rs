@@ -140,10 +140,17 @@ pub fn changes(dir: &str) -> Vec<Change> {
     result
 }
 
+#[cfg(test)]
 pub fn file_diff(dir: &str, path: &str) -> String {
+    file_diff_context(dir, path, false)
+}
+
+/// The diff of one file; with `whole` every unchanged line is included as context.
+pub fn file_diff_context(dir: &str, path: &str, whole: bool) -> String {
     let tracked = git(dir, &["ls-files", "--error-unmatch", "--", path]).is_ok();
     let out = if tracked {
-        git(dir, &["diff", "HEAD", "--", path])
+        let context = if whole { "-U100000" } else { "-U3" };
+        git(dir, &["diff", context, "HEAD", "--", path])
     } else {
         // `--no-index` exits 1 when files differ, which `git()` reports as an error.
         Command::new("git")
@@ -238,6 +245,154 @@ pub fn commit_all(dir: &str, message: &str) -> Result<String, String> {
     git(dir, &["add", "-A"])?;
     git(dir, &["commit", "-q", "-m", message])?;
     git(dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string())
+}
+
+/// Run git with a private index file, so snapshots never touch the user's staging area.
+fn git_index(dir: &str, index: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .output()
+        .map_err(|error| format!("could not run git: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+fn temp_index(dir: &str) -> std::path::PathBuf {
+    let git_dir = git(dir, &["rev-parse", "--absolute-git-dir"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Path::new(&git_dir).join(format!("runo-index-{}-{nanos}", std::process::id()))
+}
+
+/// Tree id of the whole working tree (tracked and untracked, minus ignored files).
+fn snapshot_tree(dir: &str) -> Result<(String, std::path::PathBuf), String> {
+    let index = temp_index(dir);
+    // Start from HEAD's index when there is one, so unchanged files cost nothing.
+    let _ = git_index(dir, &index, &["read-tree", "HEAD"]);
+    git_index(dir, &index, &["add", "-A", "--", "."])?;
+    let tree = git_index(dir, &index, &["write-tree"])?.trim().to_string();
+    Ok((tree, index))
+}
+
+/// Snapshot the working tree as a commit that no branch points at, so a turn can be undone.
+/// Returns its id. The commit is kept alive by a ref under `refs/runo/`.
+pub fn checkpoint(dir: &str) -> Result<String, String> {
+    let (tree, index) = snapshot_tree(dir)?;
+    let _ = std::fs::remove_file(&index);
+    let mut args = vec!["commit-tree", tree.as_str(), "-m", "runo checkpoint"];
+    let head = git(dir, &["rev-parse", "-q", "--verify", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if !head.is_empty() {
+        args.extend(["-p", head.as_str()]);
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(&args)
+        .env("GIT_AUTHOR_NAME", "Runo")
+        .env("GIT_AUTHOR_EMAIL", "runo@localhost")
+        .env("GIT_COMMITTER_NAME", "Runo")
+        .env("GIT_COMMITTER_EMAIL", "runo@localhost")
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let _ = git(
+        dir,
+        &[
+            "update-ref",
+            &format!("refs/runo/checkpoints/{commit}"),
+            &commit,
+        ],
+    );
+    Ok(commit)
+}
+
+/// Files that differ between a checkpoint and the working tree now.
+pub fn changed_since(dir: &str, checkpoint: &str) -> Vec<String> {
+    let Ok((tree, index)) = snapshot_tree(dir) else {
+        return Vec::new();
+    };
+    let _ = std::fs::remove_file(&index);
+    git(dir, &["diff", "--name-only", checkpoint, &tree])
+        .map(|s| s.lines().map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// Put the working tree back exactly as it was at the checkpoint: changed files are
+/// restored and files created since are deleted. Ignored files are left alone.
+pub fn restore(dir: &str, checkpoint: &str) -> Result<usize, String> {
+    let (tree, index) = snapshot_tree(dir)?;
+    let changed = git(
+        dir,
+        &["diff", "--name-status", "--no-renames", checkpoint, &tree],
+    );
+    let _ = std::fs::remove_file(&index);
+    let changed = changed?;
+    let mut count = 0;
+    for line in changed.lines() {
+        let Some((status, path)) = line.split_once('\t') else {
+            continue;
+        };
+        count += 1;
+        if status == "A" {
+            let _ = std::fs::remove_file(Path::new(dir).join(path));
+        } else {
+            let bytes = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["cat-file", "blob", &format!("{checkpoint}:{path}")])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !bytes.status.success() {
+                return Err(format!("could not read {path} from the checkpoint"));
+            }
+            let target = Path::new(dir).join(path);
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&target, bytes.stdout).map_err(|e| e.to_string())?;
+        }
+    }
+    // Keep the index in step for files that were staged or removed from it.
+    let _ = git(dir, &["add", "-u", "--", "."]);
+    let _ = git(dir, &["reset", "-q"]);
+    Ok(count)
+}
+
+/// The changes as one patch for writing a commit message: the diff against HEAD,
+/// plus the names of new files, cut to `limit` characters.
+pub fn patch_for_message(dir: &str, limit: usize) -> String {
+    let mut text = git(dir, &["diff", "HEAD", "--stat"]).unwrap_or_default();
+    let untracked = git(dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    if !untracked.trim().is_empty() {
+        text.push_str("\nNew files:\n");
+        text.push_str(&untracked);
+    }
+    text.push('\n');
+    text.push_str(&git(dir, &["diff", "HEAD"]).unwrap_or_default());
+    if text.len() > limit {
+        let mut cut = limit;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n[diff truncated]");
+    }
+    text
 }
 
 /// How the branch relates to its remote.
@@ -396,6 +551,48 @@ mod tests {
         sh(&repo, &["config", "user.email", "t@t"]);
         sh(&repo, &["config", "user.name", "t"]);
         repo
+    }
+
+    #[test]
+    fn checkpoints_restore_the_working_tree() {
+        let repo = repo("checkpoint");
+        let dir = repo.to_str().unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        // Uncommitted work from before the turn must come back too.
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("draft.txt"), "draft\n").unwrap();
+        let cp = checkpoint(dir).unwrap();
+        // The "agent" edits, creates, deletes; ignored files are not touched.
+        std::fs::write(repo.join("a.txt"), "three\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        std::fs::remove_file(repo.join("draft.txt")).unwrap();
+        std::fs::write(repo.join("ignored.txt"), "keep\n").unwrap();
+        let mut changed = changed_since(dir, &cp);
+        changed.sort();
+        assert_eq!(changed, ["a.txt", "draft.txt", "new.txt"]);
+        assert_eq!(restore(dir, &cp).unwrap(), 3);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
+            "draft\n"
+        );
+        assert!(!repo.join("new.txt").exists());
+        assert!(repo.join("ignored.txt").exists());
+        assert!(changed_since(dir, &cp).is_empty());
+        // The user's own index was not used for snapshots.
+        assert!(git(dir, &["diff", "--cached", "--name-only"])
+            .unwrap()
+            .trim()
+            .is_empty());
+        assert!(patch_for_message(dir, 10_000).contains("draft.txt"));
+        assert!(file_diff_context(dir, "a.txt", true).contains("+two"));
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

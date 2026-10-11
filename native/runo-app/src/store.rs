@@ -11,8 +11,9 @@ pub enum Role {
     System,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Status {
+    #[default]
     Idle,
     Working,
     Done,
@@ -31,6 +32,60 @@ pub struct Message {
     /// Run summary shown under the reply, such as "12s · 3 turns · $0.04".
     #[serde(default)]
     pub meta: String,
+    /// User turns: a snapshot commit of the worktree taken just before the agent ran,
+    /// so the turn can be undone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checkpoint: String,
+    /// Agent turns: "kept" or "undone" once the person decided on the turn's changes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resolved: String,
+    /// User turns: images attached to the prompt (absolute paths).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+    /// Agent turns: token use reported by the CLI.
+    #[serde(default, skip_serializing_if = "Usage::is_empty")]
+    pub usage: Usage,
+    /// Agent turns: tools the agent asked for but was not allowed to use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied: Vec<String>,
+    /// Agent turns: a plan the agent proposed (plan mode), shown as a card.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plan: String,
+    /// Agent turns: questions the agent asked, each with its options.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<Question>,
+}
+
+/// Token use of one agent turn.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    /// Tokens of the prompt read from or written to the cache; they fill the context too.
+    pub cached: u64,
+    /// Total cost in US cents, when the CLI reports it.
+    pub cost_cents: f64,
+    /// The model's context window, when the CLI reports it.
+    #[serde(default)]
+    pub window: u64,
+}
+
+impl Usage {
+    pub fn is_empty(&self) -> bool {
+        self.input == 0 && self.output == 0 && self.cached == 0
+    }
+
+    /// Tokens in the context after this turn.
+    pub fn context(&self) -> u64 {
+        self.input + self.cached + self.output
+    }
+}
+
+/// A multiple-choice question the agent asked (Claude's AskUserQuestion tool).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    pub question: String,
+    pub options: Vec<String>,
 }
 
 impl Session {
@@ -78,6 +133,13 @@ impl Message {
             steps: Vec::new(),
             time: String::new(),
             meta: String::new(),
+            checkpoint: String::new(),
+            resolved: String::new(),
+            images: Vec::new(),
+            usage: Usage::default(),
+            denied: Vec::new(),
+            plan: String::new(),
+            questions: Vec::new(),
         }
     }
 
@@ -101,7 +163,7 @@ fn default_mode() -> String {
     "edit".into()
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Session {
     pub id: u64,
     pub project_id: u64,
@@ -143,6 +205,9 @@ pub struct Session {
     /// Sessions started together on one task share the id of the first one; 0 if none.
     #[serde(default)]
     pub race: u64,
+    /// Prompts typed while the agent was working; each is sent when the turn ends.
+    #[serde(default)]
+    pub queue: Vec<String>,
 }
 
 /// A review comment on one line of the session's diff.
@@ -176,6 +241,78 @@ pub struct State {
     pub next_id: u64,
     pub projects: Vec<Project>,
     pub sessions: Vec<Session>,
+    /// Free-form notes per project id.
+    #[serde(default)]
+    pub notes: HashMap<u64, String>,
+    /// Recent events across sessions, newest last.
+    #[serde(default)]
+    pub activity: Vec<Activity>,
+    #[serde(default)]
+    pub automations: Vec<Automation>,
+    /// Open tabs and panels, restored on the next launch.
+    #[serde(default)]
+    pub layout: Layout,
+}
+
+/// Something that happened in a session, for the Activity feed.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct Activity {
+    /// Local time, "%Y-%m-%d %H:%M".
+    pub time: String,
+    pub session: u64,
+    pub text: String,
+}
+
+/// A prompt that starts a new session on a schedule.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct Automation {
+    pub id: u64,
+    pub name: String,
+    pub project_id: u64,
+    pub provider: String,
+    pub prompt: String,
+    /// Minutes between runs.
+    pub every_minutes: u64,
+    /// Unix seconds of the last run; 0 if it never ran.
+    #[serde(default)]
+    pub last_run: u64,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Automation {
+    /// Whether the automation should run now.
+    pub fn due(&self, now: u64) -> bool {
+        self.enabled && now >= self.last_run + self.every_minutes.max(1) * 60
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct Layout {
+    pub tabs: Vec<u64>,
+    pub selected: Option<u64>,
+    #[serde(default)]
+    pub hide_sidebar: bool,
+    #[serde(default)]
+    pub hide_panel: bool,
+}
+
+impl State {
+    /// Record an event for the Activity feed, keeping the latest 500.
+    pub fn log(&mut self, session: u64, text: impl Into<String>) {
+        self.activity.push(Activity {
+            time: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            session,
+            text: text.into(),
+        });
+        if self.activity.len() > 500 {
+            self.activity.drain(..100);
+        }
+    }
 }
 
 /// Read a JSON file, or the default when it is missing. A file that exists but cannot be
@@ -299,6 +436,7 @@ impl State {
                 unread: false,
                 notes: Vec::new(),
                 race: 0,
+                ..Default::default()
             };
         let nav = vec![
             Message { time: "10:24 AM".into(), ..Message::new(Role::User, "Refine the workspace navigation. Keep it compact, intuitive, and consistent across desktop platforms.") },
@@ -374,6 +512,7 @@ impl State {
                     nav,
                 ),
             ],
+            ..Default::default()
         };
         // Show the inbox and pinning in the demo.
         state.sessions[1].unread = true;

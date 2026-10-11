@@ -3,6 +3,8 @@
 
 use serde_json::Value;
 
+use crate::store::{Question, Usage};
+
 #[derive(Debug, PartialEq)]
 pub enum Update {
     /// Reply text to append to the agent's message.
@@ -13,6 +15,14 @@ pub enum Update {
     Summary(String),
     /// The run failed; the CLI's own explanation.
     Error(String),
+    /// Token use: the context after the latest model call, then totals from the result.
+    Usage(Usage),
+    /// Tools the agent wanted but its permission mode did not allow.
+    Denied(Vec<String>),
+    /// A plan proposed in plan mode.
+    Plan(String),
+    /// Multiple-choice questions for the person.
+    Questions(Vec<Question>),
 }
 
 /// Per-run parser state.
@@ -24,6 +34,7 @@ pub struct ClaudeStream {
     streamed_text: bool,
     /// Whether any reply text has been emitted, to separate later text blocks.
     any_text: bool,
+    usage: Usage,
 }
 
 impl ClaudeStream {
@@ -32,6 +43,7 @@ impl ClaudeStream {
             cwd: cwd.trim_end_matches('/').to_string(),
             streamed_text: false,
             any_text: false,
+            usage: Usage::default(),
         }
     }
 
@@ -73,7 +85,47 @@ impl ClaudeStream {
                 if !event["parent_tool_use_id"].is_null() {
                     return out;
                 }
+                let u = &event["message"]["usage"];
+                if u.is_object() {
+                    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                    self.usage.input = n("input_tokens");
+                    self.usage.cached =
+                        n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+                    out.push(Update::Usage(self.usage));
+                }
                 for block in event["message"]["content"].as_array().into_iter().flatten() {
+                    if block["type"] == "tool_use" {
+                        match block["name"].as_str().unwrap_or("") {
+                            "ExitPlanMode" => {
+                                if let Some(plan) = block["input"]["plan"].as_str() {
+                                    out.push(Update::Plan(plan.to_string()));
+                                }
+                            }
+                            "AskUserQuestion" => {
+                                let questions: Vec<Question> = block["input"]["questions"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .map(|q| Question {
+                                        question: q["question"].as_str().unwrap_or("").to_string(),
+                                        options: q["options"]
+                                            .as_array()
+                                            .into_iter()
+                                            .flatten()
+                                            .filter_map(|o| {
+                                                o["label"].as_str().or(o.as_str()).map(String::from)
+                                            })
+                                            .collect(),
+                                    })
+                                    .filter(|q| !q.question.is_empty())
+                                    .collect();
+                                if !questions.is_empty() {
+                                    out.push(Update::Questions(questions));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     match block["type"].as_str().unwrap_or("") {
                         "text" if !self.streamed_text => {
                             if let Some(text) = block["text"].as_str().filter(|t| !t.is_empty()) {
@@ -90,6 +142,40 @@ impl ClaudeStream {
                 }
             }
             "result" => {
+                let n = |k: &str| event["usage"][k].as_u64().unwrap_or(0);
+                if event["usage"].is_object() {
+                    self.usage.output = n("output_tokens");
+                    if self.usage.input == 0 && self.usage.cached == 0 {
+                        self.usage.input = n("input_tokens");
+                        self.usage.cached =
+                            n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+                    }
+                }
+                self.usage.cost_cents = event["total_cost_usd"].as_f64().unwrap_or(0.0) * 100.0;
+                if let Some(models) = event["modelUsage"].as_object() {
+                    self.usage.window = models
+                        .values()
+                        .filter_map(|m| m["contextWindow"].as_u64())
+                        .max()
+                        .unwrap_or(0);
+                }
+                if !self.usage.is_empty() {
+                    out.push(Update::Usage(self.usage));
+                }
+                let mut denied: Vec<String> = Vec::new();
+                for d in event["permission_denials"].as_array().into_iter().flatten() {
+                    if let Some(tool) = d["tool_name"].as_str() {
+                        // Plan and question tools are answered in the UI, not by allowing them.
+                        if !matches!(tool, "ExitPlanMode" | "AskUserQuestion")
+                            && !denied.iter().any(|t| t == tool)
+                        {
+                            denied.push(tool.to_string());
+                        }
+                    }
+                }
+                if !denied.is_empty() {
+                    out.push(Update::Denied(denied));
+                }
                 let mut parts = Vec::new();
                 if let Some(ms) = event["duration_ms"].as_u64() {
                     parts.push(duration(ms));
@@ -156,6 +242,8 @@ impl ClaudeStream {
             "WebFetch" => format!("Fetched {}", short(s("url"), 60)),
             "Task" | "Agent" => format!("Ran a subagent: {}", short(s("description"), 60)),
             "TodoWrite" => "Updated the plan".to_string(),
+            "ExitPlanMode" => "Proposed a plan".to_string(),
+            "AskUserQuestion" => "Asked a question".to_string(),
             other => format!("Used {other}"),
         }
     }
@@ -173,6 +261,44 @@ fn duration(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_denials_plans_and_questions() {
+        let out = feed_all(&[
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"usage":{"input_tokens":10,"cache_read_input_tokens":2000,"cache_creation_input_tokens":500,"output_tokens":5},"content":[{"type":"tool_use","name":"ExitPlanMode","input":{"plan":"1. Do it"}}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"question":"Which DB?","options":[{"label":"Postgres"},{"label":"SQLite"}]}]}}]}}"#,
+            r#"{"type":"result","is_error":false,"usage":{"input_tokens":30,"output_tokens":400},"total_cost_usd":0.05,"modelUsage":{"m":{"contextWindow":200000}},"permission_denials":[{"tool_name":"Bash"},{"tool_name":"Bash"},{"tool_name":"ExitPlanMode"}],"result":"ok"}"#,
+        ]);
+        let usage = Usage {
+            input: 10,
+            cached: 2500,
+            output: 0,
+            cost_cents: 0.0,
+            window: 0,
+        };
+        assert_eq!(out[0], Update::Usage(usage));
+        assert_eq!(out[1], Update::Plan("1. Do it".into()));
+        assert_eq!(out[2], Update::Step("Proposed a plan".into()));
+        assert_eq!(
+            out[3],
+            Update::Questions(vec![Question {
+                question: "Which DB?".into(),
+                options: vec!["Postgres".into(), "SQLite".into()]
+            }])
+        );
+        assert_eq!(out[4], Update::Step("Asked a question".into()));
+        assert_eq!(
+            out[5],
+            Update::Usage(Usage {
+                output: 400,
+                cost_cents: 5.0,
+                window: 200_000,
+                ..usage
+            })
+        );
+        assert_eq!(out[6], Update::Denied(vec!["Bash".into()]));
+        assert_eq!(usage.context(), 2510);
+    }
 
     fn feed_all(lines: &[&str]) -> Vec<Update> {
         let mut parser = ClaudeStream::new("/work/app/");

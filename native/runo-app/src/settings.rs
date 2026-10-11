@@ -55,6 +55,28 @@ pub struct AppSettings {
     pub default_provider: String,
     /// Shell command run in every new worktree, e.g. `npm install`.
     pub worktree_setup: String,
+    /// Stop the computer from sleeping while an agent runs.
+    pub keep_awake: bool,
+    /// Add a line crediting the agent to commits made from Runo.
+    pub attribution: bool,
+    /// Saved shell commands shown as buttons over the terminal, one `Name = command` per line.
+    pub quick_commands: String,
+    /// Group the sidebar by status (Pinned, Working, Needs review, Done) instead of project.
+    pub group_by_status: bool,
+}
+
+/// `Name = command` lines; a line without `=` uses the command as its name.
+pub fn parse_quick_commands(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| match l.split_once('=') {
+            Some((name, cmd)) if !name.trim().is_empty() && !cmd.trim().is_empty() => {
+                (name.trim().to_string(), cmd.trim().to_string())
+            }
+            _ => (l.to_string(), l.to_string()),
+        })
+        .collect()
 }
 
 impl Default for AppSettings {
@@ -73,6 +95,11 @@ impl Default for AppSettings {
             default_mode: "edit".into(),
             default_provider: "claude".into(),
             worktree_setup: String::new(),
+            keep_awake: true,
+            attribution: false,
+            quick_commands: "Test = cargo test\nBuild = cargo build\nStatus = git status --short"
+                .into(),
+            group_by_status: false,
         }
     }
 }
@@ -127,6 +154,7 @@ impl AppSettings {
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
         AUTOSCROLL.store(self.autoscroll, Ordering::Relaxed);
+        KEEP_AWAKE.store(self.keep_awake, Ordering::Relaxed);
     }
 }
 
@@ -150,6 +178,11 @@ static NOTIFY: AtomicBool = AtomicBool::new(false);
 static CONFIRM_DELETE: AtomicBool = AtomicBool::new(true);
 static REMOVE_WORKTREE: AtomicBool = AtomicBool::new(true);
 static AUTOSCROLL: AtomicBool = AtomicBool::new(true);
+static KEEP_AWAKE: AtomicBool = AtomicBool::new(true);
+
+pub fn keep_awake() -> bool {
+    KEEP_AWAKE.load(Ordering::Relaxed)
+}
 
 pub fn set_dark(dark: bool) {
     DARK.store(dark, Ordering::Relaxed);
@@ -503,8 +536,21 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
 
 #[cfg(test)]
 mod tests {
-    use super::{frontmatter, mix, scan_mcp, scan_skills, AppSettings};
+    use super::{frontmatter, mix, parse_quick_commands, scan_mcp, scan_skills, AppSettings};
     use std::path::PathBuf;
+
+    #[test]
+    fn quick_commands_parse_names() {
+        let parsed = parse_quick_commands("Test = cargo test\n# note\n\nls -la\n= bad");
+        assert_eq!(
+            parsed,
+            [
+                ("Test".to_string(), "cargo test".to_string()),
+                ("ls -la".to_string(), "ls -la".to_string()),
+                ("= bad".to_string(), "= bad".to_string()),
+            ]
+        );
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("runo-settings-{name}-{}", std::process::id()));

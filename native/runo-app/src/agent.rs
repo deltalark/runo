@@ -16,7 +16,7 @@ pub struct Provider {
     pub color: u32,
 }
 
-pub const PROVIDERS: [Provider; 3] = [
+pub const PROVIDERS: [Provider; 10] = [
     Provider {
         id: "claude",
         name: "Claude Code",
@@ -38,7 +38,62 @@ pub const PROVIDERS: [Provider; 3] = [
         mark: ">_",
         color: 0x258a5b,
     },
+    Provider {
+        id: "cursor",
+        name: "Cursor",
+        bin: "cursor-agent",
+        mark: "▲",
+        color: 0x7c7c86,
+    },
+    Provider {
+        id: "gemini",
+        name: "Gemini",
+        bin: "gemini",
+        mark: "✦",
+        color: 0x4f7cf7,
+    },
+    Provider {
+        id: "copilot",
+        name: "Copilot",
+        bin: "copilot",
+        mark: "◎",
+        color: 0x8957e5,
+    },
+    Provider {
+        id: "amp",
+        name: "Amp",
+        bin: "amp",
+        mark: "∿",
+        color: 0xe5484d,
+    },
+    Provider {
+        id: "droid",
+        name: "Droid",
+        bin: "droid",
+        mark: "◈",
+        color: 0xf27b2a,
+    },
+    Provider {
+        id: "qwen",
+        name: "Qwen Code",
+        bin: "qwen",
+        mark: "◇",
+        color: 0x615ced,
+    },
+    Provider {
+        id: "grok",
+        name: "Grok",
+        bin: "grok",
+        mark: "𝕏",
+        color: 0x9a9aa3,
+    },
 ];
+
+/// Whether the CLI keeps its own conversation that a follow-up can resume. Others get
+/// the recent conversation written into each follow-up prompt instead.
+pub fn resumes(provider: &str) -> bool {
+    matches!(provider, "claude" | "codex" | "opencode")
+}
 
 pub fn provider(id: &str) -> &'static Provider {
     PROVIDERS
@@ -134,6 +189,8 @@ pub struct RunSpec<'a> {
     pub in_git: bool,
     /// Claude Code conversation id for this session; empty for sessions saved before ids.
     pub session_id: &'a str,
+    /// Image files attached to the prompt.
+    pub images: &'a [String],
 }
 
 /// A random version-4 UUID, for naming a Claude Code conversation up front.
@@ -207,6 +264,9 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 args.push(s("--skip-git-repo-check"));
             }
             args.extend(split_args(&opts.extra_args));
+            for image in spec.images {
+                args.extend([s("-i"), image.clone()]);
+            }
             if spec.resume {
                 // A known conversation id resumes exactly that one; `--last` is the
                 // newest in the folder, which may belong to another session.
@@ -217,6 +277,73 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 }
             }
             args.push(spec.prompt.to_string());
+        }
+        "cursor" => {
+            args.extend([s("-p"), s("--output-format"), s("text")]);
+            if matches!(mode.as_str(), "" | "edit" | "full") {
+                args.push(s("--force"));
+            }
+            if !model.is_empty() {
+                args.extend([s("-m"), model]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.push(with_images(spec));
+        }
+        "gemini" | "qwen" => {
+            let approval = match mode.as_str() {
+                "plan" => "default",
+                "full" => "yolo",
+                _ => "auto_edit",
+            };
+            args.extend([s("--approval-mode"), s(approval)]);
+            if !model.is_empty() {
+                args.extend([s("-m"), model]);
+            }
+            for dir in list(&opts.add_dirs) {
+                args.extend([s("--include-directories"), dir]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.extend([s("-p"), with_images(spec)]);
+        }
+        "copilot" => {
+            if mode != "plan" {
+                args.push(s("--allow-all-tools"));
+            }
+            if !model.is_empty() {
+                args.extend([s("--model"), model]);
+            }
+            for dir in list(&opts.add_dirs) {
+                args.extend([s("--add-dir"), dir]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.extend([s("-p"), with_images(spec)]);
+        }
+        "amp" => {
+            if mode != "plan" {
+                args.push(s("--dangerously-allow-all"));
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.extend([s("-x"), with_images(spec)]);
+        }
+        "droid" => {
+            args.push(s("exec"));
+            match mode.as_str() {
+                "plan" => {}
+                "full" => args.extend([s("--auto"), s("high")]),
+                _ => args.extend([s("--auto"), s("medium")]),
+            }
+            if !model.is_empty() {
+                args.extend([s("-m"), model]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.push(with_images(spec));
+        }
+        "grok" => {
+            if !model.is_empty() {
+                args.extend([s("-m"), model]);
+            }
+            args.extend(split_args(&opts.extra_args));
+            args.extend([s("-p"), with_images(spec)]);
         }
         "opencode" => {
             args.push(s("run"));
@@ -249,6 +376,9 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 args.push(s("--auto"));
             }
             args.extend(split_args(&opts.extra_args));
+            for image in spec.images {
+                args.extend([s("-f"), image.clone()]);
+            }
             args.push(spec.prompt.to_string());
         }
         _ => {
@@ -301,10 +431,23 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             }
             // Several Claude flags are variadic; `--` keeps them from swallowing the prompt.
             args.push(s("--"));
-            args.push(spec.prompt.to_string());
+            args.push(with_images(spec));
         }
     }
     args
+}
+
+/// The prompt with attached image paths listed, for CLIs that read images from disk.
+fn with_images(spec: &RunSpec) -> String {
+    if spec.images.is_empty() {
+        return spec.prompt.to_string();
+    }
+    let mut prompt = spec.prompt.to_string();
+    prompt.push_str("\n\nAttached images (read them):");
+    for image in spec.images {
+        prompt.push_str(&format!("\n- {image}"));
+    }
+    prompt
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -318,6 +461,74 @@ pub enum Event {
     /// stderr of an agent run: kept out of the conversation unless the run fails.
     Err(Target, String),
     Done(Target, bool),
+    /// Result of a one-off background command, by the key it was started with.
+    Output(String, Result<String, String>),
+}
+
+/// Run a command to completion on a background thread and send its stdout back.
+pub fn oneshot(key: String, mut command: Command, dir: &str, tx: Sender<Event>) {
+    command.current_dir(dir).stdin(Stdio::null());
+    std::thread::spawn(move || {
+        let result = match command.output() {
+            Ok(out) if out.status.success() => {
+                Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                Err(if err.is_empty() {
+                    String::from_utf8_lossy(&out.stdout).trim().to_string()
+                } else {
+                    err
+                })
+            }
+            Err(error) => Err(format!(
+                "could not start {:?}: {error}",
+                command.get_program()
+            )),
+        };
+        let _ = tx.send(Event::Output(key, result));
+    });
+}
+
+/// A plain, one-shot run of an agent CLI with a prompt, for small jobs such as
+/// writing a commit message. Read-only where the CLI supports it.
+pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Command {
+    let bin = if configured_bin.trim().is_empty() {
+        self::provider(provider).bin
+    } else {
+        configured_bin.trim()
+    };
+    let mut command = Command::new(bin);
+    match provider {
+        "codex" => {
+            command.args([
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                prompt,
+            ]);
+        }
+        "opencode" => {
+            command.args(["run", prompt]);
+        }
+        "cursor" => {
+            command.args(["-p", "--output-format", "text", prompt]);
+        }
+        "amp" => {
+            command.args(["-x", prompt]);
+        }
+        "droid" => {
+            command.args(["exec", prompt]);
+        }
+        "claude" => {
+            command.args(["-p", "--permission-mode", "plan", "--", prompt]);
+        }
+        _ => {
+            command.args(["-p", prompt]);
+        }
+    }
+    command
 }
 
 #[derive(Clone)]
@@ -448,6 +659,7 @@ mod tests {
                     assert!(ok);
                     break;
                 }
+                Event::Output(..) => {}
             }
         }
         lines.sort();
@@ -483,6 +695,7 @@ mod arg_tests {
             opts,
             in_git,
             session_id: "",
+            images: &[],
         })
     }
 
@@ -499,6 +712,7 @@ mod arg_tests {
                 opts: &o,
                 in_git: true,
                 session_id,
+                images: &[],
             })
         };
         assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
@@ -517,6 +731,7 @@ mod arg_tests {
             opts: &o,
             in_git: true,
             session_id,
+            images: &[],
         };
         let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
         let first = provider_args(&spec(false, id));
@@ -588,6 +803,7 @@ mod arg_tests {
             opts: &o,
             in_git: true,
             session_id: "",
+            images: &[],
         };
         run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), tx).unwrap();
         let (mut out, mut err) = (vec![], vec![]);
@@ -600,6 +816,7 @@ mod arg_tests {
                     assert!(!ok);
                     break;
                 }
+                Event::Output(..) => unreachable!(),
             }
         }
         assert_eq!(out[0], "env=from-env");
@@ -628,6 +845,7 @@ mod arg_tests {
             opts: &o,
             in_git: false,
             session_id: "",
+            images: &[],
         };
         let error = run_agent(Target::Session(1), &spec, "/", tx).err().unwrap();
         assert!(error.contains("could not start"));

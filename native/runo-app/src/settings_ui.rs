@@ -15,6 +15,7 @@ pub enum SettingsPage {
     Claude,
     Codex,
     OpenCode,
+    MoreAgents,
     Mcp,
     Skills,
     Worktrees,
@@ -38,6 +39,7 @@ impl SettingsPage {
                 SettingsPage::Claude,
                 SettingsPage::Codex,
                 SettingsPage::OpenCode,
+                SettingsPage::MoreAgents,
                 SettingsPage::Mcp,
                 SettingsPage::Skills,
             ],
@@ -61,6 +63,7 @@ impl SettingsPage {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
             Self::OpenCode => "OpenCode",
+            Self::MoreAgents => "More agents",
             Self::Mcp => "MCP",
             Self::Skills => "Skills",
             Self::Worktrees => "Worktrees",
@@ -77,6 +80,7 @@ impl SettingsPage {
             Self::Claude => "Everything Runo can pass to the claude CLI, plus what it detected.",
             Self::Codex => "Everything Runo can pass to codex exec, plus what it detected.",
             Self::OpenCode => "Everything Runo can pass to opencode run, plus what it detected.",
+            Self::MoreAgents => "Cursor, Gemini, Copilot, Amp, Droid, Qwen Code and Grok. Runo maps its permission levels onto each CLI's flags.",
             Self::Mcp => "MCP servers found across your agents' config files.",
             Self::Skills => "Agent skills discovered in project, personal and agent folders.",
             Self::Worktrees => "Where isolated sessions and Runo's data live.",
@@ -351,6 +355,21 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
                 switch_row("Confirm before deleting", "Ask for a second click before deleting a session.", st.confirm_delete, |s, v| s.confirm_delete = v),
                 switch_row("Remove worktree with session", "Also delete the session's git worktree when the session is deleted. Uncommitted changes in it are lost.", st.remove_worktree_on_delete, |s, v| s.remove_worktree_on_delete = v),
+                switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
+                switch_row("Group sidebar by status", "Show Pinned, Working, Needs review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
+            ]),
+            section("Git", "How Runo commits for you.", vec![
+                switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
+                row(
+                    "Quick commands",
+                    "Buttons over the Terminal. Write Name = command, separated by semicolons.",
+                    Ctl::Text {
+                        key: "quick_commands".into(),
+                        value: st.quick_commands.replace('\n', "; "),
+                        placeholder: "Test = cargo test; Lint = cargo clippy".into(),
+                        set: Rc::new(|s, v| s.quick_commands = v.split(';').map(str::trim).collect::<Vec<_>>().join("\n")),
+                    },
+                ),
             ]),
             section("New worktrees", "Prepare each isolated worktree before the agent starts. Ignored files listed in the repository's .worktreeinclude (gitignore patterns, such as .env) are copied in automatically.", vec![
                 row(
@@ -380,6 +399,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     row("New session", "Open the New session form.", Ctl::Keys(format!("{m} N"))),
                     row("Settings", "Open this screen.", Ctl::Keys(format!("{m} ,"))),
                     row("Changes panel", "Show or hide the Changes, Files and Terminal panel.", Ctl::Keys(format!("{m} B"))),
+                    row("Sidebar", "Show or hide the sessions sidebar.", Ctl::Keys(format!("{m} \\"))),
                     row("Stop agent", "Stop the agent running in the selected session.", Ctl::Keys(format!("{m} ."))),
                     row("Close", "Close a menu, cancel a delete, or go back to the workspace.", Ctl::Keys("Esc".into())),
                 ]),
@@ -397,7 +417,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Follow output", "Scroll the conversation to the latest output while an agent works.", st.autoscroll, |s, v| s.autoscroll = v),
             ]),
             section("New sessions", "What a session starts with before you change it in the composer.", vec![
-                row("Default agent", "Preselected in New session.", Ctl::Segment(options(&[("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "OpenCode")]), st.default_provider.clone(), Rc::new(|s, v| s.default_provider = v))),
+                row("Default agent", "Preselected in New session.", Ctl::Dropdown(agent::PROVIDERS.iter().map(|p| (p.id.to_string(), p.name.to_string())).collect(), st.default_provider.clone(), Rc::new(|s, v| s.default_provider = v))),
                 row("Default permission level", "Maps to each agent's closest mode: auto edit, read-only, or full access.", Ctl::Segment(options(&[("edit", "Auto edit"), ("plan", "Plan only"), ("full", "Full access")]), st.default_mode.clone(), Rc::new(|s, v| s.default_mode = v))),
             ]),
         ],
@@ -451,6 +471,18 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Show thinking", "Include thinking blocks in the output (--thinking).", Ctl::Switch(st.agent("opencode").thinking, Rc::new(|s, v| s.agents.entry("opencode".into()).or_default().thinking = v))),
             ]),
         ],
+        SettingsPage::MoreAgents => {
+            let mut sections = Vec::new();
+            for p in agent::PROVIDERS.iter().skip(3) {
+                let mut detected = detected_section(p.id);
+                detected.title = p.name.to_string();
+                sections.push(detected);
+                let mut launch = launch_section(p.id, st, "Passed with the CLI's model flag.");
+                launch.title = format!("{} launch", p.name);
+                sections.push(launch);
+            }
+            sections
+        }
         SettingsPage::Mcp => {
             let mut sections = Vec::new();
             for provider in ["Claude", "Codex"] {
