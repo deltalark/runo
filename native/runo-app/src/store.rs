@@ -226,6 +226,9 @@ pub struct Project {
     /// Icon key from the New project popup ("" for the plain folder).
     #[serde(default)]
     pub icon: String,
+    /// Where new sessions in this project run by default: a connection id, or 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub connection: u64,
 }
 
 fn default_mode() -> String {
@@ -291,8 +294,12 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switched_from: Option<SwitchedFrom>,
     /// Runs inside its own Cove VM (`runo-<id>`) instead of directly on this machine.
+    /// Replaced by `connection`; kept so older saves load.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cove: bool,
+    /// Where the session runs: a connection's id, or 0 for this machine.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub connection: u64,
 }
 
 /// What a switch replaced, enough to undo it before anything is sent.
@@ -308,10 +315,21 @@ pub struct SwitchedFrom {
 }
 
 impl Session {
-    /// The Cove VM this session runs in, if it runs in one.
-    pub fn sandbox(&self) -> Option<crate::cove::Sandbox> {
-        self.cove
-            .then(|| crate::cove::Sandbox::for_session(self.id, &self.dir))
+    /// How to run things on the session's connection, unless it runs on this machine.
+    pub fn sandbox(&self) -> Option<crate::connections::Sandbox> {
+        let conn = crate::connections::get(self.connection)?;
+        let folder = std::path::Path::new(&self.dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some(crate::connections::Sandbox::for_session(
+            &conn, self.id, &folder, &self.dir,
+        ))
+    }
+
+    /// Runs somewhere other than this machine.
+    pub fn elsewhere(&self) -> bool {
+        self.connection != crate::connections::LOCAL
     }
 }
 

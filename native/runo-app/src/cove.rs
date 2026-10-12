@@ -68,25 +68,79 @@ pub fn available() -> bool {
     guard.1
 }
 
-pub fn vm_name(session: u64) -> String {
-    format!("runo-{session}")
+/// A VM as `cove --json ls` reports it.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct Vm {
+    pub name: String,
+    #[serde(default)]
+    pub state: serde_json::Value,
+    #[serde(default)]
+    pub cpus: u32,
+    #[serde(default)]
+    pub memory_mb: u64,
 }
 
-/// Delete a session's VM, in the background.
-pub fn remove(session: u64) {
+impl Vm {
+    pub fn state(&self) -> String {
+        self.state.as_str().unwrap_or("unknown").to_string()
+    }
+}
+
+/// This machine's Cove VMs, refreshed in the background every few seconds.
+pub fn vms() -> Vec<Vm> {
+    static STATE: OnceLock<Mutex<(Option<Instant>, Vec<Vm>)>> = OnceLock::new();
+    let state = STATE.get_or_init(|| Mutex::new((None, Vec::new())));
+    let Ok(mut guard) = state.lock() else {
+        return Vec::new();
+    };
+    if guard.0.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
+        guard.0 = Some(Instant::now());
+        std::thread::spawn(|| {
+            let found: Vec<Vm> = binary()
+                .and_then(|bin| {
+                    Command::new(bin)
+                        .args(["--json", "ls"])
+                        .stdin(std::process::Stdio::null())
+                        .output()
+                        .ok()
+                })
+                .filter(|o| o.status.success())
+                .and_then(|o| serde_json::from_slice(&o.stdout).ok())
+                .unwrap_or_default();
+            if let Some(state) = STATE.get() {
+                if let Ok(mut g) = state.lock() {
+                    g.1 = found;
+                }
+            }
+        });
+    }
+    guard.1.clone()
+}
+
+/// `cove stop` or `cove rm` a VM, in the background.
+pub fn vm_action(action: &'static str, name: &str) {
     let Some(bin) = binary() else { return };
+    let name = name.to_string();
     std::thread::spawn(move || {
         let _ = Command::new(bin)
-            .args(["rm", &vm_name(session)])
+            .args([action, &name])
             .stdin(std::process::Stdio::null())
             .output();
     });
+}
+
+pub fn vm_name(session: u64) -> String {
+    format!("runo-{session}")
 }
 
 /// How to run things for one Cove session.
 #[derive(Clone, Debug)]
 pub struct Sandbox {
     pub name: String,
+    /// `cove exec` arguments that create or start the VM (size, network, idle stop).
+    pub ensure: Vec<String>,
+    /// The connection it belongs to, for the variables it forwards.
+    pub connection: u64,
     /// `--mount` values: the session folder, and the repository's shared `.git`
     /// read-only when the folder is a worktree (so git works inside but the agent
     /// can't rewrite the main repository).
@@ -94,22 +148,38 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    pub fn for_session(session: u64, dir: &str) -> Sandbox {
+    pub fn for_session(session: u64, dir: &str, conn: &crate::connections::Connection) -> Sandbox {
         let mut mounts = vec![format!("{dir}:{dir}")];
         if let Some(common) = git_common_dir(dir) {
             if !Path::new(&common).starts_with(dir) {
                 mounts.push(format!("{common}:{common}:ro"));
             }
         }
+        // Claude Code's conversations for this folder, shared so the session can move
+        // between this machine and the VM and resume the same conversation.
+        if let Some(home) = std::env::var_os("HOME") {
+            let name = crate::connections::claude_folder_name(dir);
+            let host = Path::new(&home).join(".claude/projects").join(&name);
+            if std::fs::create_dir_all(&host).is_ok() {
+                mounts.push(format!("{}:/root/.claude/projects/{name}", host.display()));
+            }
+        }
+        let name = vm_name(session);
         Sandbox {
-            name: vm_name(session),
+            ensure: conn.cove_ensure_args(&name),
+            connection: conn.id,
+            name,
             mounts,
         }
     }
 
     /// The `cove exec` arguments up to (not including) the program.
     fn exec_args(&self, cwd: &str, pty: bool) -> Vec<String> {
-        let mut args = vec!["exec".to_string(), self.name.clone(), "--create".into()];
+        let mut args = if self.ensure.is_empty() {
+            vec!["exec".to_string(), self.name.clone(), "--create".into()]
+        } else {
+            self.ensure.clone()
+        };
         for m in &self.mounts {
             args.push("--mount".into());
             args.push(m.clone());
@@ -127,15 +197,20 @@ impl Sandbox {
     /// VM on first use.
     pub fn wrap(&self, command: &Command, cwd: &str, pty: bool) -> Result<Command, String> {
         let bin = binary().ok_or("Cove is not installed, so this session can't start its VM.")?;
+        let forwarded = crate::connections::get(self.connection)
+            .map(|c| c.forwarded_env())
+            .unwrap_or_else(|| {
+                FORWARDED_ENV
+                    .iter()
+                    .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+                    .collect()
+            });
         let program = Path::new(command.get_program())
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut args = self.exec_args(cwd, pty);
-        let mut env: Vec<(String, String)> = FORWARDED_ENV
-            .iter()
-            .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
-            .collect();
+        let mut env = forwarded;
         for (k, v) in command.get_envs() {
             if let Some(v) = v {
                 env.retain(|(key, _)| key.as_str() != k);
@@ -173,7 +248,7 @@ impl Sandbox {
 
 /// A `bash -lc` script that installs `program` in the VM if it is missing, then runs
 /// it with the remaining arguments.
-fn launcher(program: &str) -> String {
+pub(crate) fn launcher(program: &str) -> String {
     let install = match program {
         "claude" => "curl -fsSL https://claude.ai/install.sh | bash",
         "codex" => {
@@ -214,6 +289,8 @@ mod tests {
     fn sandbox() -> Sandbox {
         Sandbox {
             name: "runo-7".into(),
+            ensure: Vec::new(),
+            connection: 1,
             mounts: vec![
                 "/code/.runo-worktrees/app/x:/code/.runo-worktrees/app/x".into(),
                 "/code/app/.git:/code/app/.git:ro".into(),
@@ -269,13 +346,14 @@ mod tests {
         let wt = root.join("wt");
         git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
         let wt = wt.canonicalize().unwrap();
-        let s = Sandbox::for_session(3, wt.to_str().unwrap());
+        let conn = crate::connections::Connection::new_cove(1);
+        let s = Sandbox::for_session(3, wt.to_str().unwrap(), &conn);
         let git_dir = repo.canonicalize().unwrap().join(".git");
         assert_eq!(s.name, "runo-3");
         assert_eq!(s.mounts[1], format!("{0}:{0}:ro", git_dir.display()));
         // The project folder itself needs no extra mount.
-        let own = Sandbox::for_session(4, repo.canonicalize().unwrap().to_str().unwrap());
-        assert_eq!(own.mounts.len(), 1);
+        let own = Sandbox::for_session(4, repo.canonicalize().unwrap().to_str().unwrap(), &conn);
+        assert!(!own.mounts.iter().any(|m| m.ends_with(":ro")));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -290,7 +368,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let dir = dir.to_str().unwrap();
-        let sandbox = Sandbox::for_session(900_000 + std::process::id() as u64, dir);
+        let sandbox = Sandbox::for_session(
+            900_000 + std::process::id() as u64,
+            dir,
+            &crate::connections::Connection::new_cove(1),
+        );
         let mut command = Command::new("sh");
         command
             .args(["-c", "pwd; echo \"$GREETING\""])

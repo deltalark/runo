@@ -8,13 +8,14 @@
 
 Claude Code, Codex, Gemini, OpenCode, Cursor and more, each in its own session and its own git worktree,
 with live output, diffs, a real terminal, a browser and pull requests in one window.
+Run them on your machine, in a Cove VM or on your own server, and move them between the three at any time.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Pure Rust](https://img.shields.io/badge/built%20with-pure%20Rust-b7410e?logo=rust&logoColor=white)
 ![macOS](https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple)
 ![Status: early](https://img.shields.io/badge/status-early-orange)
 
-[Features](#features) · [Supported agents](#supported-agents) · [Getting started](#getting-started) · [Sandboxed sessions with Cove](#sandboxed-sessions-with-cove) · [Contributing](#contributing)
+[Features](#features) · [Supported agents](#supported-agents) · [Getting started](#getting-started) · [Connections](#connections-run-anywhere) · [Contributing](#contributing)
 
 <br />
 
@@ -30,6 +31,7 @@ Coding agents are good at working on their own, but juggling several of them acr
 - **Bring your own agents.** Runo drives the agent CLIs you already have installed and signed in. It never sells or proxies tokens.
 - **Nothing hard-coded.** Models, effort levels, permission modes and other options are read from each installed CLI, so new releases show up without a Runo update.
 - **Agents never collide.** Every session can get its own git worktree and branch, so parallel agents never overwrite each other's work.
+- **Run anywhere, move any time.** Start a session on your laptop, send it to a VM or your build server to keep going while you sleep, and pull it back. The files and the agent's conversation follow it.
 
 ## Features
 
@@ -77,6 +79,11 @@ Every session has two views of the same conversation. **Chat** is Runo's own int
 <img src="docs/images/playbooks.png" alt="The Playbooks page with a saved playbook, templates and a form to create a new one" width="900" />
 
 Save a task once and run it in any project: from the Playbooks page, from Quick open, by right-clicking a project, or as a slash command inside the agent. Give a playbook a schedule and Runo runs it on a timer while it is open. Templates cover finding bugs, scanning for vulnerabilities, updating docs, adding tests, reviewing changes and upgrading dependencies.
+
+- **Share playbooks as files.** A playbook is a `.playbook.md` file: a short header (name, author, version, agent, permissions, inputs) and the instructions. Export one, copy it into a chat, or keep a folder of them in a git repo.
+- **Install from anywhere.** Paste a GitHub repo, a link to one file, a local folder or the clipboard into **Install**. Runo lists what it found, marks new and updated playbooks, and shows what each one asks permission to do before you install it. **Update** checks the source again later.
+- **Inputs.** Write `{{area}}` in the instructions and Runo asks for it before the run, with a default for scheduled runs.
+- **Permissions.** A playbook says whether it may edit files, run commands or use the network. Read-only playbooks run in plan mode, so a review can't change your code.
 
 ### Memory and MCP
 
@@ -145,27 +152,56 @@ On Linux the same command makes a `.deb`, and on Windows the icon is built into 
 
 Projects and sessions are stored in `~/.runo/state.json` and settings in `~/.runo/settings.json`. Set `RUNO_HOME` to move them.
 
-## Sandboxed sessions with Cove
+## Connections: run anywhere
 
-[Cove](https://github.com/deltalark/cove) runs fast, persistent Linux microVMs on your Mac. When Cove is installed and `cove serve` is running, **New session** offers **Runs on: Cove VM**, and the session gets its own VM (`runo-<id>`).
+<img src="docs/images/runs-on.png" alt="New session with Runs on showing This computer, an SSH server called Build box, and a Cove VM" width="900" />
+
+A **connection** is a place a session can run besides your own machine. Add them in **Settings → Connections**, pick one under **Runs on** when you start a session (or make it a project's default), and move a session from its header whenever you like.
+
+| Connection | What it is | Where the files are |
+| --- | --- | --- |
+| **This machine** | The agent runs directly on your computer. | Your worktree. |
+| **Cove on this machine** | Each session gets its own Linux VM from [Cove](https://github.com/deltalark/cove). | Shared into the VM at the same path, so moving is instant. |
+| **Cove server** | Cove on your VPS or a big box, by URL and API key. | A copy on the server, synced every turn. |
+| **SSH server** | Any Linux or macOS machine you can `ssh` into. | A copy under `~/runo-work`, synced every turn. |
+
+### How moving works
 
 ```mermaid
 flowchart LR
-    subgraph Mac["Your Mac"]
-        R["Runo<br/>chat, diffs, git, PRs"]
+    subgraph Mac["Your computer"]
+        R["Runo<br/>chat, diffs, commits, PRs"]
         W[("Session worktree")]
     end
-    subgraph VM["Cove VM (one per session)"]
-        A["Agent CLI<br/>setup command, terminals"]
+    subgraph Far["Cove VM or server"]
+        A["Agent CLI<br/>terminals, commands"]
+        C[("Session copy")]
     end
-    R -- "cove exec" --> A
-    W <-. "shared at the same path" .-> A
+    W -- "before each turn:<br/>git push over ssh / cove exec" --> C
+    C -- "after each turn:<br/>git fetch, then restore" --> W
+    R -- "runs the agent there" --> A
 ```
 
-- The agent, the worktree setup command and terminal tabs all run inside the VM.
-- The session folder is shared into the VM at the same path, so git, diffs, commits and pull requests keep running on your Mac against the same files.
-- The VM sees only that folder (and the repository's `.git`, read-only), plus `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY` and `OPENROUTER_API_KEY` when Runo has them. Your home folder, keychain and SSH keys stay out of reach.
-- Claude Code, Codex and OpenCode are installed in the VM on first use, and deleting the session deletes its VM.
+- **Everything travels.** Before each agent turn Runo commits the whole working tree, uncommitted and untracked files included, to a hidden ref and sends it over the connection itself. After the turn it brings the result back the same way. Commits the agent made come back on the branch; everything else comes back uncommitted, exactly as it was left.
+- **The conversation travels too.** Claude Code's conversation files go along everywhere, and Codex's to SSH and Cove servers, so after a move the agent resumes the same conversation instead of starting over. Other agents get Runo's handoff brief.
+- **Nobody's work is lost.** If files changed on both sides, your machine's version wins and the other is saved under `refs/runo/s<id>/kept-…`, ready to diff or restore.
+- **Terminals open there.** A terminal tab in a remote session is a shell in the session's copy on that machine, synced before it opens and after it closes.
+- **No GitHub access needed.** Syncing goes over `ssh` or `cove exec`, never through GitHub, so a VM never needs your credentials. Your machine keeps doing the commits, pushes and pull requests. Turn on **GitHub access** for a connection only if the agent there needs `gh` for its own work; the token is passed per command and never written to disk.
+- **Backups.** After each turn the checkpoint is also pushed to your project's `origin` as `refs/runo/sessions/<id>`, which no branch list shows. Turn it off in Settings.
+
+### Agents can use connections too
+
+<img src="docs/images/connections.png" alt="Settings, Connections: This machine, an SSH server that tested fine, and the form to add another" width="900" />
+
+Through Runo's MCP server, agents get `list_connections` and `run_on`, so they can run a heavy build, a test matrix or some research on another machine without moving the whole session. With **Let agents use Cove** on, agents on your machine also get Cove's own tools and can make throwaway VMs for untrusted code. Each connection has an **Agents may use it** switch, and only the API keys you list for a connection ever reach it.
+
+### Setting one up
+
+- **SSH:** add an SSH server and type a host from your `~/.ssh/config` (or `user@host`). Runo uses your SSH agent and config, shares one login between the agent, terminals and syncs, and never turns off host key checks. **Test** shows what it found: the OS, git and the agent CLIs.
+- **Cove on this machine:** install Cove (see its [install guide](https://github.com/deltalark/cove#install)) and Runo offers a Cove VM under **Runs on** on its own. Set the VM's CPUs, memory, network (on or off) and idle stop in Settings.
+- **Cove on a server:** install Cove on the server, run `cove key` there, then add a Cove connection in Runo with the server's URL and that key.
+
+Agent CLIs are installed on the connection on first use, and deleting a session deletes its VM or its copy on the server.
 
 ## Status
 

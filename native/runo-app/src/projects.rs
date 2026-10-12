@@ -144,8 +144,8 @@ impl RunoApp {
             let Some(session) = self.state.session(*id).cloned() else {
                 continue;
             };
-            if session.cove {
-                cove::remove(*id);
+            if session.elsewhere() {
+                crate::connections::cleanup_session(&session);
             }
             if worktrees && session.isolated && session.dir != project.path {
                 if let Err(error) = git::remove_worktree(&project.path, &session.dir) {

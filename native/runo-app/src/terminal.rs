@@ -44,26 +44,29 @@ impl RunoApp {
         };
         let dir = self.current().map(|s| s.dir.clone()).unwrap_or_default();
         // A Cove session's terminal is a shell inside its VM.
+        // A session on a connection gets its terminal there: a shell in its VM, or on
+        // the server in the session's copy.
         let program = match self.current().and_then(|s| s.sandbox()) {
-            Some(sandbox) => match crate::cove::binary() {
-                Some(bin) => Some(pty::Program {
-                    bin: bin.to_string_lossy().into_owned(),
-                    args: sandbox.shell_args(&dir),
+            Some(sandbox) => match sandbox.shell_program(&dir) {
+                Ok((bin, args)) => Some(pty::Program {
+                    bin,
+                    args,
                     env: Vec::new(),
                     unset: Vec::new(),
                 }),
-                None => {
-                    self.info = Some((
-                        "Cove is not installed, so this session's VM shell can't open.".into(),
-                        std::time::Instant::now(),
-                    ));
+                Err(error) => {
+                    self.info = Some((error, std::time::Instant::now()));
                     cx.notify();
                     return;
                 }
             },
             None => None,
         };
-        let in_vm = program.is_some();
+        // Named after where it runs: "Build box 1".
+        let place = program.as_ref().and_then(|_| {
+            self.current()
+                .map(|s| crate::connections::name(s.connection))
+        });
         self.next_shell += 1;
         let id = self.next_shell;
         let tx = self.tx.clone();
@@ -73,8 +76,8 @@ impl RunoApp {
         }) {
             Ok(mut shell) => {
                 let n = self.session_shells(session).count() + 1;
-                if in_vm {
-                    shell.title = "cove".into();
+                if let Some(place) = place {
+                    shell.title = place;
                 }
                 shell.title = format!("{} {n}", shell.title);
                 self.shells.push(shell);

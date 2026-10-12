@@ -365,6 +365,14 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             for over in crate::mcp::codex_overrides() {
                 args.extend([s("-c"), over]);
             }
+            if let (Some(cove), Some(_)) = (cove_server(), spec.memory) {
+                args.extend([
+                    s("-c"),
+                    format!("mcp_servers.Cove.command={}", toml_string(&cove)),
+                    s("-c"),
+                    s("mcp_servers.Cove.args=[\"mcp\"]"),
+                ]);
+            }
             if let Some((exe, dir)) = spec.memory {
                 args.extend([
                     s("-c"),
@@ -550,6 +558,12 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             // Servers shared from other apps, plus Runo's memory server.
             let mut servers: serde_json::Map<String, serde_json::Value> =
                 crate::mcp::claude_servers().into_iter().collect();
+            if let (Some(cove), Some(_)) = (cove_server(), spec.memory) {
+                servers.insert(
+                    "Cove".into(),
+                    serde_json::json!({ "command": cove, "args": ["mcp"] }),
+                );
+            }
             if let Some((exe, dir)) = spec.memory {
                 servers.insert(
                     MEMORY_SERVER.into(),
@@ -563,6 +577,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                     "save_note",
                     "list_playbooks",
                     "get_playbook",
+                    "list_connections",
                 ] {
                     allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
                 }
@@ -769,6 +784,15 @@ mod interactive_tests {
         assert!(codex.windows(2).any(|w| w == ["-m", "haiku"]));
         assert_eq!(codex.iter().filter(|a| *a == "resume").count(), 1);
     }
+}
+
+/// Cove's MCP server for agents on this machine, when Cove runs here and the person
+/// lets agents use it: scratch VMs, commands, files and ports of their own.
+fn cove_server() -> Option<String> {
+    (crate::settings::cove_tools() && crate::cove::available())
+        .then(crate::cove::binary)
+        .flatten()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Name of Runo's memory MCP server in the agents' config.
@@ -995,11 +1019,21 @@ pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Comman
 }
 
 #[derive(Clone)]
-pub struct Handle(Arc<Mutex<Child>>);
+/// A running process. `group` marks Runo's own connection runner, which leads a
+/// process group: stopping it stops the ssh or cove process it started too.
+pub struct Handle(Arc<Mutex<Child>>, bool);
 
 impl Handle {
     pub fn kill(&self) {
         if let Ok(mut child) = self.0.lock() {
+            if self.1 && cfg!(unix) {
+                let _ = Command::new("kill")
+                    .args(["-TERM", "--", &format!("-{}", child.id())])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
             let _ = child.kill();
         }
     }
@@ -1010,7 +1044,7 @@ pub fn run_agent(
     target: Target,
     spec: &RunSpec,
     dir: &str,
-    sandbox: Option<&crate::cove::Sandbox>,
+    sandbox: Option<&crate::connections::Sandbox>,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
     let bin = if spec.opts.binary.trim().is_empty() {
@@ -1038,7 +1072,7 @@ pub fn run_shell(
     target: Target,
     line: &str,
     dir: &str,
-    sandbox: Option<&crate::cove::Sandbox>,
+    sandbox: Option<&crate::connections::Sandbox>,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
     let mut command = if cfg!(windows) {
@@ -1078,6 +1112,15 @@ fn spawn(
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    let group = command
+        .get_args()
+        .next()
+        .is_some_and(|a| a == "--connection-run");
+    #[cfg(unix)]
+    if group {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -1106,7 +1149,7 @@ fn spawn(
         }
         std::thread::sleep(Duration::from_millis(100));
     });
-    Ok(Handle(child))
+    Ok(Handle(child, group))
 }
 
 #[cfg(test)]

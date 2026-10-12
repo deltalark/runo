@@ -17,6 +17,8 @@ pub(crate) enum CtxTarget {
     Terminal,
     /// The Playbooks button in a session's header, for its project.
     Playbooks(u64),
+    /// The Runs on button in a session's header.
+    RunsOn(u64),
 }
 
 #[derive(Clone)]
@@ -38,6 +40,9 @@ enum Act {
     /// Run a playbook (id) in a project (id).
     Playbook(u64, u64),
     ManagePlaybooks,
+    /// Move a session (id) to a connection (id).
+    MoveTo(u64, u64),
+    ManageConnections,
     Toggle(u64),
     Diff(String),
     Preview(String),
@@ -268,6 +273,39 @@ impl RunoApp {
                     ),
                 ])
                 .collect(),
+            CtxTarget::RunsOn(sid) => {
+                let current = self.state.session(*sid).map(|s| s.connection);
+                std::iter::once((crate::connections::LOCAL, "this machine".to_string()))
+                    .chain(
+                        crate::connections::all()
+                            .into_iter()
+                            .map(|c| (c.id, c.name)),
+                    )
+                    .map(|(id, name)| {
+                        let glyph = if current == Some(id) {
+                            IconName::Check
+                        } else if id == crate::connections::LOCAL {
+                            IconName::Cpu
+                        } else {
+                            IconName::Server
+                        };
+                        let label = if current == Some(id) {
+                            format!("Runs on {name}")
+                        } else {
+                            format!("Move to {name}")
+                        };
+                        item(label, glyph, Act::MoveTo(*sid, id))
+                    })
+                    .chain([
+                        None,
+                        item(
+                            "Manage connections…",
+                            IconName::Settings,
+                            Act::ManageConnections,
+                        ),
+                    ])
+                    .collect()
+            }
             CtxTarget::Change(path) | CtxTarget::File(path) => {
                 let full = current_dir.join(path);
                 let mut v = Vec::new();
@@ -400,6 +438,11 @@ impl RunoApp {
             }
             Act::RemoveProject(pid) => self.ask_remove_project(pid, window, cx),
             Act::Playbook(id, pid) => self.run_playbook(id, Some(pid), cx),
+            Act::MoveTo(sid, to) => self.move_session(sid, to, cx),
+            Act::ManageConnections => {
+                self.open_settings();
+                self.settings_page = SettingsPage::Connections;
+            }
             Act::ManagePlaybooks => self.view = View::Automations,
             Act::NewIn(pid) => {
                 self.new_project = Some(pid);

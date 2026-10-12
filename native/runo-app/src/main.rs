@@ -4,6 +4,8 @@ mod browser;
 mod browser_engine;
 mod caps;
 mod cliview;
+mod connections;
+mod connections_ui;
 mod cove;
 mod ctxmenu;
 mod fileview;
@@ -219,7 +221,8 @@ struct RunoApp {
     new_project: Option<u64>,
     new_isolated: bool,
     /// Run the new session in its own Cove VM.
-    new_cove: bool,
+    /// Where the next session runs: a connection id, or 0 for this machine.
+    new_connection: u64,
     /// Race mode in the New session form, and the agents picked for it.
     race_mode: bool,
     /// The New session dialog lists every agent, not just the main ones.
@@ -749,6 +752,13 @@ impl RunoApp {
         .detach();
 
         let mut state = State::load();
+        {
+            let mut conns = cx.global::<AppSettings>().connections.clone();
+            if connections::migrate(&mut state.sessions, &mut conns) {
+                settings::update(cx, |s| s.connections = conns);
+                state.save();
+            }
+        }
         let demo = state.projects.is_empty();
         if demo {
             state = State::demo();
@@ -989,7 +999,7 @@ impl RunoApp {
                 .position(|p| p.id == cx.global::<AppSettings>().default_provider)
                 .unwrap_or(0),
             new_isolated: true,
-            new_cove: false,
+            new_connection: 0,
             new_more_agents: false,
             updates: Vec::new(),
             update_runs: HashMap::new(),
@@ -2067,6 +2077,7 @@ impl RunoApp {
             path: path_str,
             color,
             icon,
+            connection: 0,
         });
         self.expanded.push(id);
         self.new_project = Some(id);
@@ -2117,9 +2128,11 @@ impl RunoApp {
             let isolated = (self.new_isolated || racing) && is_git;
             match self.spawn_session(&project, provider, &branch, isolated, is_git, &task, cx) {
                 Ok(id) => {
-                    if self.new_cove && cove::available() {
+                    if self.new_connection != connections::LOCAL
+                        && connections::get(self.new_connection).is_some()
+                    {
                         if let Some(session) = self.state.session_mut(id) {
-                            session.cove = true;
+                            session.connection = self.new_connection;
                         }
                     }
                     created.push(id)
@@ -2522,8 +2535,8 @@ impl RunoApp {
         self.prune_shells();
         self.tabs.retain(|t| *t != id);
         self.stats.remove(&id);
-        if session.cove && !self.demo {
-            cove::remove(id);
+        if session.elsewhere() && !self.demo {
+            connections::cleanup_session(&session);
         }
         if session.isolated && !self.demo && remove_worktree() {
             if let Some(project) = self
@@ -3300,6 +3313,8 @@ impl RunoApp {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.new_project = Some(pid);
+                                this.new_connection = this.project_connection(pid);
+                                this.new_connection = this.project_connection(pid);
                                 this.open_new_session();
                                 cx.notify();
                             }))
@@ -3782,6 +3797,24 @@ impl RunoApp {
             .flatten()
         {
             return divider;
+        }
+        if message.role == Role::System && message.meta == "moved" {
+            return fade(
+                div()
+                    .id(("message", index))
+                    .px_3()
+                    .py(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(tint(c_subtle()))
+                    .text_size(px(12.5))
+                    .text_color(rgb(c_secondary()))
+                    .child(icon(IconName::Server, 13., c_blue()))
+                    .child(div().flex_1().min_w_0().child(message.text.clone())),
+            )
+            .into_any_element();
         }
         if message.role == Role::System {
             return fade(
@@ -4277,6 +4310,7 @@ impl RunoApp {
                     .child(icon(IconName::Play, 11., c_secondary()))
                     .child("Playbooks"),
             )
+            .children(self.runs_on_badge(session, cx))
             .child(self.view_toggle(session, cx))
             .child(
                 div()
@@ -4929,6 +4963,20 @@ impl RunoApp {
             };
         }
         self.view = View::NewSession;
+        if let Some(pid) = self.new_project {
+            self.new_connection = self.project_connection(pid);
+        }
+    }
+
+    /// A project's default "Runs on", if that connection still exists.
+    fn project_connection(&self, pid: u64) -> u64 {
+        self.state
+            .projects
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.connection)
+            .filter(|c| connections::get(*c).is_some())
+            .unwrap_or(connections::LOCAL)
     }
 
     fn close_new_session(&mut self) {
@@ -5220,10 +5268,13 @@ impl RunoApp {
             Some(p) => format!("Runs directly in {}", p.path),
         };
         let cove_ready = !self.demo && cove::available();
-        let where_to = if cove_ready && self.new_cove && project.is_some() {
-            format!("{where_to}, inside a Cove VM")
-        } else {
-            where_to
+        let conns = connections::all();
+        let where_to = match connections::get(self.new_connection) {
+            Some(c) if project.is_some() && c.remote() => {
+                format!("{where_to}, synced to {} where the agent runs", c.name)
+            }
+            Some(c) if project.is_some() => format!("{where_to}, inside a VM on {}", c.name),
+            _ => where_to,
         };
         let provider = &agent::PROVIDERS[self.new_provider];
         let task_empty = self.new_task.read(cx).value().trim().is_empty();
@@ -5245,6 +5296,35 @@ impl RunoApp {
                         .v_flex()
                         .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
                         .child(div().text_xs().text_color(rgb(c_muted())).child(desc)),
+                )
+        };
+        let runs_on_conn = |id: usize,
+                            title: SharedString,
+                            desc: SharedString,
+                            kind: connections::Kind,
+                            on: bool| {
+            card(("runs-on", id), on)
+                .child(icon(
+                    if kind == connections::Kind::Ssh {
+                        IconName::Server
+                    } else {
+                        IconName::ShieldCheck
+                    },
+                    18.,
+                    if on { c_blue() } else { c_secondary() },
+                ))
+                .child(
+                    div()
+                        .v_flex()
+                        .min_w_0()
+                        .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(c_muted()))
+                                .truncate()
+                                .child(desc),
+                        ),
                 )
         };
         let mode = |id: usize, title: &'static str, desc: &'static str, on: bool| {
@@ -5384,26 +5464,63 @@ impl RunoApp {
                     .when(isolated, |el| {
                         el.child(Input::new(&self.branch).bordered(true).h(px(36.)))
                     })
-                    .when(cove_ready && project.is_some(), |el| {
-                        el.child(label("RUNS ON")).child(
+                    .when(project.is_some() && (cove_ready || !conns.is_empty()), |el| {
+                        let mut choices = div().flex().flex_wrap().gap_2().child(
+                            runs_on(0, "This computer", "Directly on your machine", self.new_connection == connections::LOCAL)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.new_connection = connections::LOCAL;
+                                    cx.notify();
+                                })),
+                        );
+                        for (i, c) in conns.iter().enumerate() {
+                            let id = c.id;
+                            let summary: SharedString = c.summary().into();
+                            choices = choices.child(
+                                runs_on_conn(i + 1, c.name.clone().into(), summary, c.kind, self.new_connection == id)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.new_connection = id;
+                                        cx.notify();
+                                    })),
+                            );
+                        }
+                        if cove_ready && !conns.iter().any(|c| c.kind == connections::Kind::Cove && !c.remote()) {
+                            choices = choices.child(
+                                runs_on(99, "Cove VM", "Its own Linux VM, away from your files and keys", false)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let id = this.add_connection(connections::Kind::Cove, cx);
+                                        this.new_connection = id;
+                                        cx.notify();
+                                    })),
+                            );
+                        }
+                        let project_id = project.map(|p| p.id).unwrap_or_default();
+                        let is_default = project.is_some_and(|p| p.connection == self.new_connection);
+                        el.child(
                             div()
                                 .flex()
-                                .gap_2()
-                                .child(
-                                    runs_on(0, "This computer", "Directly on your machine", !self.new_cove)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.new_cove = false;
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    runs_on(1, "Cove VM", "Its own Linux VM, away from your files and keys", self.new_cove)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.new_cove = true;
-                                            cx.notify();
-                                        })),
-                                ),
+                                .items_center()
+                                .justify_between()
+                                .child(label("RUNS ON"))
+                                .when(!is_default, |el| {
+                                    el.child(
+                                        div()
+                                            .id("runs-on-default")
+                                            .text_xs()
+                                            .text_color(rgb(c_blue()))
+                                            .cursor_pointer()
+                                            .child("Make this the project's default")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                let target = this.new_connection;
+                                                if let Some(p) = this.state.projects.iter_mut().find(|p| p.id == project_id) {
+                                                    p.connection = target;
+                                                }
+                                                this.save();
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
                         )
+                        .child(choices)
                     })
                     .child(
                         div()
@@ -7530,6 +7647,19 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--mcp-memory") {
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."));
         return;
+    }
+    // `runo --connection-run <file>`: one agent turn on a remote connection, and
+    // `--connection-shell <file>`: a terminal there.
+    if let Some(mode @ ("--connection-run" | "--connection-shell")) =
+        args.get(1).map(String::as_str)
+    {
+        shellenv::init();
+        let file = args.get(2).map(String::as_str).unwrap_or("");
+        std::process::exit(if mode == "--connection-run" {
+            connections::connection_run(file)
+        } else {
+            connections::connection_shell(file)
+        });
     }
     // Before any thread starts: find agents and Node.js where the person's terminal would.
     shellenv::init();
