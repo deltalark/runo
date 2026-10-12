@@ -106,6 +106,23 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "list_connections",
+            "description": "List the places besides this machine where commands can run: Cove VMs and the person's servers, with their size, whether they have network access, and whether agents may use them.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "run_on",
+            "description": "Run a shell command on one of the connections from list_connections and get its output and exit code. It runs in a scratch folder there (a dedicated Cove VM, or a scratch folder on a server), not in this session's files. Use it for heavy or long jobs, research that needs network access, trying untrusted code safely, or anything that needs that machine's hardware.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "connection": { "type": "string", "description": "The connection's name." },
+                    "command": { "type": "string", "description": "A bash command line." }
+                },
+                "required": ["connection", "command"]
+            }
+        },
+        {
             "name": "save_note",
             "description": "Save a short, durable note (a decision, a gotcha, what is left to do) to this session's memory, so the next agent or session sees it.",
             "inputSchema": {
@@ -168,10 +185,59 @@ fn call(dir: &str, name: &str, args: &Value) -> Value {
                 Err(e) => failure(format!("Could not save the note: {e}")),
             }
         }
+        "list_connections" | "run_on" => connection_call(
+            &crate::settings::AppSettings::load().connections,
+            name,
+            args,
+        ),
         "list_playbooks" | "get_playbook" | "run_playbook" => {
             playbook_call(&load_state(), dir, name, args, &crate::store::inbox_dir())
         }
         other => failure(format!("Unknown tool {other}")),
+    }
+}
+
+fn connection_call(all: &[crate::connections::Connection], name: &str, args: &Value) -> Value {
+    if name == "list_connections" {
+        if all.is_empty() {
+            return text("No connections are set up. The person can add Cove VMs and servers in Runo's Settings > Connections.");
+        }
+        let lines: Vec<String> = all
+            .iter()
+            .map(|c| {
+                format!(
+                    "- {}: {}{}",
+                    c.name,
+                    c.summary(),
+                    if c.agents {
+                        ""
+                    } else {
+                        " (agents may not run commands here)"
+                    }
+                )
+            })
+            .collect();
+        return text(lines.join("\n"));
+    }
+    let wanted = args["connection"].as_str().unwrap_or("").trim();
+    let command = args["command"].as_str().unwrap_or("").trim();
+    if command.is_empty() {
+        return failure("Give a command to run.");
+    }
+    let Some(conn) = all.iter().find(|c| c.name.eq_ignore_ascii_case(wanted)) else {
+        let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+        return failure(format!(
+            "No connection called \"{wanted}\". Connections: {}",
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            }
+        ));
+    };
+    match crate::connections::run_for_agent(conn, command) {
+        Ok(out) => text(out),
+        Err(e) => failure(e),
     }
 }
 
@@ -426,7 +492,7 @@ mod tests {
         )
         .is_none());
         let list = handle(d, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 8);
         let call = |name: &str, args: Value| {
             handle(d, &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap()["result"]["content"][0]["text"]
                 .as_str()

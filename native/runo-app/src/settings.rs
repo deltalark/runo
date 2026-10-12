@@ -95,6 +95,12 @@ pub struct AppSettings {
     pub browser_asked: bool,
     /// Shortcuts changed in Settings > Keybindings: shortcut id → keys ("cmd-shift-k").
     pub keybindings: HashMap<String, String>,
+    /// Places sessions can run besides this machine (Cove servers, SSH servers).
+    pub connections: Vec<crate::connections::Connection>,
+    /// Back up each remote session checkpoint to the project's GitHub remote.
+    pub sync_backup: bool,
+    /// Give agents Cove's own tools (`cove mcp`): scratch VMs, commands, files, ports.
+    pub cove_tools: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -148,6 +154,9 @@ impl Default for AppSettings {
             browser_enabled: false,
             browser_asked: false,
             keybindings: HashMap::new(),
+            connections: Vec::new(),
+            sync_backup: true,
+            cove_tools: true,
         }
     }
 }
@@ -213,6 +222,9 @@ impl AppSettings {
         AUTOSCROLL.store(self.autoscroll, Ordering::Relaxed);
         KEEP_AWAKE.store(self.keep_awake, Ordering::Relaxed);
         crate::mcp::set_shared(&self.mcp_shared);
+        crate::connections::set_all(&self.connections);
+        COVE_TOOLS.store(self.cove_tools, Ordering::Relaxed);
+        SYNC_BACKUP.store(self.sync_backup, Ordering::Relaxed);
         crate::terminal::configure(
             self.term_font_size,
             match self.term_scroll.as_str() {
@@ -259,6 +271,16 @@ static CONFIRM_DELETE: AtomicBool = AtomicBool::new(true);
 static REMOVE_WORKTREE: AtomicBool = AtomicBool::new(true);
 static AUTOSCROLL: AtomicBool = AtomicBool::new(true);
 static KEEP_AWAKE: AtomicBool = AtomicBool::new(true);
+static COVE_TOOLS: AtomicBool = AtomicBool::new(true);
+static SYNC_BACKUP: AtomicBool = AtomicBool::new(true);
+
+pub fn cove_tools() -> bool {
+    COVE_TOOLS.load(Ordering::Relaxed)
+}
+
+pub fn sync_backup() -> bool {
+    SYNC_BACKUP.load(Ordering::Relaxed)
+}
 
 pub fn keep_awake() -> bool {
     KEEP_AWAKE.load(Ordering::Relaxed)

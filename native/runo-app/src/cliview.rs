@@ -76,9 +76,12 @@ fn parse_divider(meta: &str) -> Option<(&str, Option<usize>)> {
 /// Why a session can't show its CLI view without losing context, if it can't.
 pub(crate) fn cli_blocker(session: &Session) -> Option<String> {
     let name = agent::provider(&session.provider).name;
-    if session.cove {
-        // The conversation files live inside the VM, where the CLI view can't read them yet.
-        return Some("The CLI view isn't available for sessions that run in Cove yet.".into());
+    if session.elsewhere() {
+        // The CLI view runs the agent's own CLI on this machine, on files that live there.
+        return Some(format!(
+            "The CLI view isn't available while the session runs on {}. Move it to this machine to use it.",
+            crate::connections::name(session.connection)
+        ));
     }
     if !agent::has_cli_view(&session.provider) {
         return Some(format!(

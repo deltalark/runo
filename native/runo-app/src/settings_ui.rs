@@ -1,6 +1,7 @@
 //! The Settings screen: grouped navigation, searchable pages, titled sections of rows.
 
 use super::*;
+use crate::connections::{self, Connection};
 use gpui_kit::component::switch::Switch;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,6 +20,7 @@ pub enum SettingsPage {
     Skills,
     Hooks,
     Worktrees,
+    Connections,
 }
 
 impl SettingsPage {
@@ -42,7 +44,10 @@ impl SettingsPage {
                 SettingsPage::Hooks,
             ],
         ),
-        ("Workspace", &[SettingsPage::Worktrees]),
+        (
+            "Workspace",
+            &[SettingsPage::Connections, SettingsPage::Worktrees],
+        ),
     ];
 
     /// Every page, including each agent's, for searching.
@@ -66,6 +71,7 @@ impl SettingsPage {
             Self::Skills => "Skills",
             Self::Hooks => "Hooks",
             Self::Worktrees => "Worktrees",
+            Self::Connections => "Connections",
         }
     }
 
@@ -85,6 +91,7 @@ impl SettingsPage {
             Self::Skills => "Agent skills discovered in project, personal and agent folders.",
             Self::Hooks => "Commands Claude Code runs on agent events, and the config files behind them.",
             Self::Worktrees => "Where isolated sessions and Runo's data live.",
+            Self::Connections => "Places sessions can run besides this machine: Cove VMs and your own servers. Sessions can move between them at any time.",
         }
     }
 
@@ -107,6 +114,7 @@ impl SettingsPage {
             Self::Skills => IconName::Sparkles,
             Self::Hooks => IconName::Webhook,
             Self::Worktrees => IconName::GitBranch,
+            Self::Connections => IconName::Server,
             _ => IconName::Bot,
         }
     }
@@ -727,11 +735,316 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             sections.push(section("Config files", "Open in Runo's editor. Files that do not exist yet are created when you save.", files));
             sections
         }
+        SettingsPage::Connections => connection_sections(st),
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
             row("Worktree folder", "Created next to each repository as .runo-worktrees/<repo>/<branch>.", Ctl::Chip(".runo-worktrees".into(), 3)),
             row("Runo data", "Projects and sessions are saved here. Settings live next to it in settings.json.", Ctl::Chip("~/.runo/state.json".into(), 3)),
         ])],
     }
+}
+
+/// A text field bound to one field of the connection with this id.
+fn conn_text(
+    c: &Connection,
+    title: &str,
+    desc: &str,
+    placeholder: &str,
+    value: String,
+    set: fn(&mut Connection, String),
+) -> Row {
+    let id = c.id;
+    row(
+        title,
+        desc,
+        Ctl::Text {
+            key: format!("conn.{id}.{title}"),
+            value,
+            placeholder: placeholder.into(),
+            set: Rc::new(move |s, v| {
+                if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                    set(c, v);
+                }
+            }),
+        },
+    )
+}
+
+fn conn_choice(
+    c: &Connection,
+    title: &str,
+    desc: &str,
+    opts: Vec<(String, String)>,
+    value: String,
+    set: fn(&mut Connection, String),
+) -> Row {
+    let id = c.id;
+    row(
+        title,
+        desc,
+        Ctl::Dropdown(
+            opts,
+            value,
+            Rc::new(move |s, v| {
+                if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                    set(c, v);
+                }
+            }),
+        ),
+    )
+}
+
+fn conn_switch(
+    c: &Connection,
+    title: &str,
+    desc: &str,
+    on: bool,
+    set: fn(&mut Connection, bool),
+) -> Row {
+    let id = c.id;
+    row(
+        title,
+        desc,
+        Ctl::Switch(
+            on,
+            Rc::new(move |s, v| {
+                if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                    set(c, v);
+                }
+            }),
+        ),
+    )
+}
+
+fn connection_sections(st: &AppSettings) -> Vec<Section> {
+    let mut out = Vec::new();
+    let mut list: Vec<Row> = vec![row(
+        "This machine",
+        "Sessions run directly on your computer. Always available.",
+        Ctl::Chip("Built in".into(), 0),
+    )];
+    for c in &st.connections {
+        let status = match connections::test_result(c.id) {
+            Some((None, msg)) => msg,
+            Some((Some(true), msg)) => msg,
+            Some((Some(false), msg)) => format!("Couldn't connect: {msg}"),
+            None => c.summary(),
+        };
+        let id = c.id;
+        list.push(row(
+            &c.name,
+            &status,
+            Ctl::Button(
+                "Test".into(),
+                Rc::new(move |this, cx| this.test_connection(id, cx)),
+            ),
+        ));
+    }
+    list.push(row(
+        "Add a connection",
+        "A Cove server runs each session in its own VM. An SSH server is any Linux or macOS machine you can ssh into.",
+        Ctl::Buttons(vec![
+            (
+                "SSH server".into(),
+                Rc::new(|this, cx| {
+                    this.add_connection(connections::Kind::Ssh, cx);
+                }),
+            ),
+            (
+                "Cove".into(),
+                Rc::new(|this, cx| {
+                    this.add_connection(connections::Kind::Cove, cx);
+                }),
+            ),
+        ]),
+    ));
+    out.push(section(
+        "Connections",
+        "Pick one under Runs on when you start a session, or move a running session from its header. On a server or a remote Cove, Runo syncs the session's files there before each agent turn and back after it, uncommitted changes and the agent's conversation included.",
+        list,
+    ));
+
+    for c in &st.connections {
+        let id = c.id;
+        let mut rows = vec![conn_text(
+            c,
+            "Name",
+            "Shown under Runs on.",
+            "Build box",
+            c.name.clone(),
+            |c, v| c.name = v,
+        )];
+        match c.kind {
+            connections::Kind::Ssh => {
+                rows.push(conn_text(c, "Host", "A host from ~/.ssh/config, or user@host. Runo uses your SSH agent and config, and never turns off host key checks.", "anish@build-box", c.host.clone(), |c, v| c.host = v));
+                rows.push(conn_text(
+                    c,
+                    "Port",
+                    "Empty for the default.",
+                    "22",
+                    if c.port == 0 {
+                        String::new()
+                    } else {
+                        c.port.to_string()
+                    },
+                    |c, v| c.port = v.trim().parse().unwrap_or(0),
+                ));
+                rows.push(conn_text(
+                    c,
+                    "Key file",
+                    "Empty uses your SSH agent.",
+                    "~/.ssh/id_ed25519",
+                    c.identity.clone(),
+                    |c, v| c.identity = v,
+                ));
+                rows.push(conn_text(
+                    c,
+                    "Folder",
+                    "Where session copies live on the server, under the home folder.",
+                    "runo-work",
+                    c.workdir.clone(),
+                    |c, v| c.workdir = v,
+                ));
+            }
+            _ => {
+                rows.push(conn_text(c, "Server", "Empty for Cove on this machine, which shares the session folder with the VM. A URL (http://my-vps:7457) uses a Cove server elsewhere; the session's files are synced to it.", "Cove on this machine", c.url.clone(), |c, v| c.url = v));
+                if c.remote() {
+                    rows.push(conn_text(
+                        c,
+                        "API key",
+                        "Run cove key on the server.",
+                        "",
+                        c.api_key.clone(),
+                        |c, v| c.api_key = v,
+                    ));
+                }
+                rows.push(conn_choice(
+                    c,
+                    "CPUs",
+                    "For each session's VM.",
+                    options(&[("1", "1"), ("2", "2"), ("4", "4"), ("8", "8")]),
+                    c.cpus.to_string(),
+                    |c, v| c.cpus = v.parse().unwrap_or(2),
+                ));
+                rows.push(conn_choice(
+                    c,
+                    "Memory",
+                    "For each session's VM.",
+                    options(&[
+                        ("2048", "2 GB"),
+                        ("4096", "4 GB"),
+                        ("8192", "8 GB"),
+                        ("16384", "16 GB"),
+                    ]),
+                    c.memory_mb.to_string(),
+                    |c, v| c.memory_mb = v.parse().unwrap_or(4096),
+                ));
+                rows.push(row(
+                    "Network",
+                    "Off keeps the VM offline, so an agent can't reach the internet. The agent CLI then has to be in the image already.",
+                    Ctl::Segment(options(&[("full", "Full"), ("off", "Off")]), c.network.clone(), Rc::new(move |s, v| {
+                        if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                            c.network = v;
+                        }
+                    })),
+                ));
+                rows.push(conn_choice(c, "Stop when idle", "Stop a session's VM when nothing has run in it for a while. It starts again on the next message.", options(&[("0", "Never"), ("15", "After 15 min"), ("30", "After 30 min"), ("60", "After 1 hour"), ("240", "After 4 hours")]), c.idle_stop.to_string(), |c, v| c.idle_stop = v.parse().unwrap_or(0)));
+            }
+        }
+        rows.push(conn_text(c, "Keys passed in", "Environment variables from this machine the agent gets there, comma separated. Nothing else reaches it.", connections::DEFAULT_KEYS, c.keys.clone(), |c, v| c.keys = v));
+        rows.push(conn_switch(c, "GitHub access", "Give the agent your GitHub login (from gh auth token) for its own work there, such as cloning or opening PRs. Syncing never needs it. Passed per command, never saved there.", c.github, |c, v| c.github = v));
+        rows.push(conn_switch(c, "Agents may use it", "Lets agents in any session run commands here with Runo's run_on tool, for research, untrusted code or heavy jobs.", c.agents, |c, v| c.agents = v));
+        rows.push(row(
+            "Remove",
+            "Sessions that run here move back to this machine.",
+            Ctl::Button(
+                "Remove".into(),
+                Rc::new(move |this, cx| this.remove_connection(id, cx)),
+            ),
+        ));
+        out.push(section(&c.name, &c.summary(), rows));
+    }
+
+    let installed = crate::cove::binary().is_some();
+    let mut cove_rows = vec![if !installed {
+        row(
+            "Cove",
+            "Not installed. Cove gives each session its own Linux VM on this machine or your server.",
+            Ctl::Button(
+                "Get Cove".into(),
+                Rc::new(|_, cx| cx.open_url("https://github.com/deltalark/cove#install")),
+            ),
+        )
+    } else if crate::cove::available() {
+        row(
+            "Cove",
+            "Installed, and its server is running.",
+            Ctl::Chip("Ready".into(), 2),
+        )
+    } else {
+        row(
+            "Cove",
+            "Installed, but its server isn't running. Start it with cove serve.",
+            Ctl::Chip("Not running".into(), 1),
+        )
+    }];
+    cove_rows.push(switch_row(
+        "Let agents use Cove",
+        "Gives agents on this machine Cove's own tools (cove mcp), so they can make scratch VMs, run commands, move files and share ports on their own.",
+        st.cove_tools,
+        |s, v| s.cove_tools = v,
+    ));
+    cove_rows.push(switch_row(
+        "Back up checkpoints to GitHub",
+        "After each turn on a remote connection, push the session's checkpoint to the project's origin as refs/runo/sessions/<id>, which no branch list shows.",
+        st.sync_backup,
+        |s, v| s.sync_backup = v,
+    ));
+    out.push(section(
+        "Cove",
+        "Self-hosted microVMs for agents: github.com/deltalark/cove.",
+        cove_rows,
+    ));
+
+    let vms = if installed {
+        crate::cove::vms()
+    } else {
+        Vec::new()
+    };
+    if !vms.is_empty() {
+        let rows = vms
+            .iter()
+            .map(|vm| {
+                let (stop, rm) = (vm.name.clone(), vm.name.clone());
+                let mut buttons: Vec<(String, Action)> = Vec::new();
+                if vm.state() == "running" {
+                    buttons.push((
+                        "Stop".into(),
+                        Rc::new(move |_, _| crate::cove::vm_action("stop", &stop)),
+                    ));
+                }
+                buttons.push((
+                    "Delete".into(),
+                    Rc::new(move |_, _| crate::cove::vm_action("rm", &rm)),
+                ));
+                row(
+                    &vm.name,
+                    &format!(
+                        "{} · {} CPU · {} GB",
+                        vm.state(),
+                        vm.cpus,
+                        vm.memory_mb / 1024
+                    ),
+                    Ctl::Buttons(buttons),
+                )
+            })
+            .collect();
+        out.push(section(
+            "VMs on this machine",
+            "Every Cove VM, including ones agents made. runo-<n> belongs to session n.",
+            rows,
+        ));
+    }
+    out
 }
 
 impl RunoApp {

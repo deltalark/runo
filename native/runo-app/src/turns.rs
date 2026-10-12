@@ -96,6 +96,10 @@ impl RunoApp {
         let sel = session.selections();
         let agent_session = session.agent_session.clone();
         let sandbox = session.sandbox();
+        crate::connections::prepare_run(
+            Some((provider.clone(), agent_session.clone())),
+            crate::settings::sync_backup(),
+        );
         // Runo's memory server is a program on this machine, which a VM can't start.
         let exe = std::env::current_exe()
             .ok()
