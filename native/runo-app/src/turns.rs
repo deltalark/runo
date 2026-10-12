@@ -29,6 +29,12 @@ impl RunoApp {
             return;
         }
         let demo = self.demo;
+        // Notes the person shared with agents open each new conversation in the project.
+        let notes = self
+            .state
+            .session(id)
+            .filter(|s| !s.has_conversation())
+            .and_then(|s| self.shared_notes(s.project_id));
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
@@ -75,6 +81,10 @@ impl RunoApp {
             }
         } else {
             prompt.clone()
+        };
+        let sent = match notes {
+            Some(notes) => format!("{notes}{sent}"),
+            None => sent,
         };
         let mut user = Message::now(Role::User, prompt.clone());
         user.images = images.clone();
@@ -241,9 +251,25 @@ impl RunoApp {
             return;
         }
         let Some(id) = self.selected else { return };
-        let text = self.prompt.read(cx).value().trim().to_string();
-        if text.is_empty() && self.attachments.is_empty() {
+        let typed = self.prompt.read(cx).value().trim().to_string();
+        let playbook = self
+            .picked_playbook
+            .and_then(|pb| self.state.automations.iter().find(|a| a.id == pb))
+            .map(|a| (a.name.clone(), a.prompt.clone()));
+        if typed.is_empty() && self.attachments.is_empty() && playbook.is_none() {
             return;
+        }
+        // A playbook goes out as its full instructions, with anything typed added after.
+        let text = match &playbook {
+            Some((_, instructions)) if typed.is_empty() => instructions.clone(),
+            Some((_, instructions)) => format!("{instructions}\n\nAlso: {typed}"),
+            None => typed.clone(),
+        };
+        if let Some(pb) = self.picked_playbook.take() {
+            if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == pb) {
+                a.last_run = workspace::unix_now();
+                a.ran = a.last_run;
+            }
         }
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
         self.mention = None;
@@ -268,7 +294,27 @@ impl RunoApp {
             .current()
             .map(|s| cx.global::<AppSettings>().agent(&s.provider))
             .unwrap_or_default();
+        let before = self.current().map_or(0, |s| s.messages.len());
         self.start_turn(id, text, images, &opts);
+        // Only when the turn really started; an open CLI queues it instead.
+        let started = self.current().map_or(0, |s| s.messages.len()) > before;
+        if let (Some((name, _)), true) = (playbook, started) {
+            self.tag_playbook(id, &name, &typed);
+        }
+    }
+
+    /// Mark the session's latest message as a playbook run, so it shows as the playbook's
+    /// name rather than its whole prompt.
+    pub(crate) fn tag_playbook(&mut self, id: u64, name: &str, note: &str) {
+        if let Some(m) = self
+            .state
+            .session_mut(id)
+            .and_then(|s| s.messages.iter_mut().rev().find(|m| m.role == Role::User))
+        {
+            m.playbook = name.to_string();
+            m.note = note.to_string();
+        }
+        self.save();
     }
 
     /// Put the worktree back as it was before user message `index` ran.
@@ -495,11 +541,12 @@ impl RunoApp {
             self.run_playbook(playbook, here, cx);
             return;
         }
-        if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == playbook) {
-            a.last_run = workspace::unix_now();
-        }
+        // The playbook rides along as a chip; its instructions go out when the message is
+        // sent, so the box stays free for anything to add.
+        let _ = prompt;
+        self.picked_playbook = Some(playbook);
         self.prompt.update(cx, |p, cx| {
-            p.set_value(prompt, window, cx);
+            p.set_value("", window, cx);
             p.focus(window, cx);
         });
     }
@@ -1088,7 +1135,7 @@ impl RunoApp {
                         .text_size(px(11.))
                         .text_color(rgb(c_muted()))
                         .child(format!(
-                            "PLAYBOOKS · Enter uses it here · {}↵ starts a new session",
+                            "PLAYBOOKS · Enter adds it to this message · {}↵ starts a new session",
                             if cfg!(target_os = "macos") {
                                 "⌘"
                             } else {

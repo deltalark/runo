@@ -12,13 +12,17 @@ mod github;
 mod handoff;
 mod history;
 mod install;
+mod keymap;
 mod mcp;
 mod memory_mcp;
 mod models;
+mod notes;
+mod playbooks;
 mod projects;
 mod pty;
 mod settings;
 mod settings_ui;
+mod shellenv;
 mod split;
 mod store;
 mod stream;
@@ -82,34 +86,9 @@ actions!(
     ]
 );
 
-/// Global shortcuts. `secondary` is ⌘ on macOS and Ctrl elsewhere.
+/// Global shortcuts, as set in Settings > Keybindings.
 fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("secondary-n", NewSession, Some("Runo")),
-        KeyBinding::new("secondary-,", OpenSettings, Some("Runo")),
-        KeyBinding::new("secondary-.", StopAgent, Some("Runo")),
-        KeyBinding::new("secondary-b", TogglePanel, Some("Runo")),
-        KeyBinding::new("secondary-\\", ToggleSidebar, Some("Runo")),
-        KeyBinding::new("escape", Dismiss, Some("Runo")),
-        KeyBinding::new("secondary-s", SaveFile, Some("Runo")),
-        KeyBinding::new("secondary-k", QuickOpen, Some("Runo")),
-        KeyBinding::new("secondary-p", QuickOpen, Some("Runo")),
-        KeyBinding::new("secondary-shift-m", ToggleView, Some("Runo")),
-    ]);
-    // Inside a shell, keys belong to the shell: Ctrl-P is history, Escape is vi.
-    // Keys typed into the Browser tab's page go to the page.
-    cx.bind_keys([KeyBinding::new("escape", NoAction {}, Some("RunoBrowser"))]);
-    let mut shell_keys = vec!["escape"];
-    if !cfg!(target_os = "macos") {
-        shell_keys.extend([
-            "ctrl-n", "ctrl-,", "ctrl-.", "ctrl-b", "ctrl-\\", "ctrl-k", "ctrl-p",
-        ]);
-    }
-    cx.bind_keys(
-        shell_keys
-            .into_iter()
-            .map(|k| KeyBinding::new(k, NoAction {}, Some("RunoTerminal"))),
-    );
+    keymap::install(cx);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -334,8 +313,24 @@ struct RunoApp {
     notes_project: Option<u64>,
     /// True while the notes box is filled programmatically, so it is not saved back.
     loading_notes: bool,
+    /// Remove project dialog, and its confirm-by-name field.
+    remove_project: Option<projects::RemoveProject>,
+    remove_name: Entity<InputState>,
+    /// A playbook picked from the `/` menu; the next message runs it.
+    picked_playbook: Option<u64>,
+    /// The shortcut being recorded in Settings > Keybindings, and why keys were refused.
+    key_capture: Option<&'static str>,
+    key_note: Option<String>,
+    /// The playbook editor while it is open, its extra fields and the page's search.
+    pb_editor: Option<playbooks::PlaybookEditor>,
+    auto_desc: Entity<InputState>,
+    pb_query: Entity<InputState>,
+    pb_confirm_delete: Option<u64>,
+    /// Project notes: write, read or both, and the search box.
+    notes_mode: notes::NotesMode,
+    notes_query: Entity<InputState>,
     auto_name: Entity<InputState>,
-    auto_prompt: Entity<InputState>,
+    auto_prompt: Entity<TextareaState>,
     auto_every: Entity<InputState>,
     auto_project: Option<u64>,
     auto_provider: usize,
@@ -837,8 +832,9 @@ impl RunoApp {
         });
         let auto_name = cx.new(|cx| InputState::new(window, cx).placeholder("Check dependencies"));
         let auto_prompt = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Check for outdated dependencies and update the safe ones")
+            TextareaState::new(window, cx).placeholder(
+                "What the agent should do, as you would write it in a message. For example: Check for outdated dependencies, update the safe ones, run the tests and list anything that needs a decision.",
+            )
         });
         let auto_every =
             cx.new(|cx| InputState::new(window, cx).placeholder("Empty runs it by hand only"));
@@ -1030,6 +1026,19 @@ impl RunoApp {
             notes_input: notes_input.clone(),
             notes_project: None,
             loading_notes: false,
+            remove_project: None,
+            remove_name: cx.new(|cx| InputState::new(window, cx).placeholder("Project name")),
+            picked_playbook: None,
+            key_capture: None,
+            key_note: None,
+            pb_editor: None,
+            auto_desc: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("One line on what it does (optional)")
+            }),
+            pb_query: cx.new(|cx| InputState::new(window, cx).placeholder("Search playbooks")),
+            pb_confirm_delete: None,
+            notes_mode: notes::NotesMode::Write,
+            notes_query: cx.new(|cx| InputState::new(window, cx).placeholder("Search notes")),
             auto_name: auto_name.clone(),
             auto_prompt: auto_prompt.clone(),
             auto_every: auto_every.clone(),
@@ -1077,6 +1086,33 @@ impl RunoApp {
                     _ => {}
                 },
             );
+        // Recording a shortcut in Settings takes the next keys before any binding runs.
+        let me = cx.entity().downgrade();
+        let keys_sub = cx.intercept_keystrokes(move |event, _, cx| {
+            let keystroke = event.keystroke.clone();
+            let _ = me.update(cx, |this, cx| {
+                if this.key_capture.is_some() && this.view == View::Settings {
+                    this.capture_key(&keystroke, cx);
+                    cx.stop_propagation();
+                } else {
+                    this.key_capture = None;
+                }
+            });
+        });
+        // Search boxes on the Playbooks and Project notes pages filter as you type.
+        let pb_query_sub = cx.subscribe_in(&app.pb_query, window, repaint);
+        let notes_query_sub = cx.subscribe_in(&app.notes_query, window, repaint);
+        let remove_name_sub = cx.subscribe_in(&app.remove_name, window, repaint);
+        let auto_name_sub = cx.subscribe_in(&app.auto_name, window, repaint);
+        let auto_prompt_sub = cx.subscribe_in(
+            &app.auto_prompt,
+            window,
+            |_, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        );
         app._subscriptions.extend([
             branch_sub,
             task_sub,
@@ -1084,6 +1120,12 @@ impl RunoApp {
             split_sub,
             file_sub,
             address_sub,
+            keys_sub,
+            pb_query_sub,
+            notes_query_sub,
+            remove_name_sub,
+            auto_name_sub,
+            auto_prompt_sub,
         ]);
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
@@ -2478,7 +2520,20 @@ impl RunoApp {
         }
         self.terminal.remove(&id);
         self.confirm_delete = None;
-        self.selected = self.state.sessions.first().map(|s| s.id);
+        if self.split == Some(id) {
+            self.split = None;
+        }
+        // Deleting another session from its menu keeps the open one open.
+        if self.selected == Some(id) {
+            self.selected = self
+                .tabs
+                .last()
+                .copied()
+                .or_else(|| self.state.sessions.first().map(|s| s.id));
+            if self.selected.is_none() && self.view == View::Session {
+                self.view = View::Inbox;
+            }
+        }
         self.save();
         self.refresh();
     }
@@ -3305,7 +3360,7 @@ impl RunoApp {
                                 div()
                                     .text_size(px(11.))
                                     .text_color(rgb(c_muted()))
-                                    .child(format!("{MOD_KEY}N")),
+                                    .child(keymap::label(cx, "new-session")),
                             ),
                     )
                     .child(
@@ -3680,7 +3735,7 @@ impl RunoApp {
                                     )),
                                 )
                             })
-                            .child(
+                            .child(if message.playbook.is_empty() {
                                 div()
                                     .max_w(px(560.))
                                     .px(px(14.))
@@ -3690,8 +3745,11 @@ impl RunoApp {
                                     .text_size(px(13.5))
                                     .text_color(rgb(c_text()))
                                     .whitespace_normal()
-                                    .child(markdown(message.text.clone())),
-                            ),
+                                    .child(markdown(message.text.clone()))
+                                    .into_any_element()
+                            } else {
+                                self.playbook_message(index, message, cx)
+                            }),
                     ),
             )
             .into_any_element();
@@ -4577,7 +4635,10 @@ impl RunoApp {
             );
         }
 
-        let ready = !empty_prompt || !self.attachments.is_empty();
+        let picked = self
+            .picked_playbook
+            .and_then(|id| self.state.automations.iter().find(|a| a.id == id));
+        let ready = !empty_prompt || !self.attachments.is_empty() || picked.is_some();
         chips = chips.child(
             self.ghost_button_sized(
                 "attach",
@@ -4619,6 +4680,7 @@ impl RunoApp {
                         this.attach_paths(paths.paths());
                         cx.notify();
                     }))
+                    .when_some(picked, |el, a| el.child(self.playbook_chip(a, cx)))
                     .child(
                         div().px_1().text_size(px(13.5)).child(
                             Textarea::new(&self.prompt)
@@ -4808,10 +4870,10 @@ impl RunoApp {
                     .mt_4()
                     .v_flex()
                     .gap_2()
-                    .child(tip(format!("{MOD_KEY}N"), "New session"))
-                    .child(tip(format!("{MOD_KEY},"), "Settings"))
-                    .child(tip(format!("{MOD_KEY}B"), "Show or hide the changes panel"))
-                    .child(tip(format!("{MOD_KEY}."), "Stop the running agent")),
+                    .child(tip(keymap::label(cx, "new-session"), "New session"))
+                    .child(tip(keymap::label(cx, "settings"), "Settings"))
+                    .child(tip(keymap::label(cx, "panel"), "Show or hide the changes panel"))
+                    .child(tip(keymap::label(cx, "stop"), "Stop the running agent")),
             )
     }
 
@@ -6888,6 +6950,8 @@ impl Render for RunoApp {
                 options.binary = path;
                 s.agents.insert(id.into(), options);
             });
+            // Detect again with the new file, now that it is in the settings.
+            caps::refresh();
         }
         // Keep shortcuts working when nothing has focus, such as right after launch.
         if window.focused(cx).is_none() {
@@ -7088,6 +7152,10 @@ impl Render for RunoApp {
                     this.install_confirm = None;
                 } else if this.project_form.is_some() {
                     this.project_form = None;
+                } else if this.remove_project.is_some() {
+                    this.remove_project = None;
+                } else if this.pb_editor.is_some() {
+                    this.pb_editor = None;
                 } else if this.ctx_menu.is_some() {
                     this.ctx_menu = None;
                 } else if this.switch_plan.is_some() {
@@ -7305,6 +7373,7 @@ impl Render for RunoApp {
             .children(self.ctx_menu_view(cx))
             .children(self.install_modal(cx))
             .children(self.project_modal(cx))
+            .children(self.remove_project_modal(cx))
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx));
         fade(root, "app-root", 450)
@@ -7436,16 +7505,18 @@ fn main() {
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."));
         return;
     }
+    // Before any thread starts: find agents and Node.js where the person's terminal would.
+    shellenv::init();
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         load_fonts(cx);
-        bind_keys(cx);
         let settings = AppSettings::load();
         settings.apply();
         // Before any text is drawn: the renderer reads this once.
         set_font_smoothing(settings.font_smoothing);
         set_dock_icon();
         cx.set_global(settings);
+        bind_keys(cx);
         let glass = settings::glass_alpha(&cx.global::<AppSettings>().glass) < 255;
         let options = WindowOptions {
             // Transparency has to be asked for when the window is created on some platforms.

@@ -128,8 +128,12 @@ enum Ctl {
     },
     Accent(String),
     Button(String, Action),
+    /// Several buttons side by side; the last one is the primary.
+    Buttons(Vec<(String, Action)>),
     Chip(String, u32),
     Keys(String),
+    /// A shortcut that can be changed: click to record new keys.
+    Shortcut(&'static str),
     /// Open the file in Runo's editor, or reveal it.
     Edit(PathBuf),
     /// A version chip and a chevron, for rows that open another page.
@@ -339,7 +343,7 @@ fn detected_section(pid: &'static str) -> Section {
     rows.push(row(
         "Re-detect options",
         "Ask the CLI again after updating or signing in. Menus in the composer refresh automatically.",
-        Ctl::Button("Re-detect".into(), Rc::new(|_, _| caps::refresh())),
+        Ctl::Button("Re-detect".into(), Rc::new(|_, _| install::redetect())),
     ));
     section("Detected from the CLI", "Runo asks each CLI what it supports instead of hard-coding it, so new models and modes appear on their own.", rows)
 }
@@ -451,15 +455,21 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::Keybindings => {
             let m = MOD_KEY.trim_end_matches('+');
             vec![
-                section("Workspace", "Available everywhere in the window.", vec![
-                    row("Quick open", "Jump to any session, file or command.", Ctl::Keys(format!("{m} K"))),
-                    row("New session", "Open the New session form.", Ctl::Keys(format!("{m} N"))),
-                    row("Settings", "Open this screen.", Ctl::Keys(format!("{m} ,"))),
-                    row("Changes panel", "Show or hide the Changes, Files and Terminal panel.", Ctl::Keys(format!("{m} B"))),
-                    row("Sidebar", "Show or hide the sessions sidebar.", Ctl::Keys(format!("{m} \\"))),
-                    row("Stop agent", "Stop the agent running in the selected session.", Ctl::Keys(format!("{m} ."))),
-                    row("Close", "Close a menu, cancel a delete, or go back to the workspace.", Ctl::Keys("Esc".into())),
-                ]),
+                section("Workspace", "Available everywhere in the window. Click a shortcut, then press the keys you want.", {
+                    let mut rows: Vec<Row> = crate::keymap::SHORTCUTS
+                        .iter()
+                        .map(|s| row(s.title, s.desc, Ctl::Shortcut(s.id)))
+                        .collect();
+                    rows.push(row("Close", "Close a menu, cancel a delete, or go back to the workspace.", Ctl::Keys("Esc".into())));
+                    if !st.keybindings.is_empty() {
+                        rows.push(row(
+                            "Reset all shortcuts",
+                            &format!("{} changed from the defaults.", st.keybindings.len()),
+                            Ctl::Button("Reset all".into(), Rc::new(|this, cx| this.reset_shortcut(None, cx))),
+                        ));
+                    }
+                    rows
+                }),
                 section("Composer", "Change the send key in Chat settings.", vec![
                     row("Send message", "Sends the prompt to the session's agent.", Ctl::Keys(if st.send_on_enter { "Enter".into() } else { format!("{m} Enter") })),
                     row("New line", "Insert a line break in the composer.", Ctl::Keys(if st.send_on_enter { "Shift Enter".into() } else { "Enter".into() })),
@@ -483,21 +493,42 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
         ],
         SettingsPage::Providers => {
+            let _ = &data.provider_paths;
             let (mut installed, mut available) = (Vec::new(), Vec::new());
+            let managers = crate::shellenv::managers();
+            let looked = if managers.is_empty() {
+                "your PATH".to_string()
+            } else {
+                format!("your PATH, including {}", managers.join(", "))
+            };
             for p in agent::PROVIDERS.iter() {
-                let path = data.provider_paths.iter().find(|(id, _)| *id == p.id).and_then(|(_, path)| path.clone());
                 let caps = caps::get(p.id);
+                let pid = p.id;
                 if caps.installed {
-                    let mut r = row(p.name, &path.map(|p| tilde(&p)).unwrap_or_default(), Ctl::Open(caps.version.clone()));
+                    let path = install::agent_path(p);
+                    let desc = match &path {
+                        Some(path) => match crate::shellenv::found_via(path) {
+                            Some(via) => format!("{} · via {via}", tilde(path)),
+                            None => tilde(path),
+                        },
+                        None => String::new(),
+                    };
+                    let mut r = row(p.name, &desc, Ctl::Open(caps.version.clone()));
                     r.open = Some(SettingsPage::Agent(p.id));
                     installed.push(r);
                 } else {
-                    let pid = p.id;
                     available.push(row(
                         p.name,
-                        &if caps.detected { format!("`{}` isn't installed on this computer.", p.bin) } else { "Checking whether it's installed…".into() },
+                        &if caps.detected {
+                            format!("`{}` wasn't found in {looked}. Already installed somewhere else? Locate it.", p.bin)
+                        } else {
+                            "Checking whether it's installed…".into()
+                        },
                         if caps.detected {
-                            Ctl::Button("Install…".into(), Rc::new(move |this, _| this.ask_install(pid)))
+                            Ctl::Buttons(vec![
+                                ("Locate…".into(), Rc::new(move |this: &mut RunoApp, cx: &mut Context<RunoApp>| this.locate_agent(pid, cx)) as Action),
+                                ("Install…".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| this.ask_install(pid)) as Action),
+                            ])
                         } else {
                             Ctl::Chip("Detecting…".into(), 2)
                         },
@@ -505,17 +536,43 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 }
             }
             let mut sections = Vec::new();
+            let node = match install::node() {
+                Some((version, path)) => row(
+                    "Node.js",
+                    &match crate::shellenv::found_via(&path) {
+                        Some(via) => format!("{} · via {via}. Agents installed with npm use it.", tilde(&path)),
+                        None => format!("{}. Agents installed with npm use it.", tilde(&path)),
+                    },
+                    Ctl::Chip(if version.is_empty() { "Found".into() } else { version }, 0),
+                ),
+                None => row(
+                    "Node.js",
+                    &format!("Not found in {looked}. Codex, Gemini, Copilot, Amp and Qwen install with npm, which comes with Node.js from nodejs.org."),
+                    Ctl::Chip("Not found".into(), 1),
+                ),
+            };
+            let folders = crate::shellenv::folders();
+            sections.push(section("Environment", "Runo reads your login shell's PATH, so it finds the same programs your terminal does, including Node.js from nvm, fnm, Volta, asdf or Homebrew.", vec![
+                node,
+                row(
+                    "Search path",
+                    &format!(
+                        "{} folders{}.",
+                        folders.len(),
+                        if managers.is_empty() { String::new() } else { format!(", including {}", managers.join(", ")) }
+                    ),
+                    Ctl::Button("Re-detect".into(), Rc::new(|this, _| {
+                        this.info = Some(("Looking for agents and Node.js again…".into(), std::time::Instant::now()));
+                        install::redetect();
+                    })),
+                ),
+            ]));
             if !installed.is_empty() {
                 sections.push(section("Installed", "Pick an agent to change its model, flags and environment. Installed agents are also listed under Providers on the left.", installed));
             }
             if !available.is_empty() {
-                sections.push(section("More agents", "Install any of these with the vendor's official installer. Once installed it appears in the list above and in the sidebar.", available));
+                sections.push(section("More agents", "Install any of these with the vendor's official installer, or point Runo at a copy you already have. Once found it appears in the list above and in the sidebar.", available));
             }
-            sections.push(section("Detection", "Models, modes and reasoning levels come from the CLIs themselves.", vec![row(
-                "Re-detect all agents",
-                "Run detection again, for example after installing or updating a CLI.",
-                Ctl::Button("Re-detect".into(), Rc::new(|_, _| caps::refresh())),
-            )]));
             sections
         }
         SettingsPage::Agent("claude") => vec![
@@ -842,34 +899,51 @@ impl RunoApp {
                                 c_muted(),
                             )),
                     )
+                    // Deferred so the list paints above the rows that follow it. The
+                    // anchor sits on the trigger's top edge with a spacer over the
+                    // trigger, so the list opens below it, or flips to open above
+                    // it when there is no room underneath.
                     .when(open, |el| {
-                        el.child(fade(
-                            div()
-                                .absolute()
-                                .top(px(40.))
-                                .right_0()
-                                .min_w(px(220.))
-                                .max_h(px(320.))
-                                .rounded_xl()
-                                .border_1()
-                                .border_color(rgb(c_border()))
-                                .bg(rgb(c_canvas()))
-                                .shadow_lg()
-                                .occlude()
-                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                    this.settings_menu = None;
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .id(("setting-dd-scroll", ix))
-                                        .max_h(px(320.))
-                                        .overflow_y_scroll()
-                                        .child(list),
-                                ),
-                            SharedString::from(format!("dd-pop-{ix}")),
-                            140,
-                        ))
+                        el.child(
+                            div().absolute().top_0().right_0().child(
+                                deferred(
+                                    anchored().anchor(Anchor::TopRight).child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .pb_1()
+                                            .child(div().h(px(40.)))
+                                            .child(fade(
+                                                div()
+                                                    .min_w(px(220.))
+                                                    .max_h(px(320.))
+                                                    .rounded_xl()
+                                                    .border_1()
+                                                    .border_color(rgb(c_border()))
+                                                    .bg(rgb(c_canvas()))
+                                                    .shadow_lg()
+                                                    .occlude()
+                                                    .on_mouse_down_out(cx.listener(
+                                                        |this, _, _, cx| {
+                                                            this.settings_menu = None;
+                                                            cx.notify();
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .id(("setting-dd-scroll", ix))
+                                                            .max_h(px(320.))
+                                                            .overflow_y_scroll()
+                                                            .child(list),
+                                                    ),
+                                                SharedString::from(format!("dd-pop-{ix}")),
+                                                140,
+                                            )),
+                                    ),
+                                )
+                                .with_priority(1),
+                            ),
+                        )
                     })
                     .into_any_element()
             }
@@ -924,6 +998,20 @@ impl RunoApp {
                     cx.notify();
                 }))
                 .into_any_element(),
+            Ctl::Buttons(buttons) => {
+                let last = buttons.len().saturating_sub(1);
+                let mut group = div().flex().items_center().gap_2();
+                for (j, (label, action)) in buttons.into_iter().enumerate() {
+                    group = group.child(
+                        self.button(("setting-btns", ix * 8 + j), label, j == last)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                action(this, cx);
+                                cx.notify();
+                            })),
+                    );
+                }
+                group.into_any_element()
+            }
             Ctl::Chip(text, kind) => {
                 let color = match kind {
                     0 => c_green(),
@@ -965,6 +1053,156 @@ impl RunoApp {
                     );
                 }
                 keys.into_any_element()
+            }
+            Ctl::Shortcut(id) => {
+                let custom = cx.global::<AppSettings>().keybindings.clone();
+                let recording = self.key_capture == Some(id);
+                let changed = custom.contains_key(id);
+                let keys = crate::keymap::keys_for(&custom, id);
+                let cap = |text: String, accent: bool| {
+                    div()
+                        .min_w(px(26.))
+                        .h(px(26.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(if accent { c_blue() } else { c_border() }))
+                        .bg(rgb(c_canvas()))
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(text)
+                };
+                let mut shown = div().flex().items_center().gap_1();
+                if recording {
+                    shown = shown.child(
+                        div()
+                            .h(px(28.))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(c_blue()))
+                            .bg(tint(c_selected()))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(c_blue()))
+                            .child(
+                                div()
+                                    .size(px(6.))
+                                    .rounded_full()
+                                    .bg(rgb(c_blue()))
+                                    .with_animation(
+                                        "key-rec",
+                                        Animation::new(std::time::Duration::from_millis(1000))
+                                            .repeat()
+                                            .with_easing(pulsating_between(0.3, 1.)),
+                                        |el, t| el.opacity(t),
+                                    ),
+                            )
+                            .child("Press the new shortcut…"),
+                    );
+                } else {
+                    for (j, combo) in keys.iter().enumerate() {
+                        if j > 0 {
+                            shown = shown.child(
+                                div()
+                                    .px_1()
+                                    .text_xs()
+                                    .text_color(rgb(c_muted()))
+                                    .child("or"),
+                            );
+                        }
+                        for part in crate::keymap::display(combo) {
+                            shown = shown.child(cap(part, changed));
+                        }
+                    }
+                }
+                let note = recording.then(|| self.key_note.clone()).flatten();
+                div()
+                    .v_flex()
+                    .items_end()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(changed && !recording, |el| {
+                                el.child(
+                                    self.ghost_button_sized(
+                                        ("key-reset", ix),
+                                        IconName::RotateCcw,
+                                        "Reset to default",
+                                        26.,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.reset_shortcut(Some(id), cx);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id(("key-edit", ix))
+                                    .p(px(3.))
+                                    .rounded_lg()
+                                    .cursor_pointer()
+                                    .border_1()
+                                    .border_color(gpui_kit::transparent_black())
+                                    .hover(|el| {
+                                        el.border_color(rgb(c_border())).bg(tint(c_subtle()))
+                                    })
+                                    .tooltip(move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(if recording {
+                                            "Press Esc to cancel"
+                                        } else {
+                                            "Click to change"
+                                        })
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.key_capture = if this.key_capture == Some(id) {
+                                            None
+                                        } else {
+                                            Some(id)
+                                        };
+                                        this.key_note = None;
+                                        cx.notify();
+                                    }))
+                                    .child(shown),
+                            )
+                            .when(recording, |el| {
+                                el.child(
+                                    self.button(("key-cancel", ix), "Cancel", false)
+                                        .h(px(28.))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.key_capture = None;
+                                            this.key_note = None;
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
+                    )
+                    .when_some(note, |el, note| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_amber()))
+                                .child(icon(IconName::TriangleAlert, 11., c_amber()))
+                                .child(note),
+                        )
+                    })
+                    .into_any_element()
             }
             Ctl::Mcp(share, path) => {
                 let reveal = path.clone();

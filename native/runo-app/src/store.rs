@@ -54,6 +54,13 @@ pub struct Message {
     /// Agent turns: questions the agent asked, each with its options.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<Question>,
+    /// User turns: the playbook this message ran. `text` holds the full prompt sent;
+    /// the conversation shows the playbook's name instead.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub playbook: String,
+    /// User turns run from a playbook: what the person typed with it, if anything.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 /// Token use of one agent turn.
@@ -194,6 +201,8 @@ impl Message {
             denied: Vec::new(),
             plan: String::new(),
             questions: Vec::new(),
+            playbook: String::new(),
+            note: String::new(),
         }
     }
 
@@ -340,6 +349,9 @@ pub struct State {
     /// Free-form notes per project id.
     #[serde(default)]
     pub notes: HashMap<u64, String>,
+    /// Pinning, sharing with agents and last edit of each project's notes.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub notes_meta: HashMap<u64, NoteMeta>,
     /// Recent events across sessions, newest last.
     #[serde(default)]
     pub activity: Vec<Activity>,
@@ -348,6 +360,20 @@ pub struct State {
     /// Open tabs and panels, restored on the next launch.
     #[serde(default)]
     pub layout: Layout,
+}
+
+/// How a project's notes are kept and used.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct NoteMeta {
+    /// Listed first on the Project notes page.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Sent to the agent at the start of each new conversation in the project.
+    #[serde(default)]
+    pub shared: bool,
+    /// Unix seconds of the last edit.
+    #[serde(default)]
+    pub updated: u64,
 }
 
 /// Something that happened in a session, for the Activity feed.
@@ -379,6 +405,14 @@ pub struct Automation {
     pub last_run: u64,
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Unix seconds it last actually ran. `last_run` also moves when a
+    /// schedule starts counting, so it can't say whether it ever ran.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ran: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 fn yes() -> bool {
@@ -386,6 +420,18 @@ fn yes() -> bool {
 }
 
 impl Automation {
+    /// When it last ran, 0 if never. Older playbooks only have `last_run`,
+    /// which for one run by hand is the same thing.
+    pub fn ran_at(&self) -> u64 {
+        if self.ran > 0 {
+            self.ran
+        } else if self.scheduled() {
+            0
+        } else {
+            self.last_run
+        }
+    }
+
     /// The description, or the prompt's first sentence when there is none.
     pub fn summary(&self) -> String {
         let text = if self.description.trim().is_empty() {

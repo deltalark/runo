@@ -54,7 +54,7 @@ pub(crate) fn install_plan(
     windows: bool,
 ) -> Result<Install, String> {
     let need_node = || {
-        Err("This agent installs with npm. Install Node.js from nodejs.org, then try again.".into())
+        Err("This agent installs with npm, and Runo couldn't find npm. It looked on your login shell's PATH and in the nvm, fnm, Volta, asdf, Homebrew and npm global folders. Install Node.js from nodejs.org and press Re-detect, or, if the agent is already installed, locate it.".into())
     };
     let unix_only = |name: &str| {
         Err(format!(
@@ -139,7 +139,75 @@ pub(crate) fn locate(bin: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Look for agents and Node.js again: reread the login shell's PATH, then ask each CLI
+/// what it supports. Runs off the window thread, since the shell can take a moment.
+pub(crate) fn redetect() {
+    std::thread::spawn(|| {
+        crate::shellenv::init();
+        caps::refresh();
+    });
+}
+
+static NODE: std::sync::RwLock<Option<(String, PathBuf)>> = std::sync::RwLock::new(None);
+
+/// Look for Node.js again; called with agent detection, off the window thread.
+pub(crate) fn refresh_node() {
+    let found = locate("node").and_then(|path| {
+        let out = std::process::Command::new(&path)
+            .arg("--version")
+            .output()
+            .ok()?;
+        let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Some((version, path))
+    });
+    if let Ok(mut node) = NODE.write() {
+        *node = found;
+    }
+}
+
+/// Node.js as Runo last saw it: its version and where it is.
+pub(crate) fn node() -> Option<(String, PathBuf)> {
+    NODE.read().ok().and_then(|n| n.clone())
+}
+
+/// Where an agent's CLI is: the file set in Settings, or the one found on the PATH.
+pub(crate) fn agent_path(provider: &'static agent::Provider) -> Option<PathBuf> {
+    let bin = caps::binary(provider);
+    let as_path = PathBuf::from(&bin);
+    if as_path.is_absolute() {
+        return as_path.is_file().then_some(as_path);
+    }
+    locate(&bin).or_else(|| (provider.id == "cursor").then(|| locate("agent")).flatten())
+}
+
 impl RunoApp {
+    /// Point an agent at a CLI Runo didn't find, chosen in a file dialog.
+    pub(crate) fn locate_agent(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(format!("Use this {}", agent::provider(provider).name).into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(path) = paths.first() {
+                    let path = path.to_string_lossy().into_owned();
+                    let _ = this.update(cx, |this, cx| {
+                        this.install_confirm = None;
+                        this.pending_binary = Some((provider, path));
+                        this.info = Some((
+                            format!("Using the {} you picked.", agent::provider(provider).name),
+                            std::time::Instant::now(),
+                        ));
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     /// Ask before installing: the confirm card shows the exact command.
     pub(crate) fn ask_install(&mut self, provider: &'static str) {
         if self.update_runs.get(provider).is_some_and(|r| r.running()) {
@@ -303,6 +371,28 @@ impl RunoApp {
                     .flex()
                     .justify_end()
                     .gap_2()
+                    .when(plan.is_err(), |el| {
+                        el.child(
+                            self.button("install-locate", "Locate…", false)
+                                .child(icon(IconName::FolderOpen, 13., c_secondary()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.locate_agent(provider, cx)
+                                })),
+                        )
+                        .child(
+                            self.button("install-redetect", "Re-detect", false)
+                                .child(icon(IconName::RefreshCw, 13., c_secondary()))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.install_confirm = None;
+                                    this.info = Some((
+                                        "Looking for agents and Node.js again…".into(),
+                                        std::time::Instant::now(),
+                                    ));
+                                    redetect();
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(
                         self.button("install-cancel", "Cancel", false)
                             .on_click(cx.listener(|this, _, _, cx| {

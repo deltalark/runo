@@ -93,6 +93,8 @@ pub struct AppSettings {
     pub browser_enabled: bool,
     /// The built-in browser card was answered.
     pub browser_asked: bool,
+    /// Shortcuts changed in Settings > Keybindings: shortcut id → keys ("cmd-shift-k").
+    pub keybindings: HashMap<String, String>,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -145,6 +147,7 @@ impl Default for AppSettings {
             mcp_shared: Vec::new(),
             browser_enabled: false,
             browser_asked: false,
+            keybindings: HashMap::new(),
         }
     }
 }

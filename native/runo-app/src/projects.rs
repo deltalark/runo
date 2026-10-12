@@ -75,7 +75,401 @@ pub(crate) struct ProjectForm {
     pub error: Option<String>,
 }
 
+/// The Remove project dialog while it is open.
+pub(crate) struct RemoveProject {
+    pub id: u64,
+    /// Also delete the worktrees Runo made for this project's sessions.
+    pub worktrees: bool,
+    /// Also delete the project's folder from disk; needs the name typed to confirm.
+    pub folder: bool,
+    pub error: Option<String>,
+}
+
 impl RunoApp {
+    /// Ask before taking a project out of Runo.
+    pub(crate) fn ask_remove_project(
+        &mut self,
+        pid: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.demo_guard(cx) {
+            return;
+        }
+        self.remove_project = Some(RemoveProject {
+            id: pid,
+            worktrees: false,
+            folder: false,
+            error: None,
+        });
+        self.remove_name
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    /// Take the project out of Runo: its sessions stop and leave the sidebar. Files on disk
+    /// are only deleted when the dialog asked for that.
+    pub(crate) fn remove_project(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.remove_project.as_ref() else {
+            return;
+        };
+        let (pid, worktrees, folder) = (form.id, form.worktrees, form.folder);
+        let Some(project) = self.state.projects.iter().find(|p| p.id == pid).cloned() else {
+            self.remove_project = None;
+            return;
+        };
+        if folder && self.remove_name.read(cx).value().trim() != project.name {
+            if let Some(form) = self.remove_project.as_mut() {
+                form.error = Some(format!(
+                    "Type {} to confirm deleting the folder.",
+                    project.name
+                ));
+            }
+            cx.notify();
+            return;
+        }
+        let ids: Vec<u64> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.project_id == pid)
+            .map(|s| s.id)
+            .collect();
+        let mut failed = Vec::new();
+        for id in &ids {
+            for target in [Target::Session(*id), Target::Terminal(*id)] {
+                if let Some(handle) = self.handles.remove(&target) {
+                    handle.kill();
+                }
+            }
+            let Some(session) = self.state.session(*id).cloned() else {
+                continue;
+            };
+            if session.cove {
+                cove::remove(*id);
+            }
+            if worktrees && session.isolated && session.dir != project.path {
+                if let Err(error) = git::remove_worktree(&project.path, &session.dir) {
+                    failed.push(error);
+                }
+            }
+            self.terminal.remove(id);
+            self.stats.remove(id);
+        }
+        self.state.sessions.retain(|s| s.project_id != pid);
+        self.prune_shells();
+        self.tabs.retain(|t| !ids.contains(t));
+        self.state.notes.remove(&pid);
+        self.state.notes_meta.remove(&pid);
+        // Playbooks tied to the project now run wherever they are started, by hand.
+        for a in self
+            .state
+            .automations
+            .iter_mut()
+            .filter(|a| a.project_id == pid)
+        {
+            a.project_id = 0;
+            a.every_minutes = 0;
+        }
+        self.state.projects.retain(|p| p.id != pid);
+        self.expanded.retain(|p| *p != pid);
+        for slot in [
+            &mut self.new_project,
+            &mut self.notes_project,
+            &mut self.auto_project,
+        ] {
+            if *slot == Some(pid) {
+                *slot = None;
+            }
+        }
+        if self.new_project.is_none() {
+            self.new_project = self.state.projects.first().map(|p| p.id);
+        }
+        if self.split.is_some_and(|id| ids.contains(&id)) {
+            self.split = None;
+        }
+        if self.selected.is_some_and(|id| ids.contains(&id)) {
+            match self.tabs.last().copied() {
+                Some(next) => self.select(next),
+                None => {
+                    self.selected = None;
+                    if self.view == View::Session {
+                        self.view = View::Inbox;
+                    }
+                }
+            }
+        }
+        let mut message = format!(
+            "Removed {} from Runo. Its files are still on disk.",
+            project.name
+        );
+        if folder {
+            match std::fs::remove_dir_all(&project.path) {
+                Ok(()) => message = format!("Removed {} and deleted its folder.", project.name),
+                Err(error) => failed.push(format!("{}: {error}", project.path)),
+            }
+        }
+        if failed.is_empty() {
+            self.info = Some((message, std::time::Instant::now()));
+        } else {
+            self.notice = Some(format!(
+                "Removed {} from Runo, but some files could not be deleted: {}",
+                project.name,
+                failed.join("; ")
+            ));
+        }
+        self.remove_project = None;
+        self.save();
+        self.refresh();
+        cx.notify();
+    }
+
+    /// The Remove project dialog.
+    pub(crate) fn remove_project_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let form = self.remove_project.as_ref()?;
+        let project = self.state.projects.iter().find(|p| p.id == form.id)?;
+        let sessions: Vec<&Session> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.project_id == form.id)
+            .collect();
+        let running = sessions
+            .iter()
+            .filter(|s| self.handles.contains_key(&Target::Session(s.id)))
+            .count();
+        let isolated = sessions
+            .iter()
+            .filter(|s| s.isolated && s.dir != project.path)
+            .count();
+        let backdrop = if is_dark() {
+            hsla(0., 0., 0., 0.55)
+        } else {
+            hsla(0., 0., 0., 0.3)
+        };
+        let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+        let mut what = vec![if sessions.is_empty() {
+            "It has no sessions.".to_string()
+        } else {
+            format!(
+                "Its {} leave the sidebar{}.",
+                plural(sessions.len(), "session"),
+                if running > 0 {
+                    format!(", and {} stop", plural(running, "running agent"))
+                } else {
+                    String::new()
+                }
+            )
+        }];
+        if self.state.notes.contains_key(&form.id) {
+            what.push("Its project notes are removed.".into());
+        }
+        what.push("Nothing on disk changes unless you tick an option below.".into());
+        let check = |id: &'static str,
+                     on: bool,
+                     title: String,
+                     desc: String,
+                     danger: bool,
+                     set: fn(&mut RemoveProject, bool)| {
+            let tick = if danger { c_red() } else { c_blue() };
+            div()
+                .id(id)
+                .flex()
+                .items_start()
+                .gap_2()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = this.remove_project.as_mut() {
+                        set(f, !on);
+                        f.error = None;
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .mt(px(1.))
+                        .size(px(16.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(if on { tick } else { c_border() }))
+                        .when(on, |el| el.bg(rgb(tick)))
+                        .when(on, |el| el.child(icon(IconName::Check, 11., 0xffffff))),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .when(danger && on, |el| el.text_color(rgb(c_red())))
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_muted()))
+                                .child(desc),
+                        ),
+                )
+        };
+        let folder_on = form.folder;
+        let name_matches = self.remove_name.read(cx).value().trim() == project.name;
+        let can_remove = !folder_on || name_matches;
+        let card = div()
+            .id("remove-card")
+            .w(px(500.))
+            .max_w(relative(0.94))
+            .p_6()
+            .v_flex()
+            .gap_4()
+            .rounded_2xl()
+            .border_1()
+            .border_color(float_edge())
+            .bg(float(c_canvas()))
+            .shadow_2xl()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(36.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .bg(rgb(settings::mix(c_red(), c_canvas(), 0.12)))
+                            .child(icon(IconName::FolderMinus, 18., c_red())),
+                    )
+                    .child(
+                        div()
+                            .v_flex()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(format!("Remove {}?", project.name)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .truncate()
+                                    .text_color(rgb(c_muted()))
+                                    .font_family(self.mono_font.clone())
+                                    .child(project.path.clone()),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(c_secondary()))
+                    .child(what.join(" ")),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .gap_3()
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .when(isolated > 0, |el| {
+                        el.child(check(
+                            "remove-worktrees",
+                            form.worktrees,
+                            format!("Also delete {}", plural(isolated, "worktree")),
+                            "The isolated copies Runo made for these sessions, with any uncommitted work in them. Branches stay.".into(),
+                            false,
+                            |f, v| f.worktrees = v,
+                        ))
+                    })
+                    .child(check(
+                        "remove-folder",
+                        folder_on,
+                        "Also delete the project folder from disk".into(),
+                        "Permanently deletes the folder and everything in it. This can't be undone.".into(),
+                        true,
+                        |f, v| f.folder = v,
+                    ))
+                    .when(folder_on, |el| {
+                        el.child(
+                            div()
+                                .v_flex()
+                                .gap_1p5()
+                                .child(
+                                    div()
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(c_secondary()))
+                                        .child(format!("Type {} to confirm", project.name)),
+                                )
+                                .child(Input::new(&self.remove_name).bordered(true).h(px(32.))),
+                        )
+                    }),
+            )
+            .children(form.error.clone().map(|why| {
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_red()))
+                    .child(why)
+            }))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        self.button("remove-cancel", "Cancel", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.remove_project = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button(
+                            "remove-go",
+                            if folder_on {
+                                "Remove and delete folder"
+                            } else {
+                                "Remove from Runo"
+                            },
+                            false,
+                        )
+                        .border_color(rgb(c_red()))
+                        .text_color(rgb(c_red()))
+                        .when(!can_remove, |el| el.opacity(0.5))
+                        .on_click(cx.listener(|this, _, _, cx| this.remove_project(cx))),
+                    ),
+            );
+        Some(
+            fade(
+                div()
+                    .id("remove-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(backdrop)
+                    .occlude()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.remove_project = None;
+                        cx.notify();
+                    }))
+                    .child(rise(card, "remove-card-rise", 300)),
+                "remove-backdrop-fade",
+                200,
+            )
+            .into_any_element(),
+        )
+    }
+
     /// Open the New project popup.
     pub(crate) fn pick_project(&mut self, cx: &mut Context<Self>) {
         self.project_form = Some(ProjectForm {
