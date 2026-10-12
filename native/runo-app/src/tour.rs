@@ -46,7 +46,7 @@ const STEPS: &[Step] = &[
         side: Side::Right,
         glyph: IconName::Layers,
         title: "Everything in one place",
-        body: "Unread holds sessions that finished while you were away. Sessions lists them all, Isolated shows the ones in their own copy, and Agent history brings in past Claude Code and Codex chats. Pull requests, Scheduled prompts, Timeline and Project notes are here too.",
+        body: "The rail on the left switches between Home, Sessions, Design, Architecture, Playbooks and Reviews, with the Inbox and Settings at the bottom. Press Ctrl+1 to Ctrl+6 (⌘1 to ⌘6 on a Mac) to jump between them.",
     },
     Step {
         anchor: Some("projects"),
