@@ -12,7 +12,7 @@ pub(crate) struct Shortcut {
     pub default: &'static [&'static str],
 }
 
-pub(crate) const SHORTCUTS: [Shortcut; 8] = [
+pub(crate) const SHORTCUTS: [Shortcut; 14] = [
     Shortcut {
         id: "quick-open",
         title: "Quick open",
@@ -61,6 +61,42 @@ pub(crate) const SHORTCUTS: [Shortcut; 8] = [
         desc: "Save the file open in Runo's editor.",
         default: &["secondary-s"],
     },
+    Shortcut {
+        id: "go-home",
+        title: "Home",
+        desc: "Go to Home on the mode rail.",
+        default: &["secondary-1"],
+    },
+    Shortcut {
+        id: "go-sessions",
+        title: "Sessions",
+        desc: "Go to Sessions on the mode rail.",
+        default: &["secondary-2"],
+    },
+    Shortcut {
+        id: "go-design",
+        title: "Design",
+        desc: "Go to Design on the mode rail.",
+        default: &["secondary-3"],
+    },
+    Shortcut {
+        id: "go-architecture",
+        title: "Architecture",
+        desc: "Go to Architecture on the mode rail.",
+        default: &["secondary-4"],
+    },
+    Shortcut {
+        id: "go-playbooks",
+        title: "Playbooks",
+        desc: "Go to Playbooks on the mode rail.",
+        default: &["secondary-5"],
+    },
+    Shortcut {
+        id: "go-reviews",
+        title: "Reviews",
+        desc: "Go to Reviews on the mode rail.",
+        default: &["secondary-6"],
+    },
 ];
 
 /// Shortcuts the text boxes and the system already use.
@@ -88,6 +124,12 @@ fn binding(id: &str, keys: &str) -> Option<KeyBinding> {
         "stop" => KeyBinding::new(keys, StopAgent, context),
         "toggle-view" => KeyBinding::new(keys, ToggleView, context),
         "save-file" => KeyBinding::new(keys, SaveFile, context),
+        "go-home" => KeyBinding::new(keys, GoHome, context),
+        "go-sessions" => KeyBinding::new(keys, GoSessions, context),
+        "go-design" => KeyBinding::new(keys, GoDesign, context),
+        "go-architecture" => KeyBinding::new(keys, GoArchitecture, context),
+        "go-playbooks" => KeyBinding::new(keys, GoPlaybooks, context),
+        "go-reviews" => KeyBinding::new(keys, GoReviews, context),
         _ => return None,
     })
 }

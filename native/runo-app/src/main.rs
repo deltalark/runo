@@ -26,6 +26,7 @@ mod projects;
 mod pty;
 mod settings;
 mod settings_ui;
+mod shell;
 mod shellenv;
 mod split;
 mod store;
@@ -48,6 +49,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use settings::*;
 use settings_ui::SettingsPage;
+use shell::Mode;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
@@ -86,7 +88,13 @@ actions!(
         SaveFile,
         Dismiss,
         QuickOpen,
-        ToggleView
+        ToggleView,
+        GoHome,
+        GoSessions,
+        GoDesign,
+        GoArchitecture,
+        GoPlaybooks,
+        GoReviews
     ]
 );
 
@@ -98,6 +106,9 @@ fn bind_keys(cx: &mut App) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum View {
+    Home,
+    Design,
+    Architecture,
     Session,
     NewSession,
     Inbox,
@@ -1695,7 +1706,8 @@ impl RunoApp {
             command_jumps.push(Jump::Action);
         }
         for (label, name, view) in [
-            ("Go to Unread", IconName::BellDot, View::Inbox),
+            ("Go to Home", IconName::House, View::Home),
+            ("Go to Inbox", IconName::Inbox, View::Inbox),
             ("Go to Sessions", IconName::Layers, View::AllSessions),
             (
                 "Go to Isolated sessions",
@@ -1714,6 +1726,8 @@ impl RunoApp {
             ),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
+            ("Go to Design", IconName::PanelsTopLeft, View::Design),
+            ("Go to Architecture", IconName::Network, View::Architecture),
             ("Go to Project notes", IconName::NotebookPen, View::Notes),
         ] {
             commands = commands.item(CommandItem::new().label(label).icon(name));
@@ -2749,208 +2763,6 @@ impl RunoApp {
 
     // ---------- title bar ----------
 
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut tabs = div()
-            .flex()
-            .items_end()
-            .h_full()
-            .min_w_0()
-            .overflow_hidden();
-        for &id in &self.tabs {
-            let Some(session) = self.state.session(id) else {
-                continue;
-            };
-            let provider = agent::provider(&session.provider);
-            let active = self.selected == Some(id) && self.view == View::Session;
-            let working = self.handles.contains_key(&Target::Session(id));
-            tabs = tabs.child(
-                div()
-                    .id(("tab", id as usize))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        self.on_context(ctxmenu::CtxTarget::Tab(id), cx),
-                    )
-                    .group("tab")
-                    // A whole rounded box rather than an open-bottomed one: a border with a
-                    // missing side draws uneven, discoloured corners on translucent fills.
-                    .h(px(28.))
-                    .mb(px(3.))
-                    .mr_1()
-                    .min_w(px(120.))
-                    .max_w(px(210.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(transparent_black())
-                    .cursor_pointer()
-                    .text_size(px(12.5))
-                    .when(active, |el| {
-                        el.bg(glass_fill(c_canvas()))
-                            .text_color(rgb(c_text()))
-                            .border_color(divider())
-                    })
-                    .when(!active, |el| {
-                        el.text_color(rgb(c_secondary()))
-                            .hover(|el| el.bg(tint(c_subtle())))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select(id);
-                        cx.notify();
-                    }))
-                    .child(self.provider_mark(provider, 12.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(session.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .id(("tab-x", id as usize))
-                            .size(px(16.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .hover(|el| el.bg(rgb(c_border())))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(id);
-                                cx.notify();
-                            }))
-                            .child(if working || session.unread {
-                                div()
-                                    .size(px(6.))
-                                    .rounded_full()
-                                    .bg(rgb(if working { c_blue() } else { c_amber() }))
-                                    .group_hover("tab", |el| el.opacity(0.))
-                                    .into_any_element()
-                            } else {
-                                icon(IconName::X, 11., c_muted()).into_any_element()
-                            }),
-                    ),
-            );
-        }
-        let (added, removed) = self
-            .changes
-            .iter()
-            .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-        let show_stats = self.view == View::Session && !self.changes.is_empty();
-        let lead = if cfg!(target_os = "macos") { 80. } else { 8. };
-        // With the sidebar open, the tabs line up with the main column, not the sidebar.
-        let sidebar = self.view != View::Settings && self.show_sidebar;
-        div()
-            .h(px(40.))
-            .flex_none()
-            .flex()
-            .items_end()
-            .gap_2()
-            .pl(px(lead))
-            .pr_2()
-            .border_b_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
-            .window_control_area(WindowControlArea::Drag)
-            .child({
-                // The tabs line up with the main column, and follow the sidebar as it slides.
-                let (closed, open) = (60., SIDEBAR_WIDTH - lead - 8.);
-                let lead_area = div()
-                    .h_full()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_sidebar = !this.show_sidebar;
-                                this.save();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .child(tour::anchor(&self.anchors, "palette"))
-                            .child(
-                                self.ghost_button("open-palette", IconName::Search, "Quick open")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_palette(window, cx);
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
-                match self.panel_motion("sidebar") {
-                    Some((opening, at)) => lead_area
-                        .w(px(if opening { open } else { closed }))
-                        .animated(
-                            SharedString::from(format!("title-lead-{opening}-{at:?}")),
-                            Animation::new(Duration::from_millis(PANEL_MS))
-                                .with_easing(ease_in_out_cubic),
-                            move |el, d| {
-                                let t = if opening { d } else { 1. - d };
-                                el.w(px(closed + (open - closed) * t))
-                            },
-                        ),
-                    None => lead_area
-                        .w(px(if sidebar { open } else { closed }))
-                        .into_any_element(),
-                }
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .items_end()
-                    .child(tabs.relative().child(tour::anchor(&self.anchors, "tabs"))),
-            )
-            .child(
-                div()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .when(show_stats, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .gap_1()
-                                .px_2()
-                                .text_size(px(12.))
-                                .font_family(self.mono_font.clone())
-                                .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
-                                .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
-                        )
-                    })
-                    .when(
-                        self.view == View::Session && self.current().is_some(),
-                        |el| {
-                            el.child(
-                                self.ghost_button(
-                                    "toggle-panel",
-                                    IconName::PanelRight,
-                                    "Toggle the Changes panel",
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.show_panel = !this.show_panel;
-                                        this.save();
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                        },
-                    ),
-            )
-    }
-
     // ---------- sidebar ----------
 
     fn nav_item(
@@ -3364,12 +3176,6 @@ impl RunoApp {
         if cx.global::<AppSettings>().group_by_status {
             projects = self.status_groups(&filter, cx);
         }
-        let unread = self
-            .state
-            .sessions
-            .iter()
-            .filter(|s| s.unread && !s.archived)
-            .count();
         div()
             .w(px(SIDEBAR_WIDTH))
             .flex_none()
@@ -3436,15 +3242,6 @@ impl RunoApp {
                             .mt_1()
                             .v_flex()
                             .relative()
-                            .child(tour::anchor(&self.anchors, "nav"))
-                            .child(self.nav_item(
-                                "inbox",
-                                IconName::Inbox,
-                                "Unread",
-                                unread,
-                                View::Inbox,
-                                cx,
-                            ))
                             .child(self.nav_item(
                                 "all-sessions",
                                 IconName::Layers,
@@ -3467,22 +3264,6 @@ impl RunoApp {
                                 "Agent history",
                                 0,
                                 View::History,
-                                cx,
-                            ))
-                            .child(self.nav_item(
-                                "github",
-                                IconName::GitPullRequest,
-                                "Pull requests",
-                                self.gh.prs.len(),
-                                View::GitHub,
-                                cx,
-                            ))
-                            .child(self.nav_item(
-                                "automations",
-                                IconName::BookOpen,
-                                "Playbooks",
-                                self.state.automations.len(),
-                                View::Automations,
                                 cx,
                             ))
                             .child(self.nav_item(
@@ -3540,21 +3321,6 @@ impl RunoApp {
                     .relative()
                     .child(tour::anchor(&self.anchors, "projects"))
                     .child(div().size_full().overflow_y_scrollbar().child(projects)),
-            )
-            .child(
-                div().p_2().child(
-                    div()
-                        .relative()
-                        .child(tour::anchor(&self.anchors, "settings"))
-                        .child(self.nav_item(
-                            "settings",
-                            IconName::Settings,
-                            "Settings",
-                            0,
-                            View::Settings,
-                            cx,
-                        )),
-                ),
             )
     }
 
@@ -5775,7 +5541,7 @@ impl RunoApp {
         }
         self.page(
             match kind {
-                View::Inbox => "Unread",
+                View::Inbox => "Inbox",
                 View::Worktrees => "Isolated sessions",
                 _ => "Sessions",
             },
@@ -7188,6 +6954,9 @@ impl Render for RunoApp {
         };
         let still = self.settings_switching();
         let center = match shown {
+            View::Home => self.home_view(cx),
+            View::Design => self.mode_page(Mode::Design),
+            View::Architecture => self.mode_page(Mode::Architecture),
             View::Session | View::NewSession => self.session_view(window, cx),
             View::Inbox => self.list_view(View::Inbox, cx),
             View::AllSessions => self.list_view(View::AllSessions, cx),
@@ -7212,8 +6981,9 @@ impl Render for RunoApp {
             self.panel_wide = Some(wide);
             self.show_panel = wide;
         }
+        let show_tabs = self.mode() == Mode::Sessions && !self.tabs.is_empty();
         let show_right = shown == View::Session && self.current().is_some() && self.show_panel;
-        let show_left = self.view != View::Settings && self.show_sidebar;
+        let show_left = self.mode() == Mode::Sessions && self.show_sidebar;
         self.track_panel("sidebar", show_left, settings_snap);
         self.track_panel("right", show_right, settings_snap);
         self.track_panel("term", self.term_tall, false);
@@ -7281,6 +7051,30 @@ impl Render for RunoApp {
                     cx.stop_propagation();
                 }
             }))
+            .on_action(cx.listener(|this, _: &GoHome, window, cx| {
+                this.go(Mode::Home, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoSessions, window, cx| {
+                this.go(Mode::Sessions, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoDesign, window, cx| {
+                this.go(Mode::Design, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoArchitecture, window, cx| {
+                this.go(Mode::Architecture, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoPlaybooks, window, cx| {
+                this.go(Mode::Playbooks, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoReviews, window, cx| {
+                this.go(Mode::Reviews, window, cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &NewSession, _, cx| {
                 this.open_new_session();
                 cx.notify();
@@ -7344,20 +7138,22 @@ impl Render for RunoApp {
             .text_color(rgb(c_text()))
             .text_size(px(13.))
             .font_family(cx.theme().font_family.clone())
-            .child(self.title_bar(cx))
+            .child(self.top_bar(cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
+                    .child(self.mode_rail(cx))
                     .children(left)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .flex()
+                            .v_flex()
                             .bg(glass_fill(c_canvas()))
-                            .child(center)
+                            .when(show_tabs, |el| el.child(self.tab_strip(cx)))
+                            .child(div().flex_1().min_h_0().flex().child(center))
                             .animated(
                         SharedString::from(format!(
                             "center-{}-{}",
