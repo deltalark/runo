@@ -168,15 +168,51 @@ impl RunoApp {
         message: &store::Message,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let sid = self.selected.unwrap_or(0);
-        let auto = self
+        // Only the name shows: a playbook's instructions can be long, and they
+        // live on its page, which the name opens.
+        let id = self
             .state
             .automations
             .iter()
-            .find(|a| a.name == message.playbook);
+            .find(|a| a.name == message.playbook)
+            .map(|a| a.id);
         let (glyph, color) = look(&message.playbook, &message.text);
-        let key = (sid, usize::MAX - index);
-        let open = self.open_steps.contains(&key);
+        let name = div()
+            .id(("pb-msg-link", index))
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .child(
+                div()
+                    .truncate()
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .when(id.is_some(), |el| el.text_color(rgb(c_blue())))
+                    .child(message.playbook.clone()),
+            )
+            .when_some(id, |el, id| {
+                el.cursor_pointer()
+                    .hover(|el| el.underline())
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Open this playbook")
+                            .build(window, cx)
+                    })
+                    .child(icon(IconName::ArrowUpRight, 12., c_blue()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.view = View::Automations;
+                        this.open_playbook_editor(Some(id), window, cx);
+                        cx.notify();
+                    }))
+            })
+            .when(id.is_none(), |el| {
+                el.child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child("deleted"),
+                )
+            });
         div()
             .max_w(px(560.))
             .v_flex()
@@ -188,70 +224,23 @@ impl RunoApp {
             .child(
                 div()
                     .px_3()
-                    .py(px(10.))
+                    .py(px(8.))
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .bg(rgb(settings::mix(
                         color,
                         c_canvas(),
                         if is_dark() { 0.12 } else { 0.06 },
                     )))
-                    .child(Self::playbook_tile(glyph, color, 30.))
+                    .child(Self::playbook_tile(glyph, color, 24.))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .v_flex()
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(c_muted()))
-                                    .child("RAN PLAYBOOK"),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(message.playbook.clone()),
-                            ),
+                            .text_size(px(12.))
+                            .text_color(rgb(c_muted()))
+                            .child("Ran playbook"),
                     )
-                    .child(
-                        div()
-                            .id(("pb-msg-toggle", index))
-                            .h(px(24.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_size(px(11.5))
-                            .text_color(rgb(c_secondary()))
-                            .hover(|el| el.bg(tint(c_subtle())))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.open_steps.remove(&key) {
-                                    this.open_steps.insert(key);
-                                }
-                                cx.notify();
-                            }))
-                            .child(if open {
-                                "Hide instructions"
-                            } else {
-                                "Instructions"
-                            })
-                            .child(icon(
-                                if open {
-                                    IconName::ChevronUp
-                                } else {
-                                    IconName::ChevronDown
-                                },
-                                12.,
-                                c_muted(),
-                            )),
-                    ),
+                    .child(name),
             )
             .when(!message.note.is_empty(), |el| {
                 el.child(
@@ -262,23 +251,6 @@ impl RunoApp {
                         .border_color(rgb(c_border()))
                         .text_size(px(13.5))
                         .child(message.note.clone()),
-                )
-            })
-            .when(open, |el| {
-                let shown = auto
-                    .map(|a| a.prompt.clone())
-                    .filter(|p| message.text.starts_with(p.as_str()))
-                    .unwrap_or_else(|| message.text.clone());
-                el.child(
-                    div()
-                        .px(px(14.))
-                        .py(px(10.))
-                        .border_t_1()
-                        .border_color(rgb(c_border()))
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_secondary()))
-                        .whitespace_normal()
-                        .child(shown),
                 )
             })
             .into_any_element()
