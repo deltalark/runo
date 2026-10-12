@@ -152,4 +152,71 @@ impl RunoApp {
                 .into_any_element(),
         )
     }
+
+    /// Turns that were running on connections when Runo closed kept going there. Show
+    /// them as running again: their output replays from the start and their work comes
+    /// back when they end.
+    pub(crate) fn resume_remote_turns(&mut self) {
+        let ids: Vec<u64> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.status == Status::Working && s.remote_turn)
+            .map(|s| s.id)
+            .collect();
+        let mut picked = 0;
+        for id in ids {
+            let backup = settings::sync_backup();
+            let Some(session) = self.state.session_mut(id) else {
+                continue;
+            };
+            let conversation = (!session.agent_session.is_empty())
+                .then(|| (session.provider.clone(), session.agent_session.clone()));
+            let dir = session.dir.clone();
+            let provider = session.provider.clone();
+            let started = match session.sandbox() {
+                Some(connections::Sandbox::Remote(r)) => {
+                    connections::resume_command(&r, conversation, backup)
+                        .and_then(|c| agent::spawn(Target::Session(id), c, &dir, self.tx.clone()))
+                }
+                _ => Err("its connection was removed".into()),
+            };
+            match started {
+                Ok(handle) => {
+                    // The replay rebuilds the reply from the start.
+                    if let Some(m) = session
+                        .messages
+                        .last_mut()
+                        .filter(|m| m.role == Role::Agent)
+                    {
+                        *m = Message::now(Role::Agent, "");
+                    }
+                    if provider == "claude" {
+                        self.streams.insert(id, stream::ClaudeStream::new(&dir));
+                    }
+                    self.handles.insert(Target::Session(id), handle);
+                    self.started.insert(id, std::time::Instant::now());
+                    picked += 1;
+                }
+                Err(e) => {
+                    session.status = Status::Failed;
+                    session.remote_turn = false;
+                    session.messages.push(Message::new(
+                        Role::System,
+                        format!("Couldn't pick up the running turn: {e}"),
+                    ));
+                }
+            }
+        }
+        if picked > 0 {
+            self.info = Some((
+                format!(
+                    "Picked up {picked} turn{} that kept running on a connection while Runo was closed.",
+                    if picked == 1 { "" } else { "s" }
+                ),
+                std::time::Instant::now(),
+            ));
+        }
+        self.save();
+    }
 }

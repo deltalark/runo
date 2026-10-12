@@ -125,6 +125,8 @@ impl RunoApp {
         ) {
             Ok(handle) => {
                 session.status = Status::Working;
+                session.remote_turn =
+                    matches!(sandbox, Some(crate::connections::Sandbox::Remote(_)));
                 if provider == "claude" {
                     self.streams.insert(id, stream::ClaudeStream::new(&dir));
                 }
@@ -686,7 +688,12 @@ impl RunoApp {
 
     /// Prevent system sleep while any agent runs (macOS `caffeinate`, Linux `systemd-inhibit`).
     pub(crate) fn keep_awake_update(&mut self) {
-        let want = cx_keep_awake() && !self.started.is_empty();
+        // A turn on a connection doesn't need this machine awake.
+        let want = cx_keep_awake()
+            && self
+                .started
+                .keys()
+                .any(|id| self.state.session(*id).is_some_and(|s| !s.remote_turn));
         match (&mut self.awake, want) {
             (None, true) => {
                 let pid = std::process::id().to_string();

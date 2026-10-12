@@ -1026,13 +1026,16 @@ pub struct Handle(Arc<Mutex<Child>>, bool);
 impl Handle {
     pub fn kill(&self) {
         if let Ok(mut child) = self.0.lock() {
+            // A connection runner stops the turn on the connection and brings back what
+            // it did, then exits on its own.
             if self.1 && cfg!(unix) {
                 let _ = Command::new("kill")
-                    .args(["-TERM", "--", &format!("-{}", child.id())])
+                    .args(["-USR1", &child.id().to_string()])
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
+                return;
             }
             let _ = child.kill();
         }
@@ -1106,7 +1109,7 @@ fn pump<R: Read + Send + 'static>(reader: R, target: Target, is_err: bool, tx: S
     });
 }
 
-fn spawn(
+pub(crate) fn spawn(
     target: Target,
     mut command: Command,
     dir: &str,
