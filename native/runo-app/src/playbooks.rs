@@ -12,6 +12,8 @@ pub(crate) struct PlaybookEditor {
     /// The schedule is typed in minutes instead of picked from the presets.
     pub custom: bool,
     pub error: Option<String>,
+    /// What it may do, in `pbfile::PERMISSIONS` order.
+    pub permissions: Vec<String>,
 }
 
 /// Schedule presets in the editor: label and minutes.
@@ -277,6 +279,7 @@ impl RunoApp {
             last_run: if every > 0 { unix_now() } else { 0 },
             enabled: true,
             ran: 0,
+            ..Default::default()
         });
         self.save();
     }
@@ -332,11 +335,23 @@ impl RunoApp {
             )
         });
         self.auto_name.update(cx, |i, cx| i.focus(window, cx));
+        let all = || {
+            crate::pbfile::PERMISSIONS
+                .iter()
+                .map(|p| p.0.to_string())
+                .collect::<Vec<_>>()
+        };
+        let permissions = editing
+            .and_then(|id| self.state.automations.iter().find(|a| a.id == id))
+            .map(|a| a.permissions.clone())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(all);
         self.pb_editor = Some(PlaybookEditor {
             editing,
             every,
             custom,
             error: None,
+            permissions,
         });
     }
 
@@ -345,6 +360,7 @@ impl RunoApp {
         let Some(editor) = self.pb_editor.as_ref() else {
             return;
         };
+        let permissions = editor.permissions.clone();
         let name = self.auto_name.read(cx).value().trim().to_string();
         let description = self.auto_desc.read(cx).value().trim().to_string();
         let prompt = self.auto_prompt.read(cx).value().trim().to_string();
@@ -395,10 +411,17 @@ impl RunoApp {
                     a.provider = provider;
                     a.project_id = project_id;
                     a.every_minutes = every;
+                    a.permissions = permissions;
                 }
                 self.save();
             }
-            None => self.push_playbook(name, prompt, description, project_id, every),
+            None => {
+                self.push_playbook(name, prompt, description, project_id, every);
+                if let Some(a) = self.state.automations.last_mut() {
+                    a.permissions = permissions;
+                }
+                self.save();
+            }
         }
         self.pb_editor = None;
         cx.notify();
@@ -411,7 +434,7 @@ impl RunoApp {
     }
 
     /// A small rounded label with an icon, for a card's details.
-    fn pill(&self, glyph: Option<IconName>, text: String, color: u32) -> Div {
+    pub(crate) fn pill(&self, glyph: Option<IconName>, text: String, color: u32) -> Div {
         div()
             .h(px(22.))
             .px_2()
@@ -438,7 +461,44 @@ impl RunoApp {
     }
 
     /// A colored square with the playbook's icon.
-    fn playbook_tile(glyph: IconName, color: u32, size: f32) -> Div {
+    /// Pills for what a playbook declares: who made it, what it may do, what it asks for.
+    fn playbook_badges(&self, auto: &store::Automation) -> Vec<Div> {
+        let mut pills = Vec::new();
+        let made = match (auto.author.is_empty(), auto.version.is_empty()) {
+            (true, true) => None,
+            (false, true) => Some(format!("by {}", auto.author)),
+            (true, false) => Some(format!("v{}", auto.version.trim_start_matches('v'))),
+            (false, false) => Some(format!(
+                "by {} · v{}",
+                auto.author,
+                auto.version.trim_start_matches('v')
+            )),
+        };
+        if let Some(made) = made {
+            pills.push(self.pill(Some(IconName::PackageCheck), made, c_blue()));
+        }
+        if !auto.permissions.is_empty() {
+            pills.push(match permission_summary(&auto.permissions) {
+                None => self.pill(Some(IconName::Eye), "Read only".into(), c_green()),
+                Some(text) => self.pill(Some(IconName::ShieldCheck), text, c_amber()),
+            });
+        }
+        let inputs = auto.run_inputs().len();
+        if inputs > 0 {
+            pills.push(self.pill(
+                Some(IconName::SquarePen),
+                if inputs == 1 {
+                    "1 input".into()
+                } else {
+                    format!("{inputs} inputs")
+                },
+                c_muted(),
+            ));
+        }
+        pills
+    }
+
+    pub(crate) fn playbook_tile(glyph: IconName, color: u32, size: f32) -> Div {
         div()
             .size(px(size))
             .flex_none()
@@ -596,6 +656,49 @@ impl RunoApp {
                             .gap(px(2.))
                             .opacity(0.)
                             .group_hover("pb-card", |el| el.opacity(1.))
+                            .when(!auto.source.is_empty(), |el| {
+                                el.child(
+                                    self.ghost_button_sized(
+                                        ("pb-update", i),
+                                        IconName::RefreshCw,
+                                        "Check for an update",
+                                        26.,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.check_playbook_update(id, window, cx);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            })
+                            .child(
+                                self.ghost_button_sized(
+                                    ("pb-copy", i),
+                                    IconName::Copy,
+                                    "Copy as a playbook file",
+                                    26.,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.copy_playbook(id, cx);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                            .child(
+                                self.ghost_button_sized(
+                                    ("pb-export", i),
+                                    IconName::Download,
+                                    "Export to a file",
+                                    26.,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.export_playbook(id, cx);
+                                    },
+                                )),
+                            )
                             .child(
                                 self.ghost_button_sized(
                                     ("pb-edit", i),
@@ -648,7 +751,8 @@ impl RunoApp {
                             .child(provider.name),
                     )
                     .child(where_)
-                    .child(schedule),
+                    .child(schedule)
+                    .children(self.playbook_badges(auto)),
             )
             .child(div().h(px(1.)).bg(rgb(c_border())))
             .child(if confirming {
@@ -894,6 +998,7 @@ impl RunoApp {
                 last_run: 0,
                 enabled: true,
                 ran: 0,
+                ..Default::default()
             }
             .summary();
             templates.push(
@@ -987,6 +1092,20 @@ impl RunoApp {
                     ),
             )
             .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        self.button("pb-install", "Install", false)
+                            .h(px(34.))
+                            .px_3()
+                            .child(icon(IconName::Download, 13., c_text()))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_playbook_install(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                 self.button("pb-new", "New playbook", true)
                     .h(px(34.))
                     .px_3()
@@ -995,6 +1114,7 @@ impl RunoApp {
                         this.open_playbook_editor(None, window, cx);
                         cx.notify();
                     })),
+                    ),
             );
 
         let section_head = |title: &str, aside: Option<AnyElement>| {
@@ -1055,6 +1175,7 @@ impl RunoApp {
             .flex()
             .child(body)
             .children(self.playbook_editor(cx))
+            .children(self.playbook_install_modal(cx))
             .into_any_element()
     }
 
@@ -1206,6 +1327,65 @@ impl RunoApp {
                     .child(text),
             );
         }
+        let found = crate::pbfile::placeholders(&prompt);
+        let inputs = if found.is_empty() {
+            div()
+                .text_size(px(12.))
+                .text_color(rgb(c_muted()))
+                .child("None. It runs as written.")
+        } else {
+            let declared = editor
+                .editing
+                .and_then(|id| self.state.automations.iter().find(|a| a.id == id))
+                .map(|a| a.inputs.clone())
+                .unwrap_or_default();
+            let mut row = div().flex().flex_wrap().gap_1p5();
+            for input in crate::pbfile::inputs_of(&declared, &prompt) {
+                let text = if input.default.is_empty() {
+                    input.title()
+                } else {
+                    format!("{} · {}", input.title(), input.default)
+                };
+                row = row.child(self.pill(Some(IconName::SquarePen), text, c_blue()));
+            }
+            row
+        };
+        let mut permissions = div().flex().flex_wrap().gap_1p5();
+        for (j, (key, title, hint)) in crate::pbfile::PERMISSIONS.iter().enumerate() {
+            let on = editor.permissions.iter().any(|p| p == key);
+            let fixed = *key == "read";
+            permissions = permissions.child(
+                pick(("pb-perm", j), on)
+                    .when(!fixed, |el| {
+                        el.on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(e) = this.pb_editor.as_mut() {
+                                if e.permissions.iter().any(|p| p == key) {
+                                    e.permissions.retain(|p| p != key);
+                                } else {
+                                    e.permissions.push(key.to_string());
+                                }
+                                e.permissions.sort_by_key(|p| {
+                                    crate::pbfile::PERMISSIONS.iter().position(|q| q.0 == p)
+                                });
+                            }
+                            cx.notify();
+                        }))
+                    })
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(*hint).build(window, cx)
+                    })
+                    .child(icon(
+                        if on {
+                            IconName::SquareCheck
+                        } else {
+                            IconName::Square
+                        },
+                        13.,
+                        if on { c_blue() } else { c_muted() },
+                    ))
+                    .child(*title),
+            );
+        }
         let backdrop = if is_dark() {
             hsla(0., 0., 0., 0.55)
         } else {
@@ -1336,6 +1516,20 @@ impl RunoApp {
                         div()
                             .v_flex()
                             .gap_1p5()
+                            .child(label("Inputs", Some("write {{name}} in the instructions to ask for a value on each run")))
+                            .child(inputs),
+                    )
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap_1p5()
+                            .child(label("Permissions", Some("shown before anyone installs or runs it")))
+                            .child(permissions),
+                    )
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap_1p5()
                             .child(label("Agent", Some("faded ones aren't installed")))
                             .child(agents),
                     )
@@ -1410,6 +1604,7 @@ impl RunoApp {
                                         last_run: 0,
                                         enabled: true,
                                         ran: 0,
+                                        ..Default::default()
                                     }
                                     .slug()
                                 )
@@ -1450,6 +1645,21 @@ impl RunoApp {
             .into_any_element(),
         )
     }
+}
+
+/// What a playbook may do beyond reading, as "Edits files · Runs commands"; None when
+/// it only reads.
+pub(crate) fn permission_summary(permissions: &[String]) -> Option<String> {
+    let words: Vec<&str> = permissions
+        .iter()
+        .filter_map(|p| match p.as_str() {
+            "edit" => Some("Edits files"),
+            "shell" => Some("Runs commands"),
+            "network" => Some("Uses the network"),
+            _ => None,
+        })
+        .collect();
+    (!words.is_empty()).then(|| words.join(" · "))
 }
 
 /// Lay cards out in rows of `n` equal columns. Flex rows instead of a grid:

@@ -255,7 +255,10 @@ impl RunoApp {
         let playbook = self
             .picked_playbook
             .and_then(|pb| self.state.automations.iter().find(|a| a.id == pb))
-            .map(|a| (a.name.clone(), a.prompt.clone()));
+            .map(|a| {
+                let prompt = crate::pbfile::fill(&a.prompt, &a.run_inputs(), &self.picked_values);
+                (a.name.clone(), prompt)
+            });
         if typed.is_empty() && self.attachments.is_empty() && playbook.is_none() {
             return;
         }
@@ -265,6 +268,7 @@ impl RunoApp {
             Some((_, instructions)) => format!("{instructions}\n\nAlso: {typed}"),
             None => typed.clone(),
         };
+        self.picked_values.clear();
         if let Some(pb) = self.picked_playbook.take() {
             if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == pb) {
                 a.last_run = workspace::unix_now();
@@ -526,12 +530,12 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) {
         self.slash = None;
-        let Some(prompt) = self
+        let Some(asks) = self
             .state
             .automations
             .iter()
             .find(|a| a.id == playbook)
-            .map(|a| a.prompt.clone())
+            .map(|a| !a.run_inputs().is_empty())
         else {
             return;
         };
@@ -542,8 +546,13 @@ impl RunoApp {
             return;
         }
         // The playbook rides along as a chip; its instructions go out when the message is
-        // sent, so the box stays free for anything to add.
-        let _ = prompt;
+        // sent, so the box stays free for anything to add. Inputs are asked for first.
+        self.picked_values.clear();
+        if asks {
+            self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+            self.ask_playbook_inputs(playbook, None, true);
+            return;
+        }
         self.picked_playbook = Some(playbook);
         self.prompt.update(cx, |p, cx| {
             p.set_value("", window, cx);
