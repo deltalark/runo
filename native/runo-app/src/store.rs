@@ -300,6 +300,9 @@ pub struct Session {
     /// Where the session runs: a connection's id, or 0 for this machine.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub connection: u64,
+    /// The running turn is on a connection, where it keeps going while Runo is closed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_turn: bool,
 }
 
 /// What a switch replaced, enough to undo it before anything is sent.
@@ -683,8 +686,9 @@ impl State {
     pub fn load_from(path: &Path) -> Self {
         let mut state: State = read_json_or_backup(path);
         // A process cannot survive an app restart; do not show it as running.
+        // A turn on a connection keeps going there; Runo picks it up again on start.
         for session in &mut state.sessions {
-            if session.status == Status::Working {
+            if session.status == Status::Working && !session.remote_turn {
                 session.status = Status::Failed;
                 session.messages.push(Message::new(
                     Role::System,
@@ -870,6 +874,23 @@ mod tests {
             .text
             .starts_with("Interrupted"));
         assert!(loaded.sessions.iter().all(|s| s.status != Status::Working));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn turns_on_connections_stay_running_across_restarts() {
+        let dir = temp("remote-turn");
+        let path = dir.join("state.json");
+        let mut state = State::demo();
+        let session = state.session_mut(11).unwrap();
+        session.connection = 3;
+        session.remote_turn = true;
+        let before = session.messages.len();
+        write_json(&path, &state);
+        let loaded = State::load_from(&path);
+        let session = loaded.session(11).unwrap();
+        assert!(session.status == Status::Working);
+        assert_eq!(session.messages.len(), before);
         let _ = std::fs::remove_dir_all(dir);
     }
 

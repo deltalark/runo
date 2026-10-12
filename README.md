@@ -189,6 +189,18 @@ flowchart LR
 - **No GitHub access needed.** Syncing goes over `ssh` or `cove exec`, never through GitHub, so a VM never needs your credentials. Your machine keeps doing the commits, pushes and pull requests. Turn on **GitHub access** for a connection only if the agent there needs `gh` for its own work; the token is passed per command and never written to disk.
 - **Backups.** After each turn the checkpoint is also pushed to your project's `origin` as `refs/runo/sessions/<id>`, which no branch list shows. Turn it off in Settings.
 
+### Close your laptop, the agent keeps going
+
+On a Cove server or an SSH server, the agent runs **detached** from your computer: as a Cove named process, or under `setsid nohup` over SSH. Its output goes to a log on that machine, and Runo follows the log. So you can send a long task, close the lid or shut down, and come back later:
+
+- **While you're away** the agent keeps working there, and its files stay in the session's copy on that machine.
+- **When Runo opens again** it picks the turn back up. The reply replays from the start, and if the turn already finished, its work and conversation come back right away. If it's still running, you watch the rest live.
+- **Dropped connections** are handled the same way: Runo reconnects and carries on from the last line it showed, while the agent keeps going.
+- **Stop** still stops it: Runo ends the agent's processes there, then brings back what it did so far.
+- **Your keys** reach that machine in a script only its owner can read, and the script deletes itself as soon as it starts.
+
+Runo also stops keeping your computer awake while only remote turns are running. Cove on this machine runs alongside your computer, so it pauses when the computer does; use a Cove server or an SSH server for work that should go on without it.
+
 ### Agents can use connections too
 
 <img src="docs/images/connections.png" alt="Settings, Connections: This machine, an SSH server that tested fine, and the form to add another" width="900" />

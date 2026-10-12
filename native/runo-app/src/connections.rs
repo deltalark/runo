@@ -668,6 +668,7 @@ impl Sandbox {
                     env: Vec::new(),
                     conversation: None,
                     backup: false,
+                    resume: false,
                 };
                 let path = run_file_path(r.session);
                 write_private(
@@ -699,6 +700,10 @@ struct RunFile {
     conversation: Option<(String, String)>,
     /// Back each checkpoint up to the project's `origin` as `refs/runo/sessions/<id>`.
     backup: bool,
+    /// Pick up a turn that kept running there while this machine was off or Runo was
+    /// closed, instead of starting one.
+    #[serde(default)]
+    resume: bool,
 }
 
 /// Conversation ids and the backup choice come from the session, which `wrap` can't
@@ -741,6 +746,7 @@ impl Remote {
             env,
             conversation,
             backup,
+            resume: false,
         };
         let path = run_file_path(self.session);
         write_private(
@@ -753,6 +759,34 @@ impl Remote {
         c.arg("--connection-run").arg(path);
         Ok(c)
     }
+}
+
+/// The runner command that picks up a turn still running on the connection: it shows
+/// the turn's output from the start and brings the work back when it ends.
+pub fn resume_command(
+    remote: &Remote,
+    conversation: Option<(String, String)>,
+    backup: bool,
+) -> Result<Command, String> {
+    let file = RunFile {
+        remote: remote.clone(),
+        program: String::new(),
+        args: Vec::new(),
+        env: Vec::new(),
+        conversation,
+        backup,
+        resume: true,
+    };
+    let path = run_file_path(remote.session);
+    write_private(
+        &path,
+        &serde_json::to_vec(&file).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("could not prepare the run: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut c = Command::new(exe);
+    c.arg("--connection-run").arg(path);
+    Ok(c)
 }
 
 fn run_file_path(session: u64) -> PathBuf {
@@ -1129,6 +1163,225 @@ impl Remote {
     }
 }
 
+// ---------- turns that keep running on the connection ----------
+
+/// How a turn running on the connection stands.
+#[derive(Debug, PartialEq)]
+enum JobState {
+    Running,
+    Done(i32),
+    /// Its process is gone without an exit code (the server or VM restarted).
+    Lost,
+    /// No turn was ever started there.
+    Missing,
+}
+
+impl Remote {
+    /// The folder beside the session copy that holds a turn's script, output and exit
+    /// code, relative to the remote home. Outside the copy, so git never sees it.
+    fn job_dir(&self) -> String {
+        format!("{}.runo", self.remote_dir)
+    }
+
+    /// Start the agent detached on the connection, so it keeps going when this machine
+    /// sleeps, shuts down or loses the network. Its output goes to a log there.
+    fn start_job(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<(), String> {
+        let job = self.job_dir();
+        // A turn left over from before is stopped, so two never write the same files.
+        self.conn.run(
+            &self.vm,
+            &format!(
+                "job={}; if [ -s \"$job/pid\" ]; then kill -TERM -- -\"$(cat \"$job/pid\")\" 2>/dev/null || true; fi; rm -rf \"$job\"; mkdir -p \"$job\"; chmod 700 \"$job\"",
+                quote(&job)
+            ),
+            None,
+        )?;
+        let mut script = String::from("cd \"$HOME\"\n");
+        script.push_str(&format!(
+            "job=\"$HOME/\"{}\necho $$ > \"$job/pid\"\nrm -f \"$0\"\n",
+            quote(&job)
+        ));
+        for (k, v) in env {
+            script.push_str(&format!("export {k}={}\n", quote(v)));
+        }
+        script.push_str(&format!(
+            "cd {} && bash -lc {} runo {} {} </dev/null >>\"$job/out.log\" 2>>\"$job/err.log\"\n",
+            quote(&self.remote_dir),
+            quote(&launcher(program)),
+            quote(program),
+            args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+        ));
+        script.push_str("echo $? > \"$job/exit.tmp\" && mv \"$job/exit.tmp\" \"$job/exit\"\n");
+        // The script holds API keys: only its owner can read it, and it deletes itself.
+        self.conn
+            .write_file(&self.vm, &format!("{job}/run.sh"), script.as_bytes())?;
+        self.conn.run(
+            &self.vm,
+            &format!("chmod 600 {}", quote(&format!("{job}/run.sh"))),
+            None,
+        )?;
+        match self.conn.kind {
+            // Cove's named processes outlive the connection and keep an idle VM awake.
+            Kind::Cove => {
+                let mut c = self.conn.cove()?;
+                let name = format!(
+                    "runo-turn-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or_default()
+                );
+                let out = c
+                    .args(["spawn", &self.vm, &name, "--cwd", "/root", "--", "bash"])
+                    .arg(format!("{job}/run.sh"))
+                    .stdin(Stdio::null())
+                    .output()
+                    .map_err(|e| format!("could not reach {}: {e}", self.conn.name))?;
+                if !out.status.success() {
+                    return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+                }
+            }
+            _ => {
+                self.conn.run(
+                    &self.vm,
+                    &format!(
+                        "if command -v setsid >/dev/null 2>&1; then setsid nohup bash {f} </dev/null >/dev/null 2>&1 & else nohup bash {f} </dev/null >/dev/null 2>&1 & fi",
+                        f = quote(&format!("{job}/run.sh"))
+                    ),
+                    None,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn job_state(&self) -> Result<JobState, String> {
+        let out = self.conn.run(
+            &self.vm,
+            &format!(
+                "job={}; if [ -f \"$job/exit\" ]; then echo \"done $(cat \"$job/exit\")\"; \
+                 elif [ -s \"$job/pid\" ] && kill -0 \"$(cat \"$job/pid\")\" 2>/dev/null; then echo running; \
+                 elif [ -f \"$job/run.sh\" ]; then echo running; \
+                 elif [ -d \"$job\" ]; then echo lost; else echo missing; fi",
+                quote(&self.job_dir())
+            ),
+            None,
+        )?;
+        let text = String::from_utf8_lossy(&out);
+        let text = text.trim();
+        Ok(match text.split_once(' ') {
+            Some(("done", code)) => JobState::Done(code.trim().parse().unwrap_or(1)),
+            _ if text == "running" => JobState::Running,
+            _ if text == "lost" => JobState::Lost,
+            _ => JobState::Missing,
+        })
+    }
+
+    /// Show the turn's output from byte `from` on, as it is written, until the turn ends or
+    /// the connection drops. Complete lines go to `line`; returns the bytes shown.
+    fn follow_job(&self, from: u64, finished: bool, line: &mut dyn FnMut(&str)) -> u64 {
+        let job = quote(&self.job_dir());
+        let script = if finished {
+            format!("tail -c +{} {job}/out.log 2>/dev/null; true", from + 1)
+        } else {
+            format!(
+                "i=0; while [ ! -s {job}/pid ] && [ $i -lt 150 ]; do sleep 0.2; i=$((i+1)); done; \
+                 [ -s {job}/pid ] || exit 0; \
+                 touch {job}/out.log; exec tail -s 0.5 -c +{} -F --pid=\"$(cat {job}/pid)\" {job}/out.log 2>/dev/null",
+                from + 1
+            )
+        };
+        let Ok((mut command, stdin)) = self.conn.shell(&self.vm, &script, &[], false) else {
+            return 0;
+        };
+        let Ok(mut child) = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return 0;
+        };
+        if let Some(mut pipe) = child.stdin.take() {
+            let body = stdin.unwrap_or_default();
+            std::thread::spawn(move || {
+                let _ = pipe.write_all(body.as_bytes());
+            });
+        }
+        let mut shown = 0;
+        if let Some(out) = child.stdout.take() {
+            let mut reader = BufReader::new(out);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        // A line cut off by a dropped connection is shown on the next try,
+                        // except at the very end, where nothing more will come.
+                        if buf.last() != Some(&b'\n') && !finished {
+                            break;
+                        }
+                        shown += n as u64;
+                        let text = String::from_utf8_lossy(&buf);
+                        line(text.trim_end_matches(['\n', '\r']));
+                    }
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        shown
+    }
+
+    /// Stop the turn running there: its whole process group, then a hard kill.
+    fn stop_job(&self) -> Result<(), String> {
+        self.conn
+            .run(
+                &self.vm,
+                &format!(
+                    "job={}; [ -s \"$job/pid\" ] || exit 0; p=\"$(cat \"$job/pid\")\"; \
+                     kill -TERM -- -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null; \
+                     i=0; while kill -0 \"$p\" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.2; i=$((i+1)); done; \
+                     kill -KILL -- -\"$p\" 2>/dev/null; true",
+                    quote(&self.job_dir())
+                ),
+                None,
+            )
+            .map(|_| ())
+    }
+
+    /// Print the agent's own error output from the turn.
+    fn job_errors(&self) -> String {
+        self.conn
+            .run(
+                &self.vm,
+                &format!("cat {}/err.log 2>/dev/null; true", quote(&self.job_dir())),
+                None,
+            )
+            .map(|o| String::from_utf8_lossy(&o).into_owned())
+            .unwrap_or_default()
+    }
+}
+
+/// Set by SIGUSR1, which is how Runo asks a runner to stop its turn (SIGTERM, from a
+/// shutdown or logout, leaves the turn running on the connection).
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_stop(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn stop_requested() -> bool {
+    STOP.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 pub enum SyncDown {
     Unchanged,
     Updated(String),
@@ -1216,80 +1469,155 @@ pub fn connection_run(path: &str) -> i32 {
         );
         return 1;
     }
-    let sent = match r.sync_up() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Runo: could not sync to {}: {e}", r.conn.name);
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGUSR1, on_stop as *const () as libc::sighandler_t);
+    }
+    // One runner per session at a time: one left from before Runo closed finishes first.
+    let lock = std::fs::create_dir_all(crate::store::data_dir().join("runs"))
+        .and_then(|_| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(
+                    crate::store::data_dir()
+                        .join("runs")
+                        .join(format!("s{}.lock", r.session)),
+                )
+        })
+        .and_then(|f| f.lock().map(|_| f));
+    let _lock = lock.ok();
+    let sent = if file.resume {
+        match local_git(
+            &r.local_dir,
+            &["rev-parse", "-q", "--verify", &r.local_ref("base")],
+            &[],
+        ) {
+            Ok(c) if !c.is_empty() => c,
+            _ => {
+                eprintln!(
+                    "Runo: this session has nothing to pick up on {}.",
+                    r.conn.name
+                );
+                return 1;
+            }
+        }
+    } else {
+        let sent = match r.sync_up() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Runo: could not sync to {}: {e}", r.conn.name);
+                return 1;
+            }
+        };
+        if let Some((provider, id)) = &file.conversation {
+            if let Err(e) = r.carry_up(provider, id) {
+                eprintln!(
+                    "Runo: the conversation could not be copied to {}: {e}",
+                    r.conn.name
+                );
+            }
+        }
+        if let Err(e) = r.start_job(&file.program, &file.args, &file.env) {
+            eprintln!("Runo: could not start the agent on {}: {e}", r.conn.name);
             return 1;
         }
+        sent
     };
-    if let Some((provider, id)) = &file.conversation {
-        if let Err(e) = r.carry_up(provider, id) {
-            eprintln!(
-                "Runo: the conversation could not be copied to {}: {e}",
-                r.conn.name
-            );
-        }
-    }
     let mut conversation = file.conversation.clone();
-    let script = format!(
-        "cd {} && {}",
-        quote(&r.remote_dir),
-        format_args!(
-            "bash -lc {} runo {} {} </dev/null",
-            quote(&launcher(&file.program)),
-            quote(&file.program),
-            file.args
-                .iter()
-                .map(|a| quote(a))
-                .collect::<Vec<_>>()
-                .join(" ")
-        )
-    );
-    let code = match r.conn.shell(&r.vm, &script, &file.env, false) {
-        Ok((mut command, stdin)) => match command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
-            Ok(mut child) => {
-                if let Some(mut pipe) = child.stdin.take() {
-                    let body = stdin.unwrap_or_default();
-                    std::thread::spawn(move || {
-                        let _ = pipe.write_all(body.as_bytes());
-                    });
-                }
-                if let Some(out) = child.stdout.take() {
-                    let stdout = std::io::stdout();
-                    for line in BufReader::new(out).lines().map_while(Result::ok) {
-                        if conversation.as_ref().is_none_or(|(_, id)| id.is_empty()) {
-                            if let Some(id) = conversation_id(&line) {
-                                let provider = file
-                                    .conversation
-                                    .as_ref()
-                                    .map(|c| c.0.clone())
-                                    .unwrap_or_else(|| file.program.clone());
-                                conversation = Some((provider, id));
-                            }
-                        }
-                        let mut lock = stdout.lock();
-                        let _ = writeln!(lock, "{line}");
-                        let _ = lock.flush();
-                    }
-                }
-                child.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
+    let stdout = std::io::stdout();
+    let mut show = |line: &str| {
+        if conversation.as_ref().is_none_or(|(_, id)| id.is_empty()) {
+            if let Some(id) = conversation_id(line) {
+                let provider = file
+                    .conversation
+                    .as_ref()
+                    .map(|c| c.0.clone())
+                    .unwrap_or_else(|| file.program.clone());
+                conversation = Some((provider, id));
             }
-            Err(e) => {
-                eprintln!("Runo: could not reach {}: {e}", r.conn.name);
-                1
-            }
-        },
-        Err(e) => {
-            eprintln!("Runo: {e}");
-            1
         }
+        let mut lock = stdout.lock();
+        let _ = writeln!(lock, "{line}");
+        let _ = lock.flush();
     };
+    // Follow the turn's output until it ends there, reconnecting after drops. A stop
+    // request ends the turn there; the work it did so far still comes back.
+    let mut shown = 0;
+    let mut stopping = false;
+    let mut waiting = std::time::Duration::from_secs(2);
+    let mut told = false;
+    let code = loop {
+        if stop_requested() && !stopping {
+            stopping = true;
+            let _ = r.stop_job();
+        }
+        let watcher = {
+            let r = r.clone();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = done.clone();
+            std::thread::spawn(move || {
+                while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    if stop_requested() {
+                        let _ = r.stop_job();
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            });
+            done
+        };
+        shown += r.follow_job(shown, false, &mut show);
+        watcher.store(true, std::sync::atomic::Ordering::SeqCst);
+        stopping |= stop_requested();
+        match r.job_state() {
+            Ok(JobState::Done(code)) => {
+                r.follow_job(shown, true, &mut show);
+                break code;
+            }
+            Ok(JobState::Lost) => {
+                r.follow_job(shown, true, &mut show);
+                if !stopping {
+                    eprintln!(
+                        "Runo: the agent on {} ended without finishing; the server or VM may have restarted.",
+                        r.conn.name
+                    );
+                }
+                break 1;
+            }
+            Ok(JobState::Missing) => {
+                eprintln!("Runo: the turn on {} is gone.", r.conn.name);
+                break 1;
+            }
+            // The connection dropped, or this server's tail can't wait on a process.
+            Ok(JobState::Running) => std::thread::sleep(std::time::Duration::from_secs(1)),
+            Err(e) => {
+                if stopping {
+                    eprintln!(
+                        "Runo: could not reach {} to stop the agent: {e}",
+                        r.conn.name
+                    );
+                    return 1;
+                }
+                if !told {
+                    eprintln!(
+                        "Runo: lost the connection to {}; the agent keeps working there. Reconnecting…",
+                        r.conn.name
+                    );
+                    told = true;
+                }
+                std::thread::sleep(waiting);
+                waiting = (waiting * 2).min(std::time::Duration::from_secs(30));
+                continue;
+            }
+        }
+        waiting = std::time::Duration::from_secs(2);
+    };
+    let errors = r.job_errors();
+    if !errors.trim().is_empty() {
+        eprint!("{errors}");
+    }
     if let Some((provider, id)) = &conversation {
         if !id.is_empty() {
             if let Err(e) = r.carry_down(provider, id) {
@@ -1701,6 +2029,7 @@ mod tests {
             env: vec![("GREETING".into(), "hello there".into())],
             conversation: None,
             backup: false,
+            resume: false,
         };
         let path = local.parent().unwrap().join("run.json");
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -1711,6 +2040,99 @@ mod tests {
             "fix it\n"
         );
         assert!(far.join(&remote.remote_dir).join("seen.txt").exists());
+    }
+
+    /// The turn keeps going there while nothing here follows it (this machine asleep or
+    /// off, Runo closed); picking it up later shows its output and brings its work back.
+    #[test]
+    fn a_turn_keeps_going_while_this_machine_is_away() {
+        let (local, far, remote) = setup("away");
+        remote.sync_up().unwrap();
+        remote
+            .start_job(
+                "sh",
+                &[
+                    "-c".into(),
+                    "echo started; sleep 1; echo \"$GREETING\" > result.txt; echo finished".into(),
+                ],
+                &[("GREETING".into(), "built while away".into())],
+            )
+            .unwrap();
+        // Nobody is watching: the turn finishes on its own.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while remote.job_state().unwrap() == JobState::Running {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(remote.job_state().unwrap(), JobState::Done(0));
+        let job = far.join(remote.job_dir());
+        assert!(
+            !job.join("run.sh").exists(),
+            "the script with the keys is deleted"
+        );
+        assert!(!local.join("result.txt").exists());
+        // Runo opens again and picks the turn up.
+        let mut lines = Vec::new();
+        let shown = remote.follow_job(0, true, &mut |l| lines.push(l.to_string()));
+        assert_eq!(lines, ["started", "finished"]);
+        assert_eq!(shown, "started\nfinished\n".len() as u64);
+        let mut rest = Vec::new();
+        remote.follow_job(8, true, &mut |l| rest.push(l.to_string()));
+        assert_eq!(
+            rest,
+            ["finished"],
+            "a reconnect carries on where it left off"
+        );
+        let file = RunFile {
+            remote: remote.clone(),
+            program: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            conversation: None,
+            backup: false,
+            resume: true,
+        };
+        let path = local.parent().unwrap().join("resume.json");
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        assert_eq!(connection_run(path.to_str().unwrap()), 0);
+        assert_eq!(
+            std::fs::read_to_string(local.join("result.txt")).unwrap(),
+            "built while away\n"
+        );
+    }
+
+    #[test]
+    fn a_stopped_turn_ends_there() {
+        let (_, _, remote) = setup("stop");
+        remote.sync_up().unwrap();
+        remote
+            .start_job("sh", &["-c".into(), "sleep 60".into()], &[])
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while remote.job_state().unwrap() != JobState::Running {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the turn never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        remote.stop_job().unwrap();
+        assert_ne!(remote.job_state().unwrap(), JobState::Running);
+        // A new turn replaces a finished one cleanly.
+        remote
+            .start_job("sh", &["-c".into(), "echo again".into()], &[])
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while remote.job_state().unwrap() != JobState::Done(0) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second turn never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     /// The same turn against a real Cove server. Opt in with RUNO_COVE_E2E_URL and
@@ -1754,6 +2176,7 @@ mod tests {
             env: vec![("GREETING".into(), "hello there".into())],
             conversation: None,
             backup: false,
+            resume: false,
         };
         let path = root.join("run.json");
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();

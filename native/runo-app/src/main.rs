@@ -1204,6 +1204,7 @@ impl RunoApp {
         if let Some(id) = app.selected.filter(|id| !app.tabs.contains(id)) {
             app.tabs.push(id);
         }
+        app.resume_remote_turns();
         app.refresh();
         app.chat_scroll.scroll_to_bottom();
         window.focus(&app.focus, cx);
@@ -1441,6 +1442,7 @@ impl RunoApp {
                 let on_screen = self.selected == Some(id) && self.view == View::Session;
                 if let Some(session) = self.state.session_mut(id) {
                     session.status = if ok { Status::Done } else { Status::Failed };
+                    session.remote_turn = false;
                     session.unread = !on_screen;
                     if session.messages.last().is_some_and(|m| {
                         m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
