@@ -3019,13 +3019,14 @@ impl RunoApp {
     fn row_action(
         &self,
         id: impl Into<ElementId>,
+        size: f32,
         name: IconName,
         tip: &'static str,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> impl IntoElement {
         div()
             .id(id)
-            .size(px(22.))
+            .size(px(size))
             .flex()
             .items_center()
             .justify_center()
@@ -3098,10 +3099,58 @@ impl RunoApp {
                         None => provider.name.to_string(),
                     }))
                     .child(
+                        // The age and the hover actions share one slot, so the actions
+                        // replace the age instead of landing on top of it.
                         div()
                             .flex_none()
-                            .text_color(rgb(if working { c_blue() } else { c_muted() }))
-                            .child(when),
+                            .relative()
+                            .min_w(px(40.))
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .text_color(rgb(if working { c_blue() } else { c_muted() }))
+                                    .group_hover("session-row", |el| el.opacity(0.))
+                                    .child(when),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .right_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(2.))
+                                    .opacity(0.)
+                                    .group_hover("session-row", |el| el.opacity(1.))
+                                    .child(self.row_action(
+                                        ("pin", id as usize),
+                                        18.,
+                                        if pinned {
+                                            IconName::PinOff
+                                        } else {
+                                            IconName::Pin
+                                        },
+                                        if pinned { "Unpin" } else { "Pin to top" },
+                                        cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_pin(id);
+                                            cx.notify();
+                                        }),
+                                    ))
+                                    .child(self.row_action(
+                                        ("archive", id as usize),
+                                        18.,
+                                        IconName::Archive,
+                                        "Archive",
+                                        cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.toggle_archive(id);
+                                            cx.notify();
+                                        }),
+                                    )),
+                            ),
                     ),
             )
             .child(
@@ -3169,41 +3218,6 @@ impl RunoApp {
                                 .child(div().text_color(rgb(c_del())).child(format!("−{r}"))),
                         )
                     }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .right(px(6.))
-                    .top(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .opacity(0.)
-                    .group_hover("session-row", |el| el.opacity(1.))
-                    .child(self.row_action(
-                        ("pin", id as usize),
-                        if pinned {
-                            IconName::PinOff
-                        } else {
-                            IconName::Pin
-                        },
-                        if pinned { "Unpin" } else { "Pin to top" },
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle_pin(id);
-                            cx.notify();
-                        }),
-                    ))
-                    .child(self.row_action(
-                        ("archive", id as usize),
-                        IconName::Archive,
-                        "Archive",
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle_archive(id);
-                            cx.notify();
-                        }),
-                    )),
             )
     }
 
@@ -5676,6 +5690,7 @@ impl RunoApp {
                             .when(!archived, |el| {
                                 el.child(self.row_action(
                                     ("list-pin", id as usize),
+                                    22.,
                                     if pinned {
                                         IconName::PinOff
                                     } else {
@@ -5691,6 +5706,7 @@ impl RunoApp {
                             })
                             .child(self.row_action(
                                 ("list-archive", id as usize),
+                                22.,
                                 if archived {
                                     IconName::ArchiveRestore
                                 } else {
