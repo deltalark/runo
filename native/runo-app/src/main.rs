@@ -17,6 +17,8 @@ mod mcp;
 mod memory_mcp;
 mod models;
 mod notes;
+mod pbfile;
+mod pbshare;
 mod playbooks;
 mod projects;
 mod pty;
@@ -326,6 +328,14 @@ struct RunoApp {
     auto_desc: Entity<InputState>,
     pb_query: Entity<InputState>,
     pb_confirm_delete: Option<u64>,
+    /// Installing playbooks from a link, repository or file, and its source box.
+    pb_install: Option<pbshare::PlaybookInstall>,
+    pb_source: Entity<InputState>,
+    /// The form asking for a playbook's inputs before it runs.
+    pb_run: Option<pbshare::PlaybookRun>,
+    /// Inputs filled in for the next start of a playbook, and for the picked `/` playbook.
+    pb_values: Option<(u64, Vec<(String, String)>)>,
+    picked_values: Vec<(String, String)>,
     /// Project notes: write, read or both, and the search box.
     notes_mode: notes::NotesMode,
     notes_query: Entity<InputState>,
@@ -1037,6 +1047,14 @@ impl RunoApp {
             }),
             pb_query: cx.new(|cx| InputState::new(window, cx).placeholder("Search playbooks")),
             pb_confirm_delete: None,
+            pb_install: None,
+            pb_source: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("https://github.com/you/playbooks, a link to a file, or a path")
+            }),
+            pb_run: None,
+            pb_values: None,
+            picked_values: Vec::new(),
             notes_mode: notes::NotesMode::Write,
             notes_query: cx.new(|cx| InputState::new(window, cx).placeholder("Search notes")),
             auto_name: auto_name.clone(),
@@ -1101,6 +1119,7 @@ impl RunoApp {
         });
         // Search boxes on the Playbooks and Project notes pages filter as you type.
         let pb_query_sub = cx.subscribe_in(&app.pb_query, window, repaint);
+        let pb_source_sub = cx.subscribe_in(&app.pb_source, window, repaint);
         let notes_query_sub = cx.subscribe_in(&app.notes_query, window, repaint);
         let remove_name_sub = cx.subscribe_in(&app.remove_name, window, repaint);
         let auto_name_sub = cx.subscribe_in(&app.auto_name, window, repaint);
@@ -1122,6 +1141,7 @@ impl RunoApp {
             address_sub,
             keys_sub,
             pb_query_sub,
+            pb_source_sub,
             notes_query_sub,
             remove_name_sub,
             auto_name_sub,
@@ -6924,6 +6944,7 @@ impl RunoApp {
 
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare_playbook_run(window, cx);
         let st = cx.global::<AppSettings>().clone();
         // Opening or leaving Settings swaps the whole window, so it happens without motion.
         let in_settings = self.view == View::Settings;
@@ -7154,6 +7175,10 @@ impl Render for RunoApp {
                     this.project_form = None;
                 } else if this.remove_project.is_some() {
                     this.remove_project = None;
+                } else if this.pb_run.is_some() {
+                    this.pb_run = None;
+                } else if this.pb_install.is_some() {
+                    this.pb_install = None;
                 } else if this.pb_editor.is_some() {
                     this.pb_editor = None;
                 } else if this.ctx_menu.is_some() {
@@ -7374,6 +7399,7 @@ impl Render for RunoApp {
             .children(self.install_modal(cx))
             .children(self.project_modal(cx))
             .children(self.remove_project_modal(cx))
+            .children(self.playbook_run_form(cx))
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx));
         fade(root, "app-root", 450)

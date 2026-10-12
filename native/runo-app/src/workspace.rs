@@ -289,8 +289,9 @@ impl RunoApp {
             .filter(|a| a.due(now))
             .map(|a| a.id)
             .collect();
+        // On a timer nobody is there to fill in inputs; their defaults are used.
         for id in due {
-            self.run_playbook(id, None, cx);
+            self.start_playbook(id, None, None, cx);
         }
     }
 
@@ -330,6 +331,20 @@ impl RunoApp {
         if self.demo_guard(cx) {
             return;
         }
+        let asks = self
+            .state
+            .automations
+            .iter()
+            .find(|a| a.id == playbook)
+            .is_some_and(|a| !a.run_inputs().is_empty());
+        let filled = self
+            .pb_values
+            .as_ref()
+            .is_some_and(|(id, _)| *id == playbook);
+        if asks && !filled {
+            self.ask_playbook_inputs(playbook, in_project, false);
+            return;
+        }
         self.start_playbook(playbook, in_project, None, cx);
     }
 
@@ -342,7 +357,7 @@ impl RunoApp {
         from: Option<&str>,
         cx: &mut Context<Self>,
     ) {
-        let Some(auto) = self
+        let Some(mut auto) = self
             .state
             .automations
             .iter()
@@ -351,6 +366,11 @@ impl RunoApp {
         else {
             return;
         };
+        let values = match self.pb_values.take() {
+            Some((id, values)) if id == playbook => values,
+            _ => Vec::new(),
+        };
+        auto.prompt = crate::pbfile::fill(&auto.prompt, &auto.run_inputs(), &values);
         if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == playbook) {
             a.last_run = unix_now();
             a.ran = a.last_run;
@@ -394,7 +414,13 @@ impl RunoApp {
                         None => format!("Playbook: {}", auto.name),
                     },
                 );
-                let opts = cx.global::<AppSettings>().agent(&auto.provider);
+                let mut opts = cx.global::<AppSettings>().agent(&auto.provider);
+                playbook_limits(&auto, &mut opts);
+                if !auto.may("edit") {
+                    if let Some(s) = self.state.session_mut(id) {
+                        s.opts.insert("mode".into(), "plan".into());
+                    }
+                }
                 self.start_agent(id, auto.prompt.clone(), &opts);
                 self.tag_playbook(id, &auto.name, "");
                 self.measure(id);
@@ -434,4 +460,34 @@ pub fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Hold a playbook to what it declared: without `edit` it runs read-only (set on the
+/// session), and on Claude Code, without `shell` or `network` those tools are off.
+pub(crate) fn playbook_limits(auto: &store::Automation, opts: &mut settings::AgentOptions) {
+    if auto.provider != "claude" {
+        return;
+    }
+    let mut off: Vec<&str> = Vec::new();
+    if !auto.may("shell") {
+        off.push("Bash");
+    }
+    if !auto.may("network") {
+        off.extend(["WebFetch", "WebSearch"]);
+    }
+    if off.is_empty() {
+        return;
+    }
+    let mut list: Vec<String> = opts
+        .disallowed_tools
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    for tool in off {
+        if !list.iter().any(|t| t == tool) {
+            list.push(tool.to_string());
+        }
+    }
+    opts.disallowed_tools = list.join(",");
 }
