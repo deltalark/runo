@@ -996,7 +996,17 @@ impl Remote {
             &[],
         )
         .ok();
-        if let Some(base) = base.filter(|b| !b.is_empty()) {
+        // A copy without the last sync's ref was made fresh (the folder or VM was wiped
+        // or recreated). Its empty tree is not a change made there, so don't bring it in.
+        let synced_before = self
+            .conn
+            .run(
+                &self.vm,
+                &self.in_dir("git rev-parse -q --verify refs/runo/sync >/dev/null && echo yes"),
+                None,
+            )
+            .is_ok_and(|out| String::from_utf8_lossy(&out).trim() == "yes");
+        if let Some(base) = base.filter(|b| !b.is_empty() && synced_before) {
             if let Ok((theirs, branch)) = self.fetch_remote() {
                 if !self.same(&theirs, &base) {
                     let (now, _) = self.local_checkpoint()?;
@@ -1931,6 +1941,29 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(git(&local, &["show", &format!("{kept}:a.txt")]), "there");
+    }
+
+    #[test]
+    fn a_wiped_copy_there_does_not_delete_files_here() {
+        let (local, far, remote) = setup("wiped");
+        std::fs::write(local.join("todo.txt"), "note\n").unwrap();
+        remote.sync_up().unwrap();
+        // The VM is recreated or its folder deleted between turns.
+        std::fs::remove_dir_all(far.join(&remote.remote_dir)).unwrap();
+        remote.sync_up().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(local.join("a.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local.join("todo.txt")).unwrap(),
+            "note\n"
+        );
+        let copy = far.join(&remote.remote_dir);
+        assert_eq!(
+            std::fs::read_to_string(copy.join("todo.txt")).unwrap(),
+            "note\n"
+        );
     }
 
     #[test]
