@@ -1713,6 +1713,69 @@ mod tests {
         assert!(far.join(&remote.remote_dir).join("seen.txt").exists());
     }
 
+    /// The same turn against a real Cove server. Opt in with RUNO_COVE_E2E_URL and
+    /// RUNO_COVE_E2E_KEY (and RUNO_COVE_E2E_VM to reuse a VM that already has git).
+    #[test]
+    fn a_turn_runs_on_a_cove_server() {
+        let Ok(url) = std::env::var("RUNO_COVE_E2E_URL") else {
+            return;
+        };
+        let root = temp("cove-e2e");
+        let local = root.join("local");
+        std::fs::create_dir_all(&local).unwrap();
+        git(&local, &["init", "-q", "-b", "main"]);
+        std::fs::write(local.join("a.txt"), "one\n").unwrap();
+        git(&local, &["add", "-A"]);
+        git(&local, &["commit", "-q", "-m", "first"]);
+        std::fs::write(local.join("todo.txt"), "fix it\n").unwrap();
+        let conn = Connection {
+            id: 3,
+            url,
+            api_key: std::env::var("RUNO_COVE_E2E_KEY").unwrap_or_default(),
+            ..Connection::new_cove(3)
+        };
+        let session = std::process::id() as u64;
+        let remote = Remote {
+            remote_dir: conn.remote_dir("Cove E2E", session),
+            vm: std::env::var("RUNO_COVE_E2E_VM").unwrap_or_else(|_| "runo-e2e".into()),
+            conn,
+            session,
+            local_dir: local.to_string_lossy().into_owned(),
+        };
+        let file = RunFile {
+            remote: remote.clone(),
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "cat todo.txt > seen.txt; uname -n >> seen.txt; git add seen.txt; \
+                 git -c user.name=a -c user.email=a@a commit -qm 'agent work'; echo \"$GREETING\""
+                    .into(),
+            ],
+            env: vec![("GREETING".into(), "hello there".into())],
+            conversation: None,
+            backup: false,
+        };
+        let path = root.join("run.json");
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        assert_eq!(connection_run(path.to_str().unwrap()), 0);
+        let seen = std::fs::read_to_string(local.join("seen.txt")).unwrap();
+        assert!(seen.starts_with("fix it\n"), "{seen}");
+        assert_eq!(git(&local, &["log", "-1", "--format=%s"]), "agent work");
+        // A shell there sees the same copy.
+        let out = remote
+            .conn
+            .run(
+                &remote.vm,
+                &format!("cat {}/seen.txt", remote.remote_dir),
+                None,
+            )
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out), seen);
+        let _ = remote
+            .conn
+            .run(&remote.vm, &format!("rm -rf {}", remote.remote_dir), None);
+    }
+
     #[test]
     fn base64_round_trips() {
         for data in [

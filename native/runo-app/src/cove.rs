@@ -29,6 +29,8 @@ pub fn binary() -> Option<PathBuf> {
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(Path::new(&home).join(".cargo/bin"));
+        // Where Cove's install script puts it.
+        dirs.push(Path::new(&home).join(".cove/bin"));
     }
     dirs.into_iter()
         .map(|d| d.join("cove"))
