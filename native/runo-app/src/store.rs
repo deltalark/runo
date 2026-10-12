@@ -387,7 +387,7 @@ pub struct Activity {
 
 /// A playbook: a saved task (instructions and agent) that runs in any project on demand,
 /// and optionally on a schedule in one project.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
 pub struct Automation {
     pub id: u64,
     pub name: String,
@@ -409,6 +409,24 @@ pub struct Automation {
     /// schedule starts counting, so it can't say whether it ever ran.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub ran: u64,
+    /// Who wrote it and which version, for playbooks installed from a file.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub author: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    /// Where it was installed from (a link, repository or file) and the file inside it,
+    /// so it can be updated; empty for playbooks made in Runo.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub origin: String,
+    /// What it may do (`read`, `edit`, `shell`, `network`); empty means not declared,
+    /// which runs like any session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permissions: Vec<String>,
+    /// Labels and defaults for its `{{key}}` placeholders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<crate::pbfile::Input>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -420,6 +438,37 @@ fn yes() -> bool {
 }
 
 impl Automation {
+    /// The values it asks for when it runs.
+    pub fn run_inputs(&self) -> Vec<crate::pbfile::Input> {
+        crate::pbfile::inputs_of(&self.inputs, &self.prompt)
+    }
+
+    /// Whether it declared that it may do `what`; undeclared playbooks may do anything.
+    pub fn may(&self, what: &str) -> bool {
+        self.permissions.is_empty() || self.permissions.iter().any(|p| p == what)
+    }
+
+    /// As a shareable file.
+    pub fn to_file(&self) -> crate::pbfile::PlaybookFile {
+        crate::pbfile::PlaybookFile {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            author: self.author.clone(),
+            version: self.version.clone(),
+            agent: self.provider.clone(),
+            permissions: if self.permissions.is_empty() {
+                crate::pbfile::PERMISSIONS
+                    .iter()
+                    .map(|p| p.0.to_string())
+                    .collect()
+            } else {
+                self.permissions.clone()
+            },
+            inputs: self.run_inputs(),
+            prompt: self.prompt.clone(),
+        }
+    }
+
     /// When it last ran, 0 if never. Older playbooks only have `last_run`,
     /// which for one run by hand is the same thing.
     pub fn ran_at(&self) -> u64 {

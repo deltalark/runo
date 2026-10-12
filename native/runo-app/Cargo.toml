@@ -50,6 +50,7 @@ base64 = "0.22"
 libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
+toml = "0.8"
 
 [build-dependencies]
 embed-resource = "3.0.11"
