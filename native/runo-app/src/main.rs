@@ -2577,8 +2577,10 @@ impl RunoApp {
                 div()
                     .id("palette")
                     .w(px(640.))
-                    .h_auto()
-                    .max_h(px(520.))
+                    // A fixed height: the list scrolls inside it and the card does not
+                    // jump in size as results come and go while typing.
+                    .h(px(480.))
+                    .v_flex()
                     .rounded_xl()
                     .border_1()
                     .border_color(float_edge())
@@ -2589,7 +2591,12 @@ impl RunoApp {
                     .child(
                         command
                             .bordered(false)
-                            .max_h(px(440.))
+                            // The palette paints the surface, so the list and the rest of
+                            // the card are one material, translucent in glass mode.
+                            .bg(transparent_black())
+                            .flex_1()
+                            .min_h_0()
+                            .max_h(px(480.))
                             .placeholder("Jump to a session, project, file, setting or command…")
                             .on_query(move |query, _, cx| {
                                 let query = query.to_string();
@@ -6742,8 +6749,8 @@ impl RunoApp {
                         .items_center()
                         .gap_2()
                         .border_y_1()
-                        .border_color(rgb(c_border()))
-                        .bg(rgb(c_sidebar()))
+                        .border_color(divider())
+                        .bg(inset(c_sidebar()))
                         .cursor_pointer()
                         .text_size(px(12.))
                         .font_family(self.mono_font.clone())
@@ -6880,8 +6887,8 @@ impl RunoApp {
                 continue;
             }
             let (bg, mark, color) = match row.kind {
-                LineKind::Added => (Some(c_add_bg()), "+", c_add()),
-                LineKind::Removed => (Some(c_del_bg()), "−", c_del()),
+                LineKind::Added => (Some(c_add()), "+", c_add()),
+                LineKind::Removed => (Some(c_del()), "−", c_del()),
                 LineKind::Note => (None, "", c_muted()),
                 _ => (None, " ", c_text()),
             };
@@ -6896,7 +6903,7 @@ impl RunoApp {
                     .group("diff-line")
                     .flex()
                     .min_h(px(19.))
-                    .when_some(bg, |el, bg| el.bg(rgb(bg)))
+                    .when_some(bg, |el, bg| el.bg(diff_fill(bg)))
                     .when(can_note, |el| {
                         el.cursor_pointer()
                             .hover(|el| el.bg(tint(c_selected())))
@@ -7384,8 +7391,8 @@ impl RunoApp {
                         .min_h_0()
                         .v_flex()
                         .border_t_1()
-                        .border_color(rgb(c_border()))
-                        .bg(rgb(c_canvas()))
+                        .border_color(divider())
+                        .bg(inset(c_canvas()))
                         .child(
                             div()
                                 .h(px(32.))
@@ -7935,6 +7942,8 @@ impl Render for RunoApp {
         let glass = glass_on();
         if self.applied_glass != Some(glass) {
             self.applied_glass = Some(glass);
+            // Reload the theme so its code-block shade matches the new glass setting.
+            self.applied_dark = None;
             // Blurred maps to vibrancy on macOS, acrylic on Windows 10 and 11, and the
             // compositor's blur on Linux; without a compositor the window stays opaque.
             window.set_background_appearance(if glass {
@@ -7954,6 +7963,9 @@ impl Render for RunoApp {
                 Some(window),
                 cx,
             );
+            if glass {
+                gpui_kit::component::Theme::update(cx, |theme| theme.muted = code_wash().into());
+            }
             // A theme switch reloads the theme file's fonts; set the UI font again.
             self.applied_font = None;
         }
@@ -8307,7 +8319,11 @@ impl Render for RunoApp {
                             .flex_1()
                             .min_w_0()
                             .v_flex()
-                            .bg(glass_fill(c_canvas()))
+                            // Pages with their own list beside the content paint the two
+                            // layers themselves, so the list is as clear as the sidebar.
+                            .when(!matches!(self.view, View::Review | View::Settings), |el| {
+                                el.bg(glass_fill(c_canvas()))
+                            })
                             .when(show_tabs, |el| el.child(self.tab_strip(cx)))
                             .child(div().flex_1().min_h_0().flex().child(center))
                             .animated(

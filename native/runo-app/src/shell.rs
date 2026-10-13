@@ -969,133 +969,146 @@ impl RunoApp {
             .border_color(divider())
             .bg(pane(c_sidebar()))
             .window_control_area(WindowControlArea::Drag)
-            .when(mode == Mode::Sessions, |el| {
-                el.child(
-                    self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_sidebar = !this.show_sidebar;
-                            this.save();
-                            cx.notify();
-                        })),
-                )
-            })
+            // Three zones: the two sides share what the search box leaves, so the box
+            // sits in the middle of the window on every page instead of moving with the
+            // breadcrumb's length.
             .child(
                 div()
-                    .relative()
-                    .flex_none()
-                    .child(
-                        div()
-                            .id("project-switch")
-                            .h(px(30.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .when(menu_open, |el| el.bg(tint(c_active())))
-                            .hover(|el| el.bg(tint(c_subtle())))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = if this.menu.as_deref() == Some("project-switch") {
-                                    None
-                                } else {
-                                    Some("project-switch".into())
-                                };
-                                cx.notify();
-                            }))
-                            .when_some(project, |el, p| el.child(project_mark(p, 20.)))
-                            .child(div().max_w(px(200.)).truncate().child(
-                                project.map_or("No project".to_string(), |p| p.name.clone()),
-                            ))
-                            .child(icon(IconName::ChevronDown, 12., c_muted())),
-                    )
-                    .when(menu_open, |el| el.child(self.project_menu(cx))),
-            )
-            .when_some(branch, |el, (sid, branch)| {
-                el.child(
-                    div()
-                        .id("top-branch")
-                        .h(px(24.))
-                        .px(px(7.))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(5.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(c_border()))
-                        .text_size(px(12.))
-                        .text_color(rgb(c_secondary()))
-                        .cursor_pointer()
-                        .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
-                        .tooltip(|window, cx| {
-                            Tooltip::new("Branch: changes, terminal, worktrees").build(window, cx)
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            self.on_context(ctxmenu::CtxTarget::Branch(sid), cx),
-                        )
-                        .child(icon(IconName::GitBranch, 12., c_muted()))
-                        .child(div().max_w(px(180.)).truncate().child(branch)),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink(1.)
+                    .flex_1()
                     .min_w_0()
+                    .h_full()
+                    .flex()
                     .items_center()
-                    .gap_1()
-                    .text_size(px(12.5))
-                    .text_color(rgb(c_secondary()))
-                    .child(icon(IconName::ChevronRight, 12., c_muted()))
+                    .gap_2()
+                    .overflow_hidden()
+                    .when(mode == Mode::Sessions, |el| {
+                        el.child(
+                            self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_sidebar = !this.show_sidebar;
+                                    this.save();
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(
                         div()
-                            .id("crumb-mode")
+                            .relative()
                             .flex_none()
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                // The mode's own top page: Sessions lists every session.
-                                if mode == Mode::Sessions {
-                                    this.view = View::AllSessions;
-                                    this.save();
-                                } else {
-                                    this.go(mode, window, cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child(mode.label()),
+                            .child(
+                                div()
+                                    .id("project-switch")
+                                    .h(px(30.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .when(menu_open, |el| el.bg(tint(c_active())))
+                                    .hover(|el| el.bg(tint(c_subtle())))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.menu = if this.menu.as_deref() == Some("project-switch") {
+                                            None
+                                        } else {
+                                            Some("project-switch".into())
+                                        };
+                                        cx.notify();
+                                    }))
+                                    .when_some(project, |el, p| el.child(project_mark(p, 20.)))
+                                    .child(div().max_w(px(200.)).truncate().child(
+                                        project.map_or("No project".to_string(), |p| p.name.clone()),
+                                    ))
+                                    .child(icon(IconName::ChevronDown, 12., c_muted())),
+                            )
+                            .when(menu_open, |el| el.child(self.project_menu(cx))),
                     )
-                    .when_some(crumb, |el, title| {
-                        el.child(icon(IconName::ChevronRight, 12., c_muted())).child(
+                    .when_some(branch, |el, (sid, branch)| {
+                        el.child(
                             div()
-                                .id("crumb-session")
-                                .min_w_0()
-                                .max_w(px(220.))
-                                .truncate()
-                                .px_1()
-                                .rounded_sm()
+                                .id("top-branch")
+                                .h(px(24.))
+                                .px(px(7.))
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap(px(5.))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(c_border()))
+                                .text_size(px(12.))
+                                .text_color(rgb(c_secondary()))
                                 .cursor_pointer()
-                                .text_color(rgb(c_text()))
-                                .hover(|el| el.bg(tint(c_subtle())))
+                                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
                                 .tooltip(|window, cx| {
-                                    Tooltip::new("Rename this session").build(window, cx)
+                                    Tooltip::new("Branch: changes, terminal, worktrees").build(window, cx)
                                 })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.start_rename(window, cx);
-                                    cx.notify();
-                                }))
-                                .child(title),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    self.on_context(ctxmenu::CtxTarget::Branch(sid), cx),
+                                )
+                                .child(icon(IconName::GitBranch, 12., c_muted()))
+                                .child(div().max_w(px(180.)).truncate().child(branch)),
                         )
-                    }),
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink(1.)
+                            .min_w_0()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_secondary()))
+                            .child(icon(IconName::ChevronRight, 12., c_muted()))
+                            .child(
+                                div()
+                                    .id("crumb-mode")
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        // The mode's own top page: Sessions lists every session.
+                                        if mode == Mode::Sessions {
+                                            this.view = View::AllSessions;
+                                            this.save();
+                                        } else {
+                                            this.go(mode, window, cx);
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(mode.label()),
+                            )
+                            .when_some(crumb, |el, title| {
+                                el.child(icon(IconName::ChevronRight, 12., c_muted())).child(
+                                    div()
+                                        .id("crumb-session")
+                                        .min_w_0()
+                                        .max_w(px(220.))
+                                        .truncate()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .text_color(rgb(c_text()))
+                                        .hover(|el| el.bg(tint(c_subtle())))
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new("Rename this session").build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.start_rename(window, cx);
+                                            cx.notify();
+                                        }))
+                                        .child(title),
+                                )
+                            }),
+                    )
             )
             .child(
-                div().flex_1().min_w_0().flex().justify_center().child(
+                div().flex_shrink(1.).min_w(px(160.)).flex().justify_center().child(
                     div()
                         .id("top-search")
                         .relative()
@@ -1142,8 +1155,9 @@ impl RunoApp {
             )
             .child(
                 div()
+                    .flex_1()
                     .flex()
-                    .flex_none()
+                    .justify_end()
                     .items_center()
                     .gap(px(6.))
                     .child(

@@ -656,21 +656,43 @@ pub fn c_del() -> u32 {
         _ => c_red(),
     }
 }
-pub fn c_add_bg() -> u32 {
-    let strength = if DIFF.load(Ordering::Relaxed) == 2 {
+fn diff_strength() -> f32 {
+    if DIFF.load(Ordering::Relaxed) == 2 {
         0.28
     } else {
         0.14
-    };
-    mix(c_add(), c_canvas(), strength)
+    }
 }
-pub fn c_del_bg() -> u32 {
-    let strength = if DIFF.load(Ordering::Relaxed) == 2 {
-        0.28
+/// Fill of an added or removed diff line. In glass mode it is a wash of the colour over
+/// the glass, so the diff stays part of the window instead of a solid block over it.
+pub fn diff_fill(color: u32) -> Rgba {
+    if glass_on() {
+        with_alpha(color, (diff_strength() * 1.4 * 255.) as u8)
     } else {
-        0.14
-    };
-    mix(c_del(), c_canvas(), strength)
+        rgb(mix(color, c_canvas(), diff_strength()))
+    }
+}
+
+/// A surface set into a panel, such as the diff under the file list: the content colour,
+/// and in glass mode a sheet of it, since a full content layer stacked on a panel turns
+/// solid and hides the desktop that every other region shows.
+pub fn inset(color: u32) -> Rgba {
+    if glass_on() {
+        // Light layers add up faster: a white sheet over white glass turns opaque.
+        with_alpha(color, if is_dark() { 0x80 } else { 0x40 })
+    } else {
+        rgb(color)
+    }
+}
+
+/// Background of code blocks and the terminal log in glass mode: a shade over the glass
+/// rather than the theme's solid grey.
+pub fn code_wash() -> Rgba {
+    if is_dark() {
+        rgba(0x00000047)
+    } else {
+        rgba(0x0000000d)
+    }
 }
 
 // ---------- desktop notification ----------

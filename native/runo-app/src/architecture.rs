@@ -1243,9 +1243,8 @@ pub(crate) struct ArchPage {
 impl ArchPage {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<RunoApp>) -> (Self, Vec<Subscription>) {
         let notes = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder(
-                "Write down how the system fits together and the decisions behind it. Saved to the repository as you type.",
-            )
+            TextareaState::new(window, cx)
+                .placeholder("How the system fits together, and the decisions behind it.")
         });
         let question = cx.new(|cx| {
             InputState::new(window, cx).placeholder(
