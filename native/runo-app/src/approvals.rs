@@ -52,14 +52,20 @@ pub fn folder() -> PathBuf {
     crate::store::data_dir().join("approvals")
 }
 
+/// How long "wait indefinitely" waits: long enough that the turn ends some other way.
+const FOREVER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// How long an agent waits for the person (Settings > Agents).
 pub fn wait() -> Duration {
-    Duration::from_secs(
-        crate::settings::AppSettings::load()
-            .approval_wait_mins
-            .clamp(1, 24 * 60) as u64
-            * 60,
-    )
+    wait_for(crate::settings::AppSettings::load().approval_wait_mins)
+}
+
+/// The wait for a setting in minutes, where 0 means no limit.
+fn wait_for(mins: u32) -> Duration {
+    match mins {
+        0 => FOREVER,
+        mins => Duration::from_secs(mins.clamp(1, 24 * 60) as u64 * 60),
+    }
 }
 
 fn now() -> u64 {
@@ -258,6 +264,13 @@ pub fn describe(tool: &str, input: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_minutes_waits_indefinitely() {
+        assert_eq!(wait_for(5), Duration::from_secs(300));
+        assert_eq!(wait_for(100_000), Duration::from_secs(24 * 60 * 60));
+        assert!(wait_for(0) >= Duration::from_secs(7 * 24 * 60 * 60));
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

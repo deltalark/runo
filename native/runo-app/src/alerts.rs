@@ -33,9 +33,26 @@ fn stop_run(key: &str, pid: Option<u32>, why: &'static str) {
     let pid = run.1;
     drop(runs);
     #[cfg(unix)]
-    // SAFETY: kill only sends a signal; the run leads its own process group.
-    unsafe {
-        libc::kill(-(pid as i32), libc::SIGTERM);
+    {
+        // SAFETY: kill only sends a signal; the run leads its own process group.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGTERM);
+        }
+        // A process that ignores the request, or was forked just as it was sent (which
+        // macOS can miss), is killed a moment later while the run is still listed.
+        let key = key.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            let listed = RUNS
+                .lock()
+                .is_ok_and(|runs| runs.iter().any(|r| r.0 == key && r.1 == pid));
+            if listed {
+                // SAFETY: as above.
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
+        });
     }
     #[cfg(windows)]
     let _ = std::process::Command::new("taskkill")
@@ -1048,13 +1065,13 @@ impl RunoApp {
             .iter()
             .filter(|r| !self.approvals.iter().any(|a| a.id == r.id))
         {
-            if let Some(session) = self
-                .approval_session(request)
-                .and_then(|id| self.state.session(id))
-            {
+            let id = self.approval_session(request);
+            if let Some(session) = id.and_then(|id| self.state.session(id)) {
                 let name = agent::provider(&session.provider).name;
-                settings::notify(
-                    "Permission needed",
+                crate::desktop_notify::send(
+                    cx,
+                    id,
+                    &format!("Permission needed: {}", session.title),
                     &format!(
                         "{name} wants to {}",
                         approvals::describe(&request.tool, &request.input)

@@ -817,7 +817,12 @@ impl RunoApp {
                     },
                 );
                 if auto.scheduled() {
-                    notify(&auto.name, "The scheduled playbook could not start");
+                    crate::desktop_notify::send(
+                        cx,
+                        None,
+                        &auto.name,
+                        "The scheduled playbook could not start",
+                    );
                 }
             }
         }

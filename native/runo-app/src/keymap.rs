@@ -510,15 +510,14 @@ mod tests {
 
     #[test]
     fn same_keys_compare_equal() {
-        let platform = if cfg!(target_os = "macos") {
-            "cmd"
+        // Modifiers come in the order Ctrl, Alt, Shift, Cmd, whichever key "secondary" is.
+        let expected = if cfg!(target_os = "macos") {
+            "shift-cmd-k"
         } else {
-            "ctrl"
+            "ctrl-shift-k"
         };
-        assert_eq!(
-            normalize("secondary-shift-k"),
-            format!("{platform}-shift-k")
-        );
+        assert_eq!(normalize("secondary-shift-k"), expected);
+        assert_eq!(normalize("shift-secondary-k"), expected);
         assert_eq!(normalize("shift-ctrl-k"), "ctrl-shift-k");
     }
 
