@@ -106,11 +106,12 @@ pub fn resumes(provider: &str) -> bool {
     )
 }
 
-/// CLIs that take a conversation id chosen by Runo on the first run. Copilot does
-/// since it gained `--session-id`.
+/// CLIs that take a conversation id chosen by Runo on the first run. Copilot and Gemini
+/// do once their help lists `--session-id`; otherwise the id comes from their output.
 pub fn names_conversation(provider: &str) -> bool {
     match provider {
-        "claude" | "gemini" | "qwen" => true,
+        "claude" | "qwen" => true,
+        "gemini" => crate::caps::mentions("gemini", "--session-id"),
         "copilot" => crate::caps::mentions("copilot", "--session-id"),
         _ => false,
     }
@@ -479,14 +480,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             for dir in list(&opts.add_dirs) {
                 args.extend([s("--include-directories"), dir]);
             }
-            if !spec.session_id.is_empty() {
-                let flag = if spec.resume {
-                    "--resume"
-                } else {
-                    "--session-id"
-                };
-                args.extend([s(flag), spec.session_id.to_string()]);
-            }
+            args.extend(conversation_args(spec));
             if qwen && knows("--mcp-config") {
                 let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
                     .into_iter()
@@ -734,6 +728,29 @@ pub fn imports_cli_turns(provider: &str) -> bool {
     matches!(provider, "claude" | "codex")
 }
 
+/// Gemini's and Qwen Code's conversation flags: `--resume` to continue, or a new
+/// conversation's id up front. Gemini resumes by its number for the session (or
+/// "latest"), and names a new one only when it has `--session-id`.
+fn conversation_args(spec: &RunSpec) -> Vec<String> {
+    let id = spec.session_id;
+    if id.is_empty() {
+        return Vec::new();
+    }
+    let gemini = spec.provider == "gemini";
+    if spec.resume {
+        let to = if gemini {
+            crate::gemini::resume_arg(id)
+        } else {
+            id.to_string()
+        };
+        vec!["--resume".into(), to]
+    } else if !gemini || names_conversation("gemini") {
+        vec!["--session-id".into(), id.to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Arguments that open the agent's interactive CLI on this session's conversation, with
 /// the same model, mode and tools as the chat. `spec.resume` picks up the conversation
 /// in `spec.session_id`; otherwise a new one starts (named up front for Claude Code).
@@ -756,15 +773,8 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
     let resume = spec.resume && !id.is_empty();
     match spec.provider {
         "gemini" | "qwen" => {
-            let flag = if spec.resume {
-                "--resume"
-            } else {
-                "--session-id"
-            };
             let mut args = with_model(Vec::new(), "-m");
-            if !id.is_empty() {
-                args.extend([s(flag), id]);
-            }
+            args.extend(conversation_args(spec));
             return args;
         }
         "cursor" | "copilot" | "droid" => {
@@ -1283,6 +1293,10 @@ pub fn run_agent(
                 command.env(key.trim(), value.trim());
             }
         }
+    }
+    // Gemini holds to the session's mode only in a folder it trusts.
+    if spec.provider == "gemini" && spec.local && sandbox.is_none() {
+        crate::gemini::trust(dir, &spec.opts.env);
     }
     if crate::mcp::project_file(spec.provider).is_some() {
         crate::mcp::write_project(
@@ -1910,8 +1924,8 @@ mod arg_tests {
                 .windows(2)
                 .any(|w| w == pair)
         };
-        assert!(has("gemini", false, ["--session-id", "id-1"]));
-        assert!(has("gemini", true, ["--resume", "id-1"]));
+        // Gemini resumes by number, or the folder's latest while the number is unknown.
+        assert!(has("gemini", true, ["--resume", "latest"]));
         assert!(has("qwen", true, ["--resume", "id-1"]));
         assert!(has("cursor", true, ["--resume", "id-1"]));
         assert!(has("copilot", true, ["--resume", "id-1"]));
@@ -2100,6 +2114,23 @@ mod arg_tests {
             file_servers(&remote).is_empty(),
             "no local programs elsewhere"
         );
+    }
+
+    #[test]
+    fn gemini_names_a_conversation_once_its_help_lists_the_flag() {
+        crate::caps::set(
+            "gemini",
+            crate::caps::Caps {
+                help: "--session-id  Start a session with this id".into(),
+                ..Default::default()
+            },
+        );
+        assert!(names_conversation("gemini"));
+        let fresh = run_args("gemini", "edit", false, &[]);
+        assert!(fresh.windows(2).any(|w| w == ["--session-id", "id-1"]));
+        let resumed = run_args("gemini", "edit", true, &[]);
+        assert!(resumed.windows(2).any(|w| w == ["--resume", "latest"]));
+        assert!(!resumed.contains(&"--session-id".to_string()));
     }
 
     #[test]

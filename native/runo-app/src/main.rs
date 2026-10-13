@@ -12,6 +12,7 @@ mod ctxmenu;
 mod desktop_notify;
 mod files;
 mod fileview;
+mod gemini;
 mod git;
 mod github;
 mod handoff;
