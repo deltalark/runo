@@ -28,10 +28,28 @@ const CANDIDATES: &[&str] = &[
 #[cfg(not(target_os = "macos"))]
 const CANDIDATES: &[&str] = &[
     "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
     "/usr/bin/microsoft-edge",
+    "/usr/bin/microsoft-edge-stable",
     "/usr/bin/brave-browser",
+    "/opt/google/chrome/chrome",
+    "/opt/microsoft/msedge/msedge",
+    "/opt/brave.com/brave/brave",
+    "/snap/bin/chromium",
+];
+
+/// Browser commands looked up on PATH when none of the usual paths exist.
+const PATH_NAMES: &[&str] = &[
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "microsoft-edge",
+    "microsoft-edge-stable",
+    "brave-browser",
+    "brave",
 ];
 
 /// The first candidate that exists, also looking under `~/Applications`.
@@ -49,9 +67,37 @@ pub fn pick_chromium(home: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Opt
     })
 }
 
+/// The first browser command found in a PATH-style list of directories.
+pub fn search_path(path: &std::ffi::OsStr, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
+    PATH_NAMES
+        .iter()
+        .find_map(|name| dirs.iter().map(|d| d.join(name)).find(|p| exists(p)))
+}
+
+/// The browser to drive: `CHROME_PATH` when set, then the usual install paths, then PATH.
 pub fn find_chromium() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CHROME_PATH").map(PathBuf::from) {
+        if path.exists() {
+            return Some(path);
+        }
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     pick_chromium(home.as_deref(), Path::exists)
+        .or_else(|| search_path(&std::env::var_os("PATH").unwrap_or_default(), Path::exists))
+}
+
+/// What to say when no browser was found, for this system.
+pub fn not_found_message() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "No Chrome, Edge, Brave or Chromium found in /Applications or ~/Applications. \
+         Install one, or set CHROME_PATH to its executable."
+    } else if cfg!(windows) {
+        "The built-in browser needs macOS or Linux for now."
+    } else {
+        "No Chrome, Edge, Brave or Chromium found in /usr/bin, /opt, /snap/bin or on PATH. \
+         Install one (for example chromium), or set CHROME_PATH to its executable."
+    }
 }
 
 /// The browser's name from its executable path, e.g. "Google Chrome".
@@ -117,6 +163,81 @@ pub struct PageInfo {
     pub loading: bool,
     /// An `alert`, `confirm` or `prompt` waiting for an answer: (kind, message).
     pub dialog: Option<(String, String)>,
+    /// Console errors and uncaught exceptions, oldest first.
+    pub console: Vec<String>,
+}
+
+/// Console errors kept per page.
+const MAX_CONSOLE: usize = 50;
+
+/// Run in every page before its own scripts: links and `window.open` that would open
+/// a new tab or window load in the same page instead, since the panel shows one page.
+const IN_PLACE_JS: &str = r#"(() => {
+  const go = (url) => {
+    if (!url) return;
+    const href = new URL(String(url), location.href).href;
+    if (href !== 'about:blank') location.href = href;
+  };
+  window.open = function (url) { go(url); return null; };
+  const inPlace = (e) => {
+    const t = e.target;
+    const el = t && t.closest ? t.closest('a[target], area[target], form[target]') : null;
+    if (el && el.target && el.target !== '_self') el.target = '_self';
+  };
+  document.addEventListener('click', inPlace, true);
+  document.addEventListener('auxclick', inPlace, true);
+  document.addEventListener('submit', inPlace, true);
+})();"#;
+
+/// A console error or uncaught exception from a CDP event, as one line of text.
+pub fn console_error(method: &str, params: &Value) -> Option<String> {
+    match method {
+        "Runtime.consoleAPICalled" => {
+            let kind = params["type"].as_str().unwrap_or_default();
+            if kind != "error" && kind != "assert" {
+                return None;
+            }
+            let args: Vec<String> = params["args"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|v| match v["value"].as_str() {
+                            Some(s) => s.to_string(),
+                            None if !v["value"].is_null() => v["value"].to_string(),
+                            None => v["description"].as_str().unwrap_or_default().to_string(),
+                        })
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(format!("console.{kind}: {}", args.join(" ")))
+        }
+        "Runtime.exceptionThrown" => {
+            let d = &params["exceptionDetails"];
+            let text = d["exception"]["description"]
+                .as_str()
+                .or_else(|| d["text"].as_str())
+                .unwrap_or("Uncaught exception");
+            let place = d["url"]
+                .as_str()
+                .filter(|u| !u.is_empty())
+                .map(|u| format!(" ({u}:{})", d["lineNumber"].as_u64().unwrap_or(0) + 1))
+                .unwrap_or_default();
+            Some(format!("{}{place}", text.lines().next().unwrap_or(text)))
+        }
+        "Log.entryAdded" => {
+            let e = &params["entry"];
+            if e["level"] != "error" {
+                return None;
+            }
+            let url = e["url"].as_str().filter(|u| !u.is_empty());
+            Some(match url {
+                Some(url) => format!("{} ({url})", e["text"].as_str().unwrap_or_default()),
+                None => e["text"].as_str().unwrap_or_default().to_string(),
+            })
+        }
+        _ => None,
+    }
 }
 
 struct Page {
@@ -135,6 +256,8 @@ struct Shared {
     frame: Option<Frame>,
     replies: HashMap<u64, Sender<Value>>,
     dead: bool,
+    /// New tabs or windows a page opened, by target, with the session of their opener.
+    popups: HashMap<String, u64>,
 }
 
 pub struct Engine {
@@ -339,6 +462,12 @@ impl Engine {
         let s = Some(session.as_str());
         self.send("Page.enable", json!({}), s);
         self.send("Runtime.enable", json!({}), s);
+        self.send("Log.enable", json!({}), s);
+        self.send(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": IN_PLACE_JS}),
+            s,
+        );
         // Pages behave as focused (caret, :focus, focus events) though no window is.
         self.send(
             "Emulation.setFocusEmulationEnabled",
@@ -468,6 +597,32 @@ impl Engine {
             "Page.handleJavaScriptDialog",
             json!({"accept": accept}),
         );
+    }
+
+    /// Forget the page's console errors.
+    pub fn clear_console(&self, key: u64) {
+        let mut shared = self.shared.lock().unwrap();
+        if let Some(page) = shared.pages.get_mut(&key) {
+            page.info.console.clear();
+        }
+    }
+
+    /// The text selected in the page, in an input or field too. Blocks for the reply.
+    pub fn selected_text(&self, key: u64) -> Option<String> {
+        let session = self.session_of(key)?;
+        let js = "(() => { const e = document.activeElement; \
+            if (e && typeof e.selectionStart === 'number' && e.value !== undefined) \
+            return e.value.slice(e.selectionStart, e.selectionEnd); \
+            return String(getSelection()); })()";
+        let reply = self.call(
+            "Runtime.evaluate",
+            json!({"expression": js, "returnByValue": true}),
+            Some(&session),
+        )?;
+        reply["result"]["value"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
     }
 
     /// `kind` is mouseMoved, mousePressed, mouseReleased or mouseWheel.
@@ -642,6 +797,8 @@ fn read_loop(
                         seq.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+                "Target.targetCreated" | "Target.targetInfoChanged"
+                    if adopt_popup(&params["targetInfo"], &shared, &mut writer, &ids) => {}
                 "Target.targetInfoChanged" => {
                     let info = &params["targetInfo"];
                     let target = info["targetId"].as_str().unwrap_or_default();
@@ -649,6 +806,20 @@ fn read_loop(
                     if let Some(page) = s.pages.values_mut().find(|p| p.target == target) {
                         page.info.url = info["url"].as_str().unwrap_or_default().to_string();
                         page.info.title = info["title"].as_str().unwrap_or_default().to_string();
+                        seq.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                method @ ("Runtime.consoleAPICalled"
+                | "Runtime.exceptionThrown"
+                | "Log.entryAdded") => {
+                    let Some(line) = console_error(method, params) else {
+                        continue;
+                    };
+                    let mut s = shared.lock().unwrap();
+                    if let Some(page) = s.pages.values_mut().find(|p| p.session == session) {
+                        page.info.console.push(line);
+                        let extra = page.info.console.len().saturating_sub(MAX_CONSOLE);
+                        page.info.console.drain(..extra);
                         seq.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -678,6 +849,50 @@ fn read_loop(
     s.dead = true;
     s.replies.clear();
     seq.fetch_add(1, Ordering::Relaxed);
+}
+
+/// When `info` is a new tab or window one of our pages opened, load its URL in the
+/// opener and close it. Returns whether the target was such a popup.
+fn adopt_popup(
+    info: &Value,
+    shared: &Arc<Mutex<Shared>>,
+    writer: &mut std::fs::File,
+    ids: &Arc<AtomicU64>,
+) -> bool {
+    let target = info["targetId"].as_str().unwrap_or_default().to_string();
+    let url = info["url"].as_str().unwrap_or_default();
+    let mut s = shared.lock().unwrap();
+    let opener = info["openerId"].as_str().unwrap_or_default();
+    let key = match s.popups.get(&target) {
+        Some(key) => *key,
+        None if info["type"] == "page" && !opener.is_empty() => {
+            let Some((key, _)) = s.pages.iter().find(|(_, p)| p.target == opener) else {
+                return false;
+            };
+            let key = *key;
+            s.popups.insert(target.clone(), key);
+            key
+        }
+        None => return false,
+    };
+    if url.is_empty() || url == "about:blank" {
+        return true;
+    }
+    s.popups.remove(&target);
+    let Some(session) = s.pages.get(&key).map(|p| p.session.clone()) else {
+        return true;
+    };
+    drop(s);
+    let mut send = |msg: Value| {
+        let _ = writer.write_all(&frame_message(&msg));
+    };
+    send(
+        json!({"id": ids.fetch_add(1, Ordering::Relaxed), "sessionId": session,
+        "method": "Page.navigate", "params": {"url": url}}),
+    );
+    send(json!({"id": ids.fetch_add(1, Ordering::Relaxed),
+        "method": "Target.closeTarget", "params": {"targetId": target}}));
+    true
 }
 
 /// A base64 JPEG as a BGRA image GPUI can draw.
@@ -718,6 +933,28 @@ mod tests {
     }
 
     #[test]
+    fn console_errors_become_lines() {
+        let log = json!({"type": "error", "args": [{"type": "string", "value": "boom"}, {"type": "number", "value": 3}]});
+        assert_eq!(
+            console_error("Runtime.consoleAPICalled", &log).as_deref(),
+            Some("console.error: boom 3")
+        );
+        let info = json!({"type": "log", "args": [{"value": "hi"}]});
+        assert_eq!(console_error("Runtime.consoleAPICalled", &info), None);
+        let thrown = json!({"exceptionDetails": {"text": "Uncaught", "url": "http://x/app.js", "lineNumber": 9,
+            "exception": {"description": "TypeError: x is undefined\n    at f (app.js:10)"}}});
+        assert_eq!(
+            console_error("Runtime.exceptionThrown", &thrown).as_deref(),
+            Some("TypeError: x is undefined (http://x/app.js:10)")
+        );
+        let net = json!({"entry": {"level": "error", "text": "Failed to load resource", "url": "http://x/a.png"}});
+        assert_eq!(
+            console_error("Log.entryAdded", &net).as_deref(),
+            Some("Failed to load resource (http://x/a.png)")
+        );
+    }
+
+    #[test]
     fn panel_points_map_to_page_pixels() {
         // Same size: unchanged.
         assert_eq!(to_page((10., 20.), (400., 300.), (400., 300.)), (10., 20.));
@@ -747,6 +984,12 @@ mod tests {
             assert_eq!(browser_name(Path::new(user_brave)), "Brave Browser");
         }
         assert_eq!(pick_chromium(Some(home), |_| false), None);
+        let path = std::env::join_paths(["/nope", "/home/me/bin"]).unwrap();
+        assert_eq!(
+            search_path(&path, |p| p == Path::new("/home/me/bin/chromium")),
+            Some(PathBuf::from("/home/me/bin/chromium"))
+        );
+        assert_eq!(search_path(&path, |_| false), None);
         assert_eq!(key_spec("enter").unwrap().vk, 13);
         assert!(key_spec("a").is_none());
     }

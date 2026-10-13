@@ -15,6 +15,75 @@ const DEV_PORTS: [u16; 14] = [
     3000, 3001, 4000, 4200, 4321, 5000, 5173, 5174, 6006, 8000, 8080, 8081, 8888, 9000,
 ];
 
+/// Ports that are rarely web pages: databases, caches and the like.
+const NOT_WEB: [u16; 9] = [3306, 5432, 6379, 6380, 11211, 27017, 9200, 2375, 5672];
+
+/// Listening TCP ports in `/proc/net/tcp`-style text, on loopback or all interfaces.
+pub(crate) fn parse_proc_net(text: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in text.lines().skip(1) {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // sl local_address rem_address st ...; 0A is LISTEN.
+        let (Some(local), Some("0A")) = (cols.get(1), cols.get(3).copied()) else {
+            continue;
+        };
+        let Some((addr, port)) = local.rsplit_once(':') else {
+            continue;
+        };
+        let local_only = matches!(
+            addr,
+            "0100007F" | "00000000" | "00000000000000000000000000000000"
+        ) || addr == "00000000000000000000000001000000"
+            || addr.ends_with("0100007F");
+        if let (true, Ok(port)) = (local_only, u16::from_str_radix(port, 16)) {
+            ports.push(port);
+        }
+    }
+    ports
+}
+
+/// Listening ports in `lsof -nP -iTCP -sTCP:LISTEN` output.
+pub(crate) fn parse_lsof(text: &str) -> Vec<u16> {
+    text.lines()
+        .filter(|l| l.contains("(LISTEN)"))
+        .filter_map(|l| {
+            let name = l.split_whitespace().rev().nth(1)?;
+            name.rsplit_once(':')?.1.parse().ok()
+        })
+        .collect()
+}
+
+/// Dev-server-like ports listening on this machine: unprivileged, not ephemeral and not
+/// a well-known database or cache.
+fn listening_ports() -> Vec<u16> {
+    let mut ports = Vec::new();
+    if cfg!(target_os = "linux") {
+        for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            ports.extend(parse_proc_net(
+                &std::fs::read_to_string(file).unwrap_or_default(),
+            ));
+        }
+    } else if let Ok(out) = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN"])
+        .output()
+    {
+        ports.extend(parse_lsof(&String::from_utf8_lossy(&out.stdout)));
+    }
+    ports.retain(|p| (1024..32768).contains(p) && !NOT_WEB.contains(p));
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// The message asking the agent to fix errors the page logged.
+pub(crate) fn console_prompt(url: &str, errors: &[String]) -> String {
+    format!(
+        "The page at {url} logged these errors in the browser console:\n\n```\n{}\n```\n\n\
+         Find the cause and fix it.",
+        errors.join("\n")
+    )
+}
+
 /// Turn what was typed into a URL: `localhost:3000` and `:5173` work too.
 pub(crate) fn normalize_url(raw: &str) -> Option<String> {
     let raw = raw.trim();
@@ -82,6 +151,8 @@ pub(crate) struct BrowserView {
     synced_url: String,
     /// Mouse buttons held down over the page, as CDP's bit mask.
     buttons: u8,
+    /// The console error list is expanded.
+    console_open: bool,
     pub error: Option<String>,
 }
 
@@ -111,14 +182,21 @@ impl RunoApp {
         self.browser_scanning = true;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let open: Vec<String> = DEV_PORTS
+            let mut ports: Vec<u16> = DEV_PORTS
                 .iter()
+                .copied()
                 .filter(|p| {
-                    let addr = SocketAddr::from(([127, 0, 0, 1], **p));
+                    let addr = SocketAddr::from(([127, 0, 0, 1], *p));
                     TcpStream::connect_timeout(&addr, Duration::from_millis(120)).is_ok()
                 })
-                .map(|p| p.to_string())
                 .collect();
+            for port in listening_ports() {
+                if !ports.contains(&port) {
+                    ports.push(port);
+                }
+            }
+            ports.sort_unstable();
+            let open: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
             let _ = tx.send(Event::Output("ports".into(), Ok(open.join(","))));
         });
     }
@@ -160,8 +238,7 @@ impl RunoApp {
         }
         self.browser_view.pages.clear();
         let Some(path) = browser_engine::find_chromium() else {
-            self.browser_view.error =
-                Some("No Chrome, Edge, Brave or Chromium found in Applications.".into());
+            self.browser_view.error = Some(browser_engine::not_found_message().into());
             return None;
         };
         let profile = store::data_dir().join("browser").join("profile");
@@ -326,7 +403,13 @@ impl RunoApp {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
         let mods = modifier_bits(m.alt, m.control, m.platform, m.shift);
-        if m.platform {
+        // The usual shortcut key: Cmd on macOS, Ctrl elsewhere.
+        let command = if cfg!(target_os = "macos") {
+            m.platform
+        } else {
+            m.control
+        };
+        if command {
             let edit = |command: &'static str, k: &'static str, code: &'static str, vk: u32| {
                 let spec = KeySpec {
                     key: k,
@@ -345,7 +428,32 @@ impl RunoApp {
                     }
                 }
                 "a" => edit("selectAll", "a", "KeyA", 65),
-                "x" => edit("cut", "x", "KeyX", 88),
+                // Headless Chromium has no clipboard of its own: read the selection and
+                // put it on the system clipboard, then delete it for a cut.
+                k @ ("c" | "x") => {
+                    let cut = k == "x";
+                    let page = engine.clone();
+                    self.bg(
+                        move || page.selected_text(key),
+                        move |this, text, cx| {
+                            let Some(text) = text else {
+                                return;
+                            };
+                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            if let (true, Some(engine)) = (cut, this.browser.clone()) {
+                                let spec = KeySpec {
+                                    key: "Delete",
+                                    code: "Delete",
+                                    vk: 46,
+                                    text: "",
+                                    command: "deleteForward",
+                                };
+                                engine.key(key, true, &spec, 0, &["deleteForward"]);
+                                engine.key(key, false, &spec, 0, &[]);
+                            }
+                        },
+                    );
+                }
                 "z" if m.shift => edit("redo", "z", "KeyZ", 90),
                 "z" => edit("undo", "z", "KeyZ", 90),
                 "r" => engine.reload(key),
@@ -682,6 +790,18 @@ impl RunoApp {
                     .child(div().text_size(px(12.5)).child(error.clone())),
             );
         }
+        if self.current().and_then(|s| s.sandbox()).is_some() {
+            body = body.child(
+                div()
+                    .px_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .child(
+                        "This session runs elsewhere, so servers it starts are not listed \
+                         below. Open them by their address on that machine.",
+                    ),
+            );
+        }
         body = body.child(
             div()
                 .flex()
@@ -705,7 +825,7 @@ impl RunoApp {
                     .child(if self.browser_scanning {
                         "Looking for dev servers…"
                     } else {
-                        "No dev server found on the usual ports. Start one in the Terminal."
+                        "No dev server is listening on this machine. Start one in the Terminal."
                     }),
             );
         }
@@ -732,6 +852,101 @@ impl RunoApp {
         body.into_any_element()
     }
 
+    /// Console errors of the page, under it: a count that opens the list, with buttons
+    /// to send them to the session's agent or clear them.
+    fn console_bar(&self, url: &str, errors: &[String], cx: &mut Context<Self>) -> AnyElement {
+        let open = self.browser_view.console_open;
+        let n = errors.len();
+        let prompt = console_prompt(url, errors);
+        let mut bar = div()
+            .flex_none()
+            .border_t_1()
+            .border_color(rgb(c_border()))
+            .v_flex()
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .id("console-toggle")
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_color(rgb(c_red()))
+                            .child(icon(
+                                if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                12.,
+                                c_muted(),
+                            ))
+                            .child(format!(
+                                "{n} console error{}",
+                                if n == 1 { "" } else { "s" }
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.browser_view.console_open = !this.browser_view.console_open;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button("console-send", "Send to agent", false)
+                            .h(px(22.))
+                            .px_2()
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(id) = this.selected {
+                                    this.state
+                                        .log(id, "Sent browser console errors to the agent");
+                                    this.send_or_queue(id, prompt.clone(), cx);
+                                }
+                                let key = this.browser_key();
+                                if let Some(engine) = &this.browser {
+                                    engine.clear_console(key);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.ghost_button_sized("console-clear", IconName::X, "Clear", 22.)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let key = this.browser_key();
+                                if let Some(engine) = &this.browser {
+                                    engine.clear_console(key);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+        if open {
+            let mut list = div()
+                .id("console-list")
+                .max_h(px(160.))
+                .overflow_y_scroll()
+                .px_3()
+                .pb_2()
+                .v_flex()
+                .gap_1()
+                .font_family(self.mono_font.clone())
+                .text_size(px(11.5))
+                .text_color(rgb(c_secondary()));
+            for line in errors.iter().rev() {
+                list = list.child(div().child(line.clone()));
+            }
+            bar = bar.child(list);
+        }
+        bar.into_any_element()
+    }
+
     pub(crate) fn browser_tab(&self, cx: &mut Context<Self>) -> AnyElement {
         let key = self.browser_key();
         let info = self
@@ -740,6 +955,10 @@ impl RunoApp {
             .filter(|_| self.browser_view.pages.contains(&key))
             .and_then(|e| e.info(key));
         let page = info.is_some();
+        let (url, console) = info
+            .as_ref()
+            .map(|i| (i.url.clone(), i.console.clone()))
+            .unwrap_or_default();
         let (loading, dialog) = info.map_or((false, None), |i| (i.loading, i.dialog));
         let (bounds, scale) = (
             self.browser_view.bounds.clone(),
@@ -776,6 +995,9 @@ impl RunoApp {
                         self.start_page(cx)
                     }),
             )
+            .when(page && !console.is_empty(), |el| {
+                el.child(self.console_bar(&url, &console, cx))
+            })
             .into_any_element()
     }
 }
@@ -785,6 +1007,23 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn listening_ports_are_read_from_proc_and_lsof() {
+        let proc = "  sl  local_address rem_address   st tx_queue rx_queue\n\
+   0: 0100007F:1538 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n\
+   1: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n\
+   2: 0100007F:1538 0100007F:A000 01 00000000:00000000 00:00000000 00000000\n\
+   3: 0A00020F:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000\n";
+        assert_eq!(parse_proc_net(proc), vec![5432, 8080]);
+        let lsof = "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n\
+node 1 me 20u IPv6 0x1 0t0 TCP *:5173 (LISTEN)\n\
+node 1 me 21u IPv4 0x2 0t0 TCP 127.0.0.1:3000 (LISTEN)\n\
+curl 2 me 5u IPv4 0x3 0t0 TCP 10.0.0.2:5555->1.2.3.4:443 (ESTABLISHED)\n";
+        assert_eq!(parse_lsof(lsof), vec![5173, 3000]);
+        let prompt = console_prompt("http://localhost:3000/", &["boom".into()]);
+        assert!(prompt.contains("http://localhost:3000/") && prompt.contains("```\nboom\n```"));
+    }
 
     #[test]
     fn urls_are_normalized_found_and_titled() {
