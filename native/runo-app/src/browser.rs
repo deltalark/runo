@@ -296,6 +296,10 @@ impl RunoApp {
             && self.browser_view.pages.contains(&key)
             && cx.global::<AppSettings>().browser_enabled;
         engine.show(visible.then_some(key));
+        if let Some(note) = engine.take_notes().pop() {
+            self.info = Some((note, std::time::Instant::now()));
+            cx.notify();
+        }
         if !visible {
             if let Some((old, _)) = self.browser_view.frame.take() {
                 cx.drop_image(old, None);

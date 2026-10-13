@@ -87,6 +87,14 @@ pub fn find_chromium() -> Option<PathBuf> {
         .or_else(|| search_path(&std::env::var_os("PATH").unwrap_or_default(), Path::exists))
 }
 
+/// Where downloads from the panel go: the person's Downloads folder.
+fn downloads_dir() -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let dir = home.join("Downloads");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.to_string_lossy().to_string())
+}
+
 /// What to say when no browser was found, for this system.
 pub fn not_found_message() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -258,6 +266,10 @@ struct Shared {
     dead: bool,
     /// New tabs or windows a page opened, by target, with the session of their opener.
     popups: HashMap<String, u64>,
+    /// Downloads by guid: the file name, until they finish.
+    downloads: HashMap<String, String>,
+    /// What to tell the person about downloads, oldest first.
+    notes: Vec<String>,
 }
 
 pub struct Engine {
@@ -354,6 +366,14 @@ impl Engine {
             .spawn(move || read_loop(reader, writer, shared, seq, ids))
             .map_err(|e| e.to_string())?;
         engine.send("Target.setDiscoverTargets", json!({"discover": true}), None);
+        // Headless Chromium drops downloads unless told where to put them.
+        if let Some(dir) = downloads_dir() {
+            engine.send(
+                "Browser.setDownloadBehavior",
+                json!({"behavior": "allow", "downloadPath": dir, "eventsEnabled": true}),
+                None,
+            );
+        }
         Ok(engine)
     }
 
@@ -599,6 +619,11 @@ impl Engine {
         );
     }
 
+    /// Download messages since the last call, to show the person.
+    pub fn take_notes(&self) -> Vec<String> {
+        std::mem::take(&mut self.shared.lock().unwrap().notes)
+    }
+
     /// Forget the page's console errors.
     pub fn clear_console(&self, key: u64) {
         let mut shared = self.shared.lock().unwrap();
@@ -808,6 +833,29 @@ fn read_loop(
                         page.info.title = info["title"].as_str().unwrap_or_default().to_string();
                         seq.fetch_add(1, Ordering::Relaxed);
                     }
+                }
+                "Browser.downloadWillBegin" => {
+                    let name = params["suggestedFilename"].as_str().unwrap_or("file");
+                    let guid = params["guid"].as_str().unwrap_or_default().to_string();
+                    let mut s = shared.lock().unwrap();
+                    s.downloads.insert(guid, name.to_string());
+                    s.notes.push(format!("Downloading {name}…"));
+                    seq.fetch_add(1, Ordering::Relaxed);
+                }
+                "Browser.downloadProgress" => {
+                    let state = params["state"].as_str().unwrap_or_default();
+                    if state == "inProgress" {
+                        continue;
+                    }
+                    let guid = params["guid"].as_str().unwrap_or_default();
+                    let mut s = shared.lock().unwrap();
+                    let name = s.downloads.remove(guid).unwrap_or_else(|| "file".into());
+                    s.notes.push(if state == "completed" {
+                        format!("Downloaded {name} to your Downloads folder.")
+                    } else {
+                        format!("The download of {name} was canceled.")
+                    });
+                    seq.fetch_add(1, Ordering::Relaxed);
                 }
                 method @ ("Runtime.consoleAPICalled"
                 | "Runtime.exceptionThrown"
