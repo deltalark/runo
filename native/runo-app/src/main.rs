@@ -342,6 +342,10 @@ struct RunoApp {
     auto_desc: Entity<InputState>,
     pb_query: Entity<InputState>,
     pb_confirm_delete: Option<u64>,
+    /// A read-only playbook session whose plan is waiting for "Allow edits".
+    pb_widen: Option<u64>,
+    /// Playbooks agents asked to start, waiting for the person to agree.
+    pb_asks: Vec<store::PlaybookRequest>,
     /// Installing playbooks from a link, repository or file, and its source box.
     pb_install: Option<pbshare::PlaybookInstall>,
     pb_source: Entity<InputState>,
@@ -1068,6 +1072,8 @@ impl RunoApp {
             }),
             pb_query: cx.new(|cx| InputState::new(window, cx).placeholder("Search playbooks")),
             pb_confirm_delete: None,
+            pb_widen: None,
+            pb_asks: Vec::new(),
             pb_install: None,
             pb_source: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -1526,6 +1532,7 @@ impl RunoApp {
                     }
                 }
                 self.finish_turn(id, ok, stopped, cx);
+                self.playbook_turn_done(id, ok);
                 self.write_memory(id);
                 self.save();
                 if self.split == Some(id) {
@@ -2036,14 +2043,22 @@ impl RunoApp {
         if self.demo_guard(cx) {
             return;
         }
+        let Some(id) = self.current().map(|s| s.id) else {
+            return;
+        };
+        self.run_terminal_in(id, line, cx);
+    }
+
+    /// Run a command in a session's Terminal, whether or not it is the one on screen.
+    fn run_terminal_in(&mut self, id: u64, line: String, cx: &mut Context<Self>) {
         let line = line.trim().to_string();
-        let Some(session) = self.current() else {
+        let Some(session) = self.state.session(id) else {
             return;
         };
         if line.is_empty() {
             return;
         }
-        let (id, dir, sandbox) = (session.id, session.dir.clone(), session.sandbox());
+        let (dir, sandbox) = (session.dir.clone(), session.sandbox());
         if self.handles.contains_key(&Target::Terminal(id)) {
             self.notice = Some("A command is already running in this terminal.".into());
             return;
@@ -3594,7 +3609,7 @@ impl RunoApp {
         if message.role == Role::System && message.meta == "sync" {
             return self.sync_card(index, message, cx);
         }
-        if message.role == Role::System && message.meta == "moved" {
+        if message.role == Role::System && (message.meta == "moved" || message.meta == "note") {
             return fade(
                 div()
                     .id(("message", index))
@@ -3607,7 +3622,15 @@ impl RunoApp {
                     .bg(tint(c_subtle()))
                     .text_size(px(12.5))
                     .text_color(rgb(c_secondary()))
-                    .child(icon(IconName::Server, 13., c_blue()))
+                    .child(icon(
+                        if message.meta == "note" {
+                            IconName::Info
+                        } else {
+                            IconName::Server
+                        },
+                        13.,
+                        c_blue(),
+                    ))
                     .child(div().flex_1().min_w_0().child(message.text.clone())),
             )
             .into_any_element();
@@ -6860,6 +6883,7 @@ impl RunoApp {
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_playbook_run(window, cx);
+        self.prepare_playbook_editor(window, cx);
         let st = cx.global::<AppSettings>().clone();
         // Opening or leaving Settings swaps the whole window, so it happens without motion.
         let in_settings = self.view == View::Settings;
@@ -7345,6 +7369,7 @@ impl Render for RunoApp {
             .children(self.project_modal(cx))
             .children(self.remove_project_modal(cx))
             .children(self.playbook_run_form(cx))
+            .children(self.playbook_ask_modal(cx))
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx));
         fade(root, "app-root", 450)

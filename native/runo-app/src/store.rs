@@ -458,7 +458,31 @@ pub struct Automation {
     /// Labels and defaults for its `{{key}}` placeholders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<crate::pbfile::Input>,
+    /// Its latest runs, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<PlaybookRun>,
+    /// A fingerprint of the playbook as it was installed, to tell edits made here from
+    /// changes at the source.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub installed: String,
 }
+
+/// One run of a playbook, for its history.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+pub struct PlaybookRun {
+    /// Unix seconds it started, or was due.
+    pub at: u64,
+    /// The session it ran in, or 0 when it didn't start.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub session: u64,
+    /// "running", "done", "failed", "skipped" or "not started".
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// Runs kept in a playbook's history.
+const RUNS_KEPT: usize = 20;
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
@@ -472,6 +496,30 @@ impl Automation {
     /// The values it asks for when it runs.
     pub fn run_inputs(&self) -> Vec<crate::pbfile::Input> {
         crate::pbfile::inputs_of(&self.inputs, &self.prompt)
+    }
+
+    /// Add a run to the history, dropping the oldest past the limit.
+    pub fn record(&mut self, run: PlaybookRun) {
+        self.runs.push(run);
+        if self.runs.len() > RUNS_KEPT {
+            let extra = self.runs.len() - RUNS_KEPT;
+            self.runs.drain(..extra);
+        }
+    }
+
+    /// What it is, for telling whether it changed: everything a playbook file holds.
+    pub fn fingerprint(&self) -> String {
+        let file = crate::pbfile::PlaybookFile {
+            author: String::new(),
+            version: String::new(),
+            ..self.to_file()
+        };
+        crate::pbfile::render(&file)
+    }
+
+    /// Edited here since it was installed.
+    pub fn edited_here(&self) -> bool {
+        !self.installed.is_empty() && self.installed != self.fingerprint()
     }
 
     /// Whether it declared that it may do `what`; undeclared playbooks may do anything.
@@ -597,6 +645,9 @@ pub struct PlaybookRequest {
     pub project: u64,
     /// Who asked, such as "claude-code".
     pub from: String,
+    /// The folder of the session that asked.
+    #[serde(default)]
+    pub dir: String,
 }
 
 /// Leave a request in `inbox`. Written under a temporary name and renamed, so the app

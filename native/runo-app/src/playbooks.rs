@@ -14,7 +14,14 @@ pub(crate) struct PlaybookEditor {
     pub error: Option<String>,
     /// What it may do, in `pbfile::PERMISSIONS` order.
     pub permissions: Vec<String>,
+    /// Labels and defaults as saved, to fill new input rows from.
+    pub declared: Vec<crate::pbfile::Input>,
+    /// A label box and a default box per `{{key}}` seen in the instructions.
+    pub inputs: Vec<(String, Entity<InputState>, Entity<InputState>)>,
 }
+
+/// The shortest custom schedule, in minutes.
+const MIN_EVERY: u64 = 10;
 
 /// Schedule presets in the editor: label and minutes.
 const SCHEDULES: [(&str, u64); 4] = [
@@ -346,13 +353,55 @@ impl RunoApp {
             .map(|a| a.permissions.clone())
             .filter(|p| !p.is_empty())
             .unwrap_or_else(all);
+        let declared = editing
+            .and_then(|id| self.state.automations.iter().find(|a| a.id == id))
+            .map(|a| a.inputs.clone())
+            .unwrap_or_default();
         self.pb_editor = Some(PlaybookEditor {
             editing,
             every,
             custom,
             error: None,
             permissions,
+            declared,
+            inputs: Vec::new(),
         });
+    }
+
+    /// Give each `{{key}}` in the editor's instructions a label and a default box.
+    pub(crate) fn prepare_playbook_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.pb_editor.as_ref() else {
+            return;
+        };
+        let prompt = self.auto_prompt.read(cx).value().to_string();
+        let missing: Vec<crate::pbfile::Input> =
+            crate::pbfile::inputs_of(&editor.declared, &prompt)
+                .into_iter()
+                .filter(|i| !editor.inputs.iter().any(|(k, _, _)| *k == i.key))
+                .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let rows: Vec<_> = missing
+            .into_iter()
+            .map(|input| {
+                let title = input.title();
+                let label = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(title)
+                        .default_value(input.label.clone())
+                });
+                let default = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder("No default")
+                        .default_value(input.default.clone())
+                });
+                (input.key, label, default)
+            })
+            .collect();
+        if let Some(editor) = self.pb_editor.as_mut() {
+            editor.inputs.extend(rows);
+        }
     }
 
     /// Save the editor: a new playbook, or changes to the one being edited.
@@ -364,8 +413,26 @@ impl RunoApp {
         let name = self.auto_name.read(cx).value().trim().to_string();
         let description = self.auto_desc.read(cx).value().trim().to_string();
         let prompt = self.auto_prompt.read(cx).value().trim().to_string();
+        let keys = crate::pbfile::placeholders(&prompt);
+        let inputs: Vec<crate::pbfile::Input> = editor
+            .inputs
+            .iter()
+            .filter(|(key, _, _)| keys.contains(key))
+            .map(|(key, label, default)| crate::pbfile::Input {
+                key: key.clone(),
+                label: label.read(cx).value().trim().to_string(),
+                default: default.read(cx).value().trim().to_string(),
+            })
+            .filter(|i| !i.label.is_empty() || !i.default.is_empty())
+            .collect();
         let every = if editor.custom {
             match self.auto_every.read(cx).value().trim().parse::<u64>() {
+                Ok(m) if m < MIN_EVERY => {
+                    self.playbook_error(&format!(
+                        "Runs need at least {MIN_EVERY} minutes between them."
+                    ));
+                    return;
+                }
                 Ok(m) => m,
                 Err(_) => {
                     self.playbook_error("Type the minutes between runs, such as 90.");
@@ -412,6 +479,7 @@ impl RunoApp {
                     a.project_id = project_id;
                     a.every_minutes = every;
                     a.permissions = permissions;
+                    a.inputs = inputs;
                 }
                 self.save();
             }
@@ -419,6 +487,7 @@ impl RunoApp {
                 self.push_playbook(name, prompt, description, project_id, every);
                 if let Some(a) = self.state.automations.last_mut() {
                     a.permissions = permissions;
+                    a.inputs = inputs;
                 }
                 self.save();
             }
@@ -587,10 +656,64 @@ impl RunoApp {
             None => self.pill(Some(IconName::Layers), "Any project".into(), c_muted()),
         };
         let confirming = self.pb_confirm_delete == Some(id);
-        let last = match auto.ran_at() {
-            0 => "Never run".to_string(),
-            at => format!("Last run {}", ago(at, now)),
+        let last = match (auto.runs.last(), auto.ran_at()) {
+            (Some(run), _) if run.status == "failed" || run.status == "not started" => {
+                format!("Last run failed {}", ago(run.at, now))
+            }
+            (_, 0) => "Never run".to_string(),
+            (_, at) => format!("Last run {}", ago(at, now)),
         };
+        let warning = crate::workspace::limits_warning(&auto.provider, &auto.permissions);
+        let mut history = div().v_flex().gap(px(2.));
+        for (j, run) in auto.runs.iter().rev().take(3).enumerate() {
+            let (glyph, tone, word) = match run.status.as_str() {
+                "done" => (IconName::CircleCheck, c_green(), "Done"),
+                "running" => (IconName::LoaderCircle, c_blue(), "Running"),
+                "skipped" => (IconName::SkipForward, c_muted(), "Skipped"),
+                "not started" => (IconName::CircleX, c_red(), "Didn't start"),
+                _ => (IconName::CircleX, c_red(), "Failed"),
+            };
+            let sid = run.session;
+            let exists = sid != 0 && self.state.session(sid).is_some();
+            history = history.child(
+                div()
+                    .id(("pb-run-row", i * 8 + j))
+                    .h(px(24.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .text_size(px(12.))
+                    .when(exists, |el| {
+                        el.cursor_pointer()
+                            .hover(|el| el.bg(tint(c_subtle())))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.select(sid);
+                                cx.notify();
+                            }))
+                    })
+                    .child(icon(glyph, 12., tone))
+                    .child(div().flex_none().text_color(rgb(c_text())).child(word))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(c_muted()))
+                            .child(ago(run.at, now)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(c_secondary()))
+                            .child(run.note.clone()),
+                    )
+                    .when(exists, |el| {
+                        el.child(icon(IconName::ChevronRight, 12., c_muted()))
+                    }),
+            );
+        }
         let card = div()
             .id(("pb-card", i))
             .group("pb-card")
@@ -754,6 +877,19 @@ impl RunoApp {
                     .child(schedule)
                     .children(self.playbook_badges(auto)),
             )
+            .when_some(warning, |el, w| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(12.))
+                        .text_color(rgb(c_amber()))
+                        .child(icon(IconName::ShieldAlert, 12., c_amber()))
+                        .child(w),
+                )
+            })
+            .when(!auto.runs.is_empty(), |el| el.child(history))
             .child(div().h(px(1.)).bg(rgb(c_border())))
             .child(if confirming {
                 div()
@@ -1334,21 +1470,32 @@ impl RunoApp {
                 .text_color(rgb(c_muted()))
                 .child("None. It runs as written.")
         } else {
-            let declared = editor
-                .editing
-                .and_then(|id| self.state.automations.iter().find(|a| a.id == id))
-                .map(|a| a.inputs.clone())
-                .unwrap_or_default();
-            let mut row = div().flex().flex_wrap().gap_1p5();
-            for input in crate::pbfile::inputs_of(&declared, &prompt) {
-                let text = if input.default.is_empty() {
-                    input.title()
-                } else {
-                    format!("{} · {}", input.title(), input.default)
+            let mut rows = div().v_flex().gap_1p5();
+            for key in &found {
+                let Some((_, label, default)) = editor.inputs.iter().find(|(k, _, _)| k == key)
+                else {
+                    continue;
                 };
-                row = row.child(self.pill(Some(IconName::SquarePen), text, c_blue()));
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .flex_none()
+                                .truncate()
+                                .text_size(px(12.))
+                                .font_family(self.mono_font.clone())
+                                .text_color(rgb(c_secondary()))
+                                .child(format!("{{{{{key}}}}}")),
+                        )
+                        .child(div().flex_1().child(Input::new(label).bordered(true).h(px(28.))))
+                        .child(div().flex_1().child(Input::new(default).bordered(true).h(px(28.)))),
+                );
             }
-            row
+            rows
         };
         let mut permissions = div().flex().flex_wrap().gap_1p5();
         for (j, (key, title, hint)) in crate::pbfile::PERMISSIONS.iter().enumerate() {
@@ -1544,7 +1691,7 @@ impl RunoApp {
                         div()
                             .v_flex()
                             .gap_1p5()
-                            .child(label("Schedule", Some("runs while Runo is open, in the project above")))
+                            .child(label("Schedule", Some("runs while Runo is open, in the project above, on its default connection")))
                             .child(
                                 div()
                                     .flex()

@@ -103,6 +103,10 @@ pub struct AppSettings {
     pub sync_backup_untracked: bool,
     /// End a turn on a connection at the first command it isn't allowed to run.
     pub stop_on_denial: bool,
+    /// Runs of each scheduled playbook to keep; 0 keeps them all.
+    pub playbook_keep_runs: u32,
+    /// Ask before a playbook an agent asked for starts.
+    pub confirm_agent_playbooks: bool,
     /// Give agents Cove's own tools (`cove mcp`): scratch VMs, commands, files, ports.
     pub cove_tools: bool,
 }
@@ -162,6 +166,8 @@ impl Default for AppSettings {
             sync_backup: false,
             sync_backup_untracked: false,
             stop_on_denial: true,
+            playbook_keep_runs: 10,
+            confirm_agent_playbooks: true,
             cove_tools: true,
         }
     }
@@ -233,6 +239,7 @@ impl AppSettings {
         SYNC_BACKUP.store(self.sync_backup, Ordering::Relaxed);
         SYNC_BACKUP_UNTRACKED.store(self.sync_backup_untracked, Ordering::Relaxed);
         STOP_ON_DENIAL.store(self.stop_on_denial, Ordering::Relaxed);
+        KEEP_RUNS.store(self.playbook_keep_runs, Ordering::Relaxed);
         crate::terminal::configure(
             self.term_font_size,
             match self.term_scroll.as_str() {
@@ -283,6 +290,7 @@ static COVE_TOOLS: AtomicBool = AtomicBool::new(true);
 static SYNC_BACKUP: AtomicBool = AtomicBool::new(false);
 static SYNC_BACKUP_UNTRACKED: AtomicBool = AtomicBool::new(false);
 static STOP_ON_DENIAL: AtomicBool = AtomicBool::new(true);
+static KEEP_RUNS: AtomicU32 = AtomicU32::new(10);
 
 pub fn cove_tools() -> bool {
     COVE_TOOLS.load(Ordering::Relaxed)
@@ -294,6 +302,10 @@ pub fn sync_backup() -> bool {
 
 pub fn sync_backup_untracked() -> bool {
     SYNC_BACKUP_UNTRACKED.load(Ordering::Relaxed)
+}
+
+pub fn playbook_keep_runs() -> usize {
+    KEEP_RUNS.load(Ordering::Relaxed) as usize
 }
 
 pub fn stop_on_denial() -> bool {

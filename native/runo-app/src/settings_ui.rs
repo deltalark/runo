@@ -499,6 +499,10 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Default agent", "Preselected in New session.", Ctl::Dropdown(agent::PROVIDERS.iter().map(|p| (p.id.to_string(), p.name.to_string())).collect(), st.default_provider.clone(), Rc::new(|s, v| s.default_provider = v))),
                 row("Default permission level", "Maps to each agent's closest mode: auto edit, read-only, or full access.", Ctl::Segment(options(&[("edit", "Auto edit"), ("plan", "Plan only"), ("full", "Full access")]), st.default_mode.clone(), Rc::new(|s, v| s.default_mode = v))),
             ]),
+            section("Playbooks", "Saved tasks that run as their own sessions, by hand, on a schedule or when an agent asks.", vec![
+                switch_row("Ask before agents start playbooks", "When an agent asks Runo to start a playbook, show what it may do and wait for you. Off starts it right away.", st.confirm_agent_playbooks, |s, v| s.confirm_agent_playbooks = v),
+                row("Scheduled runs to keep", "Older runs of each scheduled playbook are deleted, with their worktrees. Pinned and unread runs stay.", Ctl::Dropdown(options(&[("5", "5"), ("10", "10"), ("20", "20"), ("50", "50"), ("0", "All")]), st.playbook_keep_runs.to_string(), Rc::new(|s, v| s.playbook_keep_runs = v.parse().unwrap_or(10)))),
+            ]),
         ],
         SettingsPage::Providers => {
             let _ = &data.provider_paths;

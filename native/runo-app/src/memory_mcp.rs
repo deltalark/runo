@@ -371,10 +371,11 @@ fn playbook_call(state: &State, dir: &str, tool: &str, args: &Value, inbox: &Pat
         playbook: playbook.id,
         project,
         from: CLIENT.get().cloned().unwrap_or_else(|| "an agent".into()),
+        dir: dir.to_string(),
     };
     match crate::store::send_request(inbox, &request) {
         Ok(()) => text(format!(
-            "Asked Runo to start \"{}\" as a new session. It shows up in Runo's sidebar; if Runo is closed it starts when Runo opens.",
+            "Asked Runo to start \"{}\" as a new session. Runo may ask the person to confirm first. It shows up in Runo's sidebar; if Runo is closed it starts when Runo opens.",
             playbook.name
         )),
         Err(e) => failure(format!("Could not reach Runo: {e}")),
