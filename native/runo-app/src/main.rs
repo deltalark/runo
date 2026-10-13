@@ -33,6 +33,7 @@ mod persist;
 mod playbooks;
 mod projects;
 mod pty;
+mod sessions;
 mod settings;
 mod settings_ui;
 mod shell;
@@ -188,6 +189,8 @@ struct RunoApp {
     project_name: Entity<InputState>,
     /// The project form's worktree setup command.
     project_setup: Entity<InputState>,
+    /// The project form's repository URL, when cloning.
+    clone_url: Entity<InputState>,
     /// A freshly installed CLI found off PATH, to save as the agent's binary.
     pending_binary: Option<(&'static str, String)>,
     cli_focus: FocusHandle,
@@ -283,6 +286,12 @@ struct RunoApp {
     race_mode: bool,
     /// The New session dialog lists every agent, not just the main ones.
     new_more_agents: bool,
+    /// The branch a new isolated session starts from; None for the default branch.
+    new_base: Option<String>,
+    /// The New session form's project and its branches, for the base branch menu.
+    new_branches: Option<sessions::Branches>,
+    /// Search, filters and sort of the Sessions page, and matches in conversations.
+    finder: sessions::Finder,
     /// Newer releases of installed agents, from the last update check.
     updates: Vec<alerts::AgentUpdate>,
     /// Agent updates and installs running now, just finished, or failed.
@@ -1239,6 +1248,9 @@ impl RunoApp {
             project_name,
             project_setup: cx
                 .new(|cx| InputState::new(window, cx).placeholder("npm install (optional)")),
+            clone_url: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("https://github.com/owner/repo.git")
+            }),
             pending_binary: None,
             cli_focus: cx.focus_handle(),
             focus_cli: 0,
@@ -1294,7 +1306,9 @@ impl RunoApp {
                 TextareaState::new(window, cx)
                     .placeholder("Describe what you want the agent to work on…")
             }),
-            branch: cx.new(|cx| InputState::new(window, cx).placeholder("branch (optional)")),
+            branch: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Branch (optional, named after the task)")
+            }),
             term_input,
             address,
             browser_recent: Vec::new(),
@@ -1314,6 +1328,9 @@ impl RunoApp {
             new_isolated: true,
             new_connection: 0,
             new_more_agents: false,
+            new_base: None,
+            new_branches: None,
+            finder: sessions::Finder::new(window, cx),
             updates: Vec::new(),
             update_runs: HashMap::new(),
             update_checked: None,
@@ -1504,7 +1521,19 @@ impl RunoApp {
         );
         let pb_source_sub = cx.subscribe_in(&app.pb_source, window, repaint);
         let notes_query_sub = cx.subscribe_in(&app.notes_query, window, repaint);
+        let finder_sub = cx.subscribe_in(
+            &app.finder.query.clone(),
+            window,
+            |this, input, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let query = input.read(cx).value().to_string();
+                    this.search_transcripts(query, sessions::HitsFor::List);
+                    cx.notify();
+                }
+            },
+        );
         let remove_name_sub = cx.subscribe_in(&app.remove_name, window, repaint);
+        let clone_url_sub = cx.subscribe_in(&app.clone_url, window, repaint);
         let auto_name_sub = cx.subscribe_in(&app.auto_name, window, repaint);
         let auto_prompt_sub = cx.subscribe_in(
             &app.auto_prompt,
@@ -1527,7 +1556,9 @@ impl RunoApp {
             file_query_sub,
             pb_source_sub,
             notes_query_sub,
+            finder_sub,
             remove_name_sub,
+            clone_url_sub,
             auto_name_sub,
             auto_prompt_sub,
         ]);
@@ -2208,6 +2239,7 @@ impl RunoApp {
         let state = cx.new(|cx| CommandState::new(window, cx));
         state.update(cx, |s, cx| s.focus(window, cx));
         self.palette = Some(state);
+        self.finder.palette_hits.found.clear();
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2321,7 +2353,7 @@ impl RunoApp {
             CommandItem::new()
                 .label("Add a project folder…")
                 .icon(IconName::FolderPlus)
-                .keywords(["new project", "open folder"]),
+                .keywords(["new project", "open folder", "clone repository"]),
         );
         command_jumps.push(Jump::AddProject);
         commands = commands.item(
@@ -2371,25 +2403,7 @@ impl RunoApp {
         }
         groups.push((projects, project_jumps));
 
-        let mut sessions = CommandGroup::new().label("Sessions");
-        let mut session_jumps = Vec::new();
-        for session in self.state.sessions.iter().filter(|s| !s.archived) {
-            let project = self
-                .state
-                .projects
-                .iter()
-                .find(|p| p.id == session.project_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            sessions = sessions.item(
-                CommandItem::new()
-                    .label(format!("{}  ·  {project}", session.title))
-                    .icon(IconName::MessageSquare)
-                    .keywords([session.branch.clone(), session.provider.clone()]),
-            );
-            session_jumps.push(Jump::Session(session.id));
-        }
-        groups.push((sessions, session_jumps));
+        groups.extend(self.palette_sessions());
 
         let mut pages = CommandGroup::new().label("Settings");
         let mut page_jumps = Vec::new();
@@ -2429,6 +2443,7 @@ impl RunoApp {
 
         let this = cx.entity().downgrade();
         let cancel = this.clone();
+        let searcher = this.clone();
         div()
             .id("palette-backdrop")
             .absolute()
@@ -2459,6 +2474,13 @@ impl RunoApp {
                             .bordered(false)
                             .max_h(px(440.))
                             .placeholder("Jump to a session, project, file, setting or command…")
+                            .on_query(move |query, _, cx| {
+                                let query = query.to_string();
+                                let _ = searcher.update(cx, |this, cx| {
+                                    this.search_transcripts(query, sessions::HitsFor::Palette);
+                                    cx.notify();
+                                });
+                            })
                             .on_confirm(move |ix, window, cx| {
                                 let _ = this.update(cx, |this, cx| {
                                     let jump = this
@@ -2718,18 +2740,33 @@ impl RunoApp {
         };
         let mut created = Vec::new();
         let race_base = if typed.is_empty() {
-            format!("runo/race-{}", self.state.next_id + 1)
+            Some(git::branch_slug(&task))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("runo/race-{}", self.state.next_id + 1))
         } else {
             typed.clone()
         };
+        let base = self.new_base.clone();
         for provider in providers {
+            let isolated = (self.new_isolated || racing) && is_git;
+            // An untyped name comes from the task, made unique among branches and sessions.
             let branch = if racing {
-                format!("{race_base}-{}", agent::PROVIDERS[provider].id)
+                let wanted = format!("{race_base}-{}", agent::PROVIDERS[provider].id);
+                self.task_branch(&project, "", wanted, |n| git::has_branch(&project.path, n))
             } else {
                 typed.clone()
             };
-            let isolated = (self.new_isolated || racing) && is_git;
-            match self.spawn_session(&project, provider, &branch, isolated, is_git, &task, cx) {
+            match self.spawn_session_from(
+                &project,
+                provider,
+                &branch,
+                isolated,
+                is_git,
+                &task,
+                base.clone(),
+                None,
+                cx,
+            ) {
                 Ok(id) => {
                     if self.new_connection != connections::LOCAL
                         && connections::get(self.new_connection).is_some()
@@ -2760,6 +2797,7 @@ impl RunoApp {
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
         self.branch.update(cx, |b, cx| b.set_value("", window, cx));
+        self.new_branches = None;
         if !self.expanded.contains(&project.id) {
             self.expanded.push(project.id);
         }
@@ -2814,17 +2852,50 @@ impl RunoApp {
         pr: Option<u64>,
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
+        self.spawn_session_from(
+            project,
+            provider,
+            typed_branch,
+            isolated,
+            is_git,
+            task,
+            None,
+            pr,
+            cx,
+        )
+    }
+
+    /// `spawn_session_for`, starting the branch from `base` instead of the default branch.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_session_from(
+        &mut self,
+        project: &Project,
+        provider: usize,
+        typed_branch: &str,
+        isolated: bool,
+        is_git: bool,
+        task: &str,
+        base: Option<String>,
+        pr: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        // A repository with no commits has nothing to branch from: run in the folder itself.
+        let unborn = isolated && is_git && !self.demo && !git::has_commits(&project.path);
+        let isolated = isolated && !unborn;
         let id = self.state.next_id();
-        let base = if is_git {
-            git::default_branch(&project.path)
-        } else {
-            String::new()
+        let base = match base {
+            Some(base) if is_git => base,
+            _ if is_git => git::default_branch(&project.path),
+            _ => String::new(),
         };
         let (branch, dir) = if !is_git {
             ("local folder".to_string(), project.path.clone())
         } else if isolated {
+            // Named after the task when no name was given, such as runo/fix-login-redirect.
             let branch = if typed_branch.is_empty() {
-                format!("runo/session-{id}")
+                self.task_branch(project, task, format!("runo/session-{id}"), |n| {
+                    git::has_branch(&project.path, n)
+                })
             } else {
                 typed_branch.to_string()
             };
@@ -2872,6 +2943,14 @@ impl RunoApp {
             base,
             ..Default::default()
         });
+        if unborn {
+            if let Some(session) = self.state.session_mut(id) {
+                session.messages.push(Message::new(
+                    Role::System,
+                    "This repository has no commits yet, so the session runs in the project folder instead of its own worktree. Make a first commit to isolate the next one.",
+                ));
+            }
+        }
         if isolated && is_git && !self.demo {
             self.make_worktree(id, project.path.clone(), branch, pr);
         }
@@ -5885,20 +5964,31 @@ impl RunoApp {
         let racing = self.racing() && is_git;
         let isolated = (self.new_isolated || racing) && is_git;
         let typed = git::sanitize_branch(&self.branch.read(cx).value());
+        let task_text = self.new_task.read(cx).value().to_string();
         let branch = if racing {
             format!(
                 "{}-*",
                 if typed.is_empty() {
-                    format!("runo/race-{}", self.state.next_id + 1)
+                    Some(git::branch_slug(&task_text))
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| format!("runo/race-{}", self.state.next_id + 1))
                 } else {
                     typed
                 }
             )
         } else if typed.is_empty() {
-            format!("runo/session-{}", self.state.next_id + 1)
+            let fallback = format!("runo/session-{}", self.state.next_id + 1);
+            match project {
+                Some(p) => self.task_branch(p, &task_text, fallback, |n| self.listed_branch(n)),
+                None => fallback,
+            }
         } else {
             typed
         };
+        let from = self
+            .new_base
+            .clone()
+            .unwrap_or_else(|| self.listed_default().to_string());
         let where_to = match project {
             None => "Add a project to start.".to_string(),
             Some(_) if racing => format!(
@@ -5908,6 +5998,10 @@ impl RunoApp {
                     .map(|i| branch.replace('*', agent::PROVIDERS[*i].id))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            Some(p) if isolated && !from.is_empty() => format!(
+                "Creates branch {branch} from {from} in {}",
+                git::worktree_path(&p.path, &branch).display()
             ),
             Some(p) if isolated => format!(
                 "Creates branch {branch} in {}",
@@ -6111,7 +6205,14 @@ impl RunoApp {
                             .into_any_element()
                     })
                     .when(isolated, |el| {
-                        el.child(Input::new(&self.branch).bordered(true).h(px(36.)))
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().min_w_0().child(Input::new(&self.branch).bordered(true).h(px(36.))))
+                                .when(!self.demo, |el| el.child(self.base_picker(cx))),
+                        )
                     })
                     .when(project.is_some() && (cove_ready || !conns.is_empty()), |el| {
                         let mut choices = div().flex().flex_wrap().gap_2().child(
@@ -6220,14 +6321,14 @@ impl RunoApp {
 
     fn list_view(&self, kind: View, cx: &mut Context<Self>) -> AnyElement {
         let worktrees_only = kind == View::Worktrees;
-        let mut sessions: Vec<&Session> = self
-            .state
-            .sessions
-            .iter()
-            .filter(|s| kind != View::Worktrees || s.isolated)
-            .collect();
-        // Live sessions first, archived ones last.
-        sessions.sort_by_key(|s| (s.archived, !s.pinned));
+        let query = self.finder.query.read(cx).value().trim().to_string();
+        let sessions = sessions::filtered(
+            &self.state,
+            &self.finder.filter,
+            &query,
+            &self.finder.list_hits,
+            worktrees_only,
+        );
         let mut rows = div().v_flex().gap_2();
         let mut archived_header = false;
         for (i, session) in sessions.iter().enumerate() {
@@ -6302,7 +6403,9 @@ impl RunoApp {
                                     ),
                             )
                             .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
-                                if worktrees_only && !self.demo {
+                                if let Some(said) = self.finder.list_hits.snippet(&query, id) {
+                                    format!("{project}  ·  “{said}”")
+                                } else if worktrees_only && !self.demo {
                                     session.dir.clone()
                                 } else {
                                     format!("{project}  ·  {}", session.branch)
@@ -6370,7 +6473,15 @@ impl RunoApp {
                 i,
             ));
         }
-        if sessions.is_empty() {
+        let narrowed = !query.is_empty() || self.finder.filter != Default::default();
+        if sessions.is_empty() && narrowed {
+            rows = rows.child(empty_hint(
+                "list-none",
+                IconName::Search,
+                "No sessions match",
+                "Try other words, or clear the filters.",
+            ));
+        } else if sessions.is_empty() {
             rows = rows.child(
                 div()
                     .py_10()
@@ -6397,7 +6508,13 @@ impl RunoApp {
                 View::Worktrees => "Isolated sessions",
                 _ => "Sessions",
             },
-            rows,
+            div()
+                .v_flex()
+                .gap_4()
+                .when(!self.state.sessions.is_empty(), |el| {
+                    el.child(self.list_toolbar(worktrees_only, cx))
+                })
+                .child(rows),
         )
     }
 
@@ -7585,6 +7702,7 @@ impl Render for RunoApp {
         self.measure_cell(window, cx);
         self.tour_rects = self.anchors.take();
         self.sync_project_form(window, cx);
+        self.sync_new_branches();
         if let Some((id, path)) = self.pending_binary.take() {
             settings::update(cx, |s| {
                 let mut options = s.agent(id);

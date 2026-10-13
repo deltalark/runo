@@ -32,6 +32,9 @@ All notable changes to Runo are documented here.
 - Each session is saved in its own file under `~/.runo/sessions`, only when it changed and off the UI thread. The old `state.json` is split on first start and kept as `state.json.v1-backup`.
 - Chat context control: /compact (Claude Code's own, else a fresh conversation seeded with a summary) and /clear, also in the session's right-click menu. Fork a session from any turn, with the files as they were then, and edit and resend any sent message, which rewinds the files and conversation or sends it as a fork.
 - The / menu lists the agent's own commands besides playbooks: its built-ins, custom commands (.claude/commands, ~/.codex/prompts, .gemini/commands and the equivalents of other CLIs) and Claude Code skills.
+- Sessions page: search over titles, branches, projects and past conversations (matches show a snippet), filters for project, agent, status and archived, and sort by recent, created or name. Quick open lists archived sessions (marked) and sessions whose conversation mentions what you type.
+- New session: pick the base branch (local or remote) and get a branch named after the task, such as `runo/fix-login-redirect`, numbered when taken.
+- New project can clone a repository from a URL into a folder you choose, with git's progress and errors shown, then adds it.
 
 ### Fixed
 
@@ -80,3 +83,4 @@ All notable changes to Runo are documented here.
 - Settings → MCP adds and edits Runo's own servers in a form (name, command or URL, environment) instead of a JSON file.
 - The CLI view and terminals pass middle and right clicks, drags and the wheel to programs that turn on mouse reporting, at the cell under the pointer; Shift keeps local selection.
 
+- A repository with no commits no longer fails to start an isolated session: Runo's git init makes a first empty commit, and otherwise the session runs in the project folder with a note.
