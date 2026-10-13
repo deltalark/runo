@@ -236,6 +236,13 @@ impl RunoApp {
             return;
         }
         let dir = session.dir.clone();
+        let asked = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.text.clone())
+            .unwrap_or_default();
         let taken: std::collections::HashSet<String> = self
             .state
             .sessions
@@ -251,7 +258,7 @@ impl RunoApp {
                     .map(|h| std::path::PathBuf::from(h).join(".copilot"))
             })
             .map(|p| p.join("session-state"));
-        if let Some(found) = root.and_then(|r| newest_copilot_session(&r, &dir, since, &taken)) {
+        if let Some(found) = root.and_then(|r| newest_copilot_session(&r, &dir, &asked, since, &taken)) {
             if let Some(s) = self.state.session_mut(id) {
                 s.agent_session = found;
             }
@@ -1974,15 +1981,17 @@ fn copy_image(dir: &str, image: &std::path::Path) -> Option<String> {
 }
 
 /// The newest Copilot session written since `since` that ran in `dir` and no other
-/// session uses: a folder `<id>/` or a file `<id>.jsonl` under `root`.
+/// session uses: a folder `<id>/` or a file `<id>.jsonl` under `root`. Of several, the
+/// one that holds `prompt` wins.
 pub fn newest_copilot_session(
     root: &std::path::Path,
     dir: &str,
+    prompt: &str,
     since: std::time::SystemTime,
     taken: &std::collections::HashSet<String>,
 ) -> Option<String> {
     use std::io::Read;
-    let mentions_dir = |path: &std::path::Path| {
+    let head = |path: &std::path::Path| -> String {
         let files: Vec<std::path::PathBuf> = if path.is_dir() {
             std::fs::read_dir(path)
                 .into_iter()
@@ -1994,15 +2003,28 @@ pub fn newest_copilot_session(
         } else {
             vec![path.to_path_buf()]
         };
-        files.iter().any(|file| {
+        let mut text = String::new();
+        for file in files {
             let mut head = Vec::new();
-            std::fs::File::open(file)
+            if std::fs::File::open(&file)
                 .and_then(|f| f.take(256 * 1024).read_to_end(&mut head))
                 .is_ok()
-                && String::from_utf8_lossy(&head).contains(dir)
-        })
+            {
+                text.push_str(&String::from_utf8_lossy(&head));
+                text.push('\n');
+            }
+        }
+        text
     };
-    std::fs::read_dir(root)
+    // The prompt's first line as it appears in Copilot's JSON log.
+    let asked = prompt
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().chars().take(60).collect::<String>())
+        .and_then(|l| serde_json::to_string(&l).ok())
+        .map(|l| l.trim_matches('"').to_string())
+        .filter(|l| !l.is_empty());
+    let candidates: Vec<(std::time::SystemTime, String, String)> = std::fs::read_dir(root)
         .ok()?
         .flatten()
         .filter_map(|e| {
@@ -2017,9 +2039,37 @@ pub fn newest_copilot_session(
             };
             (modified >= since && !taken.contains(&id)).then_some((modified, id, path))
         })
-        .filter(|(_, _, path)| mentions_dir(path))
-        .max_by_key(|(modified, ..)| *modified)
-        .map(|(_, id, _)| id)
+        .map(|(modified, id, path)| (modified, id, head(&path)))
+        .filter(|(_, _, text)| mentions_folder(text, dir))
+        .collect();
+    // Two sessions working in one folder at once are told apart by what was asked.
+    let newest = |list: Vec<&(std::time::SystemTime, String, String)>| {
+        list.into_iter()
+            .max_by_key(|(modified, ..)| *modified)
+            .map(|(_, id, _)| id.clone())
+    };
+    asked
+        .and_then(|asked| newest(candidates.iter().filter(|c| c.2.contains(&asked)).collect()))
+        .or_else(|| newest(candidates.iter().collect()))
+}
+
+/// Whether `text` names the folder `dir` itself or a path inside it, not merely a folder
+/// whose name starts the same ("/work/s-1" is not in "/work/s-12").
+fn mentions_folder(text: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if dir.is_empty() {
+        return false;
+    }
+    // JSON doubles the backslashes of Windows paths.
+    let escaped = dir.replace('\\', "\\\\");
+    [dir.to_string(), escaped].iter().any(|dir| {
+        text.match_indices(dir.as_str()).any(|(at, _)| {
+            !text[at + dir.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -2027,6 +2077,38 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn copilot_sessions_match_their_own_folder_and_prompt() {
+        let root = std::env::temp_dir().join(format!("runo-copilot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |id: &str, cwd: &str, prompt: &str| {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("workspace.yaml"), format!("id: {id}\ncwd: {cwd}\n")).unwrap();
+            let event = serde_json::json!({"type": "user.message", "data": {"content": prompt}});
+            std::fs::write(dir.join("events.jsonl"), format!("{event}\n")).unwrap();
+        };
+        write("a", "/work/s-12", "Add docs");
+        write("b", "/work/s-1", "Add docs");
+        write("c", "/work/s-1", "Fix the \"login\" test");
+        let since = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let none = std::collections::HashSet::new();
+        let find = |dir, prompt| newest_copilot_session(&root, dir, prompt, since, &none);
+        assert_eq!(find("/work/s-1", "Add docs").as_deref(), Some("b"));
+        assert_eq!(find("/work/s-1", "Fix the \"login\" test").as_deref(), Some("c"));
+        assert_eq!(find("/work/s-12", "Add docs").as_deref(), Some("a"));
+        assert_eq!(find("/work/s", "Add docs"), None);
+        let taken = ["b".to_string()].into_iter().collect();
+        assert_eq!(
+            newest_copilot_session(&root, "/work/s-1", "Add docs", since, &taken).as_deref(),
+            Some("c")
+        );
+        assert!(mentions_folder("cwd: /work/s-1\n", "/work/s-1/"));
+        assert!(mentions_folder(r#"{"path":"C:\\w\\s-1\\a.rs"}"#, r"C:\w\s-1"));
+        assert!(!mentions_folder(r#"{"path":"C:\\w\\s-12"}"#, r"C:\w\s-1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn commit_messages_are_cleaned() {
