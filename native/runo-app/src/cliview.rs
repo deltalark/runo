@@ -36,6 +36,11 @@ fn working_on_screen(screen: &str) -> bool {
 pub(crate) struct CliRun {
     pub shell: pty::Shell,
     provider: String,
+    /// Runs on a server through Runo's runner, which brings the work and conversation
+    /// back when the CLI ends.
+    remote: bool,
+    /// Asked to end; its turns come into the chat once the runner has synced back.
+    closing: bool,
     /// The conversation's transcript and its length when the CLI opened: turns after
     /// that point were made in the CLI.
     transcript: Option<PathBuf>,
@@ -76,10 +81,9 @@ fn parse_divider(meta: &str) -> Option<(&str, Option<usize>)> {
 /// Why a session can't show its CLI view without losing context, if it can't.
 pub(crate) fn cli_blocker(session: &Session) -> Option<String> {
     let name = agent::provider(&session.provider).name;
-    if session.elsewhere() {
-        // The CLI view runs the agent's own CLI on this machine, on files that live there.
+    if session.elsewhere() && session.sandbox().is_none() {
         return Some(format!(
-            "The CLI view isn't available while the session runs on {}. Move it to this machine to use it.",
+            "This session runs on a connection that no longer exists ({}). Move it to this machine to use the CLI.",
             crate::connections::name(session.connection)
         ));
     }
@@ -118,6 +122,13 @@ impl RunoApp {
                 ));
                 return;
             }
+            if self.cli_runs.get(&id).is_some_and(|r| r.closing) {
+                self.info = Some((
+                    "Still bringing the CLI's work back. Try again in a moment.".into(),
+                    std::time::Instant::now(),
+                ));
+                return;
+            }
             if let Some(s) = self.state.session_mut(id) {
                 s.cli = true;
             }
@@ -129,15 +140,7 @@ impl RunoApp {
             }
             self.view_changed = Some((id, std::time::Instant::now()));
             // A prompt queued while the CLI was open goes now.
-            let next = self
-                .state
-                .session_mut(id)
-                .filter(|s| !s.queue.is_empty())
-                .map(|s| (s.queue.remove(0), s.provider.clone()));
-            if let Some((prompt, provider)) = next {
-                let opts = cx.global::<AppSettings>().agent(&provider);
-                self.start_turn(id, prompt, Vec::new(), &opts);
-            }
+            self.send_queued(id, 0, cx);
         }
         self.save();
         cx.notify();
@@ -196,10 +199,14 @@ impl RunoApp {
             return;
         };
         let sel = session.selections();
+        // On a connection the CLI runs there, reaching Runo's tools through the relay.
+        let sandbox = session.sandbox();
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| !self.demo && memory_server());
+            .filter(|_| {
+                !self.demo && memory_server() && crate::connections::mcp_reachable(sandbox.as_ref())
+            });
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: if resume { "" } else { first_prompt },
@@ -210,8 +217,9 @@ impl RunoApp {
             session_id: &conversation,
             images: &[],
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
+            local: sandbox.is_none(),
         };
-        let program = pty::Program {
+        let mut program = pty::Program {
             bin: if opts.binary.trim().is_empty() {
                 agent::provider(&provider).bin.to_string()
             } else {
@@ -229,6 +237,30 @@ impl RunoApp {
             // stop the CLI saving its conversation, and the turns could not come back to Chat.
             unset: vec!["CLAUDE_CODE_CHILD_SESSION".into()],
         };
+        let remote = matches!(sandbox, Some(crate::connections::Sandbox::Remote(_)));
+        if let Some(sandbox) = &sandbox {
+            let mut command = std::process::Command::new(&program.bin);
+            command.args(&program.args);
+            for (k, v) in &program.env {
+                command.env(k, v);
+            }
+            let carried =
+                (!conversation.is_empty()).then(|| (provider.clone(), conversation.clone()));
+            match sandbox.pty_command(&command, &dir, carried) {
+                Ok(wrapped) => {
+                    let unset = std::mem::take(&mut program.unset);
+                    program = pty::Program::of(&wrapped);
+                    program.unset = unset;
+                }
+                Err(e) => {
+                    if let Some(s) = self.state.session_mut(id) {
+                        s.cli = false;
+                    }
+                    self.notice = Some(format!("Could not start the CLI: {e}"));
+                    return;
+                }
+            }
+        }
         self.next_shell += 1;
         let shell_id = self.next_shell;
         let tx = self.tx.clone();
@@ -243,6 +275,8 @@ impl RunoApp {
                     CliRun {
                         shell,
                         provider: provider.clone(),
+                        remote,
+                        closing: false,
                         transcript,
                         offset,
                         opened: SystemTime::now(),
@@ -270,14 +304,29 @@ impl RunoApp {
     /// Close the CLI and bring the turns made in it into the chat. Unless `force`, a CLI
     /// that is still working is left alone and `false` is returned.
     pub(crate) fn close_cli(&mut self, id: u64, force: bool) -> bool {
-        if let Some(run) = self.cli_runs.get(&id) {
-            if !force && cli_working(run) {
+        if let Some(run) = self.cli_runs.get_mut(&id) {
+            if !force && !run.closing && cli_working(run) {
                 self.info = Some((
                     "The agent is still replying in the CLI. Switch to Chat when it's done, or press Esc there to stop it."
                         .into(),
                     std::time::Instant::now(),
                 ));
                 return false;
+            }
+            // On a server the runner ends the CLI and syncs back first; its turns come
+            // into the chat when it exits.
+            if run.remote && !run.shell.exited() {
+                run.shell.finish();
+                run.closing = true;
+                if let Some(s) = self.state.session_mut(id) {
+                    s.cli = false;
+                }
+                self.info = Some((
+                    "Bringing the CLI's work back to this machine…".into(),
+                    std::time::Instant::now(),
+                ));
+                self.save();
+                return true;
             }
         }
         if let Some(run) = self.cli_runs.remove(&id) {
@@ -293,6 +342,35 @@ impl RunoApp {
         }
         self.save();
         true
+    }
+
+    /// Runo is quitting with CLIs open, and they close with it: bring their turns into
+    /// the chat now. The sessions stay in CLI view and reopen on the same conversation.
+    pub(crate) fn keep_cli_turns(&mut self) {
+        // CLIs on servers sync back before they close, for a few seconds at most.
+        for run in self
+            .cli_runs
+            .values()
+            .filter(|r| r.remote && !r.shell.exited())
+        {
+            run.shell.finish();
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(15)
+            && self
+                .cli_runs
+                .values()
+                .any(|r| r.remote && !r.shell.exited())
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let ids: Vec<u64> = self.cli_runs.keys().copied().collect();
+        for id in ids {
+            if let Some(run) = self.cli_runs.remove(&id) {
+                run.shell.kill();
+                self.import_cli_turns(id, &run);
+            }
+        }
     }
 
     fn import_cli_turns(&mut self, id: u64, run: &CliRun) {
@@ -365,15 +443,22 @@ impl RunoApp {
 
     /// The CLI quit on its own (for example `/exit`): go back to Chat.
     pub(crate) fn cli_exited(&mut self, shell: u64) {
-        let Some(id) = self
+        let Some((id, closing)) = self
             .cli_runs
             .iter()
             .find(|(_, r)| r.shell.id == shell && r.shell.exited())
-            .map(|(id, _)| *id)
+            .map(|(id, r)| (*id, r.closing))
         else {
             return;
         };
         self.close_cli(id, true);
+        if closing {
+            self.info = Some((
+                "The CLI's work is back. You're in Chat, on the same conversation.".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
         self.view_changed = Some((id, std::time::Instant::now()));
         self.info = Some((
             "The CLI closed. You're back in Chat, on the same conversation.".into(),
@@ -393,8 +478,9 @@ impl RunoApp {
         let Some(run) = self.cli_runs.get(&id) else {
             return;
         };
-        if self.pty_key(&run.shell, event, cx) {
-            self.info = Some(("Copied the CLI screen.".into(), std::time::Instant::now()));
+        if let Some(selection) = self.pty_key(&run.shell, event, cx) {
+            let what = if selection { "selection" } else { "CLI screen" };
+            self.info = Some((format!("Copied the {what}."), std::time::Instant::now()));
         }
         cx.notify();
     }
@@ -458,7 +544,10 @@ impl RunoApp {
             .when(!supported, |el| el.opacity(0.5))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(match &blocker {
-                    None => format!("Same conversation, two views. Switching is free: nothing is sent to {name}. Ctrl+Shift+M"),
+                    None => format!(
+                        "Same conversation, two views. Switching is free: nothing is sent to {name}. {}",
+                        keymap::label(cx, "toggle-view")
+                    ),
                     Some(reason) => reason.clone(),
                 })
                 .build(window, cx)

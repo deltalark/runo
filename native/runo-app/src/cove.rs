@@ -199,18 +199,18 @@ impl Sandbox {
     /// VM on first use.
     pub fn wrap(&self, command: &Command, cwd: &str, pty: bool) -> Result<Command, String> {
         let bin = binary().ok_or("Cove is not installed, so this session can't start its VM.")?;
+        let program = Path::new(command.get_program())
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let forwarded = crate::connections::get(self.connection)
-            .map(|c| c.forwarded_env())
+            .map(|c| c.agent_env(&program))
             .unwrap_or_else(|| {
                 FORWARDED_ENV
                     .iter()
                     .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
                     .collect()
             });
-        let program = Path::new(command.get_program())
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         let mut args = self.exec_args(cwd, pty);
         let mut env = forwarded;
         for (k, v) in command.get_envs() {
@@ -222,6 +222,12 @@ impl Sandbox {
                 ));
             }
         }
+        // Runo's MCP server reaches the VM through a relay in the shared folder.
+        let own: Vec<String> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let own = crate::connections::bridge_for_cove(cwd, &own, &mut env);
         for (k, v) in env {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
@@ -230,11 +236,11 @@ impl Sandbox {
             "--".into(),
             "bash".into(),
             "-lc".into(),
-            launcher(&program),
+            launcher(&program, "in the Cove VM"),
             "runo".into(),
             program,
         ]);
-        args.extend(command.get_args().map(|a| a.to_string_lossy().into_owned()));
+        args.extend(own);
         let mut wrapped = Command::new(bin);
         wrapped.args(args);
         Ok(wrapped)
@@ -248,24 +254,79 @@ impl Sandbox {
     }
 }
 
-/// A `bash -lc` script that installs `program` in the VM if it is missing, then runs
-/// it with the remaining arguments.
-pub(crate) fn launcher(program: &str) -> String {
-    let install = match program {
-        "claude" => "curl -fsSL https://claude.ai/install.sh | bash",
-        "codex" => {
-            "(command -v npm >/dev/null || (apt-get update -qq && apt-get install -y -qq nodejs npm)) \
-             && npm install -g @openai/codex"
+/// Shell helpers for installers: apt with sudo when not root, curl, and npm with a
+/// private Node.js when the machine has none. Nothing here needs a password.
+const INSTALL_HELPERS: &str = r#"runo_apt() { command -v apt-get >/dev/null 2>&1 || return 1; if [ "$(id -u)" = 0 ]; then apt-get update -qq && apt-get install -y -qq "$@"; else sudo -n apt-get update -qq && sudo -n apt-get install -y -qq "$@"; fi; }
+runo_curl() { command -v curl >/dev/null 2>&1 || runo_apt curl ca-certificates; }
+runo_npm() {
+  runo_curl || return 1
+  if ! command -v npm >/dev/null 2>&1; then
+    case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) return 1 ;; esac
+    case "$(uname -m)" in x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=arm64 ;; *) return 1 ;; esac
+    base=https://nodejs.org/dist/latest-v22.x
+    f="$(curl -fsSL "$base/SHASUMS256.txt" | awk '{print $2}' | grep -E "^node-v[0-9.]+-$os-$arch\.tar\.gz$" | head -n1)"
+    [ -n "$f" ] || return 1
+    echo "Installing Node.js for npm…"
+    mkdir -p "$HOME/.local/runo-node" && curl -fsSL "$base/$f" | tar -xzf - -C "$HOME/.local/runo-node" --strip-components=1 || return 1
+  fi
+  npm install -g --prefix "$HOME/.local" "$1@${want:-latest}"
+}"#;
+
+/// How to install an agent CLI on a Linux or macOS machine, by its program name: the
+/// vendor's script, or its npm package (into ~/.local, so no sudo is needed).
+fn install_command(program: &str) -> Option<String> {
+    let provider = crate::agent::PROVIDERS
+        .iter()
+        .find(|p| p.bin == program || (p.id == "cursor" && program == "agent"))?;
+    Some(match provider.id {
+        "claude" => {
+            r#"runo_curl && curl -fsSL https://claude.ai/install.sh | bash -s "${want:-latest}""#
+                .to_string()
         }
-        "opencode" => "curl -fsSL https://opencode.ai/install | bash",
-        _ => "",
-    };
-    if install.is_empty() {
+        "cursor" => "runo_curl && curl https://cursor.com/install -fsS | bash".into(),
+        "droid" => "runo_curl && curl -fsSL https://app.factory.ai/cli | sh".into(),
+        "grok" => format!("runo_curl && {}", crate::install::GROK),
+        id => format!("runo_npm {}", crate::alerts::npm_package(id)?),
+    })
+}
+
+/// Whether the install command above can install an exact version, so the copy there
+/// can match this computer's.
+pub(crate) fn pins_version(provider: &str) -> bool {
+    matches!(
+        provider,
+        "claude" | "codex" | "opencode" | "gemini" | "copilot" | "qwen"
+    )
+}
+
+/// A `bash -lc` script that runs the agent CLI given as `$1` with the remaining
+/// arguments. First it installs the CLI if it is missing, or updates it once when
+/// `RUNO_AGENT_VERSION` asks for another version, and writes the login file passed in
+/// `RUNO_AUTH_PATH` / `RUNO_AUTH_DATA` if the machine has none yet. `place` reads like
+/// "in the Cove VM" or "on Build box".
+pub(crate) fn launcher(program: &str, place: &str) -> String {
+    let Some(install) = install_command(program) else {
         return r#"exec "$@""#.to_string();
-    }
+    };
     format!(
-        r#"export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
-command -v "$1" >/dev/null 2>&1 || {{ echo "Installing $1 in the Cove VM…" >&2; {{ {install}; }} >&2 || exit 127; }}
+        r#"export PATH="$HOME/.local/bin:$HOME/.local/runo-node/bin:$HOME/.opencode/bin:$HOME/.factory/bin:$HOME/.grok/bin:$PATH"
+{INSTALL_HELPERS}
+if [ -n "$RUNO_AUTH_PATH" ] && [ ! -s "$HOME/$RUNO_AUTH_PATH" ]; then
+  mkdir -p "$(dirname "$HOME/$RUNO_AUTH_PATH")" && (umask 077; printf '%s' "$RUNO_AUTH_DATA" | base64 --decode > "$HOME/$RUNO_AUTH_PATH")
+fi
+unset RUNO_AUTH_PATH RUNO_AUTH_DATA
+want="$RUNO_AGENT_VERSION"; unset RUNO_AGENT_VERSION
+if command -v "$1" >/dev/null 2>&1; then
+  have=""; [ -z "$want" ] || have="$("$1" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+  tried="$HOME/.cache/runo/$1-$want"
+  if [ -z "$want" ] || [ "$have" = "$want" ] || [ -e "$tried" ]; then exec "$@"; fi
+  mkdir -p "$HOME/.cache/runo" && touch "$tried"
+  echo "Updating $1 {place} to $want to match this computer…" >&2
+  {{ {install}; }} >&2 || echo "Couldn't update $1 {place}; using version $have." >&2
+  exec "$@"
+fi
+echo "Installing $1 {place}…" >&2
+{{ {install}; }} >&2 && command -v "$1" >/dev/null 2>&1 || {{ echo "Couldn't install $1 {place}. Install it there yourself, then send the message again." >&2; exit 127; }}
 exec "$@""#
     )
 }
@@ -310,10 +371,65 @@ mod tests {
     }
 
     #[test]
-    fn launcher_installs_known_agents_only() {
-        assert!(launcher("claude").contains("claude.ai/install.sh"));
-        assert!(launcher("codex").contains("@openai/codex"));
-        assert_eq!(launcher("sh"), r#"exec "$@""#);
+    fn launcher_installs_every_agent() {
+        assert!(launcher("claude", "in the Cove VM").contains("claude.ai/install.sh"));
+        assert!(launcher("codex", "on Build box").contains("runo_npm @openai/codex"));
+        assert!(launcher("codex", "on Build box").contains("Installing $1 on Build box"));
+        for p in crate::agent::PROVIDERS.iter() {
+            assert!(
+                install_command(p.bin).is_some(),
+                "{} has no installer",
+                p.id
+            );
+        }
+        assert_eq!(launcher("sh", "on Build box"), r#"exec "$@""#);
+    }
+
+    /// The launcher against a fake agent: it writes the login file once, runs the CLI,
+    /// and asks for an update only when the versions differ.
+    #[test]
+    fn launcher_writes_the_login_file_and_runs_the_agent() {
+        let home = std::env::temp_dir().join(format!("runo-launch-{}", std::process::id()));
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("codex");
+        std::fs::write(&fake, "#!/bin/sh\n[ \"$1\" = --version ] && echo 'codex-cli 1.2.3' && exit 0\necho \"ran $*\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let run = || {
+            Command::new("bash")
+                .args([
+                    "-c",
+                    &launcher("codex", "here"),
+                    "runo",
+                    "codex",
+                    "exec",
+                    "hi",
+                ])
+                .env("HOME", &home)
+                .env("RUNO_AGENT_VERSION", "1.2.3")
+                .env("RUNO_AUTH_PATH", ".codex/auth.json")
+                .env("RUNO_AUTH_DATA", "eyJhIjoxfQ==")
+                .output()
+                .unwrap()
+        };
+        let out = run();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "ran exec hi\n");
+        assert_eq!(
+            std::fs::read_to_string(home.join(".codex/auth.json")).unwrap(),
+            "{\"a\":1}"
+        );
+        // A login there is left alone.
+        std::fs::write(home.join(".codex/auth.json"), "theirs").unwrap();
+        run();
+        assert_eq!(
+            std::fs::read_to_string(home.join(".codex/auth.json")).unwrap(),
+            "theirs"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

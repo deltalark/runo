@@ -50,6 +50,13 @@ impl SettingsPage {
         ),
     ];
 
+    /// The pages in the Settings sidebar, in order.
+    pub(crate) fn pages() -> impl Iterator<Item = SettingsPage> {
+        Self::GROUPS
+            .iter()
+            .flat_map(|(_, pages)| pages.iter().copied())
+    }
+
     /// Every page, including each agent's, for searching.
     fn all() -> impl Iterator<Item = SettingsPage> {
         Self::GROUPS
@@ -58,7 +65,7 @@ impl SettingsPage {
             .chain(agent::PROVIDERS.iter().map(|p| SettingsPage::Agent(p.id)))
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
@@ -80,7 +87,7 @@ impl SettingsPage {
             Self::General => "Alerts, the built-in browser, motion and how deleting works.",
             Self::Appearance => "Theme, glass, fonts and how wide conversations run.",
             Self::Terminal => "Text size, font, scrolling and mouse behavior in the terminal panel and agent CLIs.",
-            Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere.",
+            Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere. Inside a terminal on Linux and Windows, add Shift (Ctrl+Shift+K), or press Esc twice to leave it.",
             Self::Chat => "How the composer behaves and what new sessions start with.",
             Self::Providers => "The agent CLIs on this machine. Pick one to change its settings, or install another.",
             Self::Agent("claude") => "Everything Runo can pass to the claude CLI, plus what it detected.",
@@ -102,7 +109,7 @@ impl SettingsPage {
         }
     }
 
-    fn icon(self) -> IconName {
+    pub(crate) fn icon(self) -> IconName {
         match self {
             Self::General => IconName::Settings,
             Self::Appearance => IconName::Palette,
@@ -148,6 +155,98 @@ enum Ctl {
     Open(String),
     /// An MCP server: share it with Runo's sessions (key, shared), plus Edit and Reveal.
     Mcp(Option<(String, bool)>, PathBuf),
+    /// A text field that isn't a setting; a form reads it when it is saved.
+    Field {
+        key: String,
+        value: String,
+        placeholder: String,
+    },
+    /// Like `Field`, several lines tall.
+    Area {
+        key: String,
+        value: String,
+        placeholder: String,
+    },
+}
+
+/// The form for adding or editing one of Runo's MCP servers.
+pub(crate) struct McpForm {
+    /// The server's name before this edit; None when adding.
+    was: Option<String>,
+    draft: crate::mcp::OwnDraft,
+    error: Option<String>,
+}
+
+/// Field keys of the MCP server form.
+const MCP_FORM: [&str; 4] = [
+    "mcp.form.name",
+    "mcp.form.command",
+    "mcp.form.url",
+    "mcp.form.env",
+];
+
+fn mcp_form_section(form: &McpForm) -> Section {
+    let field = |key: &str, value: &str, placeholder: &str| Ctl::Field {
+        key: key.into(),
+        value: value.into(),
+        placeholder: placeholder.into(),
+    };
+    let d = &form.draft;
+    let mut rows = vec![
+        row(
+            "Name",
+            "How agents see it, as the prefix of its tools.",
+            field(MCP_FORM[0], &d.name, "my-server"),
+        ),
+        row(
+            "Command",
+            "The program and its arguments, for a server that runs on this computer.",
+            field(
+                MCP_FORM[1],
+                &d.command,
+                "npx -y @modelcontextprotocol/server-filesystem ~/code",
+            ),
+        ),
+        row(
+            "URL",
+            "Or the address of a server that runs elsewhere.",
+            field(MCP_FORM[2], &d.url, "https://example.com/mcp"),
+        ),
+        row(
+            "Environment",
+            "For a command: one KEY=value per line.",
+            Ctl::Area {
+                key: MCP_FORM[3].into(),
+                value: d.env.clone(),
+                placeholder: "API_KEY=…".into(),
+            },
+        ),
+    ];
+    rows.push(row(
+        form.error.as_deref().unwrap_or(""),
+        "",
+        Ctl::Buttons(vec![
+            (
+                "Cancel".into(),
+                Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| this.mcp_form = None)
+                    as Action,
+            ),
+            (
+                "Save".into(),
+                Rc::new(|this: &mut RunoApp, cx: &mut Context<RunoApp>| this.save_mcp_form(cx))
+                    as Action,
+            ),
+        ]),
+    ));
+    let title = match &form.was {
+        Some(name) => format!("Edit {name}"),
+        None => "Add a server".to_string(),
+    };
+    section(
+        &title,
+        "Saved to Runo's list. Headers and other fields not shown here are kept.",
+        rows,
+    )
 }
 
 struct Row {
@@ -399,7 +498,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Confirm before deleting", "Ask for a second click before deleting a session.", st.confirm_delete, |s, v| s.confirm_delete = v),
                 switch_row("Remove worktree with session", "Also delete the session's git worktree when the session is deleted. Uncommitted changes in it are lost.", st.remove_worktree_on_delete, |s, v| s.remove_worktree_on_delete = v),
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
-                switch_row("Group sidebar by status", "Show Pinned, Working, Needs review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
+                switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
             ]),
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
@@ -417,7 +516,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("New worktrees", "Prepare each isolated worktree before the agent starts. Ignored files listed in the repository's .worktreeinclude (gitignore patterns, such as .env) are copied in automatically.", vec![
                 row(
                     "Setup command",
-                    "Runs in the new worktree's Terminal, for example npm install. Leave empty to skip.",
+                    "Runs in the new worktree's Terminal, for example npm install, for projects without their own (set one in a project's Edit dialog). Leave empty to skip.",
                     Ctl::Text {
                         key: "worktree_setup".into(),
                         value: st.worktree_setup.clone(),
@@ -457,6 +556,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Interaction", "How the mouse works in the terminal.", vec![
                 row("Scroll speed", "Lines moved per wheel step. Fast suits long logs.", Ctl::Segment(options(&[("normal", "Normal"), ("fast", "Fast"), ("faster", "Faster")]), st.term_scroll.clone(), Rc::new(|s, v| s.term_scroll = v))),
+                row("Scrollback", "Lines each new terminal keeps to scroll back through and find in.", Ctl::Segment(options(&[("2000", "2,000"), ("10000", "10,000"), ("50000", "50,000")]), st.term_history.to_string(), Rc::new(|s, v| s.term_history = v.parse().unwrap_or(10_000)))),
                 row("Right-click", "Show the terminal menu, or paste the clipboard straight in like many terminals do.", Ctl::Segment(options(&[("menu", "Menu"), ("paste", "Paste")]), st.term_right_click.clone(), Rc::new(|s, v| s.term_right_click = v))),
             ]),
         ],
@@ -493,11 +593,16 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Memory", "Runo keeps a summary of each session in .runo/memory.md inside its folder, kept out of git.", vec![
                 switch_row("Runo tools for agents", "Give Claude Code and Codex Runo's tools: read the session memory, search earlier sessions, save notes, and use playbooks (as /mcp__runo__… commands in Claude Code).", st.memory_server, |s, v| s.memory_server = v),
+                row("Wait for permission answers", "With Runo tools on, Claude Code asks you mid-turn before using a tool it isn't allowed, and waits this long for Allow or Deny before carrying on without it. Turns on servers keep waiting while Runo is closed, so you can answer when it reconnects.", Ctl::Dropdown(options(&[("2", "2 minutes"), ("5", "5 minutes"), ("15", "15 minutes"), ("60", "1 hour"), ("480", "8 hours")]), st.approval_wait_mins.to_string(), Rc::new(|s, v| s.approval_wait_mins = v.parse().unwrap_or(5)))),
             ]),
             section("New sessions", "What a session starts with before you change it in the composer.", vec![
                 row("Default view", "How new sessions open. CLI shows the agent's own command line on the same conversation (Claude Code and Codex); switch any time from the session header at no token cost.", Ctl::Segment(vec![("chat".into(), "Chat".into()), ("cli".into(), "CLI".into())], st.default_view.clone(), Rc::new(|s, v| s.default_view = v))),
                 row("Default agent", "Preselected in New session.", Ctl::Dropdown(agent::PROVIDERS.iter().map(|p| (p.id.to_string(), p.name.to_string())).collect(), st.default_provider.clone(), Rc::new(|s, v| s.default_provider = v))),
                 row("Default permission level", "Maps to each agent's closest mode: auto edit, read-only, or full access.", Ctl::Segment(options(&[("edit", "Auto edit"), ("plan", "Plan only"), ("full", "Full access")]), st.default_mode.clone(), Rc::new(|s, v| s.default_mode = v))),
+            ]),
+            section("Playbooks", "Saved tasks that run as their own sessions, by hand, on a schedule or when an agent asks.", vec![
+                switch_row("Ask before agents start playbooks", "When an agent asks Runo to start a playbook, show what it may do and wait for you. Off starts it right away.", st.confirm_agent_playbooks, |s, v| s.confirm_agent_playbooks = v),
+                row("Scheduled runs to keep", "Older runs of each scheduled playbook are deleted, with their worktrees. Pinned and unread runs stay.", Ctl::Dropdown(options(&[("5", "5"), ("10", "10"), ("20", "20"), ("50", "50"), ("0", "All")]), st.playbook_keep_runs.to_string(), Rc::new(|s, v| s.playbook_keep_runs = v.parse().unwrap_or(10)))),
             ]),
         ],
         SettingsPage::Providers => {
@@ -626,19 +731,60 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 .count();
             sections.push(section(
                 "Use across agents",
-                "Each agent loads its own servers. Turn on Use in Runo to hand a server from any app to Claude Code and Codex sessions too.",
+                "Each agent loads its own servers. Turn on Use in Runo to hand a server from any app to the other agents' sessions too. Grok takes none.",
                 vec![row(
                     "Shared servers",
                     if shared == 0 {
                         "None yet. Switch one on below."
                     } else {
-                        "Passed to every new run of Claude Code and Codex that doesn't already have them."
+                        "Passed to every new run of an agent that doesn't already have them."
                     },
                     Ctl::Chip(format!("{shared} shared"), if shared == 0 { 3 } else { 0 }),
                 )],
             ));
+            let own_path = crate::mcp::own_path();
+            let mut own: Vec<Row> = data
+                .mcp
+                .iter()
+                .filter(|m| m.provider == crate::mcp::OWN)
+                .map(|m| {
+                    let (name, path) = (m.name.clone(), own_path.clone());
+                    let draft = crate::mcp::OwnDraft::from_spec(&m.name, &m.spec);
+                    row(
+                        &m.name,
+                        &if m.transport == "unknown" {
+                            "Not set up yet. Edit it to give a command or a URL.".to_string()
+                        } else {
+                            format!("{} · {}{}", m.transport, if m.enabled { "On" } else { "Disabled" }, if m.detail.is_empty() { String::new() } else { format!(" · {}", m.detail) })
+                        },
+                        Ctl::Buttons(vec![
+                            ("Edit".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| this.open_mcp_form(Some(draft.clone()))) as Action),
+                            ("Remove".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                                if let Err(e) = crate::mcp::remove_own(&path, &name) {
+                                    this.notice = Some(format!("Couldn't remove {name}: {e}"));
+                                }
+                                this.open_settings();
+                            }) as Action),
+                        ]),
+                    )
+                })
+                .collect();
+            let add_path = own_path.clone();
+            own.push(row(
+                "Add a server",
+                "Give a command and arguments, or a URL. Edit the file for headers and other fields.",
+                Ctl::Buttons(vec![
+                    ("Edit file".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| this.edit_path(&add_path)) as Action),
+                    ("Add…".into(), Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| this.open_mcp_form(None)) as Action),
+                ]),
+            ));
+            sections.push(section(
+                "Runo's servers",
+                &format!("Given to every agent's sessions except Grok's, on this computer and on connections. Kept in {}.", tilde(&own_path)),
+                own,
+            ));
             let mut providers: Vec<&'static str> = Vec::new();
-            for m in &data.mcp {
+            for m in data.mcp.iter().filter(|m| m.provider != crate::mcp::OWN) {
                 if !providers.contains(&m.provider) {
                     providers.push(m.provider);
                 }
@@ -682,7 +828,21 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             sections
         }
         SettingsPage::Skills => {
-            let mut sections = Vec::new();
+            let mut sections = vec![section(
+                "Create",
+                "A skill is a folder with a SKILL.md: a name, a description saying when to use it, and the steps.",
+                vec![row(
+                    "New skill",
+                    "Starts one in ~/.claude/skills and opens it in Runo's editor.",
+                    Ctl::Buttons(vec![("New skill…".into(), Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                        match settings::skills_home().map(|dir| settings::new_skill(&dir)) {
+                            Some(Ok(file)) => this.edit_path(&file),
+                            Some(Err(e)) => this.notice = Some(format!("Couldn't create a skill: {e}")),
+                            None => this.notice = Some("Couldn't find your home folder.".into()),
+                        }
+                    }) as Action)]),
+                )],
+            )];
             for source in ["project", "claude", "agents", "codex"] {
                 let rows: Vec<Row> = data
                     .skills
@@ -700,7 +860,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     sections.push(section(title, &format!("{} found", rows.len()), rows));
                 }
             }
-            if sections.is_empty() {
+            if sections.len() == 1 {
                 sections.push(section("Skills", "Skills live in SKILL.md files under your agents' skills folders.", vec![row("No skills found", "Create one in ~/.claude/skills, ~/.agents/skills or ~/.codex/skills.", Ctl::Chip("0".into(), 3))]));
             }
             sections
@@ -955,7 +1115,7 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
         rows.push(conn_switch(c, "Agents may use it", "Lets agents in any session run commands here with Runo's run_on tool, for research, untrusted code or heavy jobs.", c.agents, |c, v| c.agents = v));
         rows.push(row(
             "Remove",
-            "Sessions that run here move back to this machine.",
+            "Sessions that run here move back to this machine, and their copies there are deleted.",
             Ctl::Button(
                 "Remove".into(),
                 Rc::new(move |this, cx| this.remove_connection(id, cx)),
@@ -995,9 +1155,23 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
     ));
     cove_rows.push(switch_row(
         "Back up checkpoints to GitHub",
-        "After each turn on a remote connection, push the session's checkpoint to the project's origin as refs/runo/sessions/<id>, which no branch list shows.",
+        "After each turn on a remote connection, push the session's files to the project's origin as refs/runo/sessions/<id>, which no branch list shows. Never for public repositories, and deleted with the session.",
         st.sync_backup,
         |s, v| s.sync_backup = v,
+    ));
+    if st.sync_backup {
+        cove_rows.push(switch_row(
+            "Back up untracked files too",
+            "Off keeps new files that git doesn't track yet (notes, local config, secrets) out of the backup.",
+            st.sync_backup_untracked,
+            |s, v| s.sync_backup_untracked = v,
+        ));
+    }
+    cove_rows.push(switch_row(
+        "Stop at the first blocked command",
+        "When the agent tries something it isn't allowed to (Claude Code) and nobody answers its permission request in time, or Runo's tools are off, the turn stops there and shows Allow and retry, instead of carrying on without it for hours.",
+        st.stop_on_denial,
+        |s, v| s.stop_on_denial = v,
     ));
     out.push(section(
         "Cove",
@@ -1075,6 +1249,92 @@ impl RunoApp {
         self._subscriptions.push(sub);
         self.settings_inputs.insert(key.to_string(), entity.clone());
         entity
+    }
+
+    /// A text field that isn't bound to a setting, made once per key.
+    fn ensure_field(
+        &mut self,
+        key: &str,
+        value: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(entity) = self.settings_inputs.get(key) {
+            return entity.clone();
+        }
+        let entity = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder.to_string())
+                .default_value(value.to_string())
+        });
+        self.settings_inputs.insert(key.to_string(), entity.clone());
+        entity
+    }
+
+    fn ensure_area(
+        &mut self,
+        key: &str,
+        value: &str,
+        placeholder: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextareaState> {
+        if let Some(entity) = self.settings_areas.get(key) {
+            return entity.clone();
+        }
+        let entity = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(placeholder.to_string())
+                .default_value(value.to_string())
+        });
+        self.settings_areas.insert(key.to_string(), entity.clone());
+        entity
+    }
+
+    /// Open the MCP server form, filled in from `draft` when editing.
+    fn open_mcp_form(&mut self, draft: Option<crate::mcp::OwnDraft>) {
+        for key in MCP_FORM {
+            self.settings_inputs.remove(key);
+            self.settings_areas.remove(key);
+        }
+        self.mcp_form = Some(McpForm {
+            was: draft.as_ref().map(|d| d.name.clone()),
+            draft: draft.unwrap_or_default(),
+            error: None,
+        });
+    }
+
+    fn save_mcp_form(&mut self, cx: &mut Context<Self>) {
+        let field = |this: &Self, key: &str| {
+            this.settings_inputs
+                .get(key)
+                .map(|e| e.read(cx).value().to_string())
+                .unwrap_or_default()
+        };
+        let draft = crate::mcp::OwnDraft {
+            name: field(self, MCP_FORM[0]),
+            command: field(self, MCP_FORM[1]),
+            url: field(self, MCP_FORM[2]),
+            env: self
+                .settings_areas
+                .get(MCP_FORM[3])
+                .map(|e| e.read(cx).value().to_string())
+                .unwrap_or_default(),
+        };
+        let Some(form) = self.mcp_form.as_mut() else {
+            return;
+        };
+        match crate::mcp::save_own(&crate::mcp::own_path(), form.was.as_deref(), &draft) {
+            Ok(()) => {
+                self.mcp_form = None;
+                self.open_settings();
+            }
+            Err(error) => {
+                form.draft = draft;
+                form.error = Some(error);
+            }
+        }
     }
 
     fn control(
@@ -1270,6 +1530,28 @@ impl RunoApp {
                 div()
                     .w(px(340.))
                     .child(Input::new(&input).bordered(true).h(px(34.)))
+                    .into_any_element()
+            }
+            Ctl::Field {
+                key,
+                value,
+                placeholder,
+            } => {
+                let input = self.ensure_field(&key, &value, &placeholder, window, cx);
+                div()
+                    .w(px(340.))
+                    .child(Input::new(&input).bordered(true).h(px(34.)))
+                    .into_any_element()
+            }
+            Ctl::Area {
+                key,
+                value,
+                placeholder,
+            } => {
+                let area = self.ensure_area(&key, &value, &placeholder, window, cx);
+                div()
+                    .w(px(340.))
+                    .child(Textarea::new(&area).bordered(true).h(px(90.)))
                     .into_any_element()
             }
             Ctl::Accent(current) => {
@@ -1944,6 +2226,19 @@ impl RunoApp {
                     .text_color(rgb(c_muted()))
                     .child("No settings match your search."),
             );
+        }
+        let mut sections = sections;
+        if let Some(form) = self
+            .mcp_form
+            .as_ref()
+            .filter(|_| query.is_empty() && self.settings_page == SettingsPage::Mcp)
+        {
+            // Just above Runo's own list.
+            let at = sections
+                .iter()
+                .position(|s| s.title == "Runo's servers")
+                .unwrap_or(sections.len());
+            sections.insert(at, mcp_form_section(form));
         }
         for sec in sections {
             body = body.child(self.settings_card(sec, &mut counter, window, cx));

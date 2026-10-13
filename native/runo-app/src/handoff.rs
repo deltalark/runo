@@ -19,6 +19,8 @@ pub(crate) struct SwitchPlan {
     pub files: Vec<git::Change>,
     pub exchanges: usize,
     pub recap: Recap,
+    /// A model picked for the new agent from the composer's agent menu.
+    pub model: Option<String>,
 }
 
 /// The outgoing agent's own recap of the session, asked for when the switch is requested.
@@ -52,7 +54,7 @@ pub(crate) fn recap_prompt(to: &str) -> String {
 /// current conversation, and its CLI can answer a read-only follow-up there.
 pub(crate) fn wants_recap(session: &Session) -> bool {
     let askable = match session.provider.as_str() {
-        "claude" => !session.agent_session.is_empty(),
+        "claude" | "qwen" | "opencode" | "droid" => !session.agent_session.is_empty(),
         "codex" => true,
         _ => false,
     };
@@ -431,6 +433,7 @@ impl RunoApp {
             } else {
                 Recap::Skipped
             },
+            model: None,
         });
         if let Some(command) = recap {
             agent::oneshot_within(
@@ -544,6 +547,9 @@ impl RunoApp {
         };
         let from = session.provider.clone();
         session.switch_provider_keeping(to.id);
+        if let Some(model) = plan.model {
+            session.set_model(model);
+        }
         let cost = if carry { tokens(&plan.brief) } else { 0 };
         if carry {
             session.handoff = plan.brief.clone();
@@ -965,6 +971,7 @@ mod tests {
             status: "M".into(),
             added: 10,
             removed: 2,
+            ..Default::default()
         }];
         let text = brief(&BriefInput {
             from: "Claude Code",
@@ -1068,6 +1075,7 @@ mod tests {
                 status: "M".into(),
                 added: n,
                 removed: 0,
+                ..Default::default()
             })
             .collect();
         let text = brief(&input(&messages, &files));
@@ -1128,6 +1136,10 @@ mod tests {
         assert!(wants_recap(&session));
         session.provider = "gemini".into();
         assert!(!wants_recap(&session));
+        session.provider = "opencode".into();
+        assert!(!wants_recap(&session), "no OpenCode session to fork");
+        session.agent_session = "ses_1".into();
+        assert!(wants_recap(&session));
         session.provider = "codex".into();
         session.conversation_start = session.messages.len();
         assert!(!wants_recap(&session), "work from before an earlier switch");

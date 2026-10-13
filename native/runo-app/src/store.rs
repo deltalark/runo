@@ -39,6 +39,9 @@ pub struct Message {
     /// Agent turns: "kept" or "undone" once the person decided on the turn's changes.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub resolved: String,
+    /// Agent turns that were undone: a snapshot from just before the undo, for Redo.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub redo: String,
     /// User turns: images attached to the prompt (absolute paths).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
@@ -111,11 +114,22 @@ impl Session {
 
 impl Session {
     /// Whether the current agent already replied, so the next prompt continues its conversation.
+    /// A turn stopped after it ran tools but before it wrote anything still counts: the CLI
+    /// saved that conversation.
     pub fn has_conversation(&self) -> bool {
         self.messages.iter().skip(self.conversation_start).any(|m| {
-            (m.role == Role::Agent && !m.text.is_empty())
+            (m.role == Role::Agent && (!m.text.is_empty() || !m.steps.is_empty()))
                 || (m.role == Role::System && m.meta.starts_with("cli:"))
         })
+    }
+
+    /// Pick a model ("" for the agent's default). Effort and speed depend on the model, so
+    /// they reset with it.
+    pub fn set_model(&mut self, model: String) {
+        self.opts.remove("effort");
+        self.opts.remove("tier");
+        self.model.clear();
+        self.opts.insert("model".into(), model);
     }
 
     /// Switch to another agent CLI. Its options and conversation start fresh.
@@ -196,6 +210,7 @@ impl Message {
             meta: String::new(),
             checkpoint: String::new(),
             resolved: String::new(),
+            redo: String::new(),
             images: Vec::new(),
             usage: Usage::default(),
             denied: Vec::new(),
@@ -229,6 +244,10 @@ pub struct Project {
     /// Where new sessions in this project run by default: a connection id, or 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub connection: u64,
+    /// Command run in each new worktree of this project before its agent starts; empty
+    /// uses the one in Settings.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub setup: String,
 }
 
 fn default_mode() -> String {
@@ -279,7 +298,7 @@ pub struct Session {
     pub race: u64,
     /// Prompts typed while the agent was working; each is sent when the turn ends.
     #[serde(default)]
-    pub queue: Vec<String>,
+    pub queue: Vec<Queued>,
     /// A handoff brief from the previous agent, sent with the next prompt.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub handoff: String,
@@ -303,6 +322,68 @@ pub struct Session {
     /// The running turn is on a connection, where it keeps going while Runo is closed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remote_turn: bool,
+    /// The branch this session's branch started from and lands in, such as `main`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base: String,
+    /// The pull request opened for this session's branch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pr_url: String,
+    /// The newest snapshot of the folder Runo took (end of a turn, an undo or a redo),
+    /// so Undo can leave alone what changed after it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub snapshot: String,
+    /// Told to the agent with the next prompt, such as that its last turn was undone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub undo_note: String,
+    /// Connections it ran on before, whose copies are deleted along with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_on: Vec<u64>,
+    /// The playbook that started it, or 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub playbook: u64,
+    /// What that playbook declared it may do (`read`, `edit`, `shell`, `network`); every
+    /// turn of the session keeps to it. Empty means no limits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<String>,
+}
+
+/// A prompt waiting for the agent, with the images attached to it.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(from = "SavedQueued")]
+pub struct Queued {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
+impl Queued {
+    pub fn new(text: impl Into<String>, images: Vec<String>) -> Self {
+        Self {
+            text: text.into(),
+            images,
+        }
+    }
+}
+
+/// Older saves keep queued prompts as plain strings.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedQueued {
+    Text(String),
+    Full {
+        text: String,
+        #[serde(default)]
+        images: Vec<String>,
+    },
+}
+
+impl From<SavedQueued> for Queued {
+    fn from(saved: SavedQueued) -> Self {
+        match saved {
+            SavedQueued::Text(text) => Queued::new(text, Vec::new()),
+            SavedQueued::Full { text, images } => Queued::new(text, images),
+        }
+    }
 }
 
 /// What a switch replaced, enough to undo it before anything is sent.
@@ -350,11 +431,18 @@ pub struct Note {
 pub fn notes_prompt(notes: &[Note]) -> String {
     let mut out = String::from("Please address these review notes on your changes:\n");
     for (i, note) in notes.iter().enumerate() {
+        // Removed lines only exist in the old file, so their number is the old one.
+        let place = if note.code.starts_with('−') {
+            format!(
+                "{}, line {} of the old version (removed)",
+                note.path, note.line
+            )
+        } else {
+            format!("{}:{}", note.path, note.line)
+        };
         out.push_str(&format!(
-            "\n{}. `{}:{}`: {}\n   On the line `{}`\n",
+            "\n{}. `{place}`: {}\n   On the line `{}`\n",
             i + 1,
-            note.path,
-            note.line,
             note.text.trim(),
             note.code.trim()
         ));
@@ -381,6 +469,9 @@ pub struct State {
     /// Open tabs and panels, restored on the next launch.
     #[serde(default)]
     pub layout: Layout,
+    /// Cost reported by the agents per day ("%Y-%m-%d"), in US cents; the last 31 days.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub spend: std::collections::BTreeMap<String, f64>,
 }
 
 /// How a project's notes are kept and used.
@@ -448,7 +539,31 @@ pub struct Automation {
     /// Labels and defaults for its `{{key}}` placeholders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<crate::pbfile::Input>,
+    /// Its latest runs, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<PlaybookRun>,
+    /// A fingerprint of the playbook as it was installed, to tell edits made here from
+    /// changes at the source.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub installed: String,
 }
+
+/// One run of a playbook, for its history.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
+pub struct PlaybookRun {
+    /// Unix seconds it started, or was due.
+    pub at: u64,
+    /// The session it ran in, or 0 when it didn't start.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub session: u64,
+    /// "running", "done", "failed", "skipped" or "not started".
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// Runs kept in a playbook's history.
+const RUNS_KEPT: usize = 20;
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
@@ -462,6 +577,30 @@ impl Automation {
     /// The values it asks for when it runs.
     pub fn run_inputs(&self) -> Vec<crate::pbfile::Input> {
         crate::pbfile::inputs_of(&self.inputs, &self.prompt)
+    }
+
+    /// Add a run to the history, dropping the oldest past the limit.
+    pub fn record(&mut self, run: PlaybookRun) {
+        self.runs.push(run);
+        if self.runs.len() > RUNS_KEPT {
+            let extra = self.runs.len() - RUNS_KEPT;
+            self.runs.drain(..extra);
+        }
+    }
+
+    /// What it is, for telling whether it changed: everything a playbook file holds.
+    pub fn fingerprint(&self) -> String {
+        let file = crate::pbfile::PlaybookFile {
+            author: String::new(),
+            version: String::new(),
+            ..self.to_file()
+        };
+        crate::pbfile::render(&file)
+    }
+
+    /// Edited here since it was installed.
+    pub fn edited_here(&self) -> bool {
+        !self.installed.is_empty() && self.installed != self.fingerprint()
     }
 
     /// Whether it declared that it may do `what`; undeclared playbooks may do anything.
@@ -559,9 +698,75 @@ pub struct Layout {
     pub hide_sidebar: bool,
     #[serde(default)]
     pub hide_panel: bool,
+    /// The mode on the rail, by its label ("Home", "Sessions", ...).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    /// The session open beside the selected one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<u64>,
+    /// The right panel's tab: "changes", "browser" or "files".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub right_tab: String,
+    /// Projects open in the sidebar; `None` (files from before) opens them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded: Option<Vec<u64>>,
+    /// The project in the top bar's switcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<u64>,
+    /// Sidebar width in pixels; 0 is the default.
+    #[serde(default)]
+    pub sidebar_width: f32,
+    /// Home lists every project instead of the one in the top bar.
+    #[serde(default)]
+    pub home_all: bool,
+    /// Where the window was and how big.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowPlace>,
+}
+
+/// The window's last position and size, in logical pixels.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct WindowPlace {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+/// The saved window place, read before the rest of the state so the window opens there.
+pub fn saved_window() -> Option<WindowPlace> {
+    #[derive(Deserialize, Default)]
+    struct Only {
+        #[serde(default)]
+        layout: Layout,
+    }
+    let text = std::fs::read_to_string(state_path()).ok()?;
+    let only: Only = serde_json::from_str(&text).ok()?;
+    only.layout
+        .window
+        .filter(|w| w.width >= 400. && w.height >= 300.)
+}
+
+/// Today's date as the spend log keys it.
+pub fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 impl State {
+    /// Add a turn's cost to `day`, keeping a month of days.
+    pub fn add_spend(&mut self, day: &str, cents: f64) {
+        if cents <= 0.0 {
+            return;
+        }
+        *self.spend.entry(day.to_string()).or_default() += cents;
+        while self.spend.len() > 31 {
+            let first = self.spend.keys().next().cloned().unwrap_or_default();
+            self.spend.remove(&first);
+        }
+    }
+
     /// Record an event for the Activity feed, keeping the latest 500.
     pub fn log(&mut self, session: u64, text: impl Into<String>) {
         self.activity.push(Activity {
@@ -587,6 +792,9 @@ pub struct PlaybookRequest {
     pub project: u64,
     /// Who asked, such as "claude-code".
     pub from: String,
+    /// The folder of the session that asked.
+    #[serde(default)]
+    pub dir: String,
 }
 
 /// Leave a request in `inbox`. Written under a temporary name and renamed, so the app
@@ -844,6 +1052,26 @@ mod tests {
     }
 
     #[test]
+    fn picking_a_model_resets_its_effort_and_speed() {
+        let mut session = State::demo().sessions[0].clone();
+        session.model = "old".into();
+        session.opts.insert("effort".into(), "high".into());
+        session.opts.insert("tier".into(), "priority".into());
+        session.opts.insert("mode".into(), "read-only".into());
+        session.set_model("gpt-5.5".into());
+        let sel = session.selections();
+        assert_eq!(sel.get("model").map(String::as_str), Some("gpt-5.5"));
+        assert!(!sel.contains_key("effort") && !sel.contains_key("tier"));
+        assert_eq!(sel.get("mode").map(String::as_str), Some("read-only"));
+        // The agent's default is an explicit empty pick, not a fall back to the old model.
+        session.set_model(String::new());
+        assert_eq!(
+            session.selections().get("model").map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
     fn saves_and_loads_round_trip() {
         let dir = temp("roundtrip");
         let path = dir.join("state.json");
@@ -969,6 +1197,22 @@ mod tests {
         );
         session.messages.last_mut().unwrap().text = "done".into();
         assert!(session.has_conversation());
+        // A first turn stopped after it ran tools keeps its conversation.
+        session.switch_provider("codex");
+        let mut stopped = Message::new(Role::Agent, "");
+        stopped.steps.push("Read src/main.rs".into());
+        session.messages.push(stopped);
+        assert!(session.has_conversation());
+    }
+
+    #[test]
+    fn queued_prompts_load_from_older_saves() {
+        let old: Vec<Queued> =
+            serde_json::from_str(r#"["Fix it",{"text":"Look","images":["a.png"]}]"#).unwrap();
+        assert_eq!(old[0], Queued::new("Fix it", Vec::new()));
+        assert_eq!(old[1].images, ["a.png"]);
+        let saved = serde_json::to_string(&old[0]).unwrap();
+        assert_eq!(saved, r#"{"text":"Fix it"}"#);
     }
 
     #[test]
@@ -1002,7 +1246,43 @@ mod tests {
         ];
         assert_eq!(
             notes_prompt(&notes),
-            "Please address these review notes on your changes:\n\n1. `src/a.rs:12`: Name this better\n   On the line `+    let x = 1;`\n\n2. `b.css:3`: Keep red here\n   On the line `−color: red;`\n"
+            "Please address these review notes on your changes:\n\n1. `src/a.rs:12`: Name this better\n   On the line `+    let x = 1;`\n\n2. `b.css, line 3 of the old version (removed)`: Keep red here\n   On the line `−color: red;`\n"
         );
+    }
+
+    #[test]
+    fn old_layouts_still_load() {
+        let layout: Layout = serde_json::from_str(r#"{"tabs":[3],"selected":3}"#).unwrap();
+        assert_eq!(layout.tabs, vec![3]);
+        assert_eq!(layout.expanded, None);
+        assert!(layout.mode.is_empty() && layout.window.is_none());
+        let full = Layout {
+            mode: "Home".into(),
+            expanded: Some(vec![1, 2]),
+            window: Some(WindowPlace {
+                x: 10.,
+                y: 20.,
+                width: 1200.,
+                height: 800.,
+                maximized: false,
+            }),
+            ..Layout::default()
+        };
+        let back: Layout = serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
+    }
+
+    #[test]
+    fn spend_adds_up_per_day_and_keeps_a_month() {
+        let mut state = State::default();
+        state.add_spend("2026-10-13", 12.5);
+        state.add_spend("2026-10-13", 7.5);
+        state.add_spend("2026-10-13", 0.0);
+        assert_eq!(state.spend.get("2026-10-13"), Some(&20.0));
+        for day in 1..=40 {
+            state.add_spend(&format!("2026-11-{day:02}"), 1.0);
+        }
+        assert_eq!(state.spend.len(), 31);
+        assert!(!state.spend.contains_key("2026-10-13"));
     }
 }

@@ -46,7 +46,7 @@ const STEPS: &[Step] = &[
         side: Side::Right,
         glyph: IconName::Layers,
         title: "Everything in one place",
-        body: "The rail on the left switches between Home, Sessions, Design, Architecture, Playbooks and Reviews, with the Inbox and Settings at the bottom. Press Ctrl+1 to Ctrl+6 (⌘1 to ⌘6 on a Mac) to jump between them.",
+        body: "The rail on the left switches between Home, Sessions, Design, Architecture, Playbooks and Reviews, with the Inbox and Settings at the bottom. Press {go-home} to {go-reviews} to jump between them, and {go-inbox} for the Inbox.",
     },
     Step {
         anchor: Some("projects"),
@@ -60,7 +60,7 @@ const STEPS: &[Step] = &[
         side: Side::Below,
         glyph: IconName::PanelTop,
         title: "Tabs",
-        body: "Open sessions stay in tabs so you can jump between agents while they work. Right-click a tab to close it or the others.",
+        body: "Open sessions stay in tabs so you can jump between agents while they work. {next-tab} moves to the next one, {close-tab} closes it, and you can drag tabs into any order.",
     },
     Step {
         anchor: Some("composer"),
@@ -102,7 +102,7 @@ const STEPS: &[Step] = &[
         side: Side::Below,
         glyph: IconName::Search,
         title: "Quick open",
-        body: "Jump to any session, file or command from the keyboard. Press Ctrl+K (⌘K on a Mac).",
+        body: "Jump to any session, project, file, setting or command from the keyboard. Press {quick-open}.",
     },
     Step {
         anchor: Some("settings"),
@@ -119,6 +119,23 @@ const STEPS: &[Step] = &[
         body: "Add a project folder and start your first session. Have fun building.",
     },
 ];
+
+/// A step's text with each `{shortcut-id}` replaced by the keys it uses now, so the tour
+/// follows the person's own keybindings.
+pub(crate) fn with_keys(text: &str, label: impl Fn(&str) -> String) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('{') {
+        let Some(len) = rest[start..].find('}') else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        out.push_str(&label(&rest[start + 1..start + len]));
+        rest = &rest[start + len + 1..];
+    }
+    out.push_str(rest);
+    out
+}
 
 /// Marks the element it sits in as `key` for the tour. The parent must be `relative()`.
 pub(crate) fn anchor(anchors: &Anchors, key: &'static str) -> impl IntoElement {
@@ -141,19 +158,39 @@ const GAP: f32 = 14.;
 const MARGIN: f32 = 12.;
 
 impl RunoApp {
+    /// Start the tour in Sessions with a session, the sidebar and the panel open, so every
+    /// part it points at is on screen.
     pub(crate) fn start_tour(&mut self) {
         self.ctx_menu = None;
         self.switch_plan = None;
-        if matches!(self.view, View::Settings | View::NewSession) {
-            self.view = View::Session;
+        self.menu = None;
+        if self.current().is_none() {
+            if let Some(id) = self
+                .state
+                .sessions
+                .iter()
+                .find(|s| !s.archived)
+                .map(|s| s.id)
+            {
+                self.select(id);
+            }
         }
+        self.view = View::Session;
+        self.show_sidebar = true;
+        self.show_panel = true;
+        self.panel_auto_hidden = false;
         self.tour = Some(0);
     }
 
     pub(crate) fn end_tour(&mut self, cx: &mut Context<Self>) {
         self.tour = None;
-        if !cx.global::<AppSettings>().tour_seen {
-            settings::update(cx, |s| s.tour_seen = true);
+        let st = cx.global::<AppSettings>();
+        if !st.tour_seen || !st.whats_new_seen {
+            // The tour already shows the new layout, so its "What's new" card is not needed.
+            settings::update(cx, |s| {
+                s.tour_seen = true;
+                s.whats_new_seen = true;
+            });
         }
     }
 
@@ -207,6 +244,7 @@ impl RunoApp {
         };
 
         let last = at + 1 == STEPS.len();
+        let body = with_keys(step.body, |id| keymap::label(cx, id));
         let dots = div().flex().gap(px(5.)).children((0..STEPS.len()).map(|i| {
             div()
                 .h(px(6.))
@@ -269,7 +307,7 @@ impl RunoApp {
                     .text_size(px(13.))
                     .line_height(px(19.))
                     .text_color(rgb(c_secondary()))
-                    .child(step.body),
+                    .child(body),
             )
             .child(
                 div()
@@ -382,6 +420,132 @@ impl RunoApp {
 }
 
 impl RunoApp {
+    /// Once, for people who used Runo before the Workbench layout: what moved where.
+    pub(crate) fn whats_new_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let st = cx.global::<AppSettings>();
+        if !st.tour_seen
+            || st.whats_new_seen
+            || !st.browser_asked
+            || self.tour.is_some()
+            || self.view == View::Settings
+            || self.demo
+        {
+            return None;
+        }
+        let points = [
+            (
+                IconName::Layers,
+                format!(
+                    "A rail on the left for Home, Sessions, Playbooks and Reviews ({} to {}).",
+                    keymap::label(cx, "go-home"),
+                    keymap::label(cx, "go-reviews")
+                ),
+            ),
+            (
+                IconName::Inbox,
+                format!(
+                    "One Inbox for permission prompts, plans, questions and finished runs ({}).",
+                    keymap::label(cx, "go-inbox")
+                ),
+            ),
+            (
+                IconName::PanelTop,
+                format!(
+                    "Sessions open as tabs: {} for the next, {} to close, drag to reorder.",
+                    keymap::label(cx, "next-tab"),
+                    keymap::label(cx, "close-tab")
+                ),
+            ),
+            (
+                IconName::Folder,
+                "The project switcher in the top bar; Home shows that project or all of them."
+                    .to_string(),
+            ),
+        ];
+        let mut list = div().v_flex().gap_2();
+        for (glyph, text) in points {
+            list = list.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .text_size(px(13.))
+                    .line_height(px(19.))
+                    .text_color(rgb(c_secondary()))
+                    .child(div().flex_none().pt(px(2.)).child(icon(glyph, 14., c_blue())))
+                    // min_w_0 lets the text shrink to the card and wrap instead of spilling out.
+                    .child(div().flex_1().min_w_0().child(text)),
+            );
+        }
+        let close = |tour: bool| {
+            cx.listener(move |this: &mut Self, _, _, cx| {
+                settings::update(cx, |s| s.whats_new_seen = true);
+                if tour {
+                    this.start_tour();
+                }
+                cx.notify();
+            })
+        };
+        let card = div()
+            .id("whats-new")
+            .w(px(CARD_W + 40.))
+            .p_5()
+            .v_flex()
+            .gap_3()
+            .rounded_xl()
+            .border_1()
+            .border_color(float_edge())
+            .bg(float(c_canvas()))
+            .shadow_2xl()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(img(app_icon()).size(px(32.)).flex_none())
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("What's new: the Workbench"),
+                    ),
+            )
+            .child(list)
+            .child(
+                div()
+                    .pt_1()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        self.button("whats-new-tour", "Show me around", false)
+                            .on_click(close(true)),
+                    )
+                    .child(
+                        self.button("whats-new-ok", "Got it", true)
+                            .on_click(close(false)),
+                    ),
+            );
+        let dim = if is_dark() {
+            hsla(0., 0., 0., 0.62)
+        } else {
+            hsla(0., 0., 0., 0.38)
+        };
+        let layer = div()
+            .id("whats-new-layer")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(dim)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(rise(card, SharedString::from("whats-new-card"), 280));
+        Some(fade(layer, SharedString::from("whats-new-fade"), 200))
+    }
+
     /// Once, after the tour (or after updating, for people who saw it already): ask whether
     /// agents may use the built-in browser.
     pub(crate) fn browser_offer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -512,6 +676,16 @@ fn place(side: Side, target: (f32, f32, f32, f32), window: (f32, f32)) -> (f32, 
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn step_text_uses_the_current_keys() {
+        let text = with_keys("Press {quick-open} or {go-home}.", |id| match id {
+            "quick-open" => "⌘K".into(),
+            _ => "Ctrl+1".into(),
+        });
+        assert_eq!(text, "Press ⌘K or Ctrl+1.");
+        assert_eq!(with_keys("No keys {here", |_| "x".into()), "No keys {here");
+    }
 
     #[test]
     fn cards_stay_beside_their_target_and_inside_the_window() {

@@ -35,6 +35,59 @@ enum Status {
     Replace,
 }
 
+/// What an update would change in `a`, in short phrases such as "may now run commands"
+/// or "prompt: 3 lines added, 1 removed". Empty when nothing a playbook file holds differs.
+fn changes(a: &store::Automation, file: &pbfile::PlaybookFile) -> Vec<String> {
+    let mut out = Vec::new();
+    let title = |key: &str| {
+        pbfile::PERMISSIONS
+            .iter()
+            .find(|p| p.0 == key)
+            .map(|p| p.1.to_lowercase())
+            .unwrap_or_else(|| key.to_string())
+    };
+    // No list means it may do anything.
+    let all: Vec<String> = pbfile::PERMISSIONS
+        .iter()
+        .map(|p| p.0.to_string())
+        .collect();
+    let before = if a.permissions.is_empty() {
+        &all
+    } else {
+        &a.permissions
+    };
+    let after = if file.permissions.is_empty() {
+        &all
+    } else {
+        &file.permissions
+    };
+    for key in after.iter().filter(|k| !before.contains(k)) {
+        out.push(format!("may now {}", title(key)));
+    }
+    for key in before.iter().filter(|k| !after.contains(k)) {
+        out.push(format!("no longer may {}", title(key)));
+    }
+    if a.prompt.trim() != file.prompt.trim() {
+        let old: Vec<&str> = a.prompt.lines().collect();
+        let new: Vec<&str> = file.prompt.lines().collect();
+        let added = new.iter().filter(|l| !old.contains(l)).count();
+        let removed = old.iter().filter(|l| !new.contains(l)).count();
+        out.push(match (added, removed) {
+            (0, 0) => "prompt reworded".to_string(),
+            (a, 0) => format!("prompt: {a} lines added"),
+            (0, r) => format!("prompt: {r} lines removed"),
+            (a, r) => format!("prompt: {a} lines added, {r} removed"),
+        });
+    }
+    if a.description.trim() != file.description.trim() {
+        out.push("new description".into());
+    }
+    if a.inputs != file.inputs {
+        out.push("inputs changed".into());
+    }
+    out
+}
+
 impl RunoApp {
     /// The playbook already installed for `found`: same source and file, else same name.
     fn installed_match(&self, source: &str, found: &Found) -> Option<&store::Automation> {
@@ -57,8 +110,19 @@ impl RunoApp {
             Some(a) if pbfile::newer(&found.file.version, &a.version) => {
                 Status::Update(found.file.version.clone())
             }
-            Some(a) if a.prompt == found.file.prompt => Status::Same,
+            Some(a) if changes(a, &found.file).is_empty() => Status::Same,
             Some(_) => Status::Update(found.file.version.clone()),
+        }
+    }
+
+    /// Whether an update starts ticked: not when you've edited your copy here.
+    fn ticks(&self, source: &str, found: &Found) -> bool {
+        match self.install_status(source, found) {
+            Status::New => true,
+            Status::Update(_) => !self
+                .installed_match(source, found)
+                .is_some_and(|a| a.edited_here()),
+            _ => false,
         }
     }
 
@@ -101,14 +165,9 @@ impl RunoApp {
                     fetched
                         .found
                         .iter()
-                        .map(|f| {
-                            // Only what's new or an update starts ticked; same-named
-                            // playbooks of your own are left alone unless you tick them.
-                            matches!(
-                                this.install_status(&source, f),
-                                Status::New | Status::Update(_)
-                            )
-                        })
+                        // Only what's new or an update starts ticked; same-named
+                        // playbooks of your own are left alone unless you tick them.
+                        .map(|f| this.ticks(&source, f))
                         .collect()
                 });
                 if let Some(install) = this.pb_install.as_mut() {
@@ -152,9 +211,9 @@ impl RunoApp {
                     origin: String::new(),
                 };
                 install.source = String::new();
-                let status = self.install_status("", &found);
+                let tick = self.ticks("", &found);
                 let install = self.pb_install.as_mut().expect("checked above");
-                if matches!(status, Status::New | Status::Update(_)) {
+                if tick {
                     install.chosen.push(0);
                 }
                 install.error = None;
@@ -230,6 +289,7 @@ impl RunoApp {
                 if !file.agent.is_empty() {
                     a.provider = provider.clone();
                 }
+                a.installed = a.fingerprint();
             };
             match existing.and_then(|id| self.state.automations.iter_mut().find(|a| a.id == id)) {
                 Some(a) => {
@@ -423,6 +483,17 @@ impl RunoApp {
                     .child(Input::new(state).bordered(true).h(px(34.))),
             );
         }
+        let warning =
+            crate::workspace::limits_warning(&auto.provider, &auto.permissions).map(|w| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_amber()))
+                    .child(icon(IconName::ShieldAlert, 13., c_amber()))
+                    .child(w)
+            });
         let limits = (!auto.permissions.is_empty()).then(|| {
             let text = match permission_summary(&auto.permissions) {
                 None => "Read only: it can look through the project but not change it.".into(),
@@ -471,12 +542,13 @@ impl RunoApp {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(format!("Run {}", auto.name)),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(c_muted()))
-                                    .child("Fill in what this run should use."),
-                            ),
+                            .child(div().text_xs().text_color(rgb(c_muted())).child(
+                                if run.fields.is_empty() {
+                                    "Check what it may do, then run it."
+                                } else {
+                                    "Fill in what this run should use."
+                                },
+                            )),
                     ),
             )
             .child(
@@ -486,7 +558,8 @@ impl RunoApp {
                     .v_flex()
                     .gap_4()
                     .child(fields)
-                    .children(limits),
+                    .children(limits)
+                    .children(warning),
             )
             .child(
                 div()
@@ -791,6 +864,12 @@ impl RunoApp {
                 ));
             }
         }
+        let mine = self.installed_match(&install.source, found);
+        let changed = match (&status, mine) {
+            (Status::Update(_), Some(a)) => changes(a, file),
+            _ => Vec::new(),
+        };
+        let edited = matches!(status, Status::Update(_)) && mine.is_some_and(|a| a.edited_here());
         let inputs = pbfile::inputs_of(&file.inputs, &file.prompt);
         if !inputs.is_empty() {
             let names: Vec<String> = inputs.iter().map(|i| i.title()).collect();
@@ -869,7 +948,20 @@ impl RunoApp {
                                 .child(file.description.clone()),
                         )
                     })
-                    .child(pills),
+                    .child(pills)
+                    .when(!changed.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(c_secondary()))
+                                .child(format!("Changes: {}", changed.join("; "))),
+                        )
+                    })
+                    .when(edited, |el| {
+                        el.child(div().text_size(px(12.)).text_color(rgb(c_amber())).child(
+                            "You've edited this playbook here. Updating replaces your edits.",
+                        ))
+                    }),
             )
             .into_any_element()
     }
@@ -910,5 +1002,45 @@ impl RunoApp {
 
     fn tile(glyph: IconName, color: u32, size: f32) -> Div {
         Self::playbook_tile(glyph, color, size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::changes;
+    use crate::store;
+
+    #[test]
+    fn an_update_says_what_it_changes() {
+        let a = store::Automation {
+            prompt: "Check the build.\nReport back.".into(),
+            permissions: vec!["read".into()],
+            ..Default::default()
+        };
+        let mut file = a.to_file();
+        assert!(changes(&a, &file).is_empty());
+        file.permissions = vec!["read".into(), "shell".into()];
+        file.prompt = "Check the build.\nFix what fails.\nReport back.".into();
+        assert_eq!(
+            changes(&a, &file),
+            ["may now run commands", "prompt: 1 lines added"]
+        );
+        file.permissions.clear();
+        assert!(changes(&a, &file).contains(&"may now edit files".to_string()));
+    }
+
+    #[test]
+    fn edits_made_here_are_told_from_the_installed_copy() {
+        let mut a = store::Automation {
+            name: "Tidy".into(),
+            prompt: "Tidy up.".into(),
+            ..Default::default()
+        };
+        assert!(!a.edited_here(), "nothing to compare with");
+        a.installed = a.fingerprint();
+        a.version = "2".into();
+        assert!(!a.edited_here(), "the version alone isn't an edit");
+        a.prompt = "Tidy up, then test.".into();
+        assert!(a.edited_here());
     }
 }

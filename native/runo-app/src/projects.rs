@@ -72,6 +72,8 @@ pub(crate) struct ProjectForm {
     pub auto_name: bool,
     /// A name to put in the field on the next render (picking a folder happens off the window).
     pub sync_name: Option<String>,
+    /// The setup command to put in its field on the next render.
+    pub sync_setup: Option<String>,
     pub error: Option<String>,
 }
 
@@ -144,9 +146,7 @@ impl RunoApp {
             let Some(session) = self.state.session(*id).cloned() else {
                 continue;
             };
-            if session.elsewhere() {
-                crate::connections::cleanup_session(&session);
-            }
+            crate::connections::cleanup_session(&session);
             if worktrees && session.isolated && session.dir != project.path {
                 if let Err(error) = git::remove_worktree(&project.path, &session.dir) {
                     failed.push(error);
@@ -172,6 +172,9 @@ impl RunoApp {
         }
         self.state.projects.retain(|p| p.id != pid);
         self.expanded.retain(|p| *p != pid);
+        if self.project == Some(pid) {
+            self.project = None;
+        }
         for slot in [
             &mut self.new_project,
             &mut self.notes_project,
@@ -190,10 +193,15 @@ impl RunoApp {
         if self.selected.is_some_and(|id| ids.contains(&id)) {
             match self.tabs.last().copied() {
                 Some(next) => self.select(next),
+                // Nothing left open: stay in Sessions, on the list of sessions.
                 None => {
                     self.selected = None;
                     if self.view == View::Session {
-                        self.view = View::Inbox;
+                        self.view = if self.state.projects.is_empty() {
+                            View::Home
+                        } else {
+                            View::AllSessions
+                        };
                     }
                 }
             }
@@ -481,6 +489,7 @@ impl RunoApp {
             start_session: true,
             auto_name: true,
             sync_name: Some(String::new()),
+            sync_setup: Some(String::new()),
             error: None,
         });
         cx.notify();
@@ -500,8 +509,62 @@ impl RunoApp {
             start_session: false,
             auto_name: false,
             sync_name: Some(p.name.clone()),
+            sync_setup: Some(p.setup.clone()),
             error: None,
         });
+    }
+
+    /// Point a project whose folder moved at its new place. Sessions that worked in the
+    /// project folder itself follow it; isolated ones keep their own worktrees.
+    pub(crate) fn relink_project(&mut self, pid: u64, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose the project's folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.first().cloned() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                let new = path.to_string_lossy().into_owned();
+                if this
+                    .state
+                    .projects
+                    .iter()
+                    .any(|p| p.path == new && p.id != pid)
+                {
+                    this.notice = Some("That folder is already a project.".into());
+                    cx.notify();
+                    return;
+                }
+                let Some(project) = this.state.projects.iter_mut().find(|p| p.id == pid) else {
+                    return;
+                };
+                let old = std::mem::replace(&mut project.path, new.clone());
+                let name = project.name.clone();
+                for s in this
+                    .state
+                    .sessions
+                    .iter_mut()
+                    .filter(|s| s.project_id == pid && s.dir == old)
+                {
+                    s.dir = new.clone();
+                }
+                this.info = Some((
+                    format!("{name} now points at {new}."),
+                    std::time::Instant::now(),
+                ));
+                this.save();
+                this.refresh();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn browse_project_folder(&mut self, cx: &mut Context<Self>) {
@@ -541,6 +604,10 @@ impl RunoApp {
 
     /// Put a pending name into the name field; called from render, which has the window.
     pub(crate) fn sync_project_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(setup) = self.project_form.as_mut().and_then(|f| f.sync_setup.take()) {
+            self.project_setup
+                .update(cx, |input, cx| input.set_value(setup, window, cx));
+        }
         let Some(name) = self.project_form.as_mut().and_then(|f| f.sync_name.take()) else {
             return;
         };
@@ -555,6 +622,7 @@ impl RunoApp {
             return;
         };
         let name = self.project_name.read(cx).value().trim().to_string();
+        let setup = self.project_setup.read(cx).value().trim().to_string();
         let color = COLORS[form.color].0.to_string();
         let glyph = ICONS[form.icon].0.to_string();
         if let Some(pid) = form.editing {
@@ -564,6 +632,7 @@ impl RunoApp {
                 }
                 p.color = color;
                 p.icon = glyph;
+                p.setup = setup;
             }
             self.project_form = None;
             self.save();
@@ -598,7 +667,13 @@ impl RunoApp {
             }
         }
         match self.add_project(&path, name, color, glyph, start) {
-            Ok(()) => self.project_form = None,
+            Ok(()) => {
+                self.project_form = None;
+                if let Some(p) = self.state.projects.last_mut() {
+                    p.setup = setup;
+                }
+                self.save();
+            }
             Err(why) => {
                 if let Some(form) = self.project_form.as_mut() {
                     form.error = Some(why);
@@ -861,6 +936,19 @@ impl RunoApp {
                     .gap_1p5()
                     .child(label("Name"))
                     .child(Input::new(&self.project_name).bordered(true).h(px(34.))),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .gap_1p5()
+                    .child(label("Worktree setup command"))
+                    .child(Input::new(&self.project_setup).bordered(true).h(px(34.)))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("Runs in each new worktree before its agent starts, such as npm install. Empty uses the one in Settings."),
+                    ),
             )
             .child(div().v_flex().gap_1p5().child(label("Color")).child(swatches))
             .child(div().v_flex().gap_1p5().child(label("Icon")).child(glyphs))

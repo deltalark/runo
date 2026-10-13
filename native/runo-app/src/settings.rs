@@ -61,7 +61,7 @@ pub struct AppSettings {
     pub attribution: bool,
     /// Saved shell commands shown as buttons over the terminal, one `Name = command` per line.
     pub quick_commands: String,
-    /// Group the sidebar by status (Pinned, Working, Needs review, Done) instead of project.
+    /// Group the sidebar by status (Needs you, Running, Ready to review, Done) instead of project.
     pub group_by_status: bool,
     /// Translucent window over a blurred desktop: "off", "subtle", "frosted" or "clear".
     pub glass: String,
@@ -75,6 +75,8 @@ pub struct AppSettings {
     pub memory_server: bool,
     /// The first-run tour was finished or skipped.
     pub tour_seen: bool,
+    /// The "What's new" card about the Workbench layout was read.
+    pub whats_new_seen: bool,
     /// How new sessions open: "chat" or "cli" (the agent's own CLI, where supported).
     pub default_view: String,
     /// How wide the conversation runs: "comfortable", "wide" or "full".
@@ -87,6 +89,8 @@ pub struct AppSettings {
     pub term_scroll: String,
     /// Right-click in the terminal: "menu" or "paste".
     pub term_right_click: String,
+    /// Lines a terminal keeps above the screen, for new shells.
+    pub term_history: u32,
     /// MCP servers (`<app>/<name>`) handed to every agent that doesn't load them itself.
     pub mcp_shared: Vec<String>,
     /// Show pages in the Browser tab with a headless Chromium.
@@ -99,6 +103,16 @@ pub struct AppSettings {
     pub connections: Vec<crate::connections::Connection>,
     /// Back up each remote session checkpoint to the project's GitHub remote.
     pub sync_backup: bool,
+    /// Include untracked files in those backups.
+    pub sync_backup_untracked: bool,
+    /// End a turn on a connection at the first command it isn't allowed to run.
+    pub stop_on_denial: bool,
+    /// Minutes an agent waits for an answer when it asks for permission mid-turn.
+    pub approval_wait_mins: u32,
+    /// Runs of each scheduled playbook to keep; 0 keeps them all.
+    pub playbook_keep_runs: u32,
+    /// Ask before a playbook an agent asked for starts.
+    pub confirm_agent_playbooks: bool,
     /// Give agents Cove's own tools (`cove mcp`): scratch VMs, commands, files, ports.
     pub cove_tools: bool,
 }
@@ -144,18 +158,25 @@ impl Default for AppSettings {
             font_smoothing: false,
             memory_server: true,
             tour_seen: false,
+            whats_new_seen: false,
             default_view: "chat".into(),
             content_width: "full".into(),
             term_font_size: 12,
             term_font: String::new(),
             term_scroll: "normal".into(),
             term_right_click: "menu".into(),
+            term_history: 10_000,
             mcp_shared: Vec::new(),
             browser_enabled: false,
             browser_asked: false,
             keybindings: HashMap::new(),
             connections: Vec::new(),
-            sync_backup: true,
+            sync_backup: false,
+            sync_backup_untracked: false,
+            stop_on_denial: true,
+            approval_wait_mins: 5,
+            playbook_keep_runs: 10,
+            confirm_agent_playbooks: true,
             cove_tools: true,
         }
     }
@@ -225,6 +246,9 @@ impl AppSettings {
         crate::connections::set_all(&self.connections);
         COVE_TOOLS.store(self.cove_tools, Ordering::Relaxed);
         SYNC_BACKUP.store(self.sync_backup, Ordering::Relaxed);
+        SYNC_BACKUP_UNTRACKED.store(self.sync_backup_untracked, Ordering::Relaxed);
+        STOP_ON_DENIAL.store(self.stop_on_denial, Ordering::Relaxed);
+        KEEP_RUNS.store(self.playbook_keep_runs, Ordering::Relaxed);
         crate::terminal::configure(
             self.term_font_size,
             match self.term_scroll.as_str() {
@@ -234,6 +258,7 @@ impl AppSettings {
             },
             self.term_right_click == "paste",
         );
+        crate::pty::set_scrollback(self.term_history as usize);
     }
 
     /// The widest the conversation column gets, or None to fill the window.
@@ -272,7 +297,10 @@ static REMOVE_WORKTREE: AtomicBool = AtomicBool::new(true);
 static AUTOSCROLL: AtomicBool = AtomicBool::new(true);
 static KEEP_AWAKE: AtomicBool = AtomicBool::new(true);
 static COVE_TOOLS: AtomicBool = AtomicBool::new(true);
-static SYNC_BACKUP: AtomicBool = AtomicBool::new(true);
+static SYNC_BACKUP: AtomicBool = AtomicBool::new(false);
+static SYNC_BACKUP_UNTRACKED: AtomicBool = AtomicBool::new(false);
+static STOP_ON_DENIAL: AtomicBool = AtomicBool::new(true);
+static KEEP_RUNS: AtomicU32 = AtomicU32::new(10);
 
 pub fn cove_tools() -> bool {
     COVE_TOOLS.load(Ordering::Relaxed)
@@ -280,6 +308,18 @@ pub fn cove_tools() -> bool {
 
 pub fn sync_backup() -> bool {
     SYNC_BACKUP.load(Ordering::Relaxed)
+}
+
+pub fn sync_backup_untracked() -> bool {
+    SYNC_BACKUP_UNTRACKED.load(Ordering::Relaxed)
+}
+
+pub fn playbook_keep_runs() -> usize {
+    KEEP_RUNS.load(Ordering::Relaxed) as usize
+}
+
+pub fn stop_on_denial() -> bool {
+    STOP_ON_DENIAL.load(Ordering::Relaxed)
 }
 
 pub fn keep_awake() -> bool {
@@ -678,6 +718,35 @@ fn frontmatter(text: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Start a skill in `dir`: a new folder with a SKILL.md to fill in. Returns the file.
+pub fn new_skill(dir: &Path) -> std::io::Result<PathBuf> {
+    let name = (1..)
+        .map(|n| {
+            if n == 1 {
+                "new-skill".to_string()
+            } else {
+                format!("new-skill-{n}")
+            }
+        })
+        .find(|n| !dir.join(n).exists())
+        .expect("some name is free");
+    let folder = dir.join(&name);
+    std::fs::create_dir_all(&folder)?;
+    let file = folder.join("SKILL.md");
+    std::fs::write(
+        &file,
+        format!(
+            "---\nname: {name}\ndescription: What this skill does and when the agent should use it.\n---\n\nSteps for the agent to follow.\n"
+        ),
+    )?;
+    Ok(file)
+}
+
+/// Where new personal skills go.
+pub fn skills_home() -> Option<PathBuf> {
+    home().map(|h| h.join(".claude").join("skills"))
+}
+
 fn scan_skills(dir: &Path, source: &'static str, out: &mut Vec<SkillInfo>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -805,6 +874,7 @@ fn scan_mcp(home: &Path, out: &mut Vec<McpInfo>) {
     for (provider, path, field) in crate::mcp::other_sources(home) {
         crate::mcp::scan_json(provider, &path, field, out);
     }
+    crate::mcp::scan_json(crate::mcp::OWN, &crate::mcp::own_path(), "mcpServers", out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
 }
 
@@ -923,7 +993,8 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
 #[cfg(test)]
 mod tests {
     use super::{
-        frontmatter, mix, parse_quick_commands, scan_hooks, scan_mcp, scan_skills, AppSettings,
+        frontmatter, mix, new_skill, parse_quick_commands, scan_hooks, scan_mcp, scan_skills,
+        AppSettings,
     };
     use std::path::PathBuf;
 
@@ -1081,5 +1152,18 @@ mod tests {
         assert_eq!(out[0].commands, ["Edit: cargo fmt"]);
         assert_eq!(out[1].commands, ["say done"]);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_new_skill_gets_a_folder_of_its_own() {
+        let dir = temp("new-skill");
+        let first = new_skill(&dir).unwrap();
+        let second = new_skill(&dir).unwrap();
+        assert!(first.ends_with("new-skill/SKILL.md"));
+        assert!(second.ends_with("new-skill-2/SKILL.md"));
+        let mut out = Vec::new();
+        scan_skills(&dir, "claude", &mut out);
+        assert_eq!(out.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

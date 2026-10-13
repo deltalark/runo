@@ -46,6 +46,9 @@ pub fn scan(home: &Path) -> Vec<Past> {
         }
     }
     files.sort_by_key(|f| std::cmp::Reverse(f.2));
+    // A resumed Codex conversation can be written to a second file under the same id;
+    // list each conversation once, by its newest file.
+    let mut seen = std::collections::HashSet::new();
     files
         .into_iter()
         .take(MAX_FILES)
@@ -61,6 +64,7 @@ pub fn scan(home: &Path) -> Vec<Past> {
             past.modified = modified;
             Some(past)
         })
+        .filter(|past| seen.insert((past.provider, past.id.clone())))
         .collect()
 }
 
@@ -516,6 +520,8 @@ mod tests {
         .unwrap();
         std::thread::sleep(Duration::from_millis(20));
         std::fs::write(codex.join("rollout-1.jsonl"), CODEX).unwrap();
+        // The same conversation resumed into a second file is listed once.
+        std::fs::write(codex.join("rollout-2.jsonl"), CODEX).unwrap();
         std::fs::write(codex.join("notes.txt"), "ignored").unwrap();
         let found = scan(&home);
         assert_eq!(found.len(), 2);

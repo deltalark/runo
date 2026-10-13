@@ -223,28 +223,36 @@ pub fn inputs_of(declared: &[Input], prompt: &str) -> Vec<Input> {
         .collect()
 }
 
-/// The instructions with each `{{key}}` replaced: the given value, else the default.
+/// The instructions with each `{{key}}` replaced (spaces inside the braces allowed): the
+/// given value, else the default.
 pub fn fill(prompt: &str, inputs: &[Input], values: &[(String, String)]) -> String {
-    let mut out = prompt.to_string();
-    for input in inputs {
+    let value_of = |input: &Input| {
         let value = values
             .iter()
             .find(|(k, _)| *k == input.key)
             .map(|(_, v)| v.trim())
             .filter(|v| !v.is_empty())
             .unwrap_or(input.default.trim());
-        let value = if value.is_empty() {
+        if value.is_empty() {
             format!("(no {} given)", input.title().to_lowercase())
         } else {
             value.to_string()
-        };
-        for pattern in [
-            format!("{{{{{}}}}}", input.key),
-            format!("{{{{ {} }}}}", input.key),
-        ] {
-            out = out.replace(&pattern, &value);
         }
+    };
+    let mut out = String::with_capacity(prompt.len());
+    let mut rest = prompt;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else { break };
+        let key = after[..end].trim();
+        out.push_str(&rest[..start]);
+        match inputs.iter().find(|i| i.key == key) {
+            Some(input) => out.push_str(&value_of(input)),
+            None => out.push_str(&rest[start..start + 2 + end + 2]),
+        }
+        rest = &after[end + 2..];
     }
+    out.push_str(rest);
     out
 }
 
@@ -513,6 +521,17 @@ mod tests {
         let filled = fill(&file.prompt, &inputs, &[("branch".into(), "main".into())]);
         assert_eq!(filled, "Read the commits since the last tag on main.");
         assert!(fill("{{x}}", &inputs_of(&[], "{{x}}"), &[]).contains("(no x given)"));
+        // Spaces inside the braces, on either side, still count.
+        let prompt = "Since {{ since}} until {{until }} on {{ branch }}, not {{other}}.";
+        let inputs = inputs_of(&[], prompt);
+        let values: Vec<(String, String)> = ["since", "until", "branch"]
+            .iter()
+            .map(|k| (k.to_string(), format!("<{k}>")))
+            .collect();
+        assert_eq!(
+            fill(prompt, &inputs[..3], &values),
+            "Since <since> until <until> on <branch>, not {{other}}."
+        );
     }
 
     #[test]

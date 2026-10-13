@@ -23,8 +23,40 @@ impl RunoApp {
         id
     }
 
-    /// Remove a connection; its sessions move back to this machine.
+    /// Remove a connection; its sessions move back to this machine, and what they and
+    /// agents left there is deleted.
     pub(crate) fn remove_connection(&mut self, id: u64, cx: &mut Context<Self>) {
+        let busy = self
+            .state
+            .sessions
+            .iter()
+            .any(|s| s.connection == id && self.handles.contains_key(&Target::Session(s.id)));
+        if busy {
+            self.notice = Some(format!(
+                "An agent is still working on {}. Let it finish or stop it, then remove the connection.",
+                connections::name(id)
+            ));
+            cx.notify();
+            return;
+        }
+        if let Some(conn) = connections::get(id) {
+            for s in self
+                .state
+                .sessions
+                .iter()
+                .filter(|s| s.connection == id || s.left_on.contains(&id))
+            {
+                let folder = std::path::Path::new(&s.dir)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                connections::cleanup(&conn, &folder, s.id);
+            }
+            connections::cleanup_scratch(&conn);
+        }
+        for s in self.state.sessions.iter_mut() {
+            s.left_on.retain(|c| *c != id);
+        }
         let prefix = format!("conn.{id}.");
         self.settings_inputs.retain(|k, _| !k.starts_with(&prefix));
         for s in self
@@ -73,11 +105,12 @@ impl RunoApp {
         cx.notify();
     }
 
-    /// Move a session to another connection. Its files and conversation follow on the
-    /// next turn; it can't move while the agent is working.
+    /// Move a session to another connection. Its files follow on the next turn, and its
+    /// conversation too when the agent's can travel; otherwise the next message carries
+    /// a handoff brief. It can't move while the agent is working.
     pub(crate) fn move_session(&mut self, session: u64, to: u64, cx: &mut Context<Self>) {
         let busy = self.handles.contains_key(&Target::Session(session));
-        let Some(s) = self.state.session_mut(session) else {
+        let Some(s) = self.state.session(session) else {
             return;
         };
         if s.connection == to {
@@ -91,19 +124,202 @@ impl RunoApp {
             cx.notify();
             return;
         }
-        let from = connections::name(s.connection);
-        s.connection = to;
+        let target = connections::get(to);
+        // Remote copies are kept in step with git; a plain folder has no way there.
+        if target.as_ref().is_some_and(|c| c.remote()) && !self.demo && !git::is_repo(&s.dir) {
+            self.notice = Some(format!(
+                "{} can't run this session: its folder isn't a git repository, and Runo syncs files to {} with git. Run `git init` in the project (or start a session in a repository), then move it.",
+                connections::name(to),
+                connections::name(to)
+            ));
+            cx.notify();
+            return;
+        }
+        let from_conn = connections::get(s.connection);
+        let carries = connections::carries_conversation(
+            &s.provider,
+            !s.agent_session.is_empty(),
+            from_conn.as_ref(),
+            target.as_ref(),
+        );
+        let agent_name = agent::provider(&s.provider).name;
         let to_name = connections::name(to);
-        let mut note = Message::new(
-            Role::System,
+        // The conversation stays behind: the next message gets a brief of it instead.
+        let brief = (s.has_conversation() && !carries).then(|| {
+            let (files, commits) = if !self.demo && git::is_repo(&s.dir) {
+                (git::changes(&s.dir), git::recent_commits(&s.dir, 5))
+            } else {
+                (Vec::new(), String::new())
+            };
+            let notes =
+                std::fs::read_to_string(std::path::Path::new(&s.dir).join(handoff::NOTES_FILE))
+                    .unwrap_or_default();
+            let full = handoff::brief(&handoff::BriefInput {
+                from: agent_name,
+                dir: &s.dir,
+                branch: &s.branch,
+                messages: &s.messages,
+                files: &files,
+                commits: &commits,
+                notes: &notes,
+            });
+            let body = full.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
             format!(
+                "You are continuing an existing session that just moved to another machine ({to_name}). Your own record of the conversation stayed on the machine it ran on, so this is a summary of it. This is not a new session: do not say you have no prior context. The session's files came along, changes included.\n{body}"
+            )
+        });
+        let from = connections::name(s.connection);
+        let Some(s) = self.state.session_mut(session) else {
+            return;
+        };
+        if s.connection != connections::LOCAL && !s.left_on.contains(&s.connection) {
+            s.left_on.push(s.connection);
+        }
+        s.left_on.retain(|c| *c != to);
+        s.connection = to;
+        let text = match &brief {
+            Some(brief) => {
+                s.handoff = brief.clone();
+                s.carried = brief.clone();
+                s.agent_session.clear();
+                format!(
+                    "Moved from {from} to {to_name}. {agent_name} can't take its own conversation there, so the next message carries a summary of it, with the latest files."
+                )
+            }
+            None => format!(
                 "Moved from {from} to {to_name}. The next message runs there with the latest files and the same conversation."
             ),
-        );
+        };
+        let mut note = Message::new(Role::System, text);
         note.meta = "moved".into();
         s.messages.push(note);
+        if brief.is_some() {
+            s.conversation_start = s.messages.len();
+        }
         self.save();
         cx.notify();
+    }
+
+    /// The runner's warnings from a turn on a connection, as a message for the chat: work
+    /// that stayed there or was kept aside must not pass as "Agent finished".
+    pub(crate) fn sync_warning(&self, id: u64) -> Option<Message> {
+        let lines = self.stderr.get(&id)?;
+        let warnings = connections::warnings(lines);
+        if warnings.is_empty() {
+            return None;
+        }
+        let mut note = Message::now(Role::System, warnings.join("\n\n"));
+        note.meta = "sync".into();
+        Some(note)
+    }
+
+    /// Put a kept version of the files back, from the warning card that named it.
+    pub(crate) fn restore_kept(&mut self, id: u64, index: usize, kept: &str) {
+        if self.handles.contains_key(&Target::Session(id)) {
+            self.notice = Some("Wait for the agent to finish, then restore the kept files.".into());
+            return;
+        }
+        let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
+            return;
+        };
+        match connections::restore_kept(&dir, id, kept) {
+            Ok(saved) => {
+                if let Some(m) = self
+                    .state
+                    .session_mut(id)
+                    .and_then(|s| s.messages.get_mut(index))
+                {
+                    m.resolved = format!("restored {saved}");
+                }
+                self.state.log(id, "Restored kept changes");
+                self.info = Some((
+                    "Restored the kept files. What was here before is saved too.".into(),
+                    std::time::Instant::now(),
+                ));
+                self.save();
+                self.measure(id);
+                self.refresh();
+            }
+            Err(e) => self.notice = Some(format!("Couldn't restore the kept files: {e}")),
+        }
+    }
+
+    /// A warning from a turn on a connection, with a way to restore kept files.
+    pub(crate) fn sync_card(
+        &self,
+        index: usize,
+        message: &Message,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sid = self.selected.unwrap_or(0);
+        let kept = connections::kept_refs(&message.text);
+        let restored = message.resolved.strip_prefix("restored ").map(String::from);
+        let mut actions = div().flex().flex_wrap().items_center().gap_2();
+        match &restored {
+            Some(saved) => {
+                actions = actions.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .child(format!(
+                            "Restored. What was here before is saved as {saved}."
+                        )),
+                )
+            }
+            None => {
+                for (k, r) in kept.into_iter().enumerate() {
+                    actions = actions.child(
+                        self.button(
+                            ("sync-restore", index * 8 + k),
+                            "Restore kept changes",
+                            false,
+                        )
+                        .h(px(26.))
+                        .child(icon(IconName::RotateCcw, 12., c_secondary()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.restore_kept(sid, index, &r);
+                            cx.notify();
+                        })),
+                    );
+                }
+            }
+        }
+        fade(
+            div()
+                .id(("message", index))
+                .px_3()
+                .py(px(10.))
+                .flex()
+                .items_start()
+                .gap_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(settings::mix(c_amber(), c_canvas(), 0.4)))
+                .bg(rgb(settings::mix(c_amber(), c_canvas(), 0.08)))
+                .text_size(px(13.))
+                .child(
+                    div()
+                        .pt(px(2.))
+                        .child(icon(IconName::TriangleAlert, 14., c_amber())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .v_flex()
+                        .gap_2()
+                        .child(
+                            TextView::markdown(
+                                SharedString::from(format!("sync-body-{sid}-{index}")),
+                                message.text.clone(),
+                            )
+                            .selectable(true),
+                        )
+                        .child(actions),
+                ),
+            ("sync-card", index),
+            200,
+        )
     }
 
     /// The session header's "Runs on" control: where it runs; click to move it.
@@ -191,8 +407,8 @@ impl RunoApp {
                     {
                         *m = Message::now(Role::Agent, "");
                     }
-                    if provider == "claude" {
-                        self.streams.insert(id, stream::ClaudeStream::new(&dir));
+                    if let Some(parser) = stream::Parser::for_provider(&provider, &dir) {
+                        self.streams.insert(id, parser);
                     }
                     self.handles.insert(Target::Session(id), handle);
                     self.started.insert(id, std::time::Instant::now());
