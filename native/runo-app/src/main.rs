@@ -179,6 +179,11 @@ struct RunoApp {
     cell_key: Option<(SharedString, u32)>,
     focus_shell: u8,
     menu: Option<String>,
+    /// The agent whose models show beside the composer's agent menu.
+    menu_agent: Option<usize>,
+    /// The mode the last frame showed, so moving between modes swaps the page instead of
+    /// sliding its panels open.
+    shown_mode: Option<Mode>,
     settings_page: SettingsPage,
     settings_search: Entity<InputState>,
     settings_inputs: HashMap<String, Entity<InputState>>,
@@ -404,6 +409,109 @@ fn fade<E: IntoElement + Styled + 'static>(el: E, id: impl Into<ElementId>, ms: 
         Animation::new(Duration::from_millis(ms)).with_easing(ease_out_quint()),
         |el, d| el.opacity(d),
     )
+}
+
+/// One row of a composer menu: an optional lead, a label with an optional description
+/// under it, and a check when it is the current choice.
+fn menu_row(
+    id: impl Into<ElementId>,
+    label: String,
+    desc: String,
+    selected: bool,
+    lead: Option<AnyElement>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .min_h(px(28.))
+        .px_2()
+        .py(px(5.))
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded_md()
+        .cursor_pointer()
+        .text_size(px(13.))
+        .hover(|el| el.bg(tint(c_active())))
+        .when_some(lead, |el, lead| el.child(lead))
+        .child(
+            div()
+                .flex_1()
+                .v_flex()
+                .child(div().child(label))
+                .when(!desc.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .max_w(px(280.))
+                            .whitespace_normal()
+                            .child(desc),
+                    )
+                }),
+        )
+        .when(selected, |el| {
+            el.child(icon(IconName::Check, 13., c_text()))
+        })
+}
+
+/// The model a session's next run uses, by name: the one picked, else the agent's default
+/// when it says which, else empty.
+fn run_model(provider: &str, sel: &HashMap<String, String>) -> String {
+    let picked = sel.get("model").cloned().unwrap_or_default();
+    if picked.is_empty() {
+        return caps::get(provider).default_model;
+    }
+    caps::controls(provider, sel)
+        .into_iter()
+        .find(|c| c.id == "model")
+        .and_then(|c| c.choices.into_iter().find(|ch| ch.value == picked))
+        .map(|ch| ch.label)
+        .unwrap_or(picked)
+}
+
+/// A short line naming what the next message runs on: "Codex · gpt-5.5 · High reasoning
+/// · Fast". Settings left at their defaults are left out, except the model.
+fn run_note(provider: &agent::Provider, sel: &HashMap<String, String>) -> String {
+    let mut parts = vec![provider.name.to_string()];
+    let model = run_model(provider.id, sel);
+    parts.push(if model.is_empty() {
+        "Default model".to_string()
+    } else {
+        model
+    });
+    for control in caps::controls(provider.id, sel) {
+        let value = sel.get(control.id).cloned().unwrap_or_default();
+        if value.is_empty() || !matches!(control.id, "effort" | "tier") {
+            continue;
+        }
+        let Some(choice) = control.choices.iter().find(|c| c.value == value) else {
+            continue;
+        };
+        parts.push(if control.id == "effort" {
+            format!("{} {}", choice.label, control.label.to_lowercase())
+        } else {
+            choice.label.clone()
+        });
+    }
+    parts.join(" · ")
+}
+
+/// The surface of a composer menu: solid, raised and scrolling when long.
+fn menu_box(key: &str, list: impl IntoElement) -> Div {
+    div()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(c_border()))
+        .bg(rgb(c_raised()))
+        .shadow_lg()
+        .occlude()
+        .child(
+            div()
+                .id(SharedString::from(format!("popup-scroll-{key}")))
+                .max_h(px(340.))
+                .overflow_y_scroll()
+                .child(list),
+        )
 }
 
 /// Fade in while sliding up a few pixels: cards and toasts arriving.
@@ -959,6 +1067,8 @@ impl RunoApp {
             cell_key: None,
             focus_shell: 0,
             menu: None,
+            menu_agent: None,
+            shown_mode: None,
             settings_page: SettingsPage::General,
             settings_search,
             settings_inputs: HashMap::new(),
@@ -1391,6 +1501,17 @@ impl RunoApp {
                     None => vec![stream::Update::Text(line)],
                 };
                 let plain = !self.streams.contains_key(&id);
+                // The reply's run summary names the model it ran on.
+                let model = updates
+                    .iter()
+                    .any(|u| matches!(u, stream::Update::Summary(_)))
+                    .then(|| {
+                        self.state
+                            .session(id)
+                            .map(|s| run_model(&s.provider, &s.selections()))
+                            .unwrap_or_default()
+                    })
+                    .filter(|m| !m.is_empty());
                 if let Some(session) = self.state.session_mut(id) {
                     for update in updates {
                         if !matches!(session.messages.last(), Some(m) if m.role == Role::Agent) {
@@ -1407,7 +1528,12 @@ impl RunoApp {
                                 m.text.push_str(&text);
                             }
                             stream::Update::Step(step) => m.steps.push(step),
-                            stream::Update::Summary(summary) => m.meta = summary,
+                            stream::Update::Summary(summary) => {
+                                m.meta = match &model {
+                                    Some(model) => format!("{model} · {summary}"),
+                                    None => summary,
+                                }
+                            }
                             stream::Update::Error(error) => {
                                 session.messages.push(Message::new(Role::System, error))
                             }
@@ -4246,83 +4372,192 @@ impl RunoApp {
             .child(icon(IconName::ChevronDown, 11., c_muted()))
     }
 
-    /// Popup list anchored above its button; picking an item or clicking elsewhere closes it.
-    fn menu_popup(
+    /// The rows of a composer menu; picking one runs `on_pick` and closes the menu.
+    fn menu_rows(
         &self,
-        key: &str,
         items: Vec<(String, String, bool, Option<AnyElement>)>,
         on_pick: impl Fn(&mut Self, usize) + 'static + Clone,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Div {
         let mut list = div().v_flex().p_1();
         for (i, (label, desc, selected, lead)) in items.into_iter().enumerate() {
             let on_pick = on_pick.clone();
             list = list.child(
-                div()
-                    .id(("menu-item", i))
-                    .min_h(px(28.))
-                    .px_2()
-                    .py(px(5.))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .hover(|el| el.bg(tint(c_active())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                menu_row(("menu-item", i), label, desc, selected, lead).on_click(cx.listener(
+                    move |this, _, _, cx| {
                         on_pick(this, i);
                         this.menu = None;
+                        this.menu_agent = None;
                         cx.notify();
-                    }))
-                    .when_some(lead, |el, lead| el.child(lead))
-                    .child(div().flex_1().v_flex().child(div().child(label)).when(
-                        !desc.is_empty(),
-                        |el| {
-                            el.child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(rgb(c_muted()))
-                                    .max_w(px(280.))
-                                    .whitespace_normal()
-                                    .child(desc),
-                            )
-                        },
-                    ))
-                    .when(selected, |el| {
-                        el.child(icon(IconName::Check, 13., c_text()))
-                    }),
+                    },
+                )),
             );
         }
+        list
+    }
+
+    /// A composer menu opening upward from its chip. It is deferred so it paints above
+    /// everything around it, the composer's own outline included, and its surface is solid
+    /// so nothing behind it shows through.
+    fn menu_popup(
+        &self,
+        key: &str,
+        content: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .absolute()
-            .bottom(px(32.))
+            .top_0()
             .left_0()
-            .min_w(px(220.))
-            .max_h(px(340.))
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(rgb(c_raised()))
-            .shadow_lg()
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.menu = None;
-                cx.notify();
-            }))
             .child(
-                div()
-                    .id(SharedString::from(format!("popup-scroll-{key}")))
-                    .max_h(px(340.))
-                    .overflow_y_scroll()
-                    .child(list),
+                deferred(
+                    anchored()
+                        .anchor(Anchor::BottomLeft)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .pb(px(6.))
+                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                    this.menu = None;
+                                    this.menu_agent = None;
+                                    cx.notify();
+                                }))
+                                .child(content)
+                                // Fade in while rising a few pixels.
+                                .animated(
+                                    SharedString::from(format!("menu-{key}")),
+                                    Animation::new(Duration::from_millis(180))
+                                        .with_easing(ease_out_quint()),
+                                    |el, d| el.opacity(d).top(px(6. * (1. - d))),
+                                ),
+                        ),
+                )
+                .with_priority(2),
             )
-            // Menus open upward from their chip: fade in while rising a few pixels.
-            .animated(
-                SharedString::from(format!("menu-{key}")),
-                Animation::new(Duration::from_millis(180)).with_easing(ease_out_quint()),
-                |el, d| el.opacity(d).bottom(px(26. + 6. * d)),
-            )
+            .into_any_element()
+    }
+
+    /// The agent menu: agents on the left, and beside them the models of the one under the
+    /// pointer (the session's own agent at first), so agent and model are one pick.
+    fn agent_menu(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+        let sid = session.id;
+        let current = agent::PROVIDERS
+            .iter()
+            .position(|p| p.id == session.provider)
+            .unwrap_or(0);
+        let shown = self.menu_agent.unwrap_or(current);
+        let from_bin = cx.global::<AppSettings>().agent(&session.provider).binary;
+
+        let mut agents = div().v_flex().p_1();
+        for (i, p) in agent::PROVIDERS.iter().enumerate() {
+            let from_bin = from_bin.clone();
+            agents = agents.child(
+                menu_row(
+                    ("agent-item", i),
+                    p.name.to_string(),
+                    String::new(),
+                    i == current,
+                    Some(self.provider_badge(p, 18.).into_any_element()),
+                )
+                .when(i == shown, |el| el.bg(tint(c_subtle())))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && this.menu_agent != Some(i) {
+                        this.menu_agent = Some(i);
+                        cx.notify();
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.request_switch(sid, i, &from_bin);
+                    this.menu = None;
+                    this.menu_agent = None;
+                    cx.notify();
+                }))
+                .child(icon(IconName::ChevronRight, 12., c_muted())),
+            );
+        }
+
+        let p = &agent::PROVIDERS[shown];
+        let sel = if shown == current {
+            session.selections()
+        } else {
+            HashMap::new()
+        };
+        let picked = sel.get("model").cloned().unwrap_or_default();
+        let caps = caps::get(p.id);
+        let choices = caps::controls(p.id, &sel)
+            .into_iter()
+            .find(|c| c.id == "model")
+            .map(|c| c.choices)
+            .unwrap_or_else(|| {
+                vec![caps::Choice {
+                    value: String::new(),
+                    label: "Default".into(),
+                    desc: if caps.detected {
+                        String::new()
+                    } else {
+                        "Detecting models…".into()
+                    },
+                }]
+            });
+        let mut models = div().v_flex().p_1().child(
+            div()
+                .px_2()
+                .pt_1()
+                .pb(px(4.))
+                .text_size(px(11.))
+                .text_color(rgb(c_muted()))
+                .child(format!("{} models", p.name)),
+        );
+        for (j, choice) in choices.into_iter().enumerate() {
+            let from_bin = from_bin.clone();
+            let value = choice.value.clone();
+            models = models.child(
+                menu_row(
+                    SharedString::from(format!("model-item-{shown}-{j}")),
+                    choice.label,
+                    choice.desc,
+                    shown == current && choice.value == picked,
+                    None,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.pick_model(sid, shown, value.clone(), &from_bin);
+                    this.menu = None;
+                    this.menu_agent = None;
+                    cx.notify();
+                })),
+            );
+        }
+
+        let content = div()
+            .flex()
+            .items_end()
+            .gap_1()
+            .child(menu_box("agents", agents).min_w(px(190.)))
+            .child(menu_box(&format!("models-{shown}"), models).min_w(px(230.)));
+        self.menu_popup("provider", content, cx)
+    }
+
+    /// Run a session on `model` of agent `to`, switching agents first when it is another one.
+    fn pick_model(&mut self, sid: u64, to: usize, model: String, from_bin: &str) {
+        let target = agent::PROVIDERS[to].id;
+        if self
+            .state
+            .session(sid)
+            .is_some_and(|s| s.provider != target)
+        {
+            self.request_switch(sid, to, from_bin);
+        }
+        if let Some(s) = self.state.session_mut(sid).filter(|s| s.provider == target) {
+            s.set_model(model);
+        } else if let Some(plan) = self
+            .switch_plan
+            .as_mut()
+            .filter(|p| p.session == sid && p.to == to)
+        {
+            // The switch waits for confirmation; the model applies once it goes through.
+            plan.model = Some(model);
+        }
+        self.save();
     }
 
     fn composer(
@@ -4342,27 +4577,7 @@ impl RunoApp {
         let mut popup: Option<(String, AnyElement)> = None;
 
         if self.menu.as_deref() == Some("provider") {
-            let items = agent::PROVIDERS
-                .iter()
-                .map(|p| {
-                    (
-                        p.name.to_string(),
-                        String::new(),
-                        p.id == session.provider,
-                        Some(self.provider_badge(p, 18.).into_any_element()),
-                    )
-                })
-                .collect();
-            let from_bin = cx.global::<AppSettings>().agent(&session.provider).binary;
-            popup = Some((
-                "provider".into(),
-                self.menu_popup(
-                    "provider",
-                    items,
-                    move |this, i| this.request_switch(sid, i, &from_bin),
-                    cx,
-                ),
-            ));
+            popup = Some(("provider".into(), self.agent_menu(session, cx)));
         }
         for control in &controls {
             if self.menu.as_deref() != Some(control.id) {
@@ -4378,85 +4593,106 @@ impl RunoApp {
                 control.id,
                 control.choices.iter().map(|c| c.value.clone()).collect(),
             );
+            let rows = self.menu_rows(
+                items,
+                move |this, i| {
+                    if let Some(s) = this.state.session_mut(sid) {
+                        let v = values[i].clone();
+                        if id == "mode" {
+                            s.mode.clear();
+                        }
+                        if v.is_empty() {
+                            s.opts.remove(id);
+                            s.opts.insert(id.to_string(), String::new());
+                        } else {
+                            s.opts.insert(id.to_string(), v);
+                        }
+                    }
+                    this.save();
+                },
+                cx,
+            );
             popup = Some((
                 id.to_string(),
-                self.menu_popup(
-                    id,
-                    items,
-                    move |this, i| {
-                        if let Some(s) = this.state.session_mut(sid) {
-                            let v = values[i].clone();
-                            if id == "model" {
-                                // Effort and speed depend on the model, so reset them with it.
-                                s.opts.remove("effort");
-                                s.opts.remove("tier");
-                                s.model.clear();
-                            }
-                            if id == "mode" {
-                                s.mode.clear();
-                            }
-                            if v.is_empty() {
-                                s.opts.remove(id);
-                                s.opts.insert(id.to_string(), String::new());
-                            } else {
-                                s.opts.insert(id.to_string(), v);
-                            }
-                        }
-                        this.save();
-                    },
-                    cx,
-                ),
+                self.menu_popup(id, menu_box(id, rows).min_w(px(220.)), cx),
             ));
         }
 
+        // The agent chip carries the model too: once one is picked it shows by name beside the
+        // agent's mark, and the line under the composer spells out both. The model has no chip
+        // of its own; it is picked from the agent menu.
+        let picked_model = sel.get("model").cloned().unwrap_or_default();
+        let model_label = controls
+            .iter()
+            .find(|c| c.id == "model")
+            .and_then(|c| c.choices.iter().find(|ch| ch.value == picked_model))
+            .map(|ch| ch.label.clone())
+            .filter(|_| !picked_model.is_empty())
+            .or_else(|| (!picked_model.is_empty()).then(|| picked_model.clone()));
+        let agent_label = model_label.unwrap_or_else(|| provider.name.to_string());
         let mut chips = div().flex().flex_wrap().items_center().gap_1().child(
             div()
                 .relative()
                 .child(tour::anchor(&self.anchors, "agent-chip"))
-                // A new agent pops in when the session switches.
-                .child(slide_in(
+                // A new agent fades in when the session switches.
+                .child(fade(
                     div().child(self.menu_button(
                         SharedString::from("chip-provider"),
                         "provider",
                         Some(self.provider_mark(provider, 13.).into_any_element()),
                         None,
-                        provider.name.to_string(),
+                        agent_label,
                         cx,
                     )),
                     SharedString::from(format!("chip-provider-{}", provider.id)),
-                    420,
+                    300,
                 ))
                 .when(popup.as_ref().is_some_and(|(k, _)| k == "provider"), |el| {
                     el.children(popup.take().map(|(_, p)| p))
                 }),
         );
-        for control in &controls {
+        for control in controls.iter().filter(|c| c.id != "model") {
             let current = sel.get(control.id).cloned().unwrap_or_default();
-            let label = control
-                .choices
-                .iter()
-                .find(|c| c.value == current)
-                .map(|c| c.label.clone())
-                .unwrap_or_else(|| {
-                    if current.is_empty() {
-                        control.choices[0].label.clone()
-                    } else {
+            // Left at its default, a control shows just its name ("Reasoning"); once changed
+            // it shows the choice ("Fast", "Auto edit", "High reasoning"), with its name in
+            // the tooltip. Either way the row stays short enough for one line.
+            let label = if current.is_empty() {
+                control.label.clone()
+            } else {
+                let choice = control
+                    .choices
+                    .iter()
+                    .find(|c| c.value == current)
+                    .map(|c| c.label.clone())
+                    .unwrap_or_else(|| {
                         agent::generic_mode_label(&current)
                             .map(str::to_string)
                             .unwrap_or_else(|| current.clone())
-                    }
-                });
+                    });
+                if control.id == "effort" {
+                    format!("{choice} {}", control.label.to_lowercase())
+                } else {
+                    choice
+                }
+            };
+            let caption = control.label.clone();
             chips = chips.child(
                 div()
                     .relative()
-                    .child(self.menu_button(
-                        SharedString::from(format!("chip-{}", control.id)),
-                        control.id,
-                        None,
-                        Some(control.label.clone()),
-                        label,
-                        cx,
-                    ))
+                    .child(
+                        self.menu_button(
+                            SharedString::from(format!("chip-{}", control.id)),
+                            control.id,
+                            None,
+                            None,
+                            label,
+                            cx,
+                        )
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(caption.clone())
+                                .build(window, cx)
+                        }),
+                    )
                     .when(popup.as_ref().is_some_and(|(k, _)| k == control.id), |el| {
                         el.children(popup.take().map(|(_, p)| p))
                     }),
@@ -4475,8 +4711,9 @@ impl RunoApp {
             .picked_playbook
             .and_then(|id| self.state.automations.iter().find(|a| a.id == id));
         let ready = !empty_prompt || !self.attachments.is_empty() || picked.is_some();
-        chips = chips.child(
-            self.ghost_button_sized(
+        // Attach sits beside Send, so the option chips get the row to themselves.
+        let attach = self
+            .ghost_button_sized(
                 "attach",
                 IconName::Paperclip,
                 "Attach an image or file (pastes a copied image)",
@@ -4485,8 +4722,7 @@ impl RunoApp {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.attach(cx);
                 cx.notify();
-            })),
-        );
+            }));
         div()
             .w_full()
             .max_w(px(780.))
@@ -4532,6 +4768,7 @@ impl RunoApp {
                             .justify_between()
                             .gap_3()
                             .child(div().flex_1().min_w_0().child(chips))
+                            .child(attach)
                             .child(
                                 div()
                                     .id("send")
@@ -4599,7 +4836,11 @@ impl RunoApp {
                                 "Isolated worktree"
                             } else {
                                 "Project directory"
-                            }),
+                            })
+                            // What the next message runs on, so it is never a guess.
+                            .child(div().px_1().child("·"))
+                            .child(self.provider_mark(provider, 11.))
+                            .child(run_note(provider, &sel)),
                     )
                     .child(if cx.global::<AppSettings>().send_on_enter {
                         "↵ send  ·  ⇧↵ new line".to_string()
@@ -6984,11 +7225,28 @@ impl Render for RunoApp {
         let show_tabs = self.mode() == Mode::Sessions && !self.tabs.is_empty();
         let show_right = shown == View::Session && self.current().is_some() && self.show_panel;
         let show_left = self.mode() == Mode::Sessions && self.show_sidebar;
-        self.track_panel("sidebar", show_left, settings_snap);
-        self.track_panel("right", show_right, settings_snap);
+        // Moving to another mode swaps the whole page: its panels are simply there and fade
+        // in with it. Sliding is kept for opening and closing a panel in place.
+        let mode = self.mode();
+        let nav_snap = self.shown_mode.replace(mode).is_some_and(|m| m != mode);
+        self.track_panel("sidebar", show_left, settings_snap || nav_snap);
+        self.track_panel("right", show_right, settings_snap || nav_snap);
         self.track_panel("term", self.term_tall, false);
         let left_motion = self.panel_motion("sidebar");
         let right_motion = self.panel_motion("right");
+        let page_fade = |el: AnyElement, id: &str| {
+            div().flex_none().h_full().flex().child(el).animated(
+                SharedString::from(format!("{id}-{mode:?}")),
+                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
+                move |el, d| {
+                    if still {
+                        el
+                    } else {
+                        el.opacity(0.35 + 0.65 * d)
+                    }
+                },
+            )
+        };
         let left = panel_slide(
             "sidebar-slide",
             left_motion,
@@ -6996,10 +7254,12 @@ impl Render for RunoApp {
             SIDEBAR_WIDTH,
             true,
             || self.sidebar(cx).into_any_element(),
-        );
+        )
+        .map(|el| page_fade(el, "sidebar-page"));
         let right = panel_slide("right-slide", right_motion, show_right, 460., false, || {
             self.right_pane(window, cx).into_any_element()
-        });
+        })
+        .map(|el| page_fade(el, "right-page"));
         if self
             .info
             .as_ref()

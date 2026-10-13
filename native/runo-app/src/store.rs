@@ -118,6 +118,15 @@ impl Session {
         })
     }
 
+    /// Pick a model ("" for the agent's default). Effort and speed depend on the model, so
+    /// they reset with it.
+    pub fn set_model(&mut self, model: String) {
+        self.opts.remove("effort");
+        self.opts.remove("tier");
+        self.model.clear();
+        self.opts.insert("model".into(), model);
+    }
+
     /// Switch to another agent CLI. Its options and conversation start fresh.
     pub fn switch_provider(&mut self, provider: &str) {
         if self.provider == provider {
@@ -841,6 +850,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn picking_a_model_resets_its_effort_and_speed() {
+        let mut session = State::demo().sessions[0].clone();
+        session.model = "old".into();
+        session.opts.insert("effort".into(), "high".into());
+        session.opts.insert("tier".into(), "priority".into());
+        session.opts.insert("mode".into(), "read-only".into());
+        session.set_model("gpt-5.5".into());
+        let sel = session.selections();
+        assert_eq!(sel.get("model").map(String::as_str), Some("gpt-5.5"));
+        assert!(!sel.contains_key("effort") && !sel.contains_key("tier"));
+        assert_eq!(sel.get("mode").map(String::as_str), Some("read-only"));
+        // The agent's default is an explicit empty pick, not a fall back to the old model.
+        session.set_model(String::new());
+        assert_eq!(
+            session.selections().get("model").map(String::as_str),
+            Some("")
+        );
     }
 
     #[test]
