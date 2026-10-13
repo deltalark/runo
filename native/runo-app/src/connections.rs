@@ -952,33 +952,82 @@ impl Sandbox {
             }
             Sandbox::Remote(r) => {
                 // Runo's runner syncs the files there first and back when the shell ends.
-                let file = RunFile {
-                    remote: (**r).clone(),
-                    program: String::new(),
-                    args: Vec::new(),
-                    env: Vec::new(),
-                    conversation: None,
-                    backup: false,
-                    resume: false,
-                    untracked: false,
-                    stop_on_denial: false,
-                };
-                let path = run_file_path(r.session);
-                write_private(
-                    &path,
-                    &serde_json::to_vec(&file).map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| format!("could not prepare the terminal: {e}"))?;
-                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let runner = r.runner(String::new(), Vec::new(), Vec::new(), None)?;
                 Ok((
-                    exe.to_string_lossy().into_owned(),
-                    vec![
-                        "--connection-shell".into(),
-                        path.to_string_lossy().into_owned(),
-                    ],
+                    runner.get_program().to_string_lossy().into_owned(),
+                    runner
+                        .get_args()
+                        .map(|a| a.to_string_lossy().into_owned())
+                        .collect(),
                 ))
             }
         }
+    }
+
+    /// `command` as the same program on the connection, in a terminal. On a server
+    /// Runo's runner syncs the files and `conversation` (agent, id) there first and back
+    /// when the program ends.
+    pub fn pty_command(
+        &self,
+        command: &Command,
+        cwd: &str,
+        conversation: Option<(String, String)>,
+    ) -> Result<Command, String> {
+        match self {
+            Sandbox::Cove(s) => s.wrap(command, cwd, true),
+            Sandbox::Remote(r) => {
+                let program = Path::new(command.get_program())
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let mut env = r.conn.agent_env(&program);
+                for (k, v) in command.get_envs() {
+                    if let Some(v) = v {
+                        let k = k.to_string_lossy().into_owned();
+                        env.retain(|(key, _)| *key != k);
+                        env.push((k, v.to_string_lossy().into_owned()));
+                    }
+                }
+                let args = command
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                r.runner(program, args, env, conversation)
+            }
+        }
+    }
+}
+
+impl Remote {
+    /// `runo --connection-shell` for this session: a login shell there, or `program`.
+    fn runner(
+        &self,
+        program: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        conversation: Option<(String, String)>,
+    ) -> Result<Command, String> {
+        let file = RunFile {
+            remote: self.clone(),
+            program,
+            args,
+            env,
+            conversation,
+            backup: false,
+            resume: false,
+            untracked: false,
+            stop_on_denial: false,
+        };
+        let path = run_file_path(self.session);
+        write_private(
+            &path,
+            &serde_json::to_vec(&file).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("could not prepare the terminal: {e}"))?;
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut c = Command::new(exe);
+        c.arg("--connection-shell").arg(path);
+        Ok(c)
     }
 }
 
@@ -1515,6 +1564,40 @@ impl Remote {
     /// code, relative to the remote home. Outside the copy, so git never sees it.
     fn job_dir(&self) -> String {
         format!("{}.runo", self.remote_dir)
+    }
+
+    /// The script that runs `program` in a terminal in the session's copy: its
+    /// environment goes in a file only its owner can read, which deletes itself.
+    fn pty_script(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<String, String> {
+        let job = self.job_dir();
+        self.conn.run(
+            &self.vm,
+            &format!("mkdir -p {j} && chmod 700 {j}", j = quote(&job)),
+            None,
+        )?;
+        let mut env = env.to_vec();
+        let args = self.agent_args(args, &mut env)?;
+        let mut script = String::from("rm -f \"$0\"\n");
+        for (k, v) in &env {
+            script.push_str(&format!("export {k}={}\n", quote(v)));
+        }
+        script.push_str(&format!(
+            "cd {} && exec bash -lc {} runo {} {}\n",
+            quote(&self.remote_dir),
+            quote(&launcher(program, &self.conn.place())),
+            quote(program),
+            args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+        ));
+        let file = format!("{job}/pty.sh");
+        self.conn.write_file(&self.vm, &file, script.as_bytes())?;
+        self.conn
+            .run(&self.vm, &format!("chmod 600 {}", quote(&file)), None)?;
+        Ok(format!("bash {}", quote(&file)))
     }
 
     /// An agent's arguments for the connection: Runo's MCP server reaches it through a
@@ -2216,45 +2299,121 @@ pub fn connection_run(path: &str) -> i32 {
 }
 
 /// `runo --connection-shell <file>`: a terminal in the session's copy on a connection,
-/// synced there first and back when the shell exits.
+/// synced there first and back when the shell exits. With a program (an agent's own CLI,
+/// a setup command) that runs instead of a login shell, the agent's conversation goes
+/// along, and SIGUSR1 ends it early so its work still comes back.
 pub fn connection_shell(path: &str) -> i32 {
+    // The terminal may be gone by the time this has something to say.
+    let note = |text: String| {
+        let _ = writeln!(std::io::stderr(), "{text}");
+    };
     let data = std::fs::read(path);
     let _ = std::fs::remove_file(path);
     let Ok(file) = data
         .map_err(|e| e.to_string())
         .and_then(|d| serde_json::from_slice::<RunFile>(&d).map_err(|e| e.to_string()))
     else {
-        eprintln!("Runo: could not read the terminal settings.");
+        note("Runo: could not read the terminal settings.".into());
         return 1;
     };
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGUSR1, on_stop as *const () as libc::sighandler_t);
+        // Runo closing the terminal ends the program there; the sync back still runs.
+        libc::signal(libc::SIGHUP, on_stop as *const () as libc::sighandler_t);
+    }
     let r = &file.remote;
     let in_git = local_git(&r.local_dir, &["rev-parse", "--git-dir"], &[]).is_ok();
     let sent = if in_git {
-        eprintln!("Syncing the session's files to {}…", r.conn.name);
+        note(format!("Syncing the session's files to {}…", r.conn.name));
         match r.sync_up() {
             Ok(c) => Some(c),
             Err(e) => {
-                eprintln!("Runo: could not sync to {}: {e}", r.conn.name);
+                note(format!("Runo: could not sync to {}: {e}", r.conn.name));
                 None
             }
         }
     } else {
         None
     };
-    let script = format!("cd {} 2>/dev/null; exec bash -l", quote(&r.remote_dir));
+    let conversation = file.conversation.clone().filter(|(_, id)| !id.is_empty());
+    if let Some((provider, id)) = &conversation {
+        if let Err(e) = r.carry_up(provider, id) {
+            note(format!(
+                "Runo: the conversation could not be copied to {}, so the CLI may start without it: {e}",
+                r.conn.name
+            ));
+        }
+    }
+    let script = if file.program.is_empty() {
+        format!("cd {} 2>/dev/null; exec bash -l", quote(&r.remote_dir))
+    } else {
+        match r.pty_script(&file.program, &file.args, &file.env) {
+            Ok(script) => script,
+            Err(e) => {
+                note(format!(
+                    "Runo: could not start {} on {}: {e}",
+                    file.program, r.conn.name
+                ));
+                return 1;
+            }
+        }
+    };
+    // Answer the agent's calls to Runo's MCP server while it runs.
+    let pumping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let exe = runo_exe();
+    if !exe.is_empty() && file.args.iter().any(|a| a.contains(&exe)) {
+        let (r, flag) = (r.clone(), pumping.clone());
+        std::thread::spawn(move || {
+            while flag.load(std::sync::atomic::Ordering::SeqCst) {
+                let busy = r.pump_mcp().unwrap_or(0) > 0;
+                std::thread::sleep(std::time::Duration::from_millis(if busy {
+                    250
+                } else {
+                    1000
+                }));
+            }
+        });
+    }
     let code = match r.conn.shell(&r.vm, &script, &[], true) {
-        Ok((mut c, _)) => c.status().map(|s| s.code().unwrap_or(0)).unwrap_or(1),
+        Ok((mut c, _)) => match c.spawn() {
+            Ok(mut child) => loop {
+                if let Ok(Some(status)) = child.try_wait() {
+                    break status.code().unwrap_or(1);
+                }
+                if stop_requested() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break 130;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            },
+            Err(e) => {
+                note(format!("Runo: could not reach {}: {e}", r.conn.name));
+                1
+            }
+        },
         Err(e) => {
-            eprintln!("Runo: {e}");
+            note(format!("Runo: {e}"));
             1
         }
     };
+    pumping.store(false, std::sync::atomic::Ordering::SeqCst);
+    if let Some((provider, id)) = &conversation {
+        if let Err(e) = r.carry_down(provider, id) {
+            note(format!(
+                "Runo: the conversation could not be copied back from {}: {e}",
+                r.conn.name
+            ));
+        }
+    }
     if let Some(sent) = sent {
+        note(format!("Bringing the work back from {}…", r.conn.name));
         match r.sync_down(&sent) {
-            Ok(SyncDown::Kept(kept)) => eprintln!(
+            Ok(SyncDown::Kept(kept)) => note(format!(
                 "Runo: files changed here too, so they were kept; the terminal's version is saved as {kept}."
-            ),
-            Err(e) => eprintln!("Runo: could not sync back from {}: {e}", r.conn.name),
+            )),
+            Err(e) => note(format!("Runo: could not sync back from {}: {e}", r.conn.name)),
             _ => {}
         }
     }
@@ -2268,6 +2427,215 @@ fn conversation_id(line: &str) -> Option<String> {
         .iter()
         .find_map(|k| v.get(*k).and_then(|s| s.as_str()).map(String::from))
         .filter(|s| !s.is_empty())
+}
+
+// ---------- dev servers on a connection ----------
+
+/// Lists listening TCP sockets with whichever tool the machine has.
+const LISTENING: &str = "{ ss -ltnH 2>/dev/null || netstat -an 2>/dev/null || lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null; } | grep -i listen; true";
+
+/// Listening ports in `ss -ltn`, `netstat -an` or `lsof` output: the first address in
+/// each LISTEN line, written `host:port` or `host.port`.
+pub fn parse_listening(text: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in text.lines().filter(|l| l.to_uppercase().contains("LISTEN")) {
+        let port = line.split_whitespace().find_map(|word| {
+            let (_, port) = word.rsplit_once([':', '.'])?;
+            port.parse::<u16>().ok().filter(|p| *p > 0)
+        });
+        if let Some(port) = port.filter(|p| !ports.contains(p)) {
+            ports.push(port);
+        }
+    }
+    ports
+}
+
+/// A port on a connection reachable from this machine, as long as this lives.
+pub struct Forward {
+    /// The port on this machine.
+    pub local: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ssh: Option<std::process::Child>,
+}
+
+impl Drop for Forward {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(child) = self.ssh.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// A free port on this machine, the same number as `want` when it's free.
+fn free_port(want: u16) -> Result<std::net::TcpListener, String> {
+    std::net::TcpListener::bind(("127.0.0.1", want))
+        .or_else(|_| std::net::TcpListener::bind(("127.0.0.1", 0)))
+        .map_err(|e| format!("no free port on this machine: {e}"))
+}
+
+impl Sandbox {
+    /// The listening-socket lines where the session runs; see `parse_listening`.
+    pub fn listening(&self, cwd: &str) -> Result<String, String> {
+        let out = match self {
+            Sandbox::Cove(s) => {
+                let mut c = Command::new("sh");
+                c.args(["-c", LISTENING]);
+                let out = s
+                    .wrap(&c, cwd, false)?
+                    .stdin(Stdio::null())
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                out.stdout
+            }
+            Sandbox::Remote(r) => r.conn.run(&r.vm, LISTENING, None)?,
+        };
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// Make `port` where the session runs reachable on this machine: an SSH tunnel to a
+    /// server, and for Cove a local port whose connections each go through `cove exec`.
+    pub fn forward(&self, cwd: &str, port: u16) -> Result<Forward, String> {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Sandbox::Remote(r) = self {
+            if r.conn.kind == Kind::Ssh {
+                return r.conn.ssh_forward(port);
+            }
+        }
+        let listener = free_port(port)?;
+        let local = listener.local_addr().map_err(|e| e.to_string())?.port();
+        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        let (sandbox, cwd, flag) = (self.clone(), cwd.to_string(), stop.clone());
+        std::thread::spawn(move || {
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let (sandbox, cwd) = (sandbox.clone(), cwd.clone());
+                        std::thread::spawn(move || sandbox.pipe(stream, &cwd, port));
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                }
+            }
+        });
+        Ok(Forward {
+            local,
+            stop,
+            ssh: None,
+        })
+    }
+
+    /// Carry one connection to `port` there over a `cove exec` of bash's /dev/tcp.
+    fn pipe(&self, mut stream: std::net::TcpStream, cwd: &str, port: u16) {
+        let script =
+            format!("exec 3<>/dev/tcp/127.0.0.1/{port} || exit 1; cat <&3 & cat >&3; wait");
+        let command = match self {
+            Sandbox::Cove(s) => {
+                let mut c = Command::new("bash");
+                c.args(["-c", &script]);
+                s.wrap(&c, cwd, false)
+            }
+            Sandbox::Remote(r) => r.conn.shell(&r.vm, &script, &[], false).map(|(c, _)| c),
+        };
+        let Ok(mut command) = command else { return };
+        let _ = stream.set_nonblocking(false);
+        let Ok(mut child) = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return;
+        };
+        let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = child.kill();
+            return;
+        };
+        if let Ok(mut from) = stream.try_clone() {
+            std::thread::spawn(move || {
+                pass_bytes(&mut from, &mut stdin);
+            });
+        }
+        pass_bytes(&mut stdout, &mut stream);
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Copy bytes as they come. `std::io::copy` from a socket into a pipe can hold on to a
+/// short request, waiting for more.
+fn pass_bytes(from: &mut impl Read, to: &mut impl Write) {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if to.write_all(&buf[..n]).and_then(|_| to.flush()).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl Connection {
+    /// `ssh -L` from a local port to `port` on the server, once it's up. It runs on its
+    /// own connection, so closing it ends the tunnel.
+    fn ssh_forward(&self, port: u16) -> Result<Forward, String> {
+        if self.host.trim().is_empty() {
+            return Err(format!("{} has no host set.", self.name));
+        }
+        let local = free_port(port)?
+            .local_addr()
+            .map_err(|e| e.to_string())?
+            .port();
+        let mut c = Command::new("ssh");
+        c.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
+        c.args(ssh_options(self));
+        c.args([
+            "-N",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-L",
+            &format!("127.0.0.1:{local}:127.0.0.1:{port}"),
+            self.host.trim(),
+        ]);
+        let mut child = c
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not start ssh: {e}"))?;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(20) {
+            if let Ok(Some(_)) = child.try_wait() {
+                let mut err = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = e.read_to_string(&mut err);
+                }
+                return Err(if err.trim().is_empty() {
+                    format!("the tunnel to {} closed", self.name)
+                } else {
+                    err.trim().to_string()
+                });
+            }
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], local));
+            if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(200))
+                .is_ok()
+            {
+                return Ok(Forward {
+                    local,
+                    stop: Default::default(),
+                    ssh: Some(child),
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(format!("the tunnel to {} didn't open in time", self.name))
+    }
 }
 
 // ---------- Runo's MCP server for agents that run elsewhere ----------
@@ -3144,6 +3512,44 @@ mod tests {
         assert!(far.join(&remote.remote_dir).join("seen.txt").exists());
     }
 
+    /// A program in a terminal there (the agent's CLI, a setup command) runs in the
+    /// session's copy with its environment, and what it did comes back when it exits.
+    #[test]
+    fn a_terminal_program_runs_there_and_its_work_comes_back() {
+        let (local, far, remote) = setup("pty");
+        std::fs::write(local.join("todo.txt"), "fix it\n").unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "cat todo.txt > seen.txt; echo \"$GREETING\" > env.txt; exit 3",
+            ])
+            .env("GREETING", "hello there");
+        let runner = Sandbox::Remote(Box::new(remote.clone()))
+            .pty_command(&command, &remote.local_dir, None)
+            .unwrap();
+        let args: Vec<String> = runner
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "--connection-shell");
+        assert_eq!(connection_shell(&args[1]), 3);
+        assert!(
+            !Path::new(&args[1]).exists(),
+            "the run file holds secrets and is removed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local.join("seen.txt")).unwrap(),
+            "fix it\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local.join("env.txt")).unwrap(),
+            "hello there\n"
+        );
+        let job = far.join(remote.job_dir());
+        assert!(!job.join("pty.sh").exists(), "the script deletes itself");
+    }
+
     /// The turn keeps going there while nothing here follows it (this machine asleep or
     /// off, Runo closed); picking it up later shows its output and brings its work back.
     #[test]
@@ -3587,6 +3993,46 @@ mod tests {
             .set_modified(old)
             .unwrap();
         assert_eq!(remote.job_state().unwrap(), JobState::Unstarted);
+    }
+
+    #[test]
+    fn listening_ports_are_read_from_any_tool() {
+        let ss = "LISTEN 0      511          0.0.0.0:5173      0.0.0.0:*\n\
+                  LISTEN 0      4096   [::ffff:127.0.0.1]:3000            *:*\n\
+                  LISTEN 0      128             [::]:22             [::]:*";
+        assert_eq!(parse_listening(ss), vec![5173, 3000, 22]);
+        let netstat = "tcp        0      0 0.0.0.0:8080            0.0.0.0:*               LISTEN\n\
+                       tcp4       0      0  *.4321                 *.*                    LISTEN\n\
+                       tcp4       0      0  127.0.0.1.8000         127.0.0.1.52011        ESTABLISHED";
+        assert_eq!(parse_listening(netstat), vec![8080, 4321]);
+        let lsof = "node    4242 me   23u  IPv4 0xabc      0t0  TCP *:5174 (LISTEN)";
+        assert_eq!(parse_listening(lsof), vec![5174]);
+    }
+
+    /// A port forwarded through a Cove-style pipe reaches the server behind it.
+    #[test]
+    fn a_forwarded_port_reaches_the_server_there() {
+        let (_, _, remote) = setup("forward");
+        let server = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = server.accept() {
+                let mut buf = [0u8; 5];
+                let _ = s.read_exact(&mut buf);
+                let _ = s.write_all(b"pong:");
+                let _ = s.write_all(&buf);
+            }
+        });
+        let sandbox = Sandbox::Remote(Box::new(remote));
+        let forward = sandbox.forward("/", port).unwrap();
+        let mut client = std::net::TcpStream::connect(("127.0.0.1", forward.local)).unwrap();
+        client.write_all(b"hello").unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let mut got = [0u8; 10];
+        client.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"pong:hello");
     }
 
     #[test]

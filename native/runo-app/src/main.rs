@@ -249,6 +249,12 @@ struct RunoApp {
     browser_recent: Vec<String>,
     browser_ports: Vec<u16>,
     browser_scanning: bool,
+    /// Dev-server ports found where each session on a connection runs, or why not.
+    remote_ports: HashMap<u64, Result<Vec<u16>, String>>,
+    remote_scanning: std::collections::HashSet<u64>,
+    /// Ports on connections forwarded to this machine: (session, port there).
+    forwards: HashMap<(u64, u16), connections::Forward>,
+    forwarding: Option<(u64, u16)>,
     /// The headless Chromium behind the Browser tab, started on first use.
     browser: Option<std::sync::Arc<browser_engine::Engine>>,
     browser_view: browser::BrowserView,
@@ -333,6 +339,8 @@ struct RunoApp {
     note_input: Entity<InputState>,
     /// Tasks waiting for their worktree setup command to finish.
     pending_start: HashMap<u64, String>,
+    /// Terminal tabs running a setup command: shell id → session.
+    setups: HashMap<u64, u64>,
     /// The quick-open palette, while open, and what each of its rows leads to.
     palette: Option<Entity<CommandState>>,
     palette_jumps: Vec<Vec<Jump>>,
@@ -1165,6 +1173,10 @@ impl RunoApp {
             browser_recent: Vec::new(),
             browser_ports: Vec::new(),
             browser_scanning: false,
+            remote_ports: HashMap::new(),
+            remote_scanning: Default::default(),
+            forwards: HashMap::new(),
+            forwarding: None,
             browser: None,
             browser_view: browser::BrowserView::default(),
             browser_focus: cx.focus_handle(),
@@ -1198,6 +1210,7 @@ impl RunoApp {
             note_at: None,
             note_input: note_input.clone(),
             pending_start: HashMap::new(),
+            setups: HashMap::new(),
             palette: None,
             palette_jumps: Vec::new(),
             renaming: false,
@@ -1850,6 +1863,9 @@ impl RunoApp {
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
                 self.cli_exited(id);
+                if self.setups.contains_key(&id) {
+                    self.setup_exited(id, cx);
+                }
                 if let Some(shell) = self.shells.iter().find(|s| s.id == id && s.exited()) {
                     if self.shell_tab == Some(id) {
                         self.info = Some((
@@ -1867,22 +1883,35 @@ impl RunoApp {
                         .or_default()
                         .push("[exited with an error]".into());
                 }
-                if let Some(task) = self.pending_start.remove(&id) {
-                    if !ok {
-                        self.terminal.entry(id).or_default().push(
-                            "Setup failed; starting the agent anyway so you can fix it together."
-                                .into(),
-                        );
-                    }
-                    if let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) {
-                        let opts = cx.global::<AppSettings>().agent(&provider);
-                        self.start_agent(id, task, &opts);
-                    }
-                }
                 if self.selected == Some(id) {
                     self.refresh();
                 }
             }
+        }
+    }
+
+    /// The worktree setup command finished: start the agent waiting on it.
+    fn setup_done(&mut self, id: u64, ok: bool, cx: &mut Context<Self>) {
+        let Some(task) = self.pending_start.remove(&id) else {
+            return;
+        };
+        if !ok {
+            self.terminal
+                .entry(id)
+                .or_default()
+                .push("Setup failed; starting the agent anyway so you can fix it together.".into());
+            self.info = Some((
+                "The setup command failed; starting the agent anyway so you can fix it together."
+                    .into(),
+                std::time::Instant::now(),
+            ));
+        }
+        if let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) {
+            let opts = cx.global::<AppSettings>().agent(&provider);
+            self.start_agent(id, task, &opts);
+        }
+        if self.selected == Some(id) {
+            self.refresh();
         }
     }
 
@@ -2698,12 +2727,11 @@ impl RunoApp {
             .map(|p| p.setup.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| cx.global::<AppSettings>().worktree_setup.trim().to_string());
-        if isolated && !setup.is_empty() {
+        if isolated && !setup.is_empty() && !self.demo {
             self.pending_start.insert(id, task);
-            self.run_terminal(setup, cx);
-            if self.handles.contains_key(&Target::Terminal(id)) {
+            if self.run_setup_in(id, &setup, cx) {
                 self.info = Some((
-                    "Running the worktree setup command first.".into(),
+                    "Running the worktree setup command first, in a terminal tab.".into(),
                     std::time::Instant::now(),
                 ));
                 return;
@@ -4460,7 +4488,7 @@ impl RunoApp {
                             .text_sm()
                             .text_color(rgb(c_secondary()))
                             .child(format!(
-                                "The setup command is running in the Terminal. {} starts on “{}” when it finishes.",
+                                "The setup command is running in the Setup terminal tab, where you can answer what it asks. {} starts on “{}” when it finishes.",
                                 provider.name,
                                 task.lines().next().unwrap_or_default()
                             )),

@@ -90,6 +90,29 @@ pub struct Program {
     pub unset: Vec<String>,
 }
 
+impl Program {
+    /// The program, arguments and environment a command was set up with, for a PTY.
+    pub fn of(command: &std::process::Command) -> Program {
+        Program {
+            bin: command.get_program().to_string_lossy().into_owned(),
+            args: command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+            env: command
+                .get_envs()
+                .filter_map(|(k, v)| {
+                    Some((
+                        k.to_string_lossy().into_owned(),
+                        v?.to_string_lossy().into_owned(),
+                    ))
+                })
+                .collect(),
+            unset: Vec::new(),
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -411,6 +434,33 @@ impl Shell {
             let _ = c.kill();
         }
     }
+
+    /// Whether the program exited successfully, once it has exited. A program that
+    /// closed its terminal but hasn't quit yet is given half a second.
+    pub fn success(&self) -> Option<bool> {
+        let mut c = self.child.lock().ok()?;
+        for _ in 0..50 {
+            if let Ok(Some(status)) = c.try_wait() {
+                return Some(status.success());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// Ask the program to finish up: Runo's connection runner ends the program on the
+    /// connection, then syncs back before it exits. Elsewhere this is a kill.
+    pub fn finish(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.child.lock().ok().and_then(|c| c.process_id()) {
+            // SAFETY: signalling a child process this shell started.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGUSR1);
+            }
+            return;
+        }
+        self.kill();
+    }
 }
 
 impl Drop for Shell {
@@ -669,6 +719,39 @@ mod tests {
         assert_eq!(k("shift", None, false, false), None);
         assert_eq!(palette(196, true), 0xff0000);
         assert_eq!(palette(232, true), 0x080808);
+    }
+
+    /// A setup command runs in a terminal that can ask questions, and its result is known.
+    #[cfg(unix)]
+    #[test]
+    fn programs_take_answers_and_report_how_they_ended() {
+        let mut command = std::process::Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf 'Name? '; read name; echo \"hi $name\"; exit 4",
+            ])
+            .env("RUNO_TEST", "1");
+        let program = Program::of(&command);
+        assert_eq!(program.bin, "sh");
+        assert_eq!(
+            program.env,
+            vec![("RUNO_TEST".to_string(), "1".to_string())]
+        );
+        let dir = std::env::temp_dir();
+        let shell =
+            Shell::spawn_program(1, 1, dir.to_str().unwrap(), 10, 40, Some(program), |_| {})
+                .unwrap();
+        let start = Instant::now();
+        while !shell.text().contains("Name?") && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        shell.write(b"runo\r");
+        while !shell.exited() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(shell.text().contains("hi runo"), "{}", shell.text());
+        assert_eq!(shell.success(), Some(false));
     }
 
     #[cfg(unix)]

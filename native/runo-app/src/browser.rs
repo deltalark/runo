@@ -69,6 +69,12 @@ fn listening_ports() -> Vec<u16> {
     {
         ports.extend(parse_lsof(&String::from_utf8_lossy(&out.stdout)));
     }
+    dev_ports(ports)
+}
+
+/// Keep the ports a dev server could be on: unprivileged, not ephemeral and not a
+/// well-known database or cache.
+pub(crate) fn dev_ports(mut ports: Vec<u16>) -> Vec<u16> {
     ports.retain(|p| (1024..32768).contains(p) && !NOT_WEB.contains(p));
     ports.sort_unstable();
     ports.dedup();
@@ -174,8 +180,28 @@ fn button_name(button: MouseButton) -> (&'static str, u8) {
 }
 
 impl RunoApp {
-    /// Look for listening dev-server ports on this machine, off the UI thread.
+    /// Look for listening dev-server ports on this machine, and where the session runs
+    /// when that is a connection, off the UI thread.
     pub(crate) fn scan_ports(&mut self) {
+        let elsewhere = self
+            .current()
+            .and_then(|s| Some((s.id, s.dir.clone(), s.sandbox()?)));
+        if let Some((id, dir, sandbox)) = elsewhere {
+            if self.remote_scanning.insert(id) {
+                self.bg(
+                    move || {
+                        sandbox
+                            .listening(&dir)
+                            .map(|text| dev_ports(connections::parse_listening(&text)))
+                    },
+                    move |this, found, cx| {
+                        this.remote_scanning.remove(&id);
+                        this.remote_ports.insert(id, found);
+                        cx.notify();
+                    },
+                );
+            }
+        }
         if self.browser_scanning {
             return;
         }
@@ -210,6 +236,109 @@ impl RunoApp {
     pub(crate) fn open_in_browser(&mut self, url: String, cx: &mut Context<Self>) {
         self.remember_url(&url);
         cx.open_url(&url);
+    }
+
+    /// Open a dev server running where session `id` runs: forward its port to this
+    /// machine first (an SSH tunnel, or through Cove), then open it in the panel.
+    fn open_forwarded(&mut self, id: u64, port: u16, cx: &mut Context<Self>) {
+        if let Some(forward) = self.forwards.get(&(id, port)) {
+            let url = format!("http://localhost:{}", forward.local);
+            self.open_in_panel(url, cx);
+            return;
+        }
+        let Some((dir, sandbox, place)) = self
+            .state
+            .session(id)
+            .and_then(|s| Some((s.dir.clone(), s.sandbox()?, connections::name(s.connection))))
+        else {
+            return;
+        };
+        if self.forwarding.is_some() {
+            return;
+        }
+        self.forwarding = Some((id, port));
+        self.bg(
+            move || sandbox.forward(&dir, port),
+            move |this, result, cx| {
+                this.forwarding = None;
+                match result {
+                    Ok(forward) => {
+                        let url = format!("http://localhost:{}", forward.local);
+                        this.forwards.insert((id, port), forward);
+                        if this.selected == Some(id) {
+                            this.open_in_panel(url, cx);
+                        }
+                    }
+                    Err(e) => {
+                        this.notice =
+                            Some(format!("Couldn't forward port {port} from {place}: {e}"))
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// A dev server where the session runs: its port there, forwarded or not.
+    fn remote_port_row(&self, n: usize, id: u64, port: u16, cx: &mut Context<Self>) -> AnyElement {
+        let local = self.forwards.get(&(id, port)).map(|f| f.local);
+        let busy = self.forwarding == Some((id, port));
+        let label = match local {
+            Some(local) => format!(":{port}  →  localhost:{local}"),
+            None => format!(":{port}"),
+        };
+        let mut row = div()
+            .id(("remote-port", n))
+            .h(px(32.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|el| el.bg(tint(c_subtle())))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_forwarded(id, port, cx);
+                cx.notify();
+            }))
+            .child(icon(IconName::Globe, 13., c_muted()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(self.mono_font.clone())
+                    .text_size(px(12.))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child(if busy {
+                        "Forwarding…"
+                    } else if local.is_some() {
+                        "Open"
+                    } else {
+                        "Forward and open"
+                    }),
+            );
+        if local.is_some() {
+            row = row.child(
+                self.ghost_button_sized(
+                    ("remote-port-stop", n),
+                    IconName::X,
+                    "Stop forwarding",
+                    24.,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.forwards.remove(&(id, port));
+                    cx.stop_propagation();
+                    cx.notify();
+                })),
+            );
+        }
+        row.into_any_element()
     }
 
     /// Results of the port scan.
@@ -794,17 +923,59 @@ impl RunoApp {
                     .child(div().text_size(px(12.5)).child(error.clone())),
             );
         }
-        if self.current().and_then(|s| s.sandbox()).is_some() {
+        // A session on a connection: its dev servers there, forwarded here to open.
+        if let Some(session) = self.current().filter(|s| s.sandbox().is_some()) {
+            let place = connections::name(session.connection);
             body = body.child(
                 div()
-                    .px_2()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_muted()))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(section("RUNNING WHERE THIS SESSION RUNS"))
                     .child(
-                        "This session runs elsewhere, so servers it starts are not listed \
-                         below. Open them by their address on that machine.",
+                        self.ghost_button_sized(
+                            "scan-remote",
+                            IconName::RefreshCw,
+                            "Scan again",
+                            24.,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.scan_ports();
+                            cx.notify();
+                        })),
                     ),
             );
+            let note = |text: String| {
+                div()
+                    .px_2()
+                    .text_size(px(12.5))
+                    .text_color(rgb(c_muted()))
+                    .child(text)
+            };
+            match self.remote_ports.get(&session.id) {
+                _ if self.remote_scanning.contains(&session.id) => {
+                    body = body.child(note(format!("Looking for dev servers on {place}…")))
+                }
+                None => {
+                    body = body.child(note(format!("Scan to look for dev servers on {place}.")))
+                }
+                Some(Err(e)) => {
+                    body = body.child(note(format!("Couldn't list the ports on {place}: {e}")))
+                }
+                Some(Ok(ports)) if ports.is_empty() => {
+                    body = body.child(note(format!(
+                    "No dev server is listening on {place}. Start one in the session's Terminal."
+                )))
+                }
+                Some(Ok(ports)) => {
+                    body = body.child(note(format!(
+                        "On {place}. Opening one forwards its port to this machine."
+                    )));
+                    for (n, port) in ports.clone().into_iter().enumerate() {
+                        body = body.child(self.remote_port_row(n, session.id, port, cx));
+                    }
+                }
+            }
         }
         body = body.child(
             div()

@@ -784,8 +784,7 @@ impl RunoApp {
                 let mut started = false;
                 if isolated && !setup.is_empty() {
                     self.pending_start.insert(id, auto.prompt.clone());
-                    self.run_terminal_in(id, setup, cx);
-                    started = self.handles.contains_key(&Target::Terminal(id));
+                    started = self.run_setup_in(id, &setup, cx);
                     if !started {
                         self.pending_start.remove(&id);
                     }

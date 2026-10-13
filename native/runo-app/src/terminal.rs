@@ -96,6 +96,79 @@ impl RunoApp {
         cx.notify();
     }
 
+    /// Run the worktree setup command in a terminal tab of session `id`, where it can
+    /// ask questions; the agent starts when it exits. Returns whether it started.
+    pub(crate) fn run_setup_in(&mut self, id: u64, setup: &str, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.state.session(id) else {
+            return false;
+        };
+        let dir = session.dir.clone();
+        let mut command = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", setup]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", setup]);
+            c
+        };
+        // On a connection it runs there, in the session's files.
+        if let Some(sandbox) = session.sandbox() {
+            match sandbox.pty_command(&command, &dir, None) {
+                Ok(wrapped) => command = wrapped,
+                Err(error) => {
+                    self.notice = Some(format!("The setup command could not start: {error}"));
+                    return false;
+                }
+            }
+        }
+        self.next_shell += 1;
+        let shell_id = self.next_shell;
+        let tx = self.tx.clone();
+        let (rows, cols) = self.term_grid();
+        match pty::Shell::spawn_program(
+            shell_id,
+            id,
+            &dir,
+            rows,
+            cols,
+            Some(pty::Program::of(&command)),
+            move |sid| {
+                let _ = tx.send(Event::Pty(sid));
+            },
+        ) {
+            Ok(mut shell) => {
+                shell.title = "Setup".into();
+                self.shells.push(shell);
+                self.setups.insert(shell_id, id);
+                if self.selected == Some(id) {
+                    self.shell_tab = Some(shell_id);
+                    self.cli_tab = false;
+                    self.focus_shell = 2;
+                }
+                cx.notify();
+                true
+            }
+            Err(e) => {
+                self.notice = Some(format!("The setup command could not start: {e}"));
+                false
+            }
+        }
+    }
+
+    /// A setup command's terminal ended (or was closed): start the agent it held back.
+    pub(crate) fn setup_exited(&mut self, shell: u64, cx: &mut Context<Self>) {
+        let ok = match self.shells.iter().find(|s| s.id == shell) {
+            Some(s) if s.exited() => s.success().unwrap_or(true),
+            Some(_) => return,
+            None => false,
+        };
+        let Some(id) = self.setups.remove(&shell) else {
+            return;
+        };
+        self.setup_done(id, ok, cx);
+    }
+
     pub(crate) fn close_shell(&mut self, id: u64, cx: &mut Context<Self>) {
         self.shells.retain(|s| s.id != id);
         if self.shell_tab == Some(id) {
@@ -110,6 +183,8 @@ impl RunoApp {
         let state = &self.state;
         self.shells.retain(|s| state.session(s.session).is_some());
         self.cli_runs.retain(|id, _| state.session(*id).is_some());
+        self.forwards
+            .retain(|(id, _), _| state.session(*id).is_some());
     }
 
     /// Rows and columns that fit the terminal body.
