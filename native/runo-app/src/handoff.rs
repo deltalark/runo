@@ -19,6 +19,8 @@ pub(crate) struct SwitchPlan {
     pub files: Vec<git::Change>,
     pub exchanges: usize,
     pub recap: Recap,
+    /// A model picked for the new agent from the composer's agent menu.
+    pub model: Option<String>,
 }
 
 /// The outgoing agent's own recap of the session, asked for when the switch is requested.
@@ -431,6 +433,7 @@ impl RunoApp {
             } else {
                 Recap::Skipped
             },
+            model: None,
         });
         if let Some(command) = recap {
             agent::oneshot_within(
@@ -544,6 +547,9 @@ impl RunoApp {
         };
         let from = session.provider.clone();
         session.switch_provider_keeping(to.id);
+        if let Some(model) = plan.model {
+            session.set_model(model);
+        }
         let cost = if carry { tokens(&plan.brief) } else { 0 };
         if carry {
             session.handoff = plan.brief.clone();
