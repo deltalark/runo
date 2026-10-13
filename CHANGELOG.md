@@ -37,6 +37,10 @@ All notable changes to Runo are documented here.
 - New project can clone a repository from a URL into a folder you choose, with git's progress and errors shown, then adds it.
 - Design mode: collect design references per project (pasted or picked images, captures of the preview) with notes, keep design notes in `docs/design.md`, see the app's dev server beside them, and start a session with the picked references attached.
 - Architecture mode: a map of the project's packages, dependencies and module imports read from its manifests and code, architecture notes and decisions kept in `docs/architecture.md` with a generated Mermaid diagram, and agent sessions that start with both attached.
+- Reviews refreshes every five minutes in the background, filters pull requests and issues by state, author and review request, loads past 30 with Load more, and lets you pick the agent for sessions started there.
+- Review this PR: the agent writes its review to `.runo/review.json`, and Post review shows it for confirmation, then posts it to GitHub with its line comments.
+- Playbook schedules can run at a time of day on chosen weekdays, or on a cron expression. Runs missed while Runo was closed catch up once on launch (Settings can turn this off).
+- On macOS, scheduled playbooks can run while Runo is closed, from a launchd job; their runs show up as sessions when Runo opens.
 
 ### Fixed
 

@@ -113,6 +113,10 @@ pub struct AppSettings {
     pub approval_wait_mins: u32,
     /// Runs of each scheduled playbook to keep; 0 keeps them all.
     pub playbook_keep_runs: u32,
+    /// Run a scheduled playbook once on launch when it came due while Runo was closed.
+    pub playbook_catch_up: bool,
+    /// Run scheduled playbooks while Runo is closed, from a launchd agent (macOS).
+    pub playbooks_while_closed: bool,
     /// Ask before a playbook an agent asked for starts.
     pub confirm_agent_playbooks: bool,
     /// Give agents Cove's own tools (`cove mcp`): scratch VMs, commands, files, ports.
@@ -187,6 +191,8 @@ impl Default for AppSettings {
             stop_on_denial: true,
             approval_wait_mins: 5,
             playbook_keep_runs: 10,
+            playbook_catch_up: true,
+            playbooks_while_closed: false,
             confirm_agent_playbooks: true,
             cove_tools: true,
             stuck_after_mins: 10,
@@ -269,6 +275,8 @@ impl AppSettings {
         SESSION_LIMIT.store(self.session_limit_usd, Ordering::Relaxed);
         DAILY_LIMIT.store(self.daily_limit_usd, Ordering::Relaxed);
         MAX_RUNNING.store(self.max_running, Ordering::Relaxed);
+        CATCH_UP.store(self.playbook_catch_up, Ordering::Relaxed);
+        crate::pbrunner::sync_launch_agent(self.playbooks_while_closed);
         crate::terminal::configure(
             self.term_font_size,
             match self.term_scroll.as_str() {
@@ -343,6 +351,7 @@ pub fn spend_limits() -> (f64, f64) {
 pub fn max_running() -> usize {
     MAX_RUNNING.load(Ordering::Relaxed) as usize
 }
+static CATCH_UP: AtomicBool = AtomicBool::new(true);
 
 pub fn cove_tools() -> bool {
     COVE_TOOLS.load(Ordering::Relaxed)
@@ -358,6 +367,10 @@ pub fn sync_backup_untracked() -> bool {
 
 pub fn playbook_keep_runs() -> usize {
     KEEP_RUNS.load(Ordering::Relaxed) as usize
+}
+
+pub fn playbook_catch_up() -> bool {
+    CATCH_UP.load(Ordering::Relaxed)
 }
 
 pub fn stop_on_denial() -> bool {

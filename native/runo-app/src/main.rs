@@ -32,12 +32,14 @@ mod memory_mcp;
 mod models;
 mod notes;
 mod pbfile;
+mod pbrunner;
 mod pbshare;
 mod persist;
 mod playbooks;
 mod projects;
 mod pty;
 mod sessions;
+mod schedule;
 mod settings;
 mod settings_ui;
 mod shell;
@@ -1593,6 +1595,7 @@ impl RunoApp {
         app._subscriptions.extend(design_subs);
         app._subscriptions.extend(arch_subs);
         cx.set_global(MainApp(cx.entity().downgrade()));
+        app.init_github(window, cx);
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
         cx.spawn(async move |this, cx| loop {
@@ -8503,6 +8506,11 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--mcp-memory") {
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."));
         return;
+    }
+    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed (launchd).
+    if args.get(1).map(String::as_str) == Some("--run-due-playbooks") {
+        shellenv::init();
+        std::process::exit(pbrunner::run_due());
     }
     // `runo --connection-run <file>`: one agent turn on a remote connection, and
     // `--connection-shell <file>`: a terminal there.

@@ -11,6 +11,14 @@ pub(crate) struct PlaybookEditor {
     pub every: u64,
     /// The schedule is typed in minutes instead of picked from the presets.
     pub custom: bool,
+    /// "every" (minutes), "time" (a time of day on chosen weekdays) or "cron".
+    pub kind: &'static str,
+    /// The weekdays a time of day runs on, from Sunday; none runs it daily.
+    pub days: [bool; 7],
+    pub time: Entity<InputState>,
+    pub cron: Entity<InputState>,
+    /// Redraws the cron preview as it is typed.
+    _cron_sub: Subscription,
     pub error: Option<String>,
     /// What it may do, in `pbfile::PERMISSIONS` order.
     pub permissions: Vec<String>,
@@ -299,6 +307,7 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) {
         let existing = editing.and_then(|id| self.state.automations.iter().find(|a| a.id == id));
+        let cron = existing.map(|a| a.cron.clone()).unwrap_or_default();
         let (name, desc, prompt, every) = match existing {
             Some(a) => {
                 self.auto_provider = agent::PROVIDERS
@@ -357,10 +366,37 @@ impl RunoApp {
             .and_then(|id| self.state.automations.iter().find(|a| a.id == id))
             .map(|a| a.inputs.clone())
             .unwrap_or_default();
+        let timed = schedule::as_time(&cron);
+        let kind = match (&timed, cron.is_empty()) {
+            (_, true) => "every",
+            (Some(_), _) => "time",
+            (None, _) => "cron",
+        };
+        let (hour, minute, days) = timed.unwrap_or((9, 0, [false; 7]));
+        let time = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("09:00")
+                .default_value(format!("{hour:02}:{minute:02}"))
+        });
+        let cron = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("0 9 * * 1-5")
+                .default_value(if kind == "cron" { cron } else { String::new() })
+        });
+        let _cron_sub = cx.subscribe_in(&cron, window, |_, _, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
         self.pb_editor = Some(PlaybookEditor {
             editing,
             every,
             custom,
+            kind,
+            days,
+            time,
+            cron,
+            _cron_sub,
             error: None,
             permissions,
             declared,
@@ -425,7 +461,27 @@ impl RunoApp {
             })
             .filter(|i| !i.label.is_empty() || !i.default.is_empty())
             .collect();
-        let every = if editor.custom {
+        let cron = match editor.kind {
+            "time" => match schedule::parse_time(&editor.time.read(cx).value()) {
+                Some((hour, minute)) => schedule::at_time(hour, minute, &editor.days),
+                None => {
+                    self.playbook_error("Type the time of day, such as 09:30.");
+                    return;
+                }
+            },
+            "cron" => {
+                let expr = editor.cron.read(cx).value().trim().to_string();
+                if let Err(why) = schedule::parse(&expr) {
+                    self.playbook_error(&why);
+                    return;
+                }
+                expr
+            }
+            _ => String::new(),
+        };
+        let every = if !cron.is_empty() {
+            0
+        } else if editor.custom {
             match self.auto_every.read(cx).value().trim().parse::<u64>() {
                 Ok(m) if m < MIN_EVERY => {
                     self.playbook_error(&format!(
@@ -447,7 +503,7 @@ impl RunoApp {
             return;
         }
         let project_id = self.auto_project.unwrap_or(0);
-        if every > 0 && project_id == 0 {
+        if (every > 0 || !cron.is_empty()) && project_id == 0 {
             self.playbook_error(
                 "A schedule needs a project to run in. Pick one, or run it by hand.",
             );
@@ -468,7 +524,7 @@ impl RunoApp {
             Some(id) => {
                 let provider = agent::PROVIDERS[self.auto_provider].id.to_string();
                 if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == id) {
-                    if a.every_minutes != every {
+                    if a.every_minutes != every || a.cron != cron {
                         // A new schedule counts from now.
                         a.last_run = a.last_run.max(unix_now());
                     }
@@ -478,6 +534,7 @@ impl RunoApp {
                     a.provider = provider;
                     a.project_id = project_id;
                     a.every_minutes = every;
+                    a.cron = cron;
                     a.permissions = permissions;
                     a.inputs = inputs;
                 }
@@ -488,6 +545,11 @@ impl RunoApp {
                 if let Some(a) = self.state.automations.last_mut() {
                     a.permissions = permissions;
                     a.inputs = inputs;
+                    if !cron.is_empty() {
+                        // The first run is the next time it matches.
+                        a.cron = cron;
+                        a.last_run = unix_now();
+                    }
                 }
                 self.save();
             }
@@ -631,15 +693,15 @@ impl RunoApp {
                     Some(IconName::CalendarClock),
                     format!(
                         "{} · next {}",
-                        every_label(auto.every_minutes),
-                        until(auto.last_run + auto.every_minutes * 60, now)
+                        auto.schedule_label(),
+                        auto.next_run().map_or("never".into(), |at| until(at, now))
                     ),
                     c_green(),
                 )
             } else {
                 self.pill(
                     Some(IconName::Pause),
-                    format!("{} · paused", every_label(auto.every_minutes)),
+                    format!("{} · paused", auto.schedule_label()),
                     c_amber(),
                 )
             }
@@ -999,7 +1061,8 @@ impl RunoApp {
         let next = all
             .iter()
             .filter(|a| a.scheduled() && a.enabled)
-            .min_by_key(|a| a.last_run + a.every_minutes * 60);
+            .filter_map(|a| Some((a, a.next_run()?)))
+            .min_by_key(|(_, at)| *at);
         let latest = all
             .iter()
             .filter(|a| a.ran_at() > 0)
@@ -1064,11 +1127,7 @@ impl RunoApp {
                 "Scheduled",
                 scheduled.to_string(),
                 match next {
-                    Some(a) => format!(
-                        "{} runs {}",
-                        a.name,
-                        until(a.last_run + a.every_minutes * 60, now)
-                    ),
+                    Some((a, at)) => format!("{} runs {}", a.name, until(at, now)),
                     None if paused > 0 => format!("{paused} paused"),
                     None => "None on a timer".into(),
                 },
@@ -1419,15 +1478,21 @@ impl RunoApp {
             .border_1()
             .border_color(rgb(c_border()))
             .bg(rgb(c_canvas()));
+        // Presets carry their minutes; the others pick a kind of schedule.
         let options = SCHEDULES
             .iter()
-            .map(|(l, m)| (l.to_string(), Some(*m)))
-            .chain(std::iter::once(("Custom".to_string(), None)));
-        for (j, (text, minutes)) in options.enumerate() {
-            let on = match minutes {
-                Some(m) => !editor.custom && editor.every == m,
-                None => editor.custom,
-            };
+            .map(|(l, m)| (l.to_string(), Some(*m), "every"))
+            .chain([
+                ("Custom".to_string(), None, "every"),
+                ("At a time".to_string(), None, "time"),
+                ("Cron".to_string(), None, "cron"),
+            ]);
+        for (j, (text, minutes, kind)) in options.enumerate() {
+            let on = editor.kind == kind
+                && match minutes {
+                    Some(m) => !editor.custom && editor.every == m,
+                    None => kind != "every" || editor.custom,
+                };
             schedule = schedule.child(
                 div()
                     .id(("pb-every", j))
@@ -1449,12 +1514,13 @@ impl RunoApp {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(e) = this.pb_editor.as_mut() {
+                            e.kind = kind;
                             match minutes {
                                 Some(m) => {
                                     e.every = m;
                                     e.custom = false;
                                 }
-                                None => e.custom = true,
+                                None => e.custom = kind == "every",
                             }
                             e.error = None;
                         }
@@ -1463,6 +1529,61 @@ impl RunoApp {
                     .child(text),
             );
         }
+        let mut timed = div().flex().flex_wrap().items_center().gap_2().child(
+            div()
+                .w(px(76.))
+                .child(Input::new(&editor.time).bordered(true).h(px(30.))),
+        );
+        for (d, name) in schedule::WEEKDAYS.iter().enumerate() {
+            timed = timed.child(
+                self.chip(("pb-day", d), name.to_string(), editor.days[d])
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(e) = this.pb_editor.as_mut() {
+                            e.days[d] = !e.days[d];
+                            e.error = None;
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        timed = timed.child(div().text_size(px(12.)).text_color(rgb(c_muted())).child(
+            if editor.days.iter().any(|d| *d) {
+                "local time"
+            } else {
+                "local time, every day"
+            },
+        ));
+        let expr = editor.cron.read(cx).value().trim().to_string();
+        let preview = if expr.is_empty() {
+            "minute hour day month weekday, in local time".to_string()
+        } else {
+            match schedule::parse(&expr) {
+                Ok(_) => match schedule::next_local(&expr, unix_now()) {
+                    Some(at) => format!(
+                        "{} · next {}",
+                        schedule::describe(&expr),
+                        until(at, unix_now())
+                    ),
+                    None => "This never comes round.".into(),
+                },
+                Err(why) => why,
+            }
+        };
+        let cron = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .w(px(160.))
+                    .child(Input::new(&editor.cron).bordered(true).h(px(30.))),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .child(preview),
+            );
         let found = crate::pbfile::placeholders(&prompt);
         let inputs = if found.is_empty() {
             div()
@@ -1699,14 +1820,15 @@ impl RunoApp {
                         div()
                             .v_flex()
                             .gap_1p5()
-                            .child(label("Schedule", Some("runs while Runo is open, in the project above, on its default connection")))
+                            .child(label("Schedule", Some("in the project above, on its default connection; runs missed while Runo was closed catch up when it opens")))
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap_3()
                                     .child(schedule)
-                                    .when(editor.custom, |el| {
+                                    .when(editor.kind == "every" && editor.custom, |el| {
                                         el.child(
                                             div()
                                                 .flex()
@@ -1726,7 +1848,9 @@ impl RunoApp {
                                                         .child("minutes"),
                                                 ),
                                         )
-                                    }),
+                                    })
+                                    .when(editor.kind == "time", |el| el.child(timed))
+                                    .when(editor.kind == "cron", |el| el.child(cron)),
                             ),
                     ),
             )
