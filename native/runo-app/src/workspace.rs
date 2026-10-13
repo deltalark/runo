@@ -4,7 +4,7 @@
 use super::*;
 
 impl RunoApp {
-    /// Remember open tabs and panels so the next launch looks the same.
+    /// Remember open tabs, panels, the mode and the window so the next launch looks the same.
     pub(crate) fn store_layout(&mut self) {
         self.state.layout = store::Layout {
             tabs: {
@@ -17,7 +17,23 @@ impl RunoApp {
             },
             selected: self.selected,
             hide_sidebar: !self.show_sidebar,
-            hide_panel: !self.show_panel,
+            hide_panel: !self.show_panel && !self.panel_auto_hidden,
+            mode: match self.mode() {
+                Mode::Settings => String::new(),
+                mode => mode.label().to_string(),
+            },
+            split: self.split,
+            right_tab: match self.right_tab {
+                RightTab::Changes => "changes",
+                RightTab::Browser => "browser",
+                RightTab::Files => "files",
+            }
+            .to_string(),
+            expanded: Some(self.expanded.clone()),
+            project: self.project,
+            sidebar_width: self.sidebar_width,
+            home_all: self.home_all,
+            window: self.window_place,
         };
     }
 
@@ -36,46 +52,109 @@ impl RunoApp {
                 self.tabs.push(id);
             }
         }
+        self.split = layout
+            .split
+            .filter(exists)
+            .filter(|id| Some(*id) != self.selected);
         self.show_sidebar = !layout.hide_sidebar;
-        if layout.hide_panel {
-            self.show_panel = false;
-            // Keep the window-width rule from opening it again on the first frame.
-            self.panel_wide = Some(true);
+        self.show_panel = !layout.hide_panel;
+        self.right_tab = match layout.right_tab.as_str() {
+            "browser" => RightTab::Browser,
+            "files" => RightTab::Files,
+            _ => RightTab::Changes,
+        };
+        if let Some(expanded) = layout.expanded {
+            self.expanded = expanded
+                .into_iter()
+                .filter(|id| self.state.projects.iter().any(|p| p.id == *id))
+                .collect();
         }
+        self.project = layout
+            .project
+            .filter(|id| self.state.projects.iter().any(|p| p.id == *id));
+        if let Some(pid) = self.project {
+            self.new_project = Some(pid);
+        }
+        if layout.sidebar_width > 0. {
+            self.sidebar_width = layout.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        }
+        self.home_all = layout.home_all;
+        self.window_place = layout.window;
+        self.view = match layout.mode.as_str() {
+            "Home" => View::Home,
+            "Design" => View::Design,
+            "Architecture" => View::Architecture,
+            "Playbooks" => View::Automations,
+            "Inbox" => View::Inbox,
+            "Reviews" => {
+                self.load_github();
+                View::GitHub
+            }
+            _ if self.selected.is_none() && !self.state.sessions.is_empty() => View::AllSessions,
+            _ => View::Session,
+        };
     }
 
-    /// Sessions grouped by what needs attention, instead of by project.
-    pub(crate) fn status_groups(&self, filter: &str, cx: &mut Context<Self>) -> Div {
-        let visible: Vec<&Session> = self
+    /// A project's sessions as the sidebar lists them: live ones matching the filter,
+    /// pinned first.
+    pub(crate) fn project_sessions(&self, project: &Project, filter: &str) -> Vec<&Session> {
+        let mut sessions: Vec<&Session> = self
             .state
             .sessions
             .iter()
-            .filter(|s| !s.archived)
+            .filter(|s| s.project_id == project.id && !s.archived)
             .filter(|s| {
                 filter.is_empty()
                     || s.title.to_lowercase().contains(filter)
                     || s.branch.to_lowercase().contains(filter)
+                    || project.name.to_lowercase().contains(filter)
             })
             .collect();
-        let group = |s: &Session| -> usize {
-            if s.pinned {
-                0
-            } else if s.status == Status::Working {
-                1
-            } else if s.unread || s.status == Status::Failed {
-                2
-            } else {
-                3
-            }
-        };
-        let names = ["Pinned", "Working", "Needs review", "Done"];
+        sessions.sort_by_key(|s| !s.pinned);
+        sessions
+    }
+
+    /// The sessions the sidebar shows, in order, under their group: by status when the
+    /// sidebar is grouped that way, else under each open project.
+    pub(crate) fn sidebar_rows(&self, filter: &str, cx: &App) -> Vec<(String, Vec<&Session>)> {
+        if cx.global::<AppSettings>().group_by_status {
+            let visible: Vec<&Session> = self
+                .state
+                .sessions
+                .iter()
+                .filter(|s| !s.archived)
+                .filter(|s| {
+                    filter.is_empty()
+                        || s.title.to_lowercase().contains(filter)
+                        || s.branch.to_lowercase().contains(filter)
+                })
+                .collect();
+            return shell::Bucket::ALL
+                .iter()
+                .map(|b| {
+                    let mut members: Vec<&Session> = visible
+                        .iter()
+                        .copied()
+                        .filter(|s| self.bucket(s) == Some(*b))
+                        .collect();
+                    members.sort_by_key(|s| !s.pinned);
+                    (b.label().to_string(), members)
+                })
+                .filter(|(_, m)| !m.is_empty())
+                .collect();
+        }
+        self.state
+            .projects
+            .iter()
+            .filter(|p| self.expanded.contains(&p.id) || !filter.is_empty())
+            .map(|p| (p.name.clone(), self.project_sessions(p, filter)))
+            .collect()
+    }
+
+    /// Sessions grouped by what needs attention, instead of by project.
+    pub(crate) fn status_groups(&self, filter: &str, cx: &mut Context<Self>) -> Div {
         let mut col = div().v_flex().gap(px(2.)).pb_2();
-        for (g, name) in names.iter().enumerate() {
-            let members: Vec<&Session> =
-                visible.iter().copied().filter(|s| group(s) == g).collect();
-            if members.is_empty() {
-                continue;
-            }
+        for (name, members) in self.sidebar_rows(filter, cx) {
             col = col.child(
                 div()
                     .mt_2()
@@ -88,7 +167,7 @@ impl RunoApp {
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_secondary()))
-                    .child(*name)
+                    .child(name)
                     .child(
                         div()
                             .text_size(px(11.))
@@ -295,11 +374,12 @@ impl RunoApp {
         }
     }
 
-    /// The project a playbook started by hand runs in: the open session's, the one picked
-    /// for a new session, or the first.
+    /// The project in the top bar, which a playbook started by hand runs in: the one the
+    /// person switched to, the open session's, the one picked for a new session, or the first.
     pub(crate) fn current_project(&self) -> Option<u64> {
-        self.current()
-            .map(|s| s.project_id)
+        self.project
+            .filter(|id| self.state.projects.iter().any(|p| p.id == *id))
+            .or(self.current().map(|s| s.project_id))
             .or(self.new_project)
             .filter(|id| self.state.projects.iter().any(|p| p.id == *id))
             .or_else(|| self.state.projects.first().map(|p| p.id))

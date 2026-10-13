@@ -61,7 +61,7 @@ pub struct AppSettings {
     pub attribution: bool,
     /// Saved shell commands shown as buttons over the terminal, one `Name = command` per line.
     pub quick_commands: String,
-    /// Group the sidebar by status (Pinned, Working, Needs review, Done) instead of project.
+    /// Group the sidebar by status (Needs you, Running, Ready to review, Done) instead of project.
     pub group_by_status: bool,
     /// Translucent window over a blurred desktop: "off", "subtle", "frosted" or "clear".
     pub glass: String,
@@ -75,6 +75,8 @@ pub struct AppSettings {
     pub memory_server: bool,
     /// The first-run tour was finished or skipped.
     pub tour_seen: bool,
+    /// The "What's new" card about the Workbench layout was read.
+    pub whats_new_seen: bool,
     /// How new sessions open: "chat" or "cli" (the agent's own CLI, where supported).
     pub default_view: String,
     /// How wide the conversation runs: "comfortable", "wide" or "full".
@@ -144,6 +146,7 @@ impl Default for AppSettings {
             font_smoothing: false,
             memory_server: true,
             tour_seen: false,
+            whats_new_seen: false,
             default_view: "chat".into(),
             content_width: "full".into(),
             term_font_size: 12,

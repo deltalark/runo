@@ -381,6 +381,9 @@ pub struct State {
     /// Open tabs and panels, restored on the next launch.
     #[serde(default)]
     pub layout: Layout,
+    /// Cost reported by the agents per day ("%Y-%m-%d"), in US cents; the last 31 days.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub spend: std::collections::BTreeMap<String, f64>,
 }
 
 /// How a project's notes are kept and used.
@@ -559,9 +562,75 @@ pub struct Layout {
     pub hide_sidebar: bool,
     #[serde(default)]
     pub hide_panel: bool,
+    /// The mode on the rail, by its label ("Home", "Sessions", ...).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    /// The session open beside the selected one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<u64>,
+    /// The right panel's tab: "changes", "browser" or "files".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub right_tab: String,
+    /// Projects open in the sidebar; `None` (files from before) opens them all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded: Option<Vec<u64>>,
+    /// The project in the top bar's switcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<u64>,
+    /// Sidebar width in pixels; 0 is the default.
+    #[serde(default)]
+    pub sidebar_width: f32,
+    /// Home lists every project instead of the one in the top bar.
+    #[serde(default)]
+    pub home_all: bool,
+    /// Where the window was and how big.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowPlace>,
+}
+
+/// The window's last position and size, in logical pixels.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct WindowPlace {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+/// The saved window place, read before the rest of the state so the window opens there.
+pub fn saved_window() -> Option<WindowPlace> {
+    #[derive(Deserialize, Default)]
+    struct Only {
+        #[serde(default)]
+        layout: Layout,
+    }
+    let text = std::fs::read_to_string(state_path()).ok()?;
+    let only: Only = serde_json::from_str(&text).ok()?;
+    only.layout
+        .window
+        .filter(|w| w.width >= 400. && w.height >= 300.)
+}
+
+/// Today's date as the spend log keys it.
+pub fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 impl State {
+    /// Add a turn's cost to `day`, keeping a month of days.
+    pub fn add_spend(&mut self, day: &str, cents: f64) {
+        if cents <= 0.0 {
+            return;
+        }
+        *self.spend.entry(day.to_string()).or_default() += cents;
+        while self.spend.len() > 31 {
+            let first = self.spend.keys().next().cloned().unwrap_or_default();
+            self.spend.remove(&first);
+        }
+    }
+
     /// Record an event for the Activity feed, keeping the latest 500.
     pub fn log(&mut self, session: u64, text: impl Into<String>) {
         self.activity.push(Activity {
@@ -1004,5 +1073,41 @@ mod tests {
             notes_prompt(&notes),
             "Please address these review notes on your changes:\n\n1. `src/a.rs:12`: Name this better\n   On the line `+    let x = 1;`\n\n2. `b.css:3`: Keep red here\n   On the line `−color: red;`\n"
         );
+    }
+
+    #[test]
+    fn old_layouts_still_load() {
+        let layout: Layout = serde_json::from_str(r#"{"tabs":[3],"selected":3}"#).unwrap();
+        assert_eq!(layout.tabs, vec![3]);
+        assert_eq!(layout.expanded, None);
+        assert!(layout.mode.is_empty() && layout.window.is_none());
+        let full = Layout {
+            mode: "Home".into(),
+            expanded: Some(vec![1, 2]),
+            window: Some(WindowPlace {
+                x: 10.,
+                y: 20.,
+                width: 1200.,
+                height: 800.,
+                maximized: false,
+            }),
+            ..Layout::default()
+        };
+        let back: Layout = serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert_eq!(back, full);
+    }
+
+    #[test]
+    fn spend_adds_up_per_day_and_keeps_a_month() {
+        let mut state = State::default();
+        state.add_spend("2026-10-13", 12.5);
+        state.add_spend("2026-10-13", 7.5);
+        state.add_spend("2026-10-13", 0.0);
+        assert_eq!(state.spend.get("2026-10-13"), Some(&20.0));
+        for day in 1..=40 {
+            state.add_spend(&format!("2026-11-{day:02}"), 1.0);
+        }
+        assert_eq!(state.spend.len(), 31);
+        assert!(!state.spend.contains_key("2026-10-13"));
     }
 }
