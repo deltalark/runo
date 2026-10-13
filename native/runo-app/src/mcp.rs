@@ -437,26 +437,115 @@ fn edit_own(path: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> std::i
     std::fs::write(path, text + "\n")
 }
 
-/// Add a blank server to Runo's list for the person to fill in; returns its name.
-pub fn add_own(path: &Path) -> std::io::Result<String> {
-    let mut name = String::new();
+/// One of Runo's servers as the Settings form edits it: the command line (program and
+/// arguments), or a URL, and the environment as `KEY=value` lines.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct OwnDraft {
+    pub name: String,
+    pub command: String,
+    pub url: String,
+    pub env: String,
+}
+
+impl OwnDraft {
+    pub fn from_spec(name: &str, spec: &McpSpec) -> Self {
+        let mut command = vec![spec.command.clone()];
+        command.extend(spec.args.iter().cloned());
+        let command = if spec.command.is_empty() {
+            String::new()
+        } else {
+            command
+                .iter()
+                .map(|a| quote_arg(a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        Self {
+            name: name.to_string(),
+            command,
+            url: spec.url.clone(),
+            env: env.join("\n"),
+        }
+    }
+}
+
+/// An argument as typed in a command line, quoted when it has spaces or quotes.
+fn quote_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || c == '"' || c == '\'') {
+        arg.to_string()
+    } else if arg.contains('"') {
+        format!("'{arg}'")
+    } else {
+        format!("\"{arg}\"")
+    }
+}
+
+/// Save a server from the Settings form into Runo's list, in place of `was` when it
+/// is an edit. Fields the form doesn't show, like headers, are kept. Returns why the
+/// form can't be saved, for the person to fix.
+pub fn save_own(path: &Path, was: Option<&str>, draft: &OwnDraft) -> Result<(), String> {
+    let name = draft.name.trim();
+    if name.is_empty() {
+        return Err("Give the server a name.".into());
+    }
+    let words = crate::agent::split_args(&draft.command);
+    let url = draft.url.trim();
+    match (words.is_empty(), url.is_empty()) {
+        (true, true) => return Err("Give a command to start it or a URL to reach it.".into()),
+        (false, false) => return Err("Give either a command or a URL, not both.".into()),
+        _ => {}
+    }
+    let mut env = Map::new();
+    for line in draft.env.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match line.split_once('=') {
+            Some((key, value)) if !key.trim().is_empty() => {
+                env.insert(key.trim().to_string(), value.trim().into());
+            }
+            _ => return Err(format!("“{line}” isn't KEY=value.")),
+        }
+    }
+    let current = read_json(path)
+        .and_then(|v| v.get("mcpServers").and_then(Value::as_object).cloned())
+        .unwrap_or_default();
+    if was != Some(name) && current.contains_key(name) {
+        return Err(format!("Runo already has a server named {name}."));
+    }
+    let mut entry = was
+        .and_then(|w| current.get(w))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let sse = entry.get("type").and_then(Value::as_str) == Some("sse");
+    for key in [
+        "command",
+        "args",
+        "env",
+        "url",
+        "type",
+        "serverUrl",
+        "httpUrl",
+    ] {
+        entry.remove(key);
+    }
+    if let Some((command, args)) = words.split_first() {
+        entry.remove("headers");
+        entry.insert("command".into(), command.clone().into());
+        entry.insert("args".into(), args.to_vec().into());
+        if !env.is_empty() {
+            entry.insert("env".into(), Value::Object(env));
+        }
+    } else {
+        entry.insert("type".into(), if sse { "sse" } else { "http" }.into());
+        entry.insert("url".into(), url.into());
+    }
     edit_own(path, |servers| {
-        name = (1..)
-            .map(|n| {
-                if n == 1 {
-                    "new-server".to_string()
-                } else {
-                    format!("new-server-{n}")
-                }
-            })
-            .find(|n| !servers.contains_key(n))
-            .expect("some name is free");
-        servers.insert(
-            name.clone(),
-            serde_json::json!({ "command": "", "args": [], "env": {} }),
-        );
-    })?;
-    Ok(name)
+        if let Some(was) = was {
+            servers.remove(was);
+        }
+        servers.insert(name.to_string(), Value::Object(entry));
+    })
+    .map_err(|e| format!("Couldn't save {name}: {e}"))
 }
 
 /// Remove a server from Runo's list.
@@ -829,14 +918,63 @@ mod tests {
     fn runo_keeps_its_own_list_of_servers() {
         let dir = std::env::temp_dir().join(format!("runo-own-mcp-{}", std::process::id()));
         let path = dir.join("mcp.json");
-        assert_eq!(add_own(&path).unwrap(), "new-server");
-        assert_eq!(add_own(&path).unwrap(), "new-server-2");
-        remove_own(&path, "new-server").unwrap();
+        let draft = |name: &str, command: &str, url: &str, env: &str| OwnDraft {
+            name: name.into(),
+            command: command.into(),
+            url: url.into(),
+            env: env.into(),
+        };
+        let files = draft(
+            "files",
+            "npx -y \"@mcp/fs server\" ~/code",
+            "",
+            "TOKEN=abc\n\nMODE = ro",
+        );
+        save_own(&path, None, &files).unwrap();
+        save_own(
+            &path,
+            None,
+            &draft("figma", "", "https://mcp.figma.com/mcp", ""),
+        )
+        .unwrap();
         let mut out = Vec::new();
         scan_json(OWN, &path, "mcpServers", &mut out);
-        let names: Vec<&str> = out.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["new-server-2"]);
-        assert_eq!(out[0].transport, "unknown", "blank until filled in");
+        let fs = out.iter().find(|m| m.name == "files").unwrap();
+        assert_eq!(fs.spec.command, "npx");
+        assert_eq!(fs.spec.args, ["-y", "@mcp/fs server", "~/code"]);
+        assert_eq!(fs.spec.env.len(), 2);
+        // The form shows it the way it was typed.
+        let shown = OwnDraft::from_spec("files", &fs.spec);
+        assert_eq!(shown.command, "npx -y \"@mcp/fs server\" ~/code");
+        assert_eq!(shown.env, "TOKEN=abc\nMODE=ro");
+
+        // Mistakes are explained, not saved.
+        assert!(save_own(&path, None, &draft("", "x", "", "")).is_err());
+        assert!(save_own(&path, None, &draft("a", "", "", "")).is_err());
+        assert!(save_own(&path, None, &draft("a", "x", "https://x", "")).is_err());
+        assert!(save_own(&path, None, &draft("a", "x", "", "nokey")).is_err());
+        assert!(save_own(&path, None, &draft("figma", "x", "", "")).is_err());
+
+        // Renaming keeps fields the form doesn't show.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let text = text.replace(
+            "\"url\": \"https://mcp.figma.com/mcp\"",
+            "\"url\": \"https://mcp.figma.com/mcp\", \"headers\": {\"X\": \"1\"}",
+        );
+        std::fs::write(&path, text).unwrap();
+        save_own(
+            &path,
+            Some("figma"),
+            &draft("design", "", "https://mcp.figma.com/v2", ""),
+        )
+        .unwrap();
+        remove_own(&path, "files").unwrap();
+        let mut out = Vec::new();
+        scan_json(OWN, &path, "mcpServers", &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "design");
+        assert_eq!(out[0].spec.url, "https://mcp.figma.com/v2");
+        assert_eq!(out[0].spec.headers, [("X".to_string(), "1".to_string())]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -923,6 +1061,9 @@ mod tests {
         };
         assert_eq!(sse.project_json("gemini")["url"], "https://x/mcp");
         assert_eq!(sse.project_json("droid")["type"], "sse");
-        assert_eq!(http.project_json("cursor"), serde_json::json!({"url": "https://x/mcp"}));
+        assert_eq!(
+            http.project_json("cursor"),
+            serde_json::json!({"url": "https://x/mcp"})
+        );
     }
 }

@@ -64,3 +64,6 @@ All notable changes to Runo are documented here.
 - Playbook updates show what changes and aren't pre-ticked when you edited your copy; input labels and defaults are editable, and `{{ key }}` works with spaces.
 - Runo keeps its own list of MCP servers for every agent, and Settings can start a new skill.
 - Agent installs can be cancelled, stop after 15 minutes, and offer to sign in when done.
+- Terminal: dim and strikethrough text are drawn (vt100 is now vendored with both attributes).
+- Cursor, Gemini CLI and Droid get Runo's memory server and shared MCP servers through their project config file, merged with yours, kept out of git and removed after each turn. Grok has no project-level MCP config, so it still gets none.
+- Settings → MCP adds and edits Runo's own servers in a form (name, command or URL, environment) instead of a JSON file.

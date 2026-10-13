@@ -1266,7 +1266,11 @@ pub fn run_agent(
         }
     }
     if crate::mcp::project_file(spec.provider).is_some() {
-        crate::mcp::write_project(std::path::Path::new(dir), spec.provider, &file_servers(spec));
+        crate::mcp::write_project(
+            std::path::Path::new(dir),
+            spec.provider,
+            &file_servers(spec),
+        );
     }
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
@@ -2066,7 +2070,10 @@ mod arg_tests {
         assert!(file_servers(&spec("grok")).is_empty());
         let mut remote = spec("cursor");
         remote.local = false;
-        assert!(file_servers(&remote).is_empty(), "no local programs elsewhere");
+        assert!(
+            file_servers(&remote).is_empty(),
+            "no local programs elsewhere"
+        );
     }
 
     #[test]
