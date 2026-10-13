@@ -1,7 +1,7 @@
 //! The Workbench frame around every screen: the mode rail on the left, the top bar
 //! with the project switcher, search and live counters, the tab strip over a session,
-//! and the Home page. Design and Architecture have their places on the rail; their
-//! pages say what each mode will hold until the modes themselves land.
+//! and the Home page. Design and Architecture have their places on the rail; their pages
+//! live in `design` and `architecture`.
 
 use super::*;
 use gpui_kit::component::tooltip::Tooltip;
@@ -1989,130 +1989,169 @@ impl RunoApp {
 
     // ---------- Design and Architecture ----------
 
-    /// The Design and Architecture pages, until those modes land: what each will hold,
-    /// and a way to start on it today with an agent in Sessions.
-    pub(crate) fn mode_page(&self, mode: Mode, cx: &mut Context<Self>) -> AnyElement {
-        let task = if mode == Mode::Design {
-            "Write a design brief for this project in design/brief.md: who it is for, the main user flows, and every screen with its states. Keep it short and concrete."
+    /// Open the New session dialog for project `pid` with `task` filled in and `context`
+    /// to go with it.
+    pub(crate) fn start_with_context(
+        &mut self,
+        pid: u64,
+        task: &str,
+        context: StartContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.new_project = Some(pid);
+        self.new_task
+            .update(cx, |t, cx| t.set_value(task, window, cx));
+        self.new_context = Some(context);
+        self.open_new_session();
+        cx.notify();
+    }
+
+    /// Give a just-created session the context it was started with: sent ahead of its
+    /// first prompt, with the images attached when its agent reads them here.
+    pub(crate) fn apply_context(&mut self, id: u64, context: &StartContext) {
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        session.handoff = if session.handoff.is_empty() {
+            context.text.clone()
         } else {
-            "Map this project's architecture in architecture/overview.md: the main parts, how data flows between them, external services, and the decisions worth recording. Include a Mermaid diagram."
+            format!("{}\n\n{}", session.handoff, context.text)
         };
-        let (title, body, points): (&str, &str, [&str; 4]) = match mode {
-            Mode::Design => (
-                "Design",
-                "Design the app before it is built: a brief, user flows, a design system and clickable screens that agents then build from.",
-                [
-                    "Brief and flow map of every screen",
-                    "Design system from your tokens",
-                    "Canvas with a design agent and Try 3 directions",
-                    "Build this, then check the build against the design",
-                ],
-            ),
-            _ => (
-                "Architecture",
-                "Draw or generate the system's architecture from the code, keep it in the repo, and check every change against it.",
-                [
-                    "Generate containers and flows from the code",
-                    "Views: context, containers, sequence",
-                    "Rules checked after each agent turn",
-                    "Branch diffs, and draw.io import and export",
-                ],
-            ),
-        };
-        let mut list = div().v_flex().gap_2().mt_2();
-        for (i, point) in points.iter().enumerate() {
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(13.))
-                    .text_color(rgb(c_secondary()))
-                    .child(
+        let images =
+            session.connection == connections::LOCAL && agent::takes_images(&session.provider);
+        if images && !context.images.is_empty() {
+            self.launch_images.insert(id, context.images.clone());
+        }
+    }
+
+    /// The context waiting on the New session dialog, with a way to drop it.
+    pub(crate) fn context_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let context = self.new_context.as_ref()?;
+        let images = context.images.len();
+        Some(
+            div()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(c_border()))
+                .bg(tint(c_subtle()))
+                .text_size(px(12.5))
+                .child(icon(IconName::Paperclip, 13., c_secondary()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(format!("{} goes with this task", context.label)),
+                )
+                .when(images > 0, |el| {
+                    el.child(
                         div()
-                            .size(px(20.))
-                            .flex_none()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .border_1()
-                            .border_color(rgb(c_border()))
-                            .text_size(px(11.))
+                            .gap_1()
                             .text_color(rgb(c_muted()))
-                            .child((i + 1).to_string()),
+                            .child(icon(IconName::Image, 12., c_muted()))
+                            .child(images.to_string()),
                     )
-                    .child(point.to_string()),
-            );
-        }
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .v_flex()
-                    .items_center()
-                    .max_w(px(460.))
-                    .child(empty_hint(
-                        if mode == Mode::Design {
-                            "design-page"
-                        } else {
-                            "arch-page"
-                        },
-                        mode.glyph(),
-                        title,
-                        body,
-                    ))
-                    .child(list)
-                    .child(
-                        div()
-                            .mt_5()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                self.button(
-                                    "mode-page-start",
-                                    if mode == Mode::Design {
-                                        "Start a design brief"
-                                    } else {
-                                        "Map the architecture"
-                                    },
-                                    true,
-                                )
-                                .child(icon(IconName::Sparkles, 13., c_canvas()))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if let Some(pid) = this.current_project() {
-                                        this.new_project = Some(pid);
-                                    }
-                                    this.new_task
-                                        .update(cx, |t, cx| t.set_value(task, window, cx));
-                                    this.open_new_session();
-                                    cx.notify();
-                                })),
-                            )
-                            .child(
-                                self.button("mode-page-follow", "Follow progress", false)
-                                    .child(icon(IconName::ExternalLink, 13., c_secondary()))
-                                    .on_click(|_, _, cx| {
-                                        cx.open_url("https://github.com/deltalark/runo/issues")
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt_3()
-                            .max_w(px(380.))
-                            .text_center()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_muted()))
-                            .child("This mode is on its way. Until then, an agent in Sessions can write the brief or the map as files in your repository."),
-                    ),
-            )
-            .into_any_element()
+                })
+                .child(
+                    self.ghost_button_sized("context-drop", IconName::X, "Start without it", 22.)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.new_context = None;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
     }
+}
+
+/// What a session started from Design or Architecture brings along: named on the New
+/// session dialog, sent ahead of the task, with its images attached.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StartContext {
+    pub label: String,
+    pub text: String,
+    pub images: Vec<String>,
+}
+
+/// The Design and Architecture pages' frame: the mode's mark and title over the body.
+pub(crate) fn mode_frame(
+    mode: Mode,
+    title: &str,
+    subtitle: &str,
+    body: impl IntoElement,
+    action: Option<AnyElement>,
+) -> AnyElement {
+    let color = if mode == Mode::Design {
+        c_green()
+    } else {
+        c_blue()
+    };
+    div()
+        .flex_1()
+        .min_w_0()
+        .overflow_y_scrollbar()
+        .child(
+            div()
+                .max_w(px(1480.))
+                .mx_auto()
+                .p_8()
+                .v_flex()
+                .gap_6()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_4()
+                        .child(
+                            div()
+                                .size(px(44.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(12.))
+                                .border_1()
+                                .border_color(rgb(settings::mix(color, c_canvas(), 0.3)))
+                                .bg(rgb(settings::mix(
+                                    color,
+                                    c_canvas(),
+                                    if is_dark() { 0.2 } else { 0.1 },
+                                )))
+                                .child(icon(mode.glyph(), 21., color)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .v_flex()
+                                .gap(px(2.))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(22.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(title.to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .text_color(rgb(c_secondary()))
+                                        .child(subtitle.to_string()),
+                                ),
+                        )
+                        .children(action),
+                )
+                .child(body),
+        )
+        .into_any_element()
 }
 
 /// A project's square badge: its icon on its colour, or its initial.

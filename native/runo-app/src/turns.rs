@@ -1854,7 +1854,7 @@ pub fn complete_mention(text: &str, path: &str) -> String {
     }
 }
 
-fn is_image(path: &std::path::Path) -> bool {
+pub(crate) fn is_image(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| {
@@ -1880,7 +1880,7 @@ fn attachments_dir(dir: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Add `/.runo/` to the repository's `info/exclude`, once.
-fn exclude_runo_folder(dir: &str) {
+pub(crate) fn exclude_runo_folder(dir: &str) {
     let Ok(out) = std::process::Command::new("git")
         .args(["-C", dir, "rev-parse", "--git-path", "info/exclude"])
         .stdin(std::process::Stdio::null())

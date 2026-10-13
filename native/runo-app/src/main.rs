@@ -1,6 +1,7 @@
 mod agent;
 mod alerts;
 mod approvals;
+mod architecture;
 mod browser;
 mod browser_engine;
 mod caps;
@@ -9,6 +10,7 @@ mod connections;
 mod connections_ui;
 mod cove;
 mod ctxmenu;
+mod design;
 mod files;
 mod fileview;
 mod git;
@@ -379,6 +381,13 @@ struct RunoApp {
     turn_files: HashMap<u64, usize>,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
+    /// Images that go with a new session's first prompt.
+    launch_images: HashMap<u64, Vec<String>>,
+    /// Context from Design or Architecture for the session the New session dialog starts.
+    new_context: Option<shell::StartContext>,
+    /// The Design and Architecture pages.
+    design: design::DesignPage,
+    arch: architecture::ArchPage,
     /// Each session's unsent prompt while another session is on screen, and the session
     /// whose text the composer holds now.
     drafts: HashMap<u64, String>,
@@ -1119,6 +1128,8 @@ impl RunoApp {
                 cx.notify();
             }
         });
+        let (design, design_subs) = design::DesignPage::new(window, cx);
+        let (arch, arch_subs) = architecture::ArchPage::new(window, cx);
         let notes_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Write anything worth remembering about this project…")
@@ -1344,6 +1355,10 @@ impl RunoApp {
             signed_out: Default::default(),
             turn_files: HashMap::new(),
             attachments: HashMap::new(),
+            launch_images: HashMap::new(),
+            new_context: None,
+            design,
+            arch,
             drafts: HashMap::new(),
             draft_for: None,
             question_picks: HashMap::new(),
@@ -1524,6 +1539,8 @@ impl RunoApp {
             }
         });
         app._subscriptions.push(activation_sub);
+        app._subscriptions.extend(design_subs);
+        app._subscriptions.extend(arch_subs);
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
         cx.spawn(async move |this, cx| loop {
@@ -2047,7 +2064,8 @@ impl RunoApp {
     }
 
     fn start_agent(&mut self, id: u64, prompt: String, opts: &AgentOptions) {
-        self.start_turn(id, prompt, Vec::new(), opts);
+        let images = self.launch_images.remove(&id).unwrap_or_default();
+        self.start_turn(id, prompt, images, opts);
     }
 
     /// Demo projects are not real folders, so ask for a real repository instead.
@@ -2719,6 +2737,11 @@ impl RunoApp {
             }
             self.save();
         }
+        if let Some(context) = self.new_context.take() {
+            for &id in &created {
+                self.apply_context(id, &context);
+            }
+        }
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
         self.branch.update(cx, |b, cx| b.set_value("", window, cx));
@@ -2884,9 +2907,16 @@ impl RunoApp {
                 .session(id)
                 .is_some_and(|s| cliview::cli_blocker(s).is_none())
         {
+            // Context a session was started with goes ahead of the task here too.
+            let mut task = task;
             if let Some(s) = self.state.session_mut(id) {
                 s.cli = true;
                 s.status = Status::Done;
+                let brief = std::mem::take(&mut s.handoff);
+                if !brief.is_empty() {
+                    task = format!("{brief}\n\n## Your next instruction\n{task}");
+                }
+                self.launch_images.remove(&id);
             }
             self.view_changed = Some((id, std::time::Instant::now()));
             self.open_cli(id, &task, cx);
@@ -5555,6 +5585,7 @@ impl RunoApp {
         if self.view == View::NewSession {
             self.view = self.new_back;
         }
+        self.new_context = None;
     }
 
     /// New session as a dialog over the current view, on a dimmed backdrop.
@@ -6106,6 +6137,7 @@ impl RunoApp {
                     )
                     .child(label("TASK"))
                     .child(Textarea::new(&self.new_task).bordered(true).h(px(110.)))
+                    .children(self.context_chip(cx))
                     .child(
                         div()
                             .flex()
@@ -7528,8 +7560,17 @@ impl Render for RunoApp {
         if self.right_tab == RightTab::Browser && !st.browser_enabled {
             self.right_tab = RightTab::Changes;
         }
-        if self.right_tab == RightTab::Browser {
+        if self.right_tab == RightTab::Browser || self.design_page_key().is_some() {
             self.sync_browser_address(window, cx);
+        }
+        // Design and Architecture follow the project in the top bar.
+        match self.view {
+            View::Design => self.prepare_design(window, cx),
+            View::Architecture => self.prepare_architecture(window, cx),
+            _ => {
+                self.design.shown = false;
+                self.arch.shown = false;
+            }
         }
         // A new shell takes focus once its element has been drawn.
         if let Some(id) = self.selected.filter(|_| self.view == View::Session) {
@@ -7611,8 +7652,8 @@ impl Render for RunoApp {
         let still = self.settings_switching();
         let center = match shown {
             View::Home => self.home_view(cx),
-            View::Design => self.mode_page(Mode::Design, cx),
-            View::Architecture => self.mode_page(Mode::Architecture, cx),
+            View::Design => self.design_view(window, cx),
+            View::Architecture => self.architecture_view(cx),
             View::Session | View::NewSession => self.session_view(window, cx),
             View::Inbox => self.inbox_view(cx),
             View::AllSessions => self.list_view(View::AllSessions, cx),

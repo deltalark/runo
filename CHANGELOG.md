@@ -25,6 +25,8 @@ All notable changes to Runo are documented here.
 - Top bar: the project switcher handles empty projects, the Agents pill lists running agents to open or stop, spend shows today, the branch and breadcrumb are clickable, and Runs on shows the session's real connection and moves it.
 - Home follows the top-bar project with an All projects toggle and Add project. Reviews follows it too and badges only review requests and failed checks. A project whose folder is gone offers Relink or Remove.
 - App menu with Quit, and the window reopens from the Dock on macOS. Closing the last tab stays in Sessions, the tour starts in Sessions, existing users get a one-time What's new card, shortcut hints follow your keybindings, and blank session names are refused.
+- Design mode: collect design references per project (pasted or picked images, captures of the preview) with notes, keep design notes in `docs/design.md`, see the app's dev server beside them, and start a session with the picked references attached.
+- Architecture mode: a map of the project's packages, dependencies and module imports read from its manifests and code, architecture notes and decisions kept in `docs/architecture.md` with a generated Mermaid diagram, and agent sessions that start with both attached.
 
 ### Fixed
 
