@@ -31,6 +31,8 @@ pub(crate) enum Confirm {
     Merge(u64),
     /// Delete the session's worktree and branch, then archive it.
     CleanUp(u64),
+    /// Merge the session's pull request on GitHub.
+    MergePr(u64),
 }
 
 /// The Create pull request form.
@@ -786,6 +788,65 @@ impl RunoApp {
         );
     }
 
+    /// Merge the session's pull request on GitHub, trying the merge methods the
+    /// repository may allow in turn.
+    pub(crate) fn merge_pr(&mut self, id: u64) {
+        let (Some(pr), Some(dir)) = (
+            self.pr_status.get(&id).cloned(),
+            self.state.session(id).map(|s| s.dir.clone()),
+        ) else {
+            return;
+        };
+        if !self.begin(id, &format!("Merging pull request #{}.", pr.number)) {
+            return;
+        }
+        let number = pr.number.to_string();
+        self.bg(
+            move || {
+                let mut last = String::new();
+                for method in ["--merge", "--squash", "--rebase"] {
+                    let out = std::process::Command::new("gh")
+                        .args(["pr", "merge", &number, method])
+                        .current_dir(&dir)
+                        .env("GIT_TERMINAL_PROMPT", "0")
+                        .stdin(std::process::Stdio::null())
+                        .output();
+                    match out {
+                        Ok(o) if o.status.success() => return Ok(()),
+                        Ok(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                        Err(e) => return Err(format!("could not run gh: {e}")),
+                    }
+                    // Only a refused method is worth another try.
+                    if !last.to_lowercase().contains("not allowed") {
+                        break;
+                    }
+                }
+                Err(last)
+            },
+            move |this, result, _| {
+                this.git_busy.remove(&id);
+                match result {
+                    Ok(()) => {
+                        this.state
+                            .log(id, format!("Merged pull request #{}", pr.number));
+                        this.info = Some((
+                            format!("Merged pull request #{}.", pr.number),
+                            std::time::Instant::now(),
+                        ));
+                        if this.state.session(id).is_some_and(|s| s.isolated) {
+                            this.confirm_git = Some(Confirm::CleanUp(id));
+                        }
+                        this.save();
+                    }
+                    Err(error) => {
+                        this.notice = Some(format!("Could not merge the pull request: {error}"))
+                    }
+                }
+                this.load_pr_status(id);
+            },
+        );
+    }
+
     /// Ask the agent to fix the failing checks of the session's pull request.
     pub(crate) fn fix_ci(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(pr) = self.pr_status.get(&id).cloned() else {
@@ -1165,6 +1226,7 @@ impl RunoApp {
             Confirm::Keep(id) => self.keep_racer(id),
             Confirm::Merge(id) => self.merge_into_base(id),
             Confirm::CleanUp(id) => self.clean_up(id),
+            Confirm::MergePr(id) => self.merge_pr(id),
         }
     }
 
@@ -1209,6 +1271,21 @@ impl RunoApp {
                 ),
                 "Clean up",
             ),
+            Confirm::MergePr(m) if m == id => {
+                let pr = self.pr_status.get(&id)?;
+                (
+                    format!("Merge pull request #{}?", pr.number),
+                    format!(
+                        "Merges it on GitHub with a method the repository allows{}. Then you can clean up the worktree and branch.",
+                        if pr.failed.is_empty() {
+                            ""
+                        } else {
+                            ", although checks are failing"
+                        }
+                    ),
+                    "Merge PR",
+                )
+            }
             _ => return None,
         };
         Some(rise(
@@ -1289,6 +1366,8 @@ impl RunoApp {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.kept = None;
                             this.confirm_git = Some(Confirm::Merge(id));
+                            this.right_tab = RightTab::Changes;
+                            this.show_panel = true;
                             cx.notify();
                         })),
                 )
@@ -1488,6 +1567,15 @@ impl RunoApp {
                                 this.address_review(id);
                                 cx.notify();
                             })),
+                        )
+                    })
+                    .when(open && !pr.draft, |el| {
+                        el.child(
+                            self.ship_button("merge-pr", "Merge PR", IconName::GitMerge, true)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.confirm_git = Some(Confirm::MergePr(id));
+                                    cx.notify();
+                                })),
                         )
                     })
                     .when(pr.state == "MERGED", |el| {
@@ -1874,7 +1962,10 @@ impl RunoApp {
                 self.pr_form.as_ref().filter(|f| f.session == id),
                 |el, form| el.child(self.pr_form_view(form, cx)),
             )
-            .children(self.confirm_card(id, cx))
+            .children(
+                self.confirm_card(id, cx)
+                    .filter(|_| !matches!(self.confirm_git, Some(Confirm::Keep(_)))),
+            )
             .into_any_element()
     }
 }

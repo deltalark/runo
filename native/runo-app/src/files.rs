@@ -194,10 +194,7 @@ impl RunoApp {
             list = list.child(Self::note_row(match (hits.len(), more) {
                 (0, _) => format!("No file contains “{query}”."),
                 (n, true) => format!("First {n} matches of “{query}”"),
-                (n, false) => format!(
-                    "{n} match{} of “{query}”",
-                    if n == 1 { "" } else { "es" }
-                ),
+                (n, false) => format!("{n} match{} of “{query}”", if n == 1 { "" } else { "es" }),
             }));
             for (i, hit) in hits.iter().enumerate() {
                 let p = hit.path.clone();
