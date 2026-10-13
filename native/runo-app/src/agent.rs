@@ -407,10 +407,6 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             if !tier.is_empty() {
                 args.extend([s("-c"), format!("service_tier=\"{tier}\"")]);
             }
-            let approval = get("approval");
-            if !approval.is_empty() {
-                args.extend([s("-c"), format!("approval_policy=\"{approval}\"")]);
-            }
             if !opts.profile.is_empty() {
                 args.extend([s("-p"), opts.profile.clone()]);
             }
@@ -831,6 +827,11 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
                 out.extend(["resume".to_string(), spec.session_id.to_string()]);
             }
             out.extend(flags);
+            // The interactive CLI is the only place an approval policy has an effect.
+            let approval = spec.sel.get("approval").cloned().unwrap_or_default();
+            if !approval.is_empty() {
+                out.extend([s("-c"), format!("approval_policy=\"{approval}\"")]);
+            }
             if !spec.prompt.is_empty() {
                 out.push(spec.prompt.to_string());
             }
@@ -873,6 +874,7 @@ mod interactive_tests {
         let sel = std::collections::HashMap::from([
             ("model".to_string(), "haiku".to_string()),
             ("mode".to_string(), "edit".to_string()),
+            ("approval".to_string(), "untrusted".to_string()),
         ]);
         let opts = AgentOptions::default();
         let spec = |provider, resume, prompt| RunSpec {
@@ -906,6 +908,12 @@ mod interactive_tests {
             .any(|a| a == "exec" || a == "--skip-git-repo-check"));
         assert!(codex.windows(2).any(|w| w == ["-m", "haiku"]));
         assert_eq!(codex.iter().filter(|a| *a == "resume").count(), 1);
+        assert!(codex
+            .windows(2)
+            .any(|w| w == ["-c", "approval_policy=\"untrusted\""]));
+        // Chat turns can't stop to ask, so the policy stays out of them.
+        let chat = provider_args(&spec("codex", true, "Go on"));
+        assert!(!chat.iter().any(|a| a.contains("approval_policy")));
     }
 }
 
@@ -1852,8 +1860,6 @@ mod arg_tests {
                 "model_reasoning_effort=\"high\"",
                 "-c",
                 "service_tier=\"priority\"",
-                "-c",
-                "approval_policy=\"never\"",
                 "-p",
                 "work",
                 "--skip-git-repo-check",

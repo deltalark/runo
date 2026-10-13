@@ -648,13 +648,8 @@ fn controls_for(provider: &str, caps: &Caps, sel: &HashMap<String, String>) -> V
             choices: with_default("Default", caps.modes.clone()),
         });
     }
-    if !caps.approvals.is_empty() {
-        out.push(Control {
-            id: "approval",
-            label: "Approval".into(),
-            choices: with_default("Default", caps.approvals.clone()),
-        });
-    }
+    // No Approval chip: `codex exec` never stops to ask, so its policy changes nothing
+    // in Chat.
     if !caps.agents.is_empty() {
         out.push(Control {
             id: "agent",
@@ -822,7 +817,7 @@ mod fixture_tests {
         };
         let ids = |c: &[Control]| c.iter().map(|c| c.id).collect::<Vec<_>>();
         let none = controls_for("codex", &caps, &HashMap::new());
-        assert_eq!(ids(&none), ["model", "effort", "mode", "approval"]);
+        assert_eq!(ids(&none), ["model", "effort", "mode"]);
         assert_eq!(none[1].label, "Reasoning");
         assert_eq!(
             values(&none[1].choices),
@@ -833,7 +828,7 @@ mod fixture_tests {
 
         let sel = HashMap::from([("model".to_string(), "b".to_string())]);
         let b = controls_for("codex", &caps, &sel);
-        assert_eq!(ids(&b), ["model", "effort", "tier", "mode", "approval"]);
+        assert_eq!(ids(&b), ["model", "effort", "tier", "mode"]);
         assert_eq!(values(&b[1].choices), ["", "high", "max"]);
         assert_eq!(b[2].choices[0].label, "Standard");
 
