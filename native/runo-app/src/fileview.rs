@@ -19,6 +19,7 @@ pub(crate) enum FileKind {
     Binary,
 }
 
+#[derive(Clone)]
 pub(crate) struct OpenFile {
     pub path: String,
     pub abs: PathBuf,
@@ -27,6 +28,36 @@ pub(crate) struct OpenFile {
     pub saved: String,
     pub size: u64,
     pub read_only: bool,
+    /// The file is not valid UTF-8, so it opens read-only rather than being mangled.
+    pub not_utf8: bool,
+    /// When the file was last read or saved, to notice changes made on disk.
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// What to do once unsaved changes are saved or thrown away.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Leave {
+    /// Open another file.
+    Open(String),
+    /// Close the file; `true` when it was open in the main area.
+    Close(bool),
+}
+
+/// The file's modification time, if it can be read.
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Whether the file on disk now differs from the text last read or saved.
+pub(crate) fn changed_on_disk(file: &OpenFile) -> bool {
+    if modified(&file.abs) == file.modified {
+        return false;
+    }
+    match std::fs::read(&file.abs) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes) != file.saved,
+        // Deleted since: only a change if it existed before.
+        Err(_) => file.modified.is_some(),
+    }
 }
 
 pub(crate) fn file_kind(path: &str, head: &[u8]) -> FileKind {
@@ -161,11 +192,20 @@ impl RunoApp {
             std::fs::read(&abs).unwrap_or_default()
         };
         let kind = file_kind(path, &bytes[..bytes.len().min(8000)]);
+        let mut not_utf8 = false;
         let text = match kind {
             FileKind::Image | FileKind::Pdf | FileKind::Binary => String::new(),
-            _ => String::from_utf8_lossy(&bytes).into_owned(),
+            _ => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(e) => {
+                    // Saving the replacement characters back would corrupt the file.
+                    not_utf8 = true;
+                    String::from_utf8_lossy(e.as_bytes()).into_owned()
+                }
+            },
         };
-        let read_only = size > MAX_EDIT_BYTES || (self.demo && !Path::new(path).is_absolute());
+        let read_only =
+            not_utf8 || size > MAX_EDIT_BYTES || (self.demo && !Path::new(path).is_absolute());
         let language = match kind {
             FileKind::Code => language_for(path),
             FileKind::Markdown => "markdown",
@@ -187,22 +227,134 @@ impl RunoApp {
                 | FileKind::Mermaid
         );
         self.file_dirty = false;
+        self.file_leave = None;
+        self.file_conflict = false;
         self.open_file = Some(OpenFile {
             path: path.to_string(),
+            modified: modified(&abs),
             abs,
             kind,
             saved: text,
             size,
             read_only,
+            not_utf8,
         });
         cx.notify();
     }
 
+    /// Open `path`, or ask first when the open file has unsaved changes.
+    pub(crate) fn open_or_ask(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let same = self.open_file.as_ref().is_some_and(|f| f.path == path);
+        if self.file_dirty && !same {
+            self.file_leave = Some(Leave::Open(path.to_string()));
+            cx.notify();
+            return;
+        }
+        if !same || !self.file_dirty {
+            self.open_file(path, window, cx);
+        }
+    }
+
+    /// Close the open file, or ask first when it has unsaved changes.
+    pub(crate) fn close_file(&mut self, wide: bool, force: bool) {
+        if self.file_dirty && !force {
+            self.file_leave = Some(Leave::Close(wide));
+            return;
+        }
+        self.open_file = None;
+        self.file_dirty = false;
+        self.file_leave = None;
+        self.file_conflict = false;
+        if wide {
+            self.view = self.editor_back;
+        }
+    }
+
+    /// Finish what was waiting on unsaved changes: save them first, or throw them away.
+    fn leave_file(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(leave) = self.file_leave.take() else {
+            return;
+        };
+        if save {
+            self.save_file(cx);
+            if self.file_dirty {
+                // Saving failed or found a conflict; stay on the file.
+                return;
+            }
+        }
+        self.file_dirty = false;
+        match leave {
+            Leave::Open(path) => self.open_file(&path, window, cx),
+            Leave::Close(wide) => self.close_file(wide, true),
+        }
+    }
+
+    /// Notice the open file changing on disk: reload it when there are no edits, or
+    /// flag the conflict when there are. Called from the background tick.
+    pub(crate) fn watch_open_file(&mut self) {
+        let Some(file) = self.open_file.as_ref() else {
+            return;
+        };
+        if self.file_conflict || !changed_on_disk(file) {
+            return;
+        }
+        if self.file_dirty {
+            self.file_conflict = true;
+        } else {
+            self.pending_file = Some(file.path.clone());
+        }
+    }
+
+    /// Keep unsaved edits when switching sessions, to come back to later.
+    pub(crate) fn stash_open_file(&mut self, session: u64) {
+        if let Some(file) = self.open_file.take() {
+            if self.file_dirty {
+                self.unsaved.insert(session, (file, self.file_text.clone()));
+            }
+        }
+        self.file_dirty = false;
+        self.file_leave = None;
+        self.file_conflict = false;
+    }
+
+    /// Bring back a session's unsaved edits; called from render.
+    pub(crate) fn restore_open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected.filter(|_| self.open_file.is_none()) else {
+            return;
+        };
+        let Some((file, text)) = self.unsaved.remove(&id) else {
+            return;
+        };
+        self.open_file(&file.path, window, cx);
+        self.file_editor
+            .update(cx, |e, cx| e.set_value(text.clone(), window, cx));
+        self.file_text = text;
+        self.file_dirty = self
+            .open_file
+            .as_ref()
+            .is_some_and(|f| f.saved != self.file_text);
+        self.info = Some((
+            format!("Your unsaved changes to {} are back.", file.path),
+            std::time::Instant::now(),
+        ));
+    }
+
     pub(crate) fn save_file(&mut self, cx: &mut Context<Self>) {
+        self.save_file_as(false, cx);
+    }
+
+    /// Save the editor's text. Unless `overwrite`, a file changed on disk since it was
+    /// opened is not overwritten; the conflict is shown instead.
+    pub(crate) fn save_file_as(&mut self, overwrite: bool, cx: &mut Context<Self>) {
         let Some(file) = self.open_file.as_mut() else {
             return;
         };
         if file.read_only || !self.file_dirty {
+            return;
+        }
+        if !overwrite && changed_on_disk(file) {
+            self.file_conflict = true;
+            cx.notify();
             return;
         }
         let text = self.file_editor.read(cx).value().to_string();
@@ -213,7 +365,9 @@ impl RunoApp {
             Ok(()) => {
                 file.saved = text;
                 file.size = file.saved.len() as u64;
+                file.modified = modified(&file.abs);
                 self.file_dirty = false;
+                self.file_conflict = false;
                 let path = file.path.clone();
                 if let Some(id) = self.selected {
                     self.state.log(id, format!("Edited {path}"));
@@ -222,7 +376,7 @@ impl RunoApp {
                 self.refresh();
             }
             Err(e) => {
-                self.info = Some((format!("Could not save: {e}"), std::time::Instant::now()));
+                self.notice = Some(format!("Could not save {}: {e}", file.path));
             }
         }
         cx.notify();
@@ -239,7 +393,94 @@ impl RunoApp {
         if let Some(file) = &self.open_file {
             let value = self.file_editor.read(cx).value();
             self.file_dirty = value.as_ref() != file.saved;
+            // Kept so a session switch can hold on to the edits.
+            if self.file_dirty {
+                self.file_text = value.to_string();
+            }
         }
+    }
+
+    /// The bar over the editor that asks about unsaved changes or a change on disk.
+    fn file_prompt(&self, file: &OpenFile, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let name = file
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&file.path)
+            .to_string();
+        let (text, buttons): (String, Vec<(&'static str, &'static str, bool)>) = if self
+            .file_conflict
+        {
+            (
+                format!("{name} changed on disk while you were editing it."),
+                vec![
+                    ("file-overwrite", "Keep mine", true),
+                    ("file-reload", "Use the disk version", false),
+                ],
+            )
+        } else if self.file_leave.is_some() {
+            (
+                format!("Save your changes to {name}?"),
+                vec![
+                    ("file-leave-save", "Save", true),
+                    ("file-leave-discard", "Discard", false),
+                    ("file-leave-cancel", "Cancel", false),
+                ],
+            )
+        } else if file.not_utf8 {
+            return Some(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .bg(tint(c_subtle()))
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .child(icon(IconName::Info, 13., c_secondary()))
+                        .child("This file isn't UTF-8 text, so it opens read only to keep its bytes intact.")
+                        .into_any_element(),
+                );
+        } else {
+            return None;
+        };
+        let mut row = div()
+            .px_3()
+            .py_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .bg(tint(c_selected()))
+            .text_size(px(12.5))
+            .child(icon(IconName::TriangleAlert, 13., c_amber()))
+            .child(div().flex_1().min_w_0().child(text));
+        for (id, label, primary) in buttons {
+            row = row.child(
+                self.button(id, label, primary)
+                    .h(px(24.))
+                    .px_2()
+                    .text_xs()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        match id {
+                            "file-overwrite" => this.save_file_as(true, cx),
+                            "file-reload" => {
+                                this.file_conflict = false;
+                                this.file_dirty = false;
+                                if let Some(path) = this.open_file.as_ref().map(|f| f.path.clone())
+                                {
+                                    this.open_file(&path, window, cx);
+                                }
+                            }
+                            "file-leave-save" => this.leave_file(true, window, cx),
+                            "file-leave-discard" => this.leave_file(false, window, cx),
+                            _ => this.file_leave = None,
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        Some(row.into_any_element())
     }
 
     pub(crate) fn file_icon(kind: FileKind) -> IconName {
@@ -348,7 +589,11 @@ impl RunoApp {
                     div()
                         .text_xs()
                         .text_color(rgb(c_muted()))
-                        .child("Read only"),
+                        .child(if file.not_utf8 {
+                            "Not UTF-8 · read only"
+                        } else {
+                            "Read only"
+                        }),
                 )
             })
             .when(can_preview, |el| {
@@ -399,11 +644,7 @@ impl RunoApp {
             .child(
                 self.ghost_button_sized("file-close", IconName::X, "Close file", 24.)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_file = None;
-                        this.file_dirty = false;
-                        if wide {
-                            this.view = this.editor_back;
-                        }
+                        this.close_file(wide, false);
                         cx.notify();
                     })),
             );
@@ -582,6 +823,7 @@ impl RunoApp {
             .min_w_0()
             .v_flex()
             .child(header)
+            .children(self.file_prompt(file, cx))
             .child(fade(
                 div().flex_1().min_h_0().v_flex().child(body),
                 SharedString::from(format!("file-{}-{}", file.path, self.file_preview)),
@@ -596,6 +838,35 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn notices_changes_made_on_disk() {
+        let dir = std::env::temp_dir().join(format!("runo-fileview-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let abs = dir.join("a.txt");
+        std::fs::write(&abs, "one").unwrap();
+        let file = OpenFile {
+            path: "a.txt".into(),
+            modified: modified(&abs),
+            abs: abs.clone(),
+            kind: FileKind::Code,
+            saved: "one".into(),
+            size: 3,
+            read_only: false,
+            not_utf8: false,
+        };
+        assert!(!changed_on_disk(&file));
+        // Same text written again is not a change.
+        std::fs::write(&abs, "one").unwrap();
+        assert!(!changed_on_disk(&file));
+        std::fs::write(&abs, "two").unwrap();
+        let mut stale = file.clone();
+        stale.modified = None;
+        assert!(changed_on_disk(&stale));
+        std::fs::remove_file(&abs).unwrap();
+        assert!(changed_on_disk(&file));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn kinds_languages_and_csv() {

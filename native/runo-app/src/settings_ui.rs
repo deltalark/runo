@@ -417,7 +417,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("New worktrees", "Prepare each isolated worktree before the agent starts. Ignored files listed in the repository's .worktreeinclude (gitignore patterns, such as .env) are copied in automatically.", vec![
                 row(
                     "Setup command",
-                    "Runs in the new worktree's Terminal, for example npm install. Leave empty to skip.",
+                    "Runs in the new worktree's Terminal, for example npm install, for projects without their own (set one in a project's Edit dialog). Leave empty to skip.",
                     Ctl::Text {
                         key: "worktree_setup".into(),
                         value: st.worktree_setup.clone(),

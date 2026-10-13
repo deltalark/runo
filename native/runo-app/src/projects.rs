@@ -72,6 +72,8 @@ pub(crate) struct ProjectForm {
     pub auto_name: bool,
     /// A name to put in the field on the next render (picking a folder happens off the window).
     pub sync_name: Option<String>,
+    /// The setup command to put in its field on the next render.
+    pub sync_setup: Option<String>,
     pub error: Option<String>,
 }
 
@@ -481,6 +483,7 @@ impl RunoApp {
             start_session: true,
             auto_name: true,
             sync_name: Some(String::new()),
+            sync_setup: Some(String::new()),
             error: None,
         });
         cx.notify();
@@ -500,6 +503,7 @@ impl RunoApp {
             start_session: false,
             auto_name: false,
             sync_name: Some(p.name.clone()),
+            sync_setup: Some(p.setup.clone()),
             error: None,
         });
     }
@@ -541,6 +545,10 @@ impl RunoApp {
 
     /// Put a pending name into the name field; called from render, which has the window.
     pub(crate) fn sync_project_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(setup) = self.project_form.as_mut().and_then(|f| f.sync_setup.take()) {
+            self.project_setup
+                .update(cx, |input, cx| input.set_value(setup, window, cx));
+        }
         let Some(name) = self.project_form.as_mut().and_then(|f| f.sync_name.take()) else {
             return;
         };
@@ -555,6 +563,7 @@ impl RunoApp {
             return;
         };
         let name = self.project_name.read(cx).value().trim().to_string();
+        let setup = self.project_setup.read(cx).value().trim().to_string();
         let color = COLORS[form.color].0.to_string();
         let glyph = ICONS[form.icon].0.to_string();
         if let Some(pid) = form.editing {
@@ -564,6 +573,7 @@ impl RunoApp {
                 }
                 p.color = color;
                 p.icon = glyph;
+                p.setup = setup;
             }
             self.project_form = None;
             self.save();
@@ -598,7 +608,13 @@ impl RunoApp {
             }
         }
         match self.add_project(&path, name, color, glyph, start) {
-            Ok(()) => self.project_form = None,
+            Ok(()) => {
+                self.project_form = None;
+                if let Some(p) = self.state.projects.last_mut() {
+                    p.setup = setup;
+                }
+                self.save();
+            }
             Err(why) => {
                 if let Some(form) = self.project_form.as_mut() {
                     form.error = Some(why);
@@ -861,6 +877,19 @@ impl RunoApp {
                     .gap_1p5()
                     .child(label("Name"))
                     .child(Input::new(&self.project_name).bordered(true).h(px(34.))),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .gap_1p5()
+                    .child(label("Worktree setup command"))
+                    .child(Input::new(&self.project_setup).bordered(true).h(px(34.)))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("Runs in each new worktree before its agent starts, such as npm install. Empty uses the one in Settings."),
+                    ),
             )
             .child(div().v_flex().gap_1p5().child(label("Color")).child(swatches))
             .child(div().v_flex().gap_1p5().child(label("Icon")).child(glyphs))

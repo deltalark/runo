@@ -167,6 +167,8 @@ struct RunoApp {
     install_confirm: Option<&'static str>,
     project_form: Option<projects::ProjectForm>,
     project_name: Entity<InputState>,
+    /// The project form's worktree setup command.
+    project_setup: Entity<InputState>,
     /// A freshly installed CLI found off PATH, to save as the agent's binary.
     pending_binary: Option<(&'static str, String)>,
     cli_focus: FocusHandle,
@@ -201,6 +203,14 @@ struct RunoApp {
     file_editor: Entity<gpui_kit::component::input::EditorState>,
     file_preview: bool,
     file_dirty: bool,
+    /// The editor's text while it has unsaved changes.
+    file_text: String,
+    /// Waiting on a Save / Discard answer before opening another file or closing.
+    file_leave: Option<fileview::Leave>,
+    /// The open file changed on disk while it had unsaved changes.
+    file_conflict: bool,
+    /// Unsaved edits of sessions switched away from, with their files.
+    unsaved: HashMap<u64, (fileview::OpenFile, String)>,
     /// Where the main-area editor returns to.
     editor_back: View,
     /// The view shown behind the New session dialog.
@@ -810,6 +820,13 @@ impl RunoApp {
                             this.load_pr_status(id);
                         }
                     }
+                    if tick && !this.demo {
+                        let before = (this.file_conflict, this.pending_file.is_some());
+                        this.watch_open_file();
+                        if before != (this.file_conflict, this.pending_file.is_some()) {
+                            cx.notify();
+                        }
+                    }
                     if ((rescan && watching) || (idle_scan && on_session)) && !this.demo {
                         this.refresh();
                         cx.notify();
@@ -1026,6 +1043,8 @@ impl RunoApp {
             install_confirm: None,
             project_form: None,
             project_name,
+            project_setup: cx
+                .new(|cx| InputState::new(window, cx).placeholder("npm install (optional)")),
             pending_binary: None,
             cli_focus: cx.focus_handle(),
             focus_cli: 0,
@@ -1055,6 +1074,10 @@ impl RunoApp {
             file_editor,
             file_preview: false,
             file_dirty: false,
+            file_text: String::new(),
+            file_leave: None,
+            file_conflict: false,
+            unsaved: HashMap::new(),
             editor_back: View::Session,
             new_back: View::Session,
             terminal,
@@ -1460,6 +1483,9 @@ impl RunoApp {
     }
 
     fn select(&mut self, id: u64) {
+        if let Some(old) = self.selected.filter(|old| *old != id) {
+            self.stash_open_file(old);
+        }
         self.selected = Some(id);
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
@@ -1474,8 +1500,9 @@ impl RunoApp {
         self.view = View::Session;
         self.selected_file = None;
         self.diff.clear();
-        self.open_file = None;
-        self.file_dirty = false;
+        if self.open_file.is_some() && !self.file_dirty {
+            self.open_file = None;
+        }
         self.confirm_delete = None;
         self.confirm_discard = None;
         self.notice = None;
@@ -6824,8 +6851,9 @@ impl Render for RunoApp {
             window.focus(&self.focus, cx);
         }
         if let Some(path) = self.pending_file.take() {
-            self.open_file(&path, window, cx);
+            self.open_or_ask(&path, window, cx);
         }
+        self.restore_open_file(window, cx);
         if self.right_tab == RightTab::Browser && !st.browser_enabled {
             self.right_tab = RightTab::Changes;
         }
