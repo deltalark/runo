@@ -8,7 +8,8 @@ Archive SHA-256 (verified against Runo's original Cargo.lock):
 This copy preserves the published source, manifest, and MIT license. Package-only
 metadata (`Cargo.lock`, `Cargo.toml.orig`, `.cargo_vcs_info.json`) is omitted, and
 the manifest's dev-dependencies are dropped because the published crate ships no
-tests.
+tests. `rustfmt.toml` matches upstream's line width so `cargo fmt --all` leaves
+the source as published.
 
 The local patch adds the dim (SGR 2) and strikethrough (SGR 9, reset by 29)
 attributes: `Cell::dim`, `Cell::strikethrough` and the matching `Screen`

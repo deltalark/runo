@@ -130,12 +130,12 @@ impl Attrs {
         };
         // SGR 22 clears bold and dim together, so both are rewritten when
         // either changes.
-        let attrs = if self.bold() == other.bold() && self.dim() == other.dim()
-        {
-            attrs
-        } else {
-            attrs.intensity(self.bold(), self.dim())
-        };
+        let attrs =
+            if self.bold() == other.bold() && self.dim() == other.dim() {
+                attrs
+            } else {
+                attrs.intensity(self.bold(), self.dim())
+            };
         let attrs = if self.italic() == other.italic() {
             attrs
         } else {
