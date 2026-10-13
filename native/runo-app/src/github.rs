@@ -581,6 +581,8 @@ impl RunoApp {
             self.gh.issues.clear();
             self.gh.runs.clear();
             self.gh.errors.clear();
+            // Answers still on their way for the other project are dropped uncounted.
+            self.gh.loading = 0;
             self.gh.filter.prs_limit = PAGE;
             self.gh.filter.issues_limit = PAGE;
         }
