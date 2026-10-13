@@ -180,7 +180,90 @@ pub(crate) fn agent_path(provider: &'static agent::Provider) -> Option<PathBuf> 
     locate(&bin).or_else(|| (provider.id == "cursor").then(|| locate("agent")).flatten())
 }
 
+/// The command that signs an agent in, as typed in a terminal: its login command where
+/// it has one, else the CLI itself, which asks on first run.
+pub(crate) fn sign_in_command(provider: &str, bin: &str) -> String {
+    let bin = if bin
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+:\\".contains(c))
+    {
+        bin.to_string()
+    } else if cfg!(windows) {
+        format!("\"{bin}\"")
+    } else {
+        format!("'{}'", bin.replace('\'', "'\\''"))
+    };
+    match provider {
+        "codex" | "cursor" | "amp" => format!("{bin} login"),
+        "opencode" => format!("{bin} auth login"),
+        _ => bin,
+    }
+}
+
+/// Run `line` in a new window of the computer's terminal app, left open afterwards.
+pub(crate) fn open_in_terminal(line: &str) -> Result<(), String> {
+    use std::process::Command;
+    let started = if cfg!(target_os = "macos") {
+        // Terminal runs a .command file it is asked to open.
+        let file = std::env::temp_dir().join("runo-sign-in.command");
+        std::fs::write(&file, format!("#!/bin/sh\n{line}\n")).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755));
+        }
+        Command::new("open").arg(&file).spawn().is_ok()
+    } else if cfg!(windows) {
+        Command::new("cmd")
+            .args(["/C", "start", "", "cmd", "/K", line])
+            .spawn()
+            .is_ok()
+    } else {
+        let script = format!("{line}; exec \"${{SHELL:-sh}}\"");
+        [
+            ("x-terminal-emulator", "-e"),
+            ("gnome-terminal", "--"),
+            ("konsole", "-e"),
+            ("xfce4-terminal", "-x"),
+            ("kitty", "--"),
+            ("alacritty", "-e"),
+            ("xterm", "-e"),
+        ]
+        .iter()
+        .filter_map(|(app, flag)| locate(app).map(|path| (path, flag)))
+        .any(|(path, flag)| {
+            Command::new(path)
+                .args([flag, "sh", "-c", &script])
+                .spawn()
+                .is_ok()
+        })
+    };
+    if started {
+        Ok(())
+    } else {
+        Err("No terminal app was found.".into())
+    }
+}
+
 impl RunoApp {
+    /// Open a terminal that signs the agent in, or copy the command when there's none.
+    pub(crate) fn sign_in_agent(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+        let p = agent::provider(provider);
+        let bin = agent_path(p)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.bin.to_string());
+        let line = sign_in_command(provider, &bin);
+        let said = match open_in_terminal(&line) {
+            Ok(()) => format!("Sign in to {} in the terminal window, then pick it in New session.", p.name),
+            Err(_) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(line.clone()));
+                format!("Copied `{line}`. Run it in a terminal to sign in to {}.", p.name)
+            }
+        };
+        self.info = Some((said, std::time::Instant::now()));
+        cx.notify();
+    }
+
     /// Point an agent at a CLI Runo didn't find, chosen in a file dialog.
     pub(crate) fn locate_agent(&mut self, provider: &'static str, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
@@ -247,7 +330,7 @@ impl RunoApp {
         if let Err(error) = result {
             // The install card stays and says what went wrong, with the log and a retry.
             if let Some(run) = self.update_runs.get_mut(p.id) {
-                run.failed = Some(updater::explain(&error, &run.command));
+                run.failed = Some(alerts::run_failure(&error, &run.command));
             }
             return;
         }
@@ -514,5 +597,21 @@ mod tests {
         }
         let windows = install_plan("claude", false, true).unwrap();
         assert_eq!(windows.program[0], "powershell");
+    }
+
+    #[test]
+    fn each_agent_has_a_way_to_sign_in() {
+        assert_eq!(sign_in_command("codex", "codex"), "codex login");
+        assert_eq!(
+            sign_in_command("opencode", "/opt/bin/opencode"),
+            "/opt/bin/opencode auth login"
+        );
+        assert_eq!(sign_in_command("claude", "claude"), "claude");
+        if !cfg!(windows) {
+            assert_eq!(
+                sign_in_command("amp", "/Users/me/My Tools/amp"),
+                "'/Users/me/My Tools/amp' login"
+            );
+        }
     }
 }

@@ -7,6 +7,56 @@ use super::*;
 /// How often installed agents are checked for a newer release.
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
+/// How long an install or update may run before Runo stops it.
+const RUN_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// The result of a run the person cancelled.
+const CANCELLED: &str = "Cancelled.";
+/// Starts the result of a run stopped for taking too long.
+const TIMED_OUT: &str = "It ran for 15 minutes without finishing, so Runo stopped it.";
+
+/// Installs and updates running now: key, process id, and why it was stopped, if it was.
+static RUNS: std::sync::Mutex<Vec<(String, u32, Option<&'static str>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Stop the run with `key` and everything it started, giving `why` as its result.
+fn stop_run(key: &str, pid: Option<u32>, why: &'static str) {
+    let Ok(mut runs) = RUNS.lock() else {
+        return;
+    };
+    let Some(run) = runs
+        .iter_mut()
+        .find(|r| r.0 == key && r.2.is_none() && pid.is_none_or(|p| p == r.1))
+    else {
+        return;
+    };
+    run.2 = Some(why);
+    let pid = run.1;
+    drop(runs);
+    #[cfg(unix)]
+    // SAFETY: kill only sends a signal; the run leads its own process group.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGTERM);
+    }
+    #[cfg(windows)]
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .status();
+}
+
+/// What went wrong with an install or update, as a card says it.
+pub(crate) fn run_failure(error: &str, command: &str) -> updater::Failure {
+    if error.starts_with(TIMED_OUT) {
+        updater::Failure {
+            why: format!("{TIMED_OUT} Try again, or run it in a terminal to see where it stops."),
+            command: (!command.is_empty()).then(|| command.to_string()),
+            log: Some(error.to_string()),
+            ..Default::default()
+        }
+    } else {
+        updater::explain(error, command)
+    }
+}
+
 /// A newer release of an installed agent CLI.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AgentUpdate {
@@ -319,6 +369,7 @@ fn clean_line(raw: &str) -> String {
 }
 
 /// Run an updater, sending each line it prints as `<key>-line` and the result as `<key>`.
+/// It can be cancelled with `cancel_run`, and is stopped after `RUN_LIMIT`.
 pub(crate) fn run_streaming(key: String, mut command: std::process::Command, tx: Sender<Event>) {
     use std::io::Read;
     use std::process::Stdio;
@@ -327,6 +378,11 @@ pub(crate) fn run_streaming(key: String, mut command: std::process::Command, tx:
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     std::thread::spawn(move || {
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -341,6 +397,24 @@ pub(crate) fn run_streaming(key: String, mut command: std::process::Command, tx:
                 return;
             }
         };
+        let pid = child.id();
+        if let Ok(mut runs) = RUNS.lock() {
+            runs.push((key.clone(), pid, None));
+        }
+        let watched = key.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while started.elapsed() < RUN_LIMIT {
+                std::thread::sleep(Duration::from_secs(2));
+                let running = RUNS
+                    .lock()
+                    .is_ok_and(|runs| runs.iter().any(|r| r.0 == watched && r.1 == pid));
+                if !running {
+                    return;
+                }
+            }
+            stop_run(&watched, Some(pid), TIMED_OUT);
+        });
         let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let mut readers = Vec::new();
         let streams: Vec<Box<dyn Read + Send>> = [
@@ -395,8 +469,23 @@ pub(crate) fn run_streaming(key: String, mut command: std::process::Command, tx:
         }
         let ok = child.wait().is_ok_and(|status| status.success());
         let text = tail.lock().map(|t| t.join("\n")).unwrap_or_default();
-        let _ = tx.send(Event::Output(key, if ok { Ok(text) } else { Err(text) }));
+        let stopped = RUNS.lock().ok().and_then(|mut runs| {
+            let at = runs.iter().position(|r| r.0 == key && r.1 == pid)?;
+            runs.remove(at).2
+        });
+        let result = match stopped {
+            Some(why) if why == TIMED_OUT => Err(format!("{TIMED_OUT}\n{text}")),
+            Some(why) => Err(why.to_string()),
+            None if ok => Ok(text),
+            None => Err(text),
+        };
+        let _ = tx.send(Event::Output(key, result));
     });
+}
+
+/// Stop a run started with `run_streaming`; its result is dropped.
+pub(crate) fn cancel_run(key: &str) {
+    stop_run(key, None, CANCELLED);
 }
 
 /// A finished card: hold the success badge, then fade out just before it is removed.
@@ -689,8 +778,10 @@ impl RunoApp {
             .update_runs
             .iter()
             .filter(|(_, run)| {
-                run.finished
-                    .is_some_and(|at| at.elapsed() > UPDATE_DONE_SHOWN)
+                !run.install
+                    && run
+                        .finished
+                        .is_some_and(|at| at.elapsed() > UPDATE_DONE_SHOWN)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -712,6 +803,11 @@ impl RunoApp {
             if let (Some(run), Ok(line)) = (self.update_runs.get_mut(provider), result) {
                 run.take_line(&line);
             }
+            return true;
+        }
+        if (key.starts_with("install:") || key.starts_with("update:"))
+            && result.as_ref().is_err_and(|e| e == CANCELLED)
+        {
             return true;
         }
         if let Some(provider) = key.strip_prefix("install:") {
@@ -844,7 +940,7 @@ impl RunoApp {
                     .get(provider)
                     .map(|r| r.command.clone())
                     .unwrap_or_default();
-                let failure = updater::explain(&error, &command);
+                let failure = run_failure(&error, &command);
                 self.state
                     .log(0, format!("Updating {name} failed: {}", failure.why));
                 if let Some(run) = self.update_runs.get_mut(provider) {
@@ -1062,7 +1158,7 @@ impl RunoApp {
                 }
                 Some(run) => (
                     format!("Updating from {current} to {latest}."),
-                    self.update_progress_view(n, run),
+                    self.update_progress_view(n, id, run, cx),
                 ),
                 None => (
                     format!("Version {latest} is out. You have {current}."),
@@ -1139,16 +1235,27 @@ impl RunoApp {
             let provider = agent::provider(id);
             let done = run.finished.is_some();
             let key = format!("i:{id}:{:?}", run.started);
-            if self.alerts_hidden.contains(&key) && !done {
+            // A finished install stays until dismissed, offering to sign in.
+            if self.alerts_hidden.contains(&key) {
                 continue;
             }
             let (body, actions) = if done {
                 (
                     format!(
-                        "Sign in once by running `{}` in a terminal, then pick it in New session.",
-                        provider.bin
+                        "Sign in once with `{}`, then pick it in New session.",
+                        install::sign_in_command(id, provider.bin)
                     ),
-                    div().flex().child(update_done_badge(n, "Installed")),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(update_done_badge(n, "Installed"))
+                        .child(
+                            self.button(("install-sign-in", n), "Sign in…", true)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.sign_in_agent(id, cx)
+                                })),
+                        ),
                 )
             } else if let Some(failure) = run.failed.clone() {
                 (
@@ -1158,7 +1265,7 @@ impl RunoApp {
             } else {
                 (
                     "Downloading and setting up the CLI.".to_string(),
-                    self.update_progress_view(n + 100, run),
+                    self.update_progress_view(n + 100, id, run, cx),
                 )
             };
             let card = self.alert_card(
@@ -1190,11 +1297,7 @@ impl RunoApp {
                 None,
                 cx,
             );
-            run_cards.push(if done {
-                fade_after_badge(card, format!("in-out-{key}"))
-            } else {
-                card
-            });
+            run_cards.push(card);
         }
         run_cards.extend(cards);
         let cards = run_cards;
@@ -1485,7 +1588,13 @@ impl RunoApp {
     }
 
     /// The live progress of an update: a bar, what the updater is doing, and the time.
-    fn update_progress_view(&self, n: usize, run: &UpdateRun) -> Div {
+    fn update_progress_view(
+        &self,
+        n: usize,
+        provider: &'static str,
+        run: &UpdateRun,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let now = std::time::Instant::now();
         let fraction = run.progress(now);
         let secs = now.duration_since(run.started).as_secs();
@@ -1570,8 +1679,35 @@ impl RunoApp {
                         .text_size(px(11.))
                         .text_color(rgb(c_secondary()))
                         .child(figure),
+                )
+                .child(
+                    div()
+                        .id(("up-cancel", n))
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(rgb(c_secondary()))
+                        .cursor_pointer()
+                        .hover(|el| el.text_color(rgb(c_text())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.cancel_agent_run(provider);
+                            cx.notify();
+                        }))
+                        .child("Cancel"),
                 ),
         )
+    }
+
+    /// Stop an agent's install or update and drop its card.
+    pub(crate) fn cancel_agent_run(&mut self, provider: &'static str) {
+        cancel_run(&format!("install:{provider}"));
+        cancel_run(&format!("update:{provider}"));
+        if let Some(run) = self.update_runs.remove(provider) {
+            let what = if run.install { "installing" } else { "updating" };
+            self.info = Some((
+                format!("Stopped {what} {}.", agent::provider(provider).name),
+                std::time::Instant::now(),
+            ));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1692,6 +1828,32 @@ impl RunoApp {
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_install_stops_with_what_it_started() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo started; sleep 30 & wait"]);
+        run_streaming("install:test-cancel".into(), cmd, tx);
+        let started = std::time::Instant::now();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)).expect("a line first") {
+                Event::Output(k, Ok(line)) if k.ends_with("-line") && line == "started" => break,
+                _ => continue,
+            }
+        }
+        cancel_run("install:test-cancel");
+        let result = loop {
+            match rx.recv_timeout(Duration::from_secs(5)).expect("a result") {
+                Event::Output(k, result) if k == "install:test-cancel" => break result,
+                _ => continue,
+            }
+        };
+        assert_eq!(result, Err(CANCELLED.to_string()));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(RUNS.lock().unwrap().iter().all(|r| r.0 != "install:test-cancel"));
+    }
 
     #[test]
     fn versions_compare_and_updates_have_commands() {
