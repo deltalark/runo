@@ -5,6 +5,10 @@
 //! folder. Runo asks the login shell for its PATH once at startup and adds the folders
 //! those tools use, so `codex`, `node` and `npm` are found the same way a terminal finds
 //! them, and the agents Runo starts inherit the same PATH.
+//!
+//! The rest of the login shell's environment (API keys, `JAVA_HOME`, `GOPATH`, proxy
+//! settings…) is brought over too, without overriding anything Runo was started with
+//! and leaving out what only makes sense inside that shell.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -30,11 +34,16 @@ pub fn init() {
     let inherited: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    let shell = if cfg!(windows) || std::env::var_os("RUNO_NO_SHELL_PATH").is_some() {
+    let env = if cfg!(windows) || std::env::var_os("RUNO_NO_SHELL_PATH").is_some() {
         Vec::new()
     } else {
-        login_shell_path(Duration::from_secs(4)).unwrap_or_default()
+        login_shell_env(Duration::from_secs(4)).unwrap_or_default()
     };
+    let shell = env_path(&env).unwrap_or_default();
+    for (key, value) in importable(&env, |k| std::env::var_os(k).is_some()) {
+        // Single-threaded at startup, like PATH below.
+        std::env::set_var(key, value);
+    }
     let known = known_dirs(&home);
     let merged = merge(&shell, &inherited, &known);
     if let Ok(joined) = std::env::join_paths(merged.iter().map(|(p, _)| p)) {
@@ -128,9 +137,130 @@ fn merge(
     out
 }
 
-/// Ask the login shell for its PATH. Interactive and login, so .zshrc / .bashrc and
-/// .profile both run, which is where nvm and friends put themselves.
-fn login_shell_path(timeout: Duration) -> Option<Vec<PathBuf>> {
+/// Marks where the environment starts in the shell's output, after any profile noise.
+const MARKER: &str = "__RUNO_ENV__";
+
+/// Variables that describe the shell or terminal session itself, not the person's setup.
+const SKIP: &[&str] = &[
+    "PATH",
+    "PWD",
+    "OLDPWD",
+    "SHLVL",
+    "_",
+    "PS1",
+    "PS2",
+    "PS3",
+    "PS4",
+    "PROMPT",
+    "RPROMPT",
+    "PROMPT_COMMAND",
+    "TERM",
+    "COLORTERM",
+    "COLUMNS",
+    "LINES",
+    "HISTFILE",
+    "HISTSIZE",
+    "HISTFILESIZE",
+    "HISTCONTROL",
+    "SAVEHIST",
+    "DISABLE_AUTO_UPDATE",
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    "WINDOWID",
+    "SSH_TTY",
+    "GPG_TTY",
+    "SHELL_SESSION_ID",
+    "MANPATH",
+    "INFOPATH",
+];
+
+/// Prefixes of shell, prompt and terminal variables left out for the same reason.
+const SKIP_PREFIX: &[&str] = &[
+    "BASH_FUNC_",
+    "BASH_",
+    "ZSH",
+    "P9K",
+    "_P9K",
+    "POWERLEVEL9K",
+    "STARSHIP_",
+    "TERM_",
+    "ITERM",
+    "KITTY_",
+    "WEZTERM_",
+    "ALACRITTY_",
+    "VSCODE_",
+    "VTE_",
+    "COMP_",
+    "__",
+];
+
+/// Whether `name` is a plain environment variable name.
+fn valid_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The login shell's variables worth bringing over: valid names, not shell-session
+/// state, and not already set (`is_set`) in Runo's own environment.
+pub(crate) fn importable(
+    env: &[(String, String)],
+    is_set: impl Fn(&str) -> bool,
+) -> Vec<(&str, &str)> {
+    env.iter()
+        .filter(|(k, v)| {
+            valid_name(k)
+                && !v.contains('\0')
+                && !SKIP.contains(&k.as_str())
+                && !SKIP_PREFIX.iter().any(|p| k.starts_with(p))
+                && !is_set(k)
+        })
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
+
+/// The PATH in the shell's environment.
+fn env_path(env: &[(String, String)]) -> Option<Vec<PathBuf>> {
+    let (_, value) = env.iter().rev().find(|(k, _)| k == "PATH")?;
+    let paths: Vec<PathBuf> = std::env::split_paths(value)
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    (!paths.is_empty()).then_some(paths)
+}
+
+/// The variables in `env` output after the marker: NUL-separated when `env -0` worked,
+/// else one per line. Without a marker the whole output is read.
+fn parse_env(out: &str) -> Vec<(String, String)> {
+    let body = match out.rfind(MARKER) {
+        Some(at) => out[at + MARKER.len()..].trim_start_matches('\n'),
+        None => out,
+    };
+    let entries: Vec<&str> = if body.contains('\0') {
+        body.split('\0').collect()
+    } else {
+        body.lines().collect()
+    };
+    let mut env: Vec<(String, String)> = Vec::new();
+    for entry in entries {
+        let Some((key, value)) = entry.split_once('=') else {
+            continue;
+        };
+        let key = key.trim_start_matches('\n');
+        if !valid_name(key) {
+            continue;
+        }
+        env.retain(|(k, _)| k != key);
+        env.push((key.to_string(), value.to_string()));
+    }
+    env
+}
+
+/// Ask the login shell for its environment. Interactive and login, so .zshrc / .bashrc
+/// and .profile both run, which is where nvm and friends put themselves.
+fn login_shell_env(timeout: Duration) -> Option<Vec<(String, String)>> {
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -142,7 +272,10 @@ fn login_shell_path(timeout: Duration) -> Option<Vec<PathBuf>> {
             }
         });
     let mut child = std::process::Command::new(&shell)
-        .args(["-ilc", "command env"])
+        .args([
+            "-ilc",
+            &format!("printf '\\n{MARKER}\\n'; command env -0 2>/dev/null || command env"),
+        ])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -169,16 +302,8 @@ fn login_shell_path(timeout: Duration) -> Option<Vec<PathBuf>> {
         }
     }
     let out = reader.join().ok()?;
-    parse_env_path(&out)
-}
-
-/// The PATH from `env` output; the last one wins, after anything profiles printed.
-fn parse_env_path(out: &str) -> Option<Vec<PathBuf>> {
-    let line = out.lines().rev().find(|l| l.starts_with("PATH="))?;
-    let paths: Vec<PathBuf> = std::env::split_paths(&line["PATH=".len()..])
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect();
-    (!paths.is_empty()).then_some(paths)
+    let env = parse_env(&out);
+    (!env.is_empty()).then_some(env)
 }
 
 /// Version numbers of a folder name such as "v22.11.0" or "node-v20.1.0", for sorting.
@@ -350,10 +475,22 @@ mod tests {
     fn reads_path_from_env_output_after_profile_noise() {
         let out = "Welcome!\nPATH=/old\nHOME=/h\nPATH=/a/bin:/b/bin\nSHELL=/bin/zsh\n";
         assert_eq!(
-            parse_env_path(out),
+            env_path(&parse_env(out)),
             Some(vec![PathBuf::from("/a/bin"), PathBuf::from("/b/bin")])
         );
-        assert_eq!(parse_env_path("nothing here"), None);
+        assert_eq!(env_path(&parse_env("nothing here")), None);
+    }
+
+    #[test]
+    fn imports_the_login_environment_without_overriding() {
+        let out = format!(
+            "motd PATH=/noise\n{MARKER}\nPATH=/a/bin\0API_KEY=k=v\0NOTE=two\nlines\0\
+             PWD=/x\0SHLVL=2\0BASH_FUNC_f%%=() {{ :; }}\0HOME=/h\0P9K_TTY=old\0bad-name=1\0"
+        );
+        let env = parse_env(&out);
+        assert_eq!(env_path(&env), Some(vec![PathBuf::from("/a/bin")]));
+        let picked = importable(&env, |k| k == "HOME");
+        assert_eq!(picked, vec![("API_KEY", "k=v"), ("NOTE", "two\nlines")]);
     }
 
     #[test]
