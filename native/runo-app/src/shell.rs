@@ -756,14 +756,6 @@ impl RunoApp {
         window.focus(&self.focus, cx);
     }
 
-    /// Stop one session's agent, wherever it is.
-    pub(crate) fn stop_session(&mut self, id: u64) {
-        if let Some(handle) = self.handles.get(&Target::Session(id)) {
-            self.stopping.insert(id);
-            handle.kill();
-        }
-    }
-
     /// Where the open session's agent runs, as the top bar and status bar show it: the
     /// name and a dot that is green when reachable, amber while unknown, red when not.
     pub(crate) fn runs_on(&self) -> (String, u32, String) {
@@ -1776,7 +1768,7 @@ impl RunoApp {
                     .font_weight(FontWeight::NORMAL)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         match view {
-                            View::History => this.open_history(),
+                            View::History => this.open_history(cx),
                             View::Notes => {
                                 this.notes_project = this.current_project();
                                 this.open_notes(window, cx);

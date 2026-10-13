@@ -8,7 +8,14 @@ use shell::Need;
 
 impl RunoApp {
     /// The inline answers for a blocked session: the same replies the corner cards send.
-    fn waiting_actions(&self, n: usize, id: u64, waiting: Waiting, cx: &mut Context<Self>) -> Div {
+    fn waiting_actions(
+        &self,
+        n: usize,
+        id: u64,
+        index: usize,
+        waiting: Waiting,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut actions = div().flex().flex_wrap().items_center().gap_2();
         match waiting {
             Waiting::Denied(tools) => {
@@ -54,14 +61,15 @@ impl RunoApp {
                             })),
                     );
             }
-            Waiting::Question(q) => {
+            Waiting::Questions(questions) => {
+                let (qi, q) = self.next_question(id, index, &questions);
                 for (oi, option) in q.options.iter().take(4).enumerate() {
-                    let answer = format!("My answer: {} {option}", q.question);
+                    let option = option.clone();
                     actions = actions.child(
                         self.chip(("inbox-opt", n * 10 + oi), option.clone(), false)
                             .h(px(26.))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.answer_session(id, answer.clone(), Vec::new(), cx);
+                                this.pick_answer(id, index, qi, option.clone(), cx);
                                 cx.notify();
                             })),
                     );
@@ -118,16 +126,18 @@ impl RunoApp {
             .map(|p| p.name.clone())
             .unwrap_or_default();
         let waiting = (need == Need::Blocked)
-            .then(|| alerts::waiting_on(session).map(|(_, w)| w))
+            .then(|| alerts::waiting_on(session))
             .flatten();
-        let (glyph, color, what) = match &waiting {
+        let (glyph, color, what) = match waiting.as_ref().map(|(_, w)| w) {
             Some(Waiting::Denied(tools)) => (
                 IconName::ShieldAlert,
                 c_amber(),
                 format!("{} wants to use {}", provider.name, alerts::and_list(tools)),
             ),
-            Some(Waiting::Question(q)) => {
-                (IconName::CircleQuestionMark, c_amber(), q.question.clone())
+            Some(Waiting::Questions(questions)) => {
+                let index = waiting.as_ref().map_or(0, |(i, _)| *i);
+                let (_, q) = self.next_question(id, index, questions);
+                (IconName::CircleQuestionMark, c_amber(), q.question)
             }
             Some(Waiting::Plan) => (
                 IconName::ListChecks,
@@ -149,7 +159,7 @@ impl RunoApp {
             ),
         };
         let mut actions = match waiting {
-            Some(w) => self.waiting_actions(n, id, w, cx),
+            Some((index, w)) => self.waiting_actions(n, id, index, w, cx),
             None => div().flex().items_center().gap_2(),
         };
         actions = actions

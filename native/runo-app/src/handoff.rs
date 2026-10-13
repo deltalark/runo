@@ -965,6 +965,7 @@ mod tests {
             status: "M".into(),
             added: 10,
             removed: 2,
+            ..Default::default()
         }];
         let text = brief(&BriefInput {
             from: "Claude Code",
@@ -1068,6 +1069,7 @@ mod tests {
                 status: "M".into(),
                 added: n,
                 removed: 0,
+                ..Default::default()
             })
             .collect();
         let text = brief(&input(&messages, &files));

@@ -424,7 +424,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("New worktrees", "Prepare each isolated worktree before the agent starts. Ignored files listed in the repository's .worktreeinclude (gitignore patterns, such as .env) are copied in automatically.", vec![
                 row(
                     "Setup command",
-                    "Runs in the new worktree's Terminal, for example npm install. Leave empty to skip.",
+                    "Runs in the new worktree's Terminal, for example npm install, for projects without their own (set one in a project's Edit dialog). Leave empty to skip.",
                     Ctl::Text {
                         key: "worktree_setup".into(),
                         value: st.worktree_setup.clone(),
@@ -464,6 +464,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Interaction", "How the mouse works in the terminal.", vec![
                 row("Scroll speed", "Lines moved per wheel step. Fast suits long logs.", Ctl::Segment(options(&[("normal", "Normal"), ("fast", "Fast"), ("faster", "Faster")]), st.term_scroll.clone(), Rc::new(|s, v| s.term_scroll = v))),
+                row("Scrollback", "Lines each new terminal keeps to scroll back through and find in.", Ctl::Segment(options(&[("2000", "2,000"), ("10000", "10,000"), ("50000", "50,000")]), st.term_history.to_string(), Rc::new(|s, v| s.term_history = v.parse().unwrap_or(10_000)))),
                 row("Right-click", "Show the terminal menu, or paste the clipboard straight in like many terminals do.", Ctl::Segment(options(&[("menu", "Menu"), ("paste", "Paste")]), st.term_right_click.clone(), Rc::new(|s, v| s.term_right_click = v))),
             ]),
         ],
