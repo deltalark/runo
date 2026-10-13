@@ -427,7 +427,7 @@ impl RunoApp {
         );
     }
 
-    fn worktree_ready(
+    pub(crate) fn worktree_ready(
         &mut self,
         id: u64,
         result: Result<(String, String, Vec<String>), String>,

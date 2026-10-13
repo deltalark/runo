@@ -4,6 +4,13 @@
 use super::*;
 use crate::store::Queued;
 
+/// An entry of the composer's `/` menu.
+#[derive(Clone)]
+pub(crate) enum SlashPick {
+    Playbook(u64),
+    Command(agentcmds::Command),
+}
+
 /// Most recent conversation, written into follow-ups for CLIs that cannot resume.
 const CONTEXT_MESSAGES: usize = 8;
 const CONTEXT_CHARS: usize = 1500;
@@ -110,7 +117,14 @@ impl RunoApp {
                     2,
                 );
                 let name = agent::provider(&provider).name;
-                format!("{}\n{recent}", handoff::digest(&session.messages, name))
+                let from = crate::chatctl::context_from(&session.messages);
+                let digest = handoff::digest(&session.messages[from..], name);
+                // After a compact, its summary stands in for what came before.
+                if from > 0 && !session.carried.is_empty() {
+                    format!("{}\n\n{digest}\n{recent}", session.carried)
+                } else {
+                    format!("{digest}\n{recent}")
+                }
             } else {
                 let recent =
                     context_prompt(&session.messages[session.conversation_start..], &prompt);
@@ -420,6 +434,7 @@ impl RunoApp {
         };
         // While the agent or its setup command runs, the prompt and its images wait.
         if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+            self.editing = None;
             if let Some(session) = self.state.session_mut(id) {
                 session.queue.push(Queued::new(text, images));
             }
@@ -434,12 +449,35 @@ impl RunoApp {
             .current()
             .map(|s| cx.global::<AppSettings>().agent(&s.provider))
             .unwrap_or_default();
+        // An edited message replaces the one it came from.
+        if let Some((_, index)) = self.editing.filter(|(e, _)| *e == id) {
+            self.editing = None;
+            self.resend_from(id, index, text, images, cx);
+            return;
+        }
+        if playbook.is_none() && images.is_empty() && self.run_chat_command(id, &text, &opts) {
+            return;
+        }
+        // `codex exec` takes prompts as written, so its saved prompts are expanded here.
+        let codex_prompt = self
+            .current()
+            .filter(|s| s.provider == "codex" && playbook.is_none())
+            .and_then(|_| agentcmds::expand_codex(&text, agentcmds::home().as_deref()))
+            .map(|expanded| (expanded, text.clone()));
+        let text = codex_prompt
+            .as_ref()
+            .map(|(expanded, _)| expanded.clone())
+            .unwrap_or(text);
         let before = self.current().map_or(0, |s| s.messages.len());
         self.start_turn(id, text, images, &opts);
         // Only when the turn really started; an open CLI queues it instead.
         let started = self.current().map_or(0, |s| s.messages.len()) > before;
         if let (Some((name, _)), true) = (playbook, started) {
             self.tag_playbook(id, &name, &typed);
+        }
+        if let (Some((_, typed)), true) = (codex_prompt, started) {
+            let (name, note) = typed.trim().split_once(' ').unwrap_or((typed.trim(), ""));
+            self.tag_playbook(id, name, note.trim());
         }
     }
 
@@ -747,10 +785,17 @@ impl RunoApp {
         let text = self.prompt.read(cx).value().to_string();
         self.mention = mention_query(&text);
         self.slash = slash_query(&text);
+        if self.slash.is_some() {
+            self.load_agent_commands();
+        } else {
+            // Read again next time, so new command files show up.
+            self.agent_commands = None;
+        }
     }
 
-    /// Playbooks matching the `/query`, best first.
-    pub(crate) fn slash_matches(&self) -> Vec<u64> {
+    /// Playbooks and the agent's own commands matching the `/query`, best first. A command
+    /// typed out in full goes first; otherwise playbooks lead.
+    pub(crate) fn slash_matches(&self) -> Vec<SlashPick> {
         let Some(query) = &self.slash else {
             return Vec::new();
         };
@@ -773,19 +818,68 @@ impl RunoApp {
             })
             .collect();
         hits.sort_by_key(|(rank, a)| (*rank, a.name.len()));
-        hits.into_iter().take(8).map(|(_, a)| a.id).collect()
+        let mut out: Vec<SlashPick> = hits
+            .into_iter()
+            .take(8)
+            .map(|(_, a)| SlashPick::Playbook(a.id))
+            .collect();
+        let commands = self
+            .agent_commands
+            .as_ref()
+            .filter(|(sid, _)| Some(*sid) == self.selected)
+            .map(|(_, c)| agentcmds::matching(c, &q))
+            .unwrap_or_default();
+        for c in commands.into_iter().take(12) {
+            let pick = SlashPick::Command(c.clone());
+            if c.name.to_lowercase() == q {
+                out.insert(0, pick);
+            } else {
+                out.push(pick);
+            }
+        }
+        out
     }
 
-    /// Use a playbook from the `/` menu: put its prompt in the box for this session, or
-    /// start it as its own session in this project.
+    /// Read the agent's commands for the selected session when the `/` menu opens.
+    fn load_agent_commands(&mut self) {
+        let Some((id, provider, dir)) = self
+            .current()
+            .map(|s| (s.id, s.provider.clone(), s.dir.clone()))
+        else {
+            return;
+        };
+        if self
+            .agent_commands
+            .as_ref()
+            .is_some_and(|(sid, _)| *sid == id)
+        {
+            return;
+        }
+        let home = agentcmds::home();
+        let found = agentcmds::discover(&provider, std::path::Path::new(&dir), home.as_deref());
+        self.agent_commands = Some((id, found));
+    }
+
+    /// Use an entry of the `/` menu. A playbook goes in the box for this session, or starts
+    /// as its own session in this project; an agent command is typed into the box.
     pub(crate) fn pick_slash(
         &mut self,
-        playbook: u64,
+        pick: SlashPick,
         new_session: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.slash = None;
+        let playbook = match pick {
+            SlashPick::Playbook(id) => id,
+            SlashPick::Command(command) => {
+                self.prompt.update(cx, |p, cx| {
+                    p.set_value(format!("/{} ", command.name), window, cx);
+                    p.focus(window, cx);
+                });
+                return;
+            }
+        };
         let Some(asks) = self
             .state
             .automations
@@ -1458,15 +1552,17 @@ impl RunoApp {
                 .last()
                 .is_some_and(|m| m.role == Role::System)
             && session.messages.iter().any(|m| m.role == Role::User);
+        let edit_bar = self.edit_bar(cx);
         if session.queue.is_empty()
             && attached.is_empty()
             && matches.is_empty()
             && playbooks.is_empty()
             && !retry
+            && edit_bar.is_none()
         {
             return None;
         }
-        let mut col = div().v_flex().gap_1();
+        let mut col = div().v_flex().gap_1().children(edit_bar);
         if retry {
             col = col.child(
                 div()
@@ -1661,69 +1757,112 @@ impl RunoApp {
                 .border_1()
                 .border_color(rgb(c_border()))
                 .bg(rgb(c_raised()))
-                .shadow_lg()
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_size(px(11.))
-                        .text_color(rgb(c_muted()))
-                        .child(format!(
+                .shadow_lg();
+            let heading = |text: String| {
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_muted()))
+                    .child(text)
+            };
+            let mut section = None;
+            for (i, pick) in playbooks.into_iter().enumerate() {
+                let is_playbook = matches!(pick, SlashPick::Playbook(_));
+                if section != Some(is_playbook) {
+                    section = Some(is_playbook);
+                    list = list.child(heading(if is_playbook {
+                        format!(
                             "PLAYBOOKS · Enter adds it to this message · {}↵ starts a new session",
                             if cfg!(target_os = "macos") {
                                 "⌘"
                             } else {
                                 "Ctrl+"
                             }
-                        )),
-                );
-            for (i, id) in playbooks.into_iter().enumerate() {
-                let Some(a) = self.state.automations.iter().find(|a| a.id == id) else {
-                    continue;
-                };
-                list = list.child(
-                    div()
-                        .id(("slash", i))
-                        .min_h(px(30.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .when(i == 0, |el| el.bg(tint(c_active())))
-                        .hover(|el| el.bg(tint(c_active())))
-                        .text_size(px(12.5))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.pick_slash(id, false, window, cx);
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::BookOpen, 12., c_muted()))
-                        .child(div().flex_none().child(format!("/{}", a.slug())))
+                        )
+                    } else {
+                        format!(
+                            "{} COMMANDS · Enter puts it in the message",
+                            agent::provider(&session.provider).name.to_uppercase()
+                        )
+                    }));
+                }
+                let row = div()
+                    .id(("slash", i))
+                    .min_h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(i == 0, |el| el.bg(tint(c_active())))
+                    .hover(|el| el.bg(tint(c_active())))
+                    .text_size(px(12.5));
+                let picked = pick.clone();
+                let row = row.on_click(cx.listener(move |this, _, window, cx| {
+                    this.pick_slash(picked.clone(), false, window, cx);
+                    cx.notify();
+                }));
+                let entry = match pick {
+                    SlashPick::Playbook(id) => {
+                        let Some(a) = self.state.automations.iter().find(|a| a.id == id) else {
+                            continue;
+                        };
+                        row.child(icon(IconName::BookOpen, 12., c_muted()))
+                            .child(div().flex_none().child(format!("/{}", a.slug())))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(rgb(c_muted()))
+                                    .child(a.summary()),
+                            )
+                            .child(
+                                self.ghost_button_sized(
+                                    ("slash-run", i),
+                                    IconName::Play,
+                                    "Start as a new session",
+                                    22.,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.pick_slash(SlashPick::Playbook(id), true, window, cx);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                    }
+                    SlashPick::Command(c) => row
+                        .child(icon(
+                            if c.source == agentcmds::Source::Skill {
+                                IconName::Sparkles
+                            } else {
+                                IconName::SquareSlash
+                            },
+                            12.,
+                            c_muted(),
+                        ))
+                        .child(div().flex_none().child(format!("/{}", c.name)))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .text_color(rgb(c_muted()))
-                                .child(a.summary()),
+                                .child(c.description.clone()),
                         )
                         .child(
-                            self.ghost_button_sized(
-                                ("slash-run", i),
-                                IconName::Play,
-                                "Start as a new session",
-                                22.,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.pick_slash(id, true, window, cx);
-                                    cx.notify();
-                                },
-                            )),
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(rgb(c_muted()))
+                                .child(c.source.label()),
                         ),
-                );
+                };
+                list = list.child(entry);
             }
             col = col.child(list);
         }

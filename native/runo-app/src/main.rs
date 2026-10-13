@@ -1,9 +1,11 @@
 mod agent;
+mod agentcmds;
 mod alerts;
 mod approvals;
 mod browser;
 mod browser_engine;
 mod caps;
+mod chatctl;
 mod cliview;
 mod connections;
 mod connections_ui;
@@ -393,6 +395,10 @@ struct RunoApp {
     mention: Option<String>,
     /// The `/query` typed at the start of the prompt, which lists playbooks.
     slash: Option<String>,
+    /// The agent's own commands for the `/` menu, read for one session when the menu opens.
+    agent_commands: Option<(u64, Vec<agentcmds::Command>)>,
+    /// A sent message being edited in the composer: (session, message index).
+    editing: Option<(u64, usize)>,
     /// A commit message written by the agent, waiting to be put in the commit box.
     commit_suggestion: Option<String>,
     writing_commit: bool,
@@ -1351,6 +1357,8 @@ impl RunoApp {
             pending_mentions: Vec::new(),
             mention: None,
             slash: None,
+            agent_commands: None,
+            editing: None,
             commit_suggestion: None,
             writing_commit: false,
             awake: None,
@@ -1913,8 +1921,18 @@ impl RunoApp {
                     session.unread = !on_screen;
                     if silent {
                         if ok {
+                            let compacted = session
+                                .messages
+                                .iter()
+                                .rev()
+                                .find(|m| m.role == Role::User)
+                                .is_some_and(|m| m.text.starts_with("/compact"));
                             if let Some(m) = session.messages.last_mut() {
-                                m.text = "(The agent finished without any output.)".into();
+                                m.text = if compacted {
+                                    "Compacted the conversation.".into()
+                                } else {
+                                    "(The agent finished without any output.)".into()
+                                };
                             }
                         } else {
                             session.messages.pop();
@@ -4164,6 +4182,25 @@ impl RunoApp {
                                     )),
                                 )
                             })
+                            .when(!working, |el| {
+                                el.child(
+                                    self.ghost_button_sized(
+                                        ("edit-msg", index),
+                                        IconName::Pencil,
+                                        "Edit and send again",
+                                        24.,
+                                    )
+                                    .mt(px(6.))
+                                    .opacity(0.)
+                                    .group_hover("user-msg", |el| el.opacity(1.))
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.start_edit(sid, index, window, cx);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            })
                             .child(if message.playbook.is_empty() {
                                 div()
                                     .max_w(px(560.))
@@ -4187,6 +4224,7 @@ impl RunoApp {
             .then(|| {
                 self.switch_divider(index, &message.meta)
                     .or_else(|| self.cli_divider(index, &message.meta))
+                    .or_else(|| self.context_divider(index, &message.meta))
             })
             .flatten()
         {
@@ -4390,6 +4428,25 @@ impl RunoApp {
                             })
                             .when(!message.usage.is_empty(), |el| {
                                 el.child("·").child(usage_label(&message.usage))
+                            })
+                            .when(!live, |el| {
+                                let sid = self.selected.unwrap_or(0);
+                                el.child(
+                                    self.ghost_button_sized(
+                                        ("fork", index),
+                                        IconName::GitFork,
+                                        "Fork from here: a new session with this conversation and the files as they were",
+                                        22.,
+                                    )
+                                    .opacity(0.)
+                                    .group_hover("message", |el| el.opacity(1.))
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.fork_from(sid, index, cx);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
                             })
                             .child(
                                 self.ghost_button_sized(

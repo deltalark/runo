@@ -316,7 +316,7 @@ pub(crate) const MEMORY_FILE: &str = ".runo/memory.md";
 /// Notes agents saved through the memory server.
 pub(crate) const NOTES_FILE: &str = ".runo/notes.md";
 
-fn read_notes(dir: &str) -> String {
+pub(crate) fn read_notes(dir: &str) -> String {
     std::fs::read_to_string(std::path::Path::new(dir).join(NOTES_FILE)).unwrap_or_default()
 }
 
@@ -512,7 +512,9 @@ impl RunoApp {
         let Some(session) = self.state.session(id) else {
             return;
         };
-        if exchanges(&session.messages).is_empty() || !git::is_repo(&session.dir) {
+        // What was cleared or compacted away stays out of it.
+        let messages = &session.messages[crate::chatctl::context_from(&session.messages)..];
+        if exchanges(messages).is_empty() || !git::is_repo(&session.dir) {
             return;
         }
         let files = git::changes(&session.dir);
@@ -524,7 +526,7 @@ impl RunoApp {
             from: agent::provider(&session.provider).name,
             dir: &session.dir,
             branch: &session.branch,
-            messages: &session.messages,
+            messages,
             files: &files,
             commits: &git::recent_commits(&session.dir, 5),
             notes: &read_notes(&session.dir),
