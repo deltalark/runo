@@ -1,4 +1,4 @@
-//! Persistent projects and sessions, stored as JSON under `~/.runo/state.json`.
+//! Persistent projects and sessions, stored as JSON under `~/.runo` (see `persist`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -450,7 +450,7 @@ pub fn notes_prompt(notes: &[Note]) -> String {
     out
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct State {
     pub next_id: u64,
     pub projects: Vec<Project>,
@@ -841,20 +841,25 @@ pub fn read_json_or_backup<T: Default + serde::de::DeserializeOwned>(path: &Path
     match serde_json::from_str(&text) {
         Ok(value) => value,
         Err(error) => {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let backup = path.with_extension(format!("json.corrupt-{stamp}"));
-            let _ = std::fs::rename(path, &backup);
-            eprintln!(
-                "runo: could not read {} ({error}); moved it to {}",
-                path.display(),
-                backup.display()
-            );
+            move_aside(path, &error.to_string());
             T::default()
         }
     }
+}
+
+/// Move a file Runo can't read out of the way, keeping it next to where it was.
+pub fn move_aside(path: &Path, error: &str) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.corrupt-{stamp}"));
+    let _ = std::fs::rename(path, &backup);
+    eprintln!(
+        "runo: could not read {} ({error}); moved it to {}",
+        path.display(),
+        backup.display()
+    );
 }
 
 /// Write JSON atomically: to a temporary file first, then rename over the target.
@@ -891,12 +896,30 @@ impl State {
         Self::load_from(&state_path())
     }
 
+    /// Load the state whose index is at `path`, splitting a single-file state from
+    /// before into one file per session (the old file is kept as a backup).
     pub fn load_from(path: &Path) -> Self {
-        let mut state: State = read_json_or_backup(path);
-        // A process cannot survive an app restart; do not show it as running.
-        // A turn on a connection keeps going there; Runo picks it up again on start.
+        let root = path.parent().unwrap_or(Path::new("."));
+        let mut state = match crate::persist::read(path) {
+            Ok((mut state, mut written, old)) => {
+                if old {
+                    crate::persist::migrate(path, &mut state, &mut written);
+                }
+                crate::persist::seed(root, written);
+                state
+            }
+            Err(error) => {
+                move_aside(path, &error);
+                State::default()
+            }
+        };
+        // A turn on a connection keeps going there, and a local turn runs detached from
+        // Runo; both are picked up again on start. Anything else could not survive.
         for session in &mut state.sessions {
-            if session.status == Status::Working && !session.remote_turn {
+            if session.status == Status::Working
+                && !session.remote_turn
+                && crate::detach::left_behind(root, session.id).is_none()
+            {
                 session.status = Status::Failed;
                 session.messages.push(Message::new(
                     Role::System,
@@ -907,8 +930,23 @@ impl State {
         state
     }
 
+    /// Read the saved state without changing anything, for other processes such as
+    /// Runo's MCP server.
+    pub fn peek() -> Self {
+        crate::persist::read(&state_path())
+            .map(|(state, ..)| state)
+            .unwrap_or_default()
+    }
+
+    /// Save in the background: the files are written a moment later, and only those
+    /// that changed.
     pub fn save(&self) {
-        write_json(&state_path(), self);
+        crate::persist::queue(&data_dir(), self.clone());
+    }
+
+    /// Write what is still waiting to be saved; for quitting.
+    pub fn flush() {
+        crate::persist::flush(std::time::Duration::from_secs(5));
     }
 
     pub fn next_id(&mut self) -> u64 {

@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::handoff::{MEMORY_FILE, NOTES_FILE};
 use crate::store::{Role, State};
@@ -402,11 +402,7 @@ fn playbook_call(state: &State, dir: &str, tool: &str, args: &Value, inbox: &Pat
 }
 
 fn load_state() -> State {
-    let path: PathBuf = crate::store::data_dir().join("state.json");
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    State::peek()
 }
 
 fn search(dir: &str, query: &str) -> String {
