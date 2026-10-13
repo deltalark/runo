@@ -19,6 +19,8 @@ pub struct GhItem {
 pub struct GhData {
     pub project: u64,
     pub prs: Vec<GhItem>,
+    /// Pull requests that ask for the person's review.
+    pub review_requested: Vec<u64>,
     pub issues: Vec<GhItem>,
     pub runs: Vec<GhItem>,
     pub loading: usize,
@@ -87,6 +89,44 @@ pub fn parse_runs(json: &str) -> Vec<GhItem> {
         .collect()
 }
 
+/// Parse `gh pr list --json number`: just the numbers.
+pub fn parse_numbers(json: &str) -> Vec<u64> {
+    items(json)
+        .iter()
+        .filter_map(|v| v["number"].as_u64())
+        .collect()
+}
+
+/// The newest run of each workflow and branch, when it failed. Older failures that a later
+/// run fixed don't need anyone.
+pub fn latest_failures(runs: &[GhItem]) -> Vec<&GhItem> {
+    let mut seen = std::collections::HashSet::new();
+    runs.iter()
+        .filter(|r| seen.insert(r.detail.clone()))
+        .filter(|r| {
+            matches!(
+                r.state.as_str(),
+                "failure" | "timed_out" | "startup_failure"
+            )
+        })
+        .collect()
+}
+
+impl GhData {
+    /// Open pull requests that ask for the person's review.
+    pub fn requested(&self) -> Vec<&GhItem> {
+        self.prs
+            .iter()
+            .filter(|p| self.review_requested.contains(&p.number))
+            .collect()
+    }
+
+    /// What in Reviews needs the person: review requests and failed checks.
+    pub fn needs_you(&self) -> usize {
+        self.requested().len() + latest_failures(&self.runs).len()
+    }
+}
+
 fn items(json: &str) -> Vec<Value> {
     serde_json::from_str::<Value>(json)
         .ok()
@@ -99,14 +139,9 @@ fn s(v: &Value) -> String {
 }
 
 impl RunoApp {
+    /// Reviews follows the project in the top bar.
     fn gh_project(&self) -> Option<Project> {
-        let id = if self.gh.project != 0 {
-            self.gh.project
-        } else {
-            self.current()
-                .map(|s| s.project_id)
-                .or_else(|| self.state.projects.first().map(|p| p.id))?
-        };
+        let id = self.current_project()?;
         self.state.projects.iter().find(|p| p.id == id).cloned()
     }
 
@@ -143,10 +178,27 @@ impl RunoApp {
         let Some(project) = self.gh_project() else {
             return;
         };
+        if self.gh.project != project.id {
+            self.gh.prs.clear();
+            self.gh.review_requested.clear();
+            self.gh.issues.clear();
+            self.gh.runs.clear();
+        }
         self.gh.project = project.id;
         self.gh.error = None;
-        self.gh.loading = 3;
-        let jobs: [(&str, &[&str]); 3] = [
+        self.gh.loading = 4;
+        let jobs: [(&str, &[&str]); 4] = [
+            (
+                "gh-review",
+                &[
+                    "pr",
+                    "list",
+                    "--search",
+                    "review-requested:@me",
+                    "--json",
+                    "number",
+                ],
+            ),
             (
                 "gh-prs",
                 &[
@@ -197,6 +249,7 @@ impl RunoApp {
         match result {
             Ok(json) => match key.as_str() {
                 "gh-prs" => self.gh.prs = parse_prs(&json),
+                "gh-review" => self.gh.review_requested = parse_numbers(&json),
                 "gh-issues" => self.gh.issues = parse_issues(&json),
                 "gh-runs" => self.gh.runs = parse_runs(&json),
                 _ => {}
@@ -358,11 +411,11 @@ impl RunoApp {
                     current == Some(pid),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.gh.project = pid;
-                    this.gh.prs.clear();
-                    this.gh.issues.clear();
-                    this.gh.runs.clear();
+                    // Picking a project here switches the top bar too.
+                    this.project = Some(pid);
+                    this.new_project = Some(pid);
                     this.load_github();
+                    this.save();
                     cx.notify();
                 })),
             );
@@ -392,11 +445,24 @@ impl RunoApp {
                 "Review pull request #{} ({}): {}. Read it with `gh pr view {} --comments` and `gh pr diff {}`, then summarise problems and suggested fixes.",
                 pr.number, pr.url, pr.title, pr.number, pr.number
             );
+            let requested = self.gh.review_requested.contains(&pr.number);
+            let marked;
+            let pr = if requested {
+                marked = GhItem {
+                    detail: format!("Review requested  ·  {}", pr.detail),
+                    ..pr.clone()
+                };
+                &marked
+            } else {
+                pr
+            };
             prs = prs.child(self.gh_row(
                 ("pr", i),
                 pr,
                 IconName::GitPullRequest,
-                if pr.state == "draft" {
+                if requested {
+                    c_amber()
+                } else if pr.state == "draft" {
                     c_muted()
                 } else {
                     c_green()
@@ -438,7 +504,7 @@ impl RunoApp {
                 .child(text)
         };
         self.page(
-            "Pull requests",
+            "Reviews",
             div()
                 .v_flex()
                 .gap_2()
@@ -516,5 +582,42 @@ mod tests {
         );
         assert_eq!(runs[0].detail, "Build · main");
         assert!(parse_prs("not json").is_empty());
+        assert_eq!(parse_numbers(r#"[{"number":4},{"number":9}]"#), vec![4, 9]);
+    }
+
+    #[test]
+    fn only_the_newest_run_of_each_workflow_counts() {
+        let run = |detail: &str, state: &str| GhItem {
+            detail: detail.into(),
+            state: state.into(),
+            ..GhItem::default()
+        };
+        // Newest first, as gh lists them: CI on main failed before and passes now.
+        let runs = vec![
+            run("CI · main", "success"),
+            run("Lint · main", "failure"),
+            run("CI · main", "failure"),
+            run("CI · feat", "in_progress"),
+        ];
+        let failed = latest_failures(&runs);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].detail, "Lint · main");
+        let data = GhData {
+            prs: vec![
+                GhItem {
+                    number: 4,
+                    ..GhItem::default()
+                },
+                GhItem {
+                    number: 5,
+                    ..GhItem::default()
+                },
+            ],
+            review_requested: vec![5, 77],
+            runs,
+            ..GhData::default()
+        };
+        assert_eq!(data.requested().len(), 1);
+        assert_eq!(data.needs_you(), 2);
     }
 }
