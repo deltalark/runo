@@ -668,31 +668,50 @@ impl RunoApp {
                     cx.notify();
                 }),
             )
-            .when(RIGHT_CLICK_PASTE.load(Ordering::Relaxed), |el| {
-                el.on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, _, _, cx| {
-                        let shell = match cli {
-                            Some(id) => this.cli_runs.get(&id).map(|r| &r.shell),
-                            None => this.active_shell(),
-                        };
-                        if let (Some(shell), Some(text)) =
-                            (shell, cx.read_from_clipboard().and_then(|c| c.text()))
-                        {
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    this.term_mouse(cli, TermMouse::Down(ev), (rows, cols));
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(move |this, ev: &MouseUpEvent, _, _| {
+                    this.term_mouse(cli, TermMouse::Up(ev), (rows, cols));
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &MouseUpEvent, _, _| {
+                    this.term_mouse(cli, TermMouse::Up(ev), (rows, cols));
+                }),
+            )
+            // A program that asked for the mouse gets right clicks too; otherwise they
+            // paste or open the menu.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                    let shell = match cli {
+                        Some(id) => this.cli_runs.get(&id).map(|r| &r.shell),
+                        None => this.active_shell(),
+                    };
+                    let Some(shell) = shell else {
+                        return;
+                    };
+                    if reports_mouse(shell, ev.modifiers.shift) {
+                        this.term_mouse(cli, TermMouse::Down(ev), (rows, cols));
+                    } else if RIGHT_CLICK_PASTE.load(Ordering::Relaxed) {
+                        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                             shell.paste(&text);
                         }
-                        cx.stop_propagation();
-                    }),
-                )
-            })
-            .when(
-                cli.is_none() && !RIGHT_CLICK_PASTE.load(Ordering::Relaxed),
-                |el| {
-                    el.on_mouse_down(
-                        MouseButton::Right,
-                        self.on_context(ctxmenu::CtxTarget::Terminal, cx),
-                    )
-                },
+                    } else if cli.is_none() {
+                        this.ctx_menu = Some((ev.position, ctxmenu::CtxTarget::Terminal));
+                        this.ctx_index = None;
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
             )
             .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, _, cx| {
                 let dy = f32::from(ev.delta.pixel_delta(px(term_line())).y);
@@ -763,15 +782,27 @@ impl RunoApp {
         let mods = (m.shift, m.alt, m.control);
         if mode != vt100::MouseProtocolMode::None && !m.shift {
             let act = match event {
-                TermMouse::Down(_) => pty::MouseAct::Press(0),
-                TermMouse::Up(_) => pty::MouseAct::Release(0),
+                TermMouse::Down(e) => button_code(e.button).map(pty::MouseAct::Press),
+                TermMouse::Up(e) => button_code(e.button).map(pty::MouseAct::Release),
                 TermMouse::Move(e) => {
-                    pty::MouseAct::Move((e.pressed_button == Some(MouseButton::Left)).then_some(0))
+                    Some(pty::MouseAct::Move(e.pressed_button.and_then(button_code)))
                 }
             };
-            if let Some(bytes) = pty::mouse_report(mode, encoding, act, row, col, mods) {
+            let (row, col) = shell.view(|v| report_cell(v, position, (rows, cols)));
+            if let Some(bytes) =
+                act.and_then(|act| pty::mouse_report(mode, encoding, act, row, col, mods))
+            {
                 shell.write_raw(&bytes);
             }
+            return None;
+        }
+        // Only the left button selects; the others mean something only to the program.
+        let left = match event {
+            TermMouse::Down(e) => e.button == MouseButton::Left,
+            TermMouse::Up(e) => e.button == MouseButton::Left,
+            TermMouse::Move(_) => true,
+        };
+        if !left {
             return None;
         }
         let back = scrolled + (rows.saturating_sub(1).saturating_sub(row)) as usize;
@@ -850,6 +881,34 @@ fn cell_at(v: &pty::ViewState, position: Point<Pixels>, (rows, cols): (u16, u16)
     (clamp(y, rows), clamp(x.round(), cols + 1))
 }
 
+/// The cell a mouse report names: the one under the pointer, inside the grid.
+fn report_cell(
+    v: &pty::ViewState,
+    position: Point<Pixels>,
+    (rows, cols): (u16, u16),
+) -> (u16, u16) {
+    let (w, h) = (v.cell.0.max(1.), v.cell.1.max(1.));
+    let x = (f32::from(position.x) - v.origin.0) / w;
+    let y = (f32::from(position.y) - v.origin.1) / h;
+    let clamp = |n: f32, max: u16| (n.max(0.) as u16).min(max.saturating_sub(1));
+    (clamp(y, rows), clamp(x, cols))
+}
+
+/// The button number a mouse report uses, for the buttons a terminal reports.
+fn button_code(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
+/// Whether a program in the PTY gets the mouse: it asked for it and Shift isn't held.
+fn reports_mouse(shell: &pty::Shell, shift: bool) -> bool {
+    !shift && shell.with_screen(|s| s.mouse_protocol_mode()) != vt100::MouseProtocolMode::None
+}
+
 /// The word around character `col`, as `[start, end)`.
 fn word_at(text: &str, col: usize) -> (usize, usize) {
     let chars: Vec<char> = text.chars().collect();
@@ -881,7 +940,7 @@ fn wheel(shell: &pty::Shell, ev: &ScrollWheelEvent, lines: isize, (rows, cols): 
     });
     let m = ev.modifiers;
     if mode != vt100::MouseProtocolMode::None && !m.shift {
-        let (row, col) = shell.view(|v| cell_at(v, ev.position, (rows, cols)));
+        let (row, col) = shell.view(|v| report_cell(v, ev.position, (rows, cols)));
         let act = pty::MouseAct::Wheel(lines > 0);
         for _ in 0..lines.unsigned_abs().min(10) {
             if let Some(bytes) =
@@ -920,5 +979,71 @@ mod tests {
         assert_eq!(cell_at(&v, point(px(10.), px(20.)), (24, 80)), (0, 0));
         assert_eq!(cell_at(&v, point(px(51.), px(53.)), (24, 80)), (2, 5));
         assert_eq!(cell_at(&v, point(px(9000.), px(9000.)), (24, 80)), (23, 80));
+        // Reports name the cell under the pointer and stay inside the grid.
+        assert_eq!(report_cell(&v, point(px(17.), px(20.)), (24, 80)), (0, 0));
+        assert_eq!(report_cell(&v, point(px(51.), px(53.)), (24, 80)), (2, 5));
+        assert_eq!(
+            report_cell(&v, point(px(9000.), px(9000.)), (24, 80)),
+            (23, 79)
+        );
+        assert_eq!(report_cell(&v, point(px(0.), px(0.)), (24, 80)), (0, 0));
+    }
+
+    #[test]
+    fn mouse_buttons_map_to_report_codes() {
+        assert_eq!(button_code(MouseButton::Left), Some(0));
+        assert_eq!(button_code(MouseButton::Middle), Some(1));
+        assert_eq!(button_code(MouseButton::Right), Some(2));
+        assert_eq!(
+            button_code(MouseButton::Navigate(NavigationDirection::Back)),
+            None
+        );
+        // A right-button drag and release in SGR, and a middle click in the default encoding.
+        use vt100::{MouseProtocolEncoding as E, MouseProtocolMode as M};
+        let none = (false, false, false);
+        assert_eq!(
+            pty::mouse_report(
+                M::ButtonMotion,
+                E::Sgr,
+                pty::MouseAct::Move(Some(2)),
+                0,
+                0,
+                none
+            ),
+            Some(b"\x1b[<34;1;1M".to_vec())
+        );
+        assert_eq!(
+            pty::mouse_report(
+                M::PressRelease,
+                E::Sgr,
+                pty::MouseAct::Release(2),
+                1,
+                2,
+                none
+            ),
+            Some(b"\x1b[<2;3;2m".to_vec())
+        );
+        assert_eq!(
+            pty::mouse_report(
+                M::PressRelease,
+                E::Default,
+                pty::MouseAct::Press(1),
+                0,
+                0,
+                none
+            ),
+            Some(vec![0x1b, b'[', b'M', 33, 33, 33])
+        );
+        assert_eq!(
+            pty::mouse_report(
+                M::PressRelease,
+                E::Sgr,
+                pty::MouseAct::Press(0),
+                0,
+                0,
+                (true, false, true)
+            ),
+            Some(b"\x1b[<20;1;1M".to_vec())
+        );
     }
 }

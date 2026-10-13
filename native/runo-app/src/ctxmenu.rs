@@ -61,6 +61,13 @@ enum Act {
     /// Show a session's changes in the right panel.
     Changes(u64),
     Worktrees,
+    /// Compact or clear a session's agent conversation.
+    Compact(u64),
+    ClearContext(u64),
+    /// Edit user message (index) of the current session and send it again.
+    EditMessage(usize),
+    /// Fork the current session from message (index).
+    Fork(usize),
 }
 
 struct Item {
@@ -192,6 +199,17 @@ impl RunoApp {
                     "Reveal in file manager",
                     IconName::FolderOpen,
                     Act::Reveal(session_dir(id)),
+                ));
+                v.push(None);
+                v.push(item(
+                    "Compact context",
+                    IconName::FoldVertical,
+                    Act::Compact(id),
+                ));
+                v.push(item(
+                    "Clear context",
+                    IconName::Eraser,
+                    Act::ClearContext(id),
                 ));
                 v.push(None);
                 v.push(item(
@@ -400,6 +418,17 @@ impl RunoApp {
                     IconName::Quote,
                     Act::Quote(m.text.clone()),
                 ));
+                if m.role != Role::System {
+                    v.push(None);
+                    if m.role == Role::User {
+                        v.push(item(
+                            "Edit and send again",
+                            IconName::Pencil,
+                            Act::EditMessage(*index),
+                        ));
+                    }
+                    v.push(item("Fork from here", IconName::GitFork, Act::Fork(*index)));
+                }
                 v
             }
             CtxTarget::Terminal => vec![
@@ -442,6 +471,25 @@ impl RunoApp {
                 self.start_rename(window, cx);
             }
             Act::Pin(id) => self.toggle_pin(id),
+            Act::Compact(id) => {
+                let opts = self
+                    .state
+                    .session(id)
+                    .map(|s| cx.global::<AppSettings>().agent(&s.provider))
+                    .unwrap_or_default();
+                self.compact_context(id, "", &opts);
+            }
+            Act::ClearContext(id) => self.clear_context(id),
+            Act::EditMessage(index) => {
+                if let Some(id) = self.selected {
+                    self.start_edit(id, index, window, cx);
+                }
+            }
+            Act::Fork(index) => {
+                if let Some(id) = self.selected {
+                    self.fork_from(id, index, cx);
+                }
+            }
             Act::Unread(id) => {
                 if let Some(s) = self.state.session_mut(id) {
                     s.unread = !s.unread;

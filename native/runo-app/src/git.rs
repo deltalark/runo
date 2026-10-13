@@ -292,6 +292,18 @@ pub fn add_worktree(repo: &str, branch: &str, start: Option<&str>) -> Result<Str
     Ok(dest_str)
 }
 
+/// A new worktree on `branch` holding the folder as checkpoint `cp` saw it: the branch
+/// starts at the commit it was on, and uncommitted work comes along.
+pub fn fork_worktree(repo: &str, branch: &str, cp: &str) -> Result<String, String> {
+    let (head, _) = checkpoint_parts(repo, cp);
+    let dir = add_worktree(repo, branch, head.as_deref())?;
+    if let Err(error) = restore(&dir, cp, None) {
+        let _ = remove_worktree(repo, &dir);
+        return Err(error);
+    }
+    Ok(dir)
+}
+
 /// A worktree at `start` with no branch checked out, for a branch made inside it later
 /// (such as by `gh pr checkout`). Lives where a branch called `name` would.
 pub fn add_detached_worktree(repo: &str, name: &str, start: &str) -> Result<String, String> {
@@ -1347,6 +1359,42 @@ mod tests {
             .is_empty());
         assert!(patch_for_message(dir, 10_000).contains("draft.txt"));
         assert!(file_diff_context(dir, "a.txt", true, "HEAD").contains("+two"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn forks_carry_uncommitted_work_at_the_checkpoint() {
+        let repo = repo("fork");
+        let dir = repo.to_str().unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("gone.txt"), "x\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("draft.txt"), "draft\n").unwrap();
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        let cp = checkpoint(dir).unwrap();
+        // Later work in the original folder stays out of the fork.
+        std::fs::write(repo.join("a.txt"), "three\n").unwrap();
+        sh(&repo, &["commit", "-q", "-am", "later"]);
+        let fork = std::path::PathBuf::from(fork_worktree(dir, "runo/fork-test", &cp).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(fork.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fork.join("draft.txt")).unwrap(),
+            "draft\n"
+        );
+        assert!(!fork.join("gone.txt").exists());
+        let fork_dir = fork.to_str().unwrap();
+        assert_eq!(current_branch(fork_dir), "runo/fork-test");
+        assert_eq!(
+            git(fork_dir, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "init"
+        );
+        let _ = remove_worktree(dir, fork_dir);
+        let _ = std::fs::remove_dir_all(worktree_path(dir, "runo/fork-test"));
         let _ = std::fs::remove_dir_all(&repo);
     }
 

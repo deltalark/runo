@@ -30,6 +30,8 @@ All notable changes to Runo are documented here.
 - A log file per launch and crash reports in `~/.runo/logs`, with a card on the next start to view or report a crash.
 - Runo checks GitHub for a newer release and offers to download it; nothing installs on its own. A release workflow builds signed and notarized macOS zips and disk images when the signing secrets are set.
 - Each session is saved in its own file under `~/.runo/sessions`, only when it changed and off the UI thread. The old `state.json` is split on first start and kept as `state.json.v1-backup`.
+- Chat context control: /compact (Claude Code's own, else a fresh conversation seeded with a summary) and /clear, also in the session's right-click menu. Fork a session from any turn, with the files as they were then, and edit and resend any sent message, which rewinds the files and conversation or sends it as a fork.
+- The / menu lists the agent's own commands besides playbooks: its built-ins, custom commands (.claude/commands, ~/.codex/prompts, .gemini/commands and the equivalents of other CLIs) and Claude Code skills.
 
 ### Fixed
 
@@ -76,3 +78,5 @@ All notable changes to Runo are documented here.
 - Terminal: dim and strikethrough text are drawn (vt100 is now vendored with both attributes).
 - Cursor, Gemini CLI and Droid get Runo's memory server and shared MCP servers through their project config file, merged with yours, kept out of git and removed after each turn. Grok has no project-level MCP config, so it still gets none.
 - Settings → MCP adds and edits Runo's own servers in a form (name, command or URL, environment) instead of a JSON file.
+- The CLI view and terminals pass middle and right clicks, drags and the wheel to programs that turn on mouse reporting, at the cell under the pointer; Shift keeps local selection.
+
