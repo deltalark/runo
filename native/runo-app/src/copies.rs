@@ -101,27 +101,20 @@ pub(crate) fn search_dirs(home: &Path, path: Option<&std::ffi::OsStr>) -> Vec<(P
         let Ok(entries) = std::fs::read_dir(&versions) else {
             continue;
         };
-        let mut found: Vec<PathBuf> = entries
+        let mut found: Vec<(String, PathBuf)> = entries
             .flatten()
             .map(|e| {
                 let dir = e.path();
+                let name = e.file_name().to_string_lossy().into_owned();
                 let fnm = dir.join("installation/bin");
-                if fnm.is_dir() {
-                    fnm
-                } else {
-                    dir.join("bin")
-                }
+                let bin = if fnm.is_dir() { fnm } else { dir.join("bin") };
+                (name, bin)
             })
             .collect();
-        // Newest Node.js first.
-        found.sort_by_key(|d| {
-            std::cmp::Reverse(crate::alerts::version_parts(
-                &d.parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ))
-        });
-        more.extend(found);
+        // Newest Node.js first, by the version folder's own name: the rest of the path
+        // can hold digits too.
+        found.sort_by_key(|(name, _)| std::cmp::Reverse(crate::alerts::version_parts(name)));
+        more.extend(found.into_iter().map(|(_, bin)| bin));
     }
     for dir in more {
         if !dirs.iter().any(|(d, _)| *d == dir) {
