@@ -35,6 +35,8 @@ All notable changes to Runo are documented here.
 - Sessions page: search over titles, branches, projects and past conversations (matches show a snippet), filters for project, agent, status and archived, and sort by recent, created or name. Quick open lists archived sessions (marked) and sessions whose conversation mentions what you type.
 - New session: pick the base branch (local or remote) and get a branch named after the task, such as `runo/fix-login-redirect`, numbered when taken.
 - New project can clone a repository from a URL into a folder you choose, with git's progress and errors shown, then adds it.
+- Design mode: collect design references per project (pasted or picked images, captures of the preview) with notes, keep design notes in `docs/design.md`, see the app's dev server beside them, and start a session with the picked references attached.
+- Architecture mode: a map of the project's packages, dependencies and module imports read from its manifests and code, architecture notes and decisions kept in `docs/architecture.md` with a generated Mermaid diagram, and agent sessions that start with both attached.
 
 ### Fixed
 
