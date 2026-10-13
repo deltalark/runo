@@ -359,6 +359,12 @@ pub struct JsonStream {
     streamed: bool,
     usage: Usage,
     named: bool,
+    /// Codex items already shown as a step, by id.
+    shown: std::collections::HashSet<String>,
+    /// How much of each Codex message is already shown, by item id.
+    written: std::collections::HashMap<String, usize>,
+    /// The last error reported, so the same failure isn't shown twice.
+    last_error: String,
 }
 
 impl JsonStream {
@@ -369,7 +375,116 @@ impl JsonStream {
             streamed: false,
             usage: Usage::default(),
             named: false,
+            shown: Default::default(),
+            written: Default::default(),
+            last_error: String::new(),
         }
+    }
+
+    /// An error, unless it repeats the one just reported.
+    fn error(&mut self, message: String) -> Option<Update> {
+        if message == self.last_error {
+            return None;
+        }
+        self.last_error = message.clone();
+        Some(Update::Error(message))
+    }
+
+    /// A Codex item as it starts, grows (`done` false) or finishes. Messages stream in as
+    /// their text grows; other items show as a step once, as soon as they can be named.
+    fn codex_item(&mut self, item: &Value, done: bool) -> Vec<Update> {
+        let id = item["id"].as_str().unwrap_or("").to_string();
+        let kind = item["type"].as_str().unwrap_or("");
+        if kind == "agent_message" {
+            let text = item["text"].as_str().unwrap_or("");
+            if id.is_empty() {
+                return if done {
+                    self.block(text).into_iter().collect()
+                } else {
+                    vec![]
+                };
+            }
+            let written = self.written.get(&id).copied().unwrap_or(0);
+            // Text that shrank or was rewritten mid-character is left as first shown.
+            let Some(rest) = text.get(written..) else {
+                return vec![];
+            };
+            let rest = if written == 0 { rest.trim_start() } else { rest };
+            let rest = if done { rest.trim_end() } else { rest };
+            if rest.is_empty() {
+                return vec![];
+            }
+            self.written.insert(id, text.len());
+            let sep = if written == 0 && self.any_text {
+                "\n\n"
+            } else {
+                ""
+            };
+            self.any_text = true;
+            return vec![Update::Text(format!("{sep}{rest}"))];
+        }
+        if !id.is_empty() && self.shown.contains(&id) {
+            return vec![];
+        }
+        let mut out = Vec::new();
+        match kind {
+            "command_execution" => {
+                let command = item["command"].as_str().unwrap_or("");
+                if !command.is_empty() {
+                    out.push(Update::Step(format!(
+                        "Ran {}",
+                        short(&shell_body(command), 70)
+                    )));
+                }
+            }
+            "file_change" => {
+                for change in item["changes"].as_array().into_iter().flatten() {
+                    let path = change["path"].as_str().unwrap_or("").to_string();
+                    let verb = match change["kind"].as_str().unwrap_or("") {
+                        "add" => "Wrote",
+                        "delete" => "Deleted",
+                        _ => "Edited",
+                    };
+                    let path = path
+                        .strip_prefix(&self.cwd)
+                        .map(|p| p.trim_start_matches('/').to_string())
+                        .unwrap_or(path);
+                    out.push(Update::Step(format!("{verb} {path}")));
+                }
+            }
+            "mcp_tool_call" => out.push(Update::Step(format!(
+                "Used {} {}",
+                item["server"].as_str().unwrap_or(""),
+                item["tool"].as_str().unwrap_or("a tool")
+            ))),
+            "web_search" => {
+                let query = item["query"].as_str().unwrap_or("");
+                if !query.is_empty() || done {
+                    out.push(Update::Step(format!(
+                        "Searched the web for {}",
+                        short(query, 50)
+                    )));
+                }
+            }
+            "todo_list" => out.push(Update::Step("Updated the plan".into())),
+            // Reasoning summaries start with a bold heading, such as "**Reading the tests**".
+            "reasoning" => {
+                let text = item["text"].as_str().unwrap_or("");
+                let heading = text
+                    .lines()
+                    .map(|l| l.trim().trim_matches('*').trim())
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("");
+                if !heading.is_empty() {
+                    out.push(Update::Step(format!("Thought: {}", short(heading, 70))));
+                }
+            }
+            _ => {}
+        }
+        if !out.is_empty() && !id.is_empty() {
+            self.shown.insert(id);
+        }
+        out
     }
 
     /// A complete block of reply text, set apart from earlier ones.
@@ -417,45 +532,10 @@ impl JsonStream {
         let num = |v: &Value| v.as_u64().unwrap_or(0);
         let data = &event["data"];
         match event["type"].as_str().unwrap_or("") {
-            // Codex.
-            "item.completed" => {
-                let item = &event["item"];
-                match item["type"].as_str().unwrap_or("") {
-                    "agent_message" => out.extend(self.block(item["text"].as_str().unwrap_or(""))),
-                    "command_execution" => {
-                        let command = item["command"].as_str().unwrap_or("");
-                        out.push(Update::Step(format!(
-                            "Ran {}",
-                            short(&shell_body(command), 70)
-                        )));
-                    }
-                    "file_change" => {
-                        for change in item["changes"].as_array().into_iter().flatten() {
-                            let path = change["path"].as_str().unwrap_or("").to_string();
-                            let verb = match change["kind"].as_str().unwrap_or("") {
-                                "add" => "Wrote",
-                                "delete" => "Deleted",
-                                _ => "Edited",
-                            };
-                            let path = path
-                                .strip_prefix(&self.cwd)
-                                .map(|p| p.trim_start_matches('/').to_string())
-                                .unwrap_or(path);
-                            out.push(Update::Step(format!("{verb} {path}")));
-                        }
-                    }
-                    "mcp_tool_call" => out.push(Update::Step(format!(
-                        "Used {} {}",
-                        item["server"].as_str().unwrap_or(""),
-                        item["tool"].as_str().unwrap_or("a tool")
-                    ))),
-                    "web_search" => out.push(Update::Step(format!(
-                        "Searched the web for {}",
-                        short(item["query"].as_str().unwrap_or(""), 50)
-                    ))),
-                    "todo_list" => out.push(Update::Step("Updated the plan".into())),
-                    _ => {}
-                }
+            // Codex: items show as they start and grow, not only once they finish.
+            "item.started" | "item.updated" | "item.completed" => {
+                let done = event["type"] == "item.completed";
+                out.extend(self.codex_item(&event["item"], done));
             }
             "turn.completed" => {
                 let u = &event["usage"];
@@ -468,11 +548,9 @@ impl JsonStream {
                     out.push(Update::Usage(self.usage));
                 }
             }
-            "turn.failed" => out.push(Update::Error(
-                event["error"]["message"]
-                    .as_str()
-                    .unwrap_or("The agent reported an error.")
-                    .to_string(),
+            "turn.failed" => out.extend(self.error(
+                error_message(&event["error"])
+                    .unwrap_or_else(|| "The agent reported an error.".into()),
             )),
             // Cursor: complete assistant messages; Amp-style content blocks.
             "assistant" => {
@@ -638,14 +716,13 @@ impl JsonStream {
                     .to_string(),
             )),
             "error" => {
-                let message = event["message"]
-                    .as_str()
-                    .or(event["error"]["message"].as_str())
-                    .or(event["error"].as_str())
-                    .unwrap_or("");
+                // Codex puts the text in `message`, OpenCode in `error.data.message`.
+                let message = error_message(&event["message"])
+                    .or_else(|| error_message(&event["error"]))
+                    .unwrap_or_default();
                 // Codex reports its own retries as errors; only the final failure counts.
                 if !message.is_empty() && !message.starts_with("Reconnecting") {
-                    out.push(Update::Error(message.to_string()));
+                    out.extend(self.error(message));
                 }
             }
             _ => {}
@@ -692,6 +769,46 @@ impl JsonStream {
             }
         }
         self.step(tool, &input)
+    }
+}
+
+/// The readable text of an error: a string, or the message inside an object such as
+/// OpenCode's `{"name":…,"data":{"message":…}}`. Messages that are themselves JSON, as
+/// Codex passes on from the API, or end in it ("unexpected status 400: {…}"), give the
+/// message inside.
+fn error_message(error: &Value) -> Option<String> {
+    match error {
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let inner = text
+                .find('{')
+                .and_then(|at| serde_json::from_str::<Value>(&text[at..]).ok())
+                .filter(Value::is_object)
+                .and_then(|v| error_message(&v));
+            Some(inner.unwrap_or_else(|| text.to_string()))
+        }
+        Value::Object(map) => ["message", "detail", "error_description", "error", "data"]
+            .iter()
+            .find_map(|k| map.get(*k).and_then(error_message))
+            .or_else(|| map.get("name").and_then(Value::as_str).map(str::to_string)),
+        _ => None,
+    }
+}
+
+/// An error line from a CLI's log, with any JSON in it reduced to the message inside, as
+/// in Codex's "ERROR: {\"error\":{\"message\":…}}".
+pub fn readable_error(line: &str) -> String {
+    let Some(at) = line.find('{') else {
+        return line.to_string();
+    };
+    match error_message(&Value::String(line[at..].to_string())) {
+        Some(message) if !message.starts_with('{') => {
+            format!("{}{message}", &line[..at])
+        }
+        _ => line.to_string(),
     }
 }
 
@@ -877,6 +994,7 @@ mod tests {
             out,
             [
                 Update::Conversation("0199a213-81c0-7800-8aa1-bbab2a035a53".into()),
+                Update::Step("Thought: Looking".into()),
                 Update::Step("Ran ls -a".into()),
                 Update::Step("Edited src/lib.rs".into()),
                 Update::Step("Wrote NEW.md".into()),
@@ -893,6 +1011,75 @@ mod tests {
         assert_eq!(
             json_all(&[r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#]),
             [Update::Error("usage limit reached".into())]
+        );
+    }
+
+    #[test]
+    fn codex_streams_messages_and_shows_steps_as_they_start() {
+        let out = json_all(&[
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"First."}}"#,
+            r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
+            r#"{"type":"item.updated","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"running 3 tests","exit_code":null,"status":"in_progress"}}"#,
+            r#"{"type":"item.started","item":{"id":"item_2","type":"agent_message","text":""}}"#,
+            r#"{"type":"item.updated","item":{"id":"item_2","type":"agent_message","text":"All tests"}}"#,
+            r#"{"type":"item.updated","item":{"id":"item_2","type":"agent_message","text":"All tests pass"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'cargo test'","aggregated_output":"ok","exit_code":0,"status":"completed"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"All tests pass.\n"}}"#,
+        ]);
+        assert_eq!(
+            out,
+            [
+                Update::Text("First.".into()),
+                Update::Step("Ran cargo test".into()),
+                Update::Text("\n\nAll tests".into()),
+                Update::Text(" pass".into()),
+                Update::Text(".".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn error_lines_lose_their_json() {
+        assert_eq!(
+            readable_error(r#"ERROR: {"detail":"The model is not supported"}"#),
+            "ERROR: The model is not supported"
+        );
+        assert_eq!(readable_error("Error: plain {not json"), "Error: plain {not json");
+    }
+
+    #[test]
+    fn errors_show_the_message_inside() {
+        // Codex passes on the API's error as JSON inside the message, and says it twice.
+        let codex = json_all(&[
+            r#"{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.\"}}"}"#,
+            r#"{"type":"turn.failed","error":{"message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.\"}}"}}"#,
+        ]);
+        assert_eq!(
+            codex,
+            [Update::Error(
+                "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
+                    .into()
+            )]
+        );
+        assert_eq!(
+            json_all(&[
+                r#"{"type":"error","message":"unexpected status 401 Unauthorized: {\"detail\":\"Your token expired\"}"}"#
+            ]),
+            [Update::Error("Your token expired".into())]
+        );
+        let opencode = json_all(&[
+            r#"{"type":"error","timestamp":1760000000000,"sessionID":"ses_9","error":{"name":"UnknownError","data":{"message":"Error: Token refresh failed: 401"}}}"#,
+        ]);
+        assert_eq!(
+            opencode,
+            [
+                Update::Conversation("ses_9".into()),
+                Update::Error("Error: Token refresh failed: 401".into())
+            ]
+        );
+        assert_eq!(
+            json_all(&[r#"{"type":"error","error":{"name":"ProviderAuthError","data":{}}}"#]),
+            [Update::Error("ProviderAuthError".into())]
         );
     }
 

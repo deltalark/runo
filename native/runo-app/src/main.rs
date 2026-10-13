@@ -376,6 +376,8 @@ struct RunoApp {
     stopping: std::collections::HashSet<u64>,
     /// Runs stopped because their CLI waited for a browser sign-in.
     signed_out: std::collections::HashSet<u64>,
+    /// Sessions whose agent reported an error in its output this turn.
+    stream_failed: std::collections::HashSet<u64>,
     /// Files changed by each session's latest turn, once it finished (for Undo / Keep).
     turn_files: HashMap<u64, usize>,
     /// Images attached to each session's unsent prompt.
@@ -1343,6 +1345,7 @@ impl RunoApp {
             started: HashMap::new(),
             stopping: Default::default(),
             signed_out: Default::default(),
+            stream_failed: Default::default(),
             turn_files: HashMap::new(),
             attachments: HashMap::new(),
             drafts: HashMap::new(),
@@ -1824,6 +1827,7 @@ impl RunoApp {
                                 }
                             }
                             stream::Update::Error(error) => {
+                                self.stream_failed.insert(id);
                                 session.messages.push(Message::new(Role::System, error))
                             }
                             stream::Update::Usage(usage) => m.usage = usage,
@@ -1888,6 +1892,8 @@ impl RunoApp {
                     .filter(|l| !l.starts_with(connections::WARNING))
                     .collect();
                 let signed_out = self.signed_out.remove(&id);
+                // Some CLIs report a failed turn in their output and still exit cleanly.
+                let reported = self.stream_failed.remove(&id);
                 let mut hold = false;
                 let sync_warning = self.sync_warning(id);
                 if let Some(session) = self.state.session_mut(id) {
@@ -1904,12 +1910,25 @@ impl RunoApp {
                         .chain(all.iter().map(String::as_str))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let sign_in = if (silent || !ok || signed_out) && !stopped {
+                    let sign_in = if (silent || !ok || signed_out || reported) && !stopped {
                         agent::sign_in_hint(&session.provider, &errors)
                     } else {
                         None
                     };
-                    let ok = ok && sign_in.is_none();
+                    let ok = ok && sign_in.is_none() && !reported;
+                    // A reply that never started is dropped, leaving the error.
+                    if reported {
+                        let at = session
+                            .messages
+                            .iter()
+                            .rposition(|m| m.role != Role::System);
+                        if let Some(at) = at.filter(|&at| {
+                            let m = &session.messages[at];
+                            m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
+                        }) {
+                            session.messages.remove(at);
+                        }
+                    }
                     session.status = if ok { Status::Done } else { Status::Failed };
                     session.remote_turn = false;
                     session.unread = !on_screen;
@@ -1939,28 +1958,36 @@ impl RunoApp {
                         hold = true;
                         session.messages.push(Message::new(Role::System, hint));
                     } else if !ok {
-                        let mut errors: Vec<String> = Vec::new();
+                        let mut lines: Vec<String> = Vec::new();
                         for line in all.iter().filter(|l| {
                             l.starts_with("ERROR:")
                                 || l.starts_with("Error:")
                                 || l.starts_with("error:")
                         }) {
-                            if !errors.contains(line) {
-                                errors.push(line.clone());
+                            let line = stream::readable_error(line);
+                            if !lines.contains(&line) {
+                                lines.push(line);
                             }
                         }
-                        let tail: Vec<String> = if errors.is_empty() {
+                        let tail: Vec<String> = if lines.is_empty() {
                             all.iter().rev().take(12).rev().cloned().collect()
                         } else {
-                            errors
+                            lines
                         };
-                        let log = tail.join("\n");
+                        // The agent's own error is already shown above; only a tip is added.
+                        let log = if reported {
+                            errors.clone()
+                        } else {
+                            tail.join("\n")
+                        };
                         let mut text = String::from(if stopped {
                             "Stopped."
+                        } else if reported {
+                            ""
                         } else {
                             "The agent stopped with an error."
                         });
-                        if !log.trim().is_empty() && !stopped {
+                        if !log.trim().is_empty() && !stopped && !reported {
                             text.push_str(&format!(
                                 "\n```text\n{}\n```",
                                 log.replace("```", "'''")
@@ -1973,7 +2000,10 @@ impl RunoApp {
                         {
                             text.push_str("\nTip: choose another model from the model menu, or set one under Settings for this agent.");
                         }
-                        session.messages.push(Message::new(Role::System, text));
+                        let text = text.trim_start().to_string();
+                        if !text.is_empty() {
+                            session.messages.push(Message::new(Role::System, text));
+                        }
                     }
                 }
                 let ok = self

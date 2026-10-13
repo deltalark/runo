@@ -1139,6 +1139,12 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
         "status 401",
         "(401)",
         "code 401",
+        // OpenCode, when its saved sign-in has expired.
+        "token refresh failed",
+        "providerautherror",
+        // Gemini, signed out.
+        "set an auth method",
+        "must specify the gemini_api_key",
     ];
     if !signs.iter().any(|s| lower.contains(s)) {
         return None;
@@ -2126,6 +2132,14 @@ mod arg_tests {
         assert!(hint.contains("codex login"));
         assert!(sign_in_hint("claude", "Invalid API key · Please run /login").is_some());
         assert!(sign_in_hint("claude", "error: model not found").is_none());
+        assert!(sign_in_hint("opencode", "Error: Token refresh failed: 401")
+            .unwrap()
+            .contains("opencode auth login"));
+        assert!(sign_in_hint(
+            "gemini",
+            "Please set an Auth method in your /Users/me/.gemini/settings.json or specify one of the following environment variables before running: GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA"
+        )
+        .is_some());
         assert!(waits_for_sign_in(
             "No API key found. Starting login flow..."
         ));
