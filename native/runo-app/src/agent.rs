@@ -1189,6 +1189,30 @@ pub fn sign_in_help(provider: &str) -> String {
     format!("{name} isn't signed in. {how}")
 }
 
+/// Whether the CLI reports what a turn cost, which spending limits count.
+pub fn reports_cost(provider: &str) -> bool {
+    matches!(provider, "claude" | "opencode")
+}
+
+/// Which agents report a cost, for spending limits and the spend shown: "Only Claude
+/// Code and OpenCode report a cost; …".
+pub fn cost_note() -> String {
+    let (some, none): (Vec<&Provider>, Vec<&Provider>) =
+        PROVIDERS.iter().partition(|p| reports_cost(p.id));
+    let names = |list: &[&Provider]| {
+        let names: Vec<&str> = list.iter().map(|p| p.name).collect();
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => names.join(""),
+        }
+    };
+    format!(
+        "Only {} report a cost; {} report none, so their turns count as $0 and limits don't hold them.",
+        names(&some),
+        names(&none)
+    )
+}
+
 /// Where to pick another model, when the CLI's errors say the model can't be used.
 pub fn model_hint(provider: &str, log: &str) -> Option<String> {
     let lower = log.to_lowercase();
@@ -2220,6 +2244,9 @@ mod arg_tests {
         assert!(tip.contains("model chip") && tip.contains("Settings → Codex"));
         assert!(model_hint("codex", "Model metadata for `x` not found.").is_some());
         assert!(model_hint("codex", "file not found").is_none());
+        let note = cost_note();
+        assert!(note.starts_with("Only Claude Code and OpenCode report a cost; Codex, "));
+        assert!(note.contains(" and Grok report none"));
         assert!(sign_in_hint("opencode", "Error: Token refresh failed: 401")
             .unwrap()
             .contains("opencode auth login"));

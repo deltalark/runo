@@ -8342,10 +8342,19 @@ impl Render for RunoApp {
                                                     .iter()
                                                     .map(|m| m.usage.cost_cents)
                                                     .sum();
-                                                (u, cost)
+                                                let reports = agent::reports_cost(&s.provider);
+                                                let about = if reports {
+                                                    format!("session cost ${:.2}", cost / 100.0)
+                                                } else {
+                                                    format!(
+                                                        "{} reports no cost, so spending limits don't count it",
+                                                        agent::provider(&s.provider).name
+                                                    )
+                                                };
+                                                (u, cost, reports, about)
                                             })
                                     }),
-                                |el, (usage, cost)| {
+                                |el, (usage, cost, reports, about)| {
                                     let window = if usage.window > 0 { usage.window } else { 200_000 };
                                     let pct = (usage.context() as f32 / window as f32).min(1.0);
                                     el.child(
@@ -8356,8 +8365,7 @@ impl Render for RunoApp {
                                             .gap(px(6.))
                                             .tooltip(move |window, cx| {
                                                 gpui_kit::component::tooltip::Tooltip::new(format!(
-                                                    "Context used by the latest turn · session cost ${:.2}",
-                                                    cost / 100.0
+                                                    "Context used by the latest turn · {about}"
                                                 ))
                                                 .build(window, cx)
                                             })
@@ -8382,7 +8390,8 @@ impl Render for RunoApp {
                                             .child(format!("{:.0}%", pct * 100.))
                                             .when(cost > 0.0, |el| {
                                                 el.child(format!("· ${:.2}", cost / 100.0))
-                                            }),
+                                            })
+                                            .when(!reports, |el| el.child("· no cost reported")),
                                     )
                                 },
                             )

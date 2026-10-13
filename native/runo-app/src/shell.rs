@@ -1162,8 +1162,9 @@ impl RunoApp {
                                 .cursor_default()
                                 .tooltip(move |window, cx| {
                                     Tooltip::new(format!(
-                                        "Spend reported by the agents today. ${:.2} across every session.",
-                                        total / 100.0
+                                        "Spend reported by the agents today. ${:.2} across every session. {}",
+                                        total / 100.0,
+                                        agent::cost_note()
                                     ))
                                     .build(window, cx)
                                 })
@@ -1862,7 +1863,7 @@ impl RunoApp {
                     .child(self.stat_card(
                         "Spend today",
                         format!("${:.2}", spend_today / 100.0),
-                        "reported by the agents, all projects".into(),
+                        "reported by Claude Code and OpenCode, all projects".into(),
                         c_muted(),
                     )),
             )
