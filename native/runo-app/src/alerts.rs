@@ -361,8 +361,8 @@ mod stage_tests {
     }
 }
 
-/// A line of updater output without colour codes or spinner characters.
-fn clean_line(raw: &str) -> String {
+/// A line of output without colour codes or spinner characters.
+pub(crate) fn clean_line(raw: &str) -> String {
     let mut out = String::new();
     let mut chars = raw.chars().peekable();
     while let Some(c) = chars.next() {
@@ -2149,6 +2149,11 @@ mod tests {
         assert_eq!(
             clean_line("\x1b[32mDownloading\x1b[0m 12% \u{280b}"),
             "Downloading 12%"
+        );
+        // OpenCode colours its stderr errors even when it isn't a terminal.
+        assert_eq!(
+            clean_line("\x1b[91m\x1b[1mError: \x1b[0mSession not found"),
+            "Error: Session not found"
         );
         assert_eq!(
             phase_of("npm http fetch GET 200 https://x 41ms"),

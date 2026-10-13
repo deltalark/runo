@@ -1968,6 +1968,7 @@ impl RunoApp {
                     .cloned()
                     .unwrap_or_default()
                     .into_iter()
+                    .map(|l| alerts::clean_line(&l))
                     .filter(|l| !l.starts_with(connections::WARNING))
                     .collect();
                 let signed_out = self.signed_out.remove(&id);
