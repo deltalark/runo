@@ -39,6 +39,8 @@ pub struct Caps {
     pub detected: bool,
     /// The model the CLI uses when none is picked, by name ("Sonnet 5.5"), when it says.
     pub default_model: String,
+    /// The CLI's own `--help`, for flags that only newer releases have.
+    pub help: String,
 }
 
 /// One dropdown shown in the composer.
@@ -74,6 +76,23 @@ pub fn binary(provider: &'static crate::agent::Provider) -> String {
 
 fn store() -> &'static RwLock<HashMap<String, Caps>> {
     CAPS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Whether the installed CLI's help mentions `text`, such as a flag newer releases added.
+pub fn mentions(provider: &str, text: &str) -> bool {
+    store()
+        .read()
+        .ok()
+        .and_then(|m| m.get(provider).map(|c| c.help.contains(text)))
+        .unwrap_or(false)
+}
+
+/// Record what a CLI supports; used by tests to stand in for detection.
+#[cfg(test)]
+pub fn set(provider: &str, caps: Caps) {
+    if let Ok(mut map) = store().write() {
+        map.insert(provider.to_string(), caps);
+    }
 }
 
 pub fn get(provider: &str) -> Caps {
@@ -130,24 +149,36 @@ fn generic(provider: &str, bin: &str) -> Caps {
         label: label.into(),
         desc: desc.into(),
     };
+    let help = if installed {
+        run(bin, &["--help"])
+    } else {
+        String::new()
+    };
     // Models: the CLI's own list when it has one, else the choices its help names.
     let models = if !installed {
         Vec::new()
     } else if provider == "cursor" {
         crate::models::parse_model_list(&run_quiet(bin, &["models"], Duration::from_secs(20)))
     } else {
-        crate::models::help_model_choices(&run(bin, &["--help"]))
+        crate::models::help_model_choices(&help)
     };
+    // Only the levels the CLI can really hold to: one without a read-only mode doesn't
+    // offer Plan only, and one that always runs every tool offers only Full access.
+    let modes = crate::agent::modes(provider)
+        .iter()
+        .map(|mode| match *mode {
+            "edit" => level("edit", "Auto edit", "Edit files without asking"),
+            "plan" => level("plan", "Plan only", "Read and suggest; no edits"),
+            _ => level("full", "Full access", "Run anything without asking"),
+        })
+        .collect();
     Caps {
         installed,
         version,
         models,
-        modes: vec![
-            level("edit", "Auto edit", "Edit files without asking"),
-            level("plan", "Plan only", "Read and suggest; no edits"),
-            level("full", "Full access", "Run anything without asking"),
-        ],
+        modes,
         detected: true,
+        help,
         ..Caps::default()
     }
 }

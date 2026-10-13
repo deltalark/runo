@@ -2,7 +2,10 @@
 //! with Runo's sessions.
 //!
 //! Each agent already loads its own servers. A shared server is handed to the other
-//! agents per run: Claude Code through `--mcp-config`, Codex through `-c mcp_servers.*`.
+//! agents per run where the CLI takes servers that way: Claude Code and Qwen Code through
+//! `--mcp-config`, Codex through `-c mcp_servers.*`, Amp through `--mcp-config`, Copilot
+//! through `--additional-mcp-config` and OpenCode through `OPENCODE_CONFIG_CONTENT`.
+//! Cursor, Gemini, Droid and Grok only read their own config files, so they get none.
 
 use crate::settings::McpInfo;
 use serde_json::{Map, Value};
@@ -40,15 +43,8 @@ impl McpSpec {
         }
     }
 
-    /// Claude Code's `mcpServers` entry.
-    fn claude_json(&self) -> Value {
-        let pairs = |list: &[(String, String)]| {
-            Value::Object(
-                list.iter()
-                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-                    .collect(),
-            )
-        };
+    /// Claude Code's `mcpServers` entry, which Qwen Code reads too.
+    pub fn claude_json(&self) -> Value {
         let mut obj = Map::new();
         if !self.command.is_empty() {
             obj.insert("command".into(), self.command.clone().into());
@@ -66,8 +62,64 @@ impl McpSpec {
         Value::Object(obj)
     }
 
+    /// Amp's `amp.mcpServers` entry.
+    pub fn amp_json(&self) -> Value {
+        let mut obj = Map::new();
+        if !self.command.is_empty() {
+            obj.insert("command".into(), self.command.clone().into());
+            obj.insert("args".into(), self.args.clone().into());
+            if !self.env.is_empty() {
+                obj.insert("env".into(), pairs(&self.env));
+            }
+        } else {
+            obj.insert("url".into(), self.url.clone().into());
+            if !self.headers.is_empty() {
+                obj.insert("headers".into(), pairs(&self.headers));
+            }
+        }
+        Value::Object(obj)
+    }
+
+    /// Copilot's `mcpServers` entry; it lists the tools the agent may use.
+    pub fn copilot_json(&self) -> Value {
+        let mut obj = Map::new();
+        if !self.command.is_empty() {
+            obj.insert("type".into(), "local".into());
+            obj.insert("command".into(), self.command.clone().into());
+            obj.insert("args".into(), self.args.clone().into());
+            obj.insert("env".into(), pairs(&self.env));
+        } else {
+            obj.insert("type".into(), if self.sse { "sse" } else { "http" }.into());
+            obj.insert("url".into(), self.url.clone().into());
+            obj.insert("headers".into(), pairs(&self.headers));
+        }
+        obj.insert("tools".into(), serde_json::json!(["*"]));
+        Value::Object(obj)
+    }
+
+    /// OpenCode's `mcp` entry: the command and its arguments in one list.
+    pub fn opencode_json(&self) -> Value {
+        let mut obj = Map::new();
+        if !self.command.is_empty() {
+            obj.insert("type".into(), "local".into());
+            let mut command = vec![self.command.clone()];
+            command.extend(self.args.iter().cloned());
+            obj.insert("command".into(), command.into());
+            if !self.env.is_empty() {
+                obj.insert("environment".into(), pairs(&self.env));
+            }
+        } else {
+            obj.insert("type".into(), "remote".into());
+            obj.insert("url".into(), self.url.clone().into());
+            if !self.headers.is_empty() {
+                obj.insert("headers".into(), pairs(&self.headers));
+            }
+        }
+        Value::Object(obj)
+    }
+
     /// Codex `-c` overrides for `mcp_servers.<name>`.
-    fn codex_overrides(&self, name: &str) -> Vec<String> {
+    pub fn codex_overrides(&self, name: &str) -> Vec<String> {
         let quote = |s: &str| Value::String(s.to_string()).to_string();
         let mut out = Vec::new();
         if !self.command.is_empty() {
@@ -101,6 +153,14 @@ impl McpSpec {
         }
         out
     }
+}
+
+fn pairs(list: &[(String, String)]) -> Value {
+    Value::Object(
+        list.iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect(),
+    )
 }
 
 /// The key a server is shared under in settings: `<app>/<name>`.
@@ -154,6 +214,9 @@ fn shared_for(agent: &str) -> Vec<(String, McpSpec)> {
         .filter(|m| match agent {
             "claude" => m.provider != "Claude Code",
             "codex" => m.provider != "Codex",
+            "opencode" => m.provider != "OpenCode",
+            "qwen" => m.provider != "Qwen Code",
+            "amp" => m.provider != "Amp",
             _ => true,
         })
         .map(|m| (safe_name(&m.name), m.spec))
@@ -161,19 +224,12 @@ fn shared_for(agent: &str) -> Vec<(String, McpSpec)> {
         .collect()
 }
 
-/// Shared servers as Claude Code `mcpServers` entries.
-pub fn claude_servers() -> Vec<(String, Value)> {
-    shared_for("claude")
+/// Shared servers for one run of `agent`. A run on a connection or in a VM can't start
+/// programs on this machine, so only servers reached by URL go along there.
+pub fn shared_servers(agent: &str, local: bool) -> Vec<(String, McpSpec)> {
+    shared_for(agent)
         .into_iter()
-        .map(|(name, spec)| (name, spec.claude_json()))
-        .collect()
-}
-
-/// Shared servers as Codex `-c` overrides.
-pub fn codex_overrides() -> Vec<String> {
-    shared_for("codex")
-        .into_iter()
-        .flat_map(|(name, spec)| spec.codex_overrides(&name))
+        .filter(|(_, spec)| local || spec.command.is_empty())
         .collect()
 }
 
@@ -484,13 +540,32 @@ mod tests {
             "Cursor/figma".into(),
             "Claude Code/files".into(),
         ]);
-        let claude: Vec<String> = claude_servers().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(claude, ["blender_lab", "figma"]);
-        let codex = codex_overrides();
+        let names = |agent: &str, local: bool| -> Vec<String> {
+            shared_servers(agent, local)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect()
+        };
+        assert_eq!(names("claude", true), ["blender_lab", "figma"]);
+        let codex: Vec<String> = shared_servers("codex", true)
+            .into_iter()
+            .flat_map(|(name, spec)| spec.codex_overrides(&name))
+            .collect();
         assert!(codex.contains(&"mcp_servers.files.command=\"uvx\"".to_string()));
         assert!(codex.contains(&"mcp_servers.figma.url=\"https://mcp.figma.com/mcp\"".to_string()));
         assert!(!codex.iter().any(|c| c.contains("blender_lab")));
+        // A run elsewhere can't start this machine's programs.
+        assert_eq!(names("claude", false), ["figma"]);
+        let opencode = shared_servers("opencode", true);
+        assert_eq!(
+            opencode[0].1.opencode_json(),
+            serde_json::json!({"type": "local", "command": ["uvx", "blender-mcp"]})
+        );
+        assert_eq!(
+            opencode[1].1.copilot_json()["tools"],
+            serde_json::json!(["*"])
+        );
         set_shared(&[]);
-        assert!(claude_servers().is_empty());
+        assert!(names("claude", true).is_empty());
     }
 }
