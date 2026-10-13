@@ -41,6 +41,10 @@ All notable changes to Runo are documented here.
 - Review this PR: the agent writes its review to `.runo/review.json`, and Post review shows it for confirmation, then posts it to GitHub with its line comments.
 - Playbook schedules can run at a time of day on chosen weekdays, or on a cron expression. Runs missed while Runo was closed catch up once on launch (Settings can turn this off).
 - On macOS, scheduled playbooks can run while Runo is closed, from a launchd job: each runs in a new worktree after the project's setup command, with the agent's settings and the playbook's permissions, and shows up as a session when Runo opens.
+- Settings → Providers and each agent's page list every copy of its CLI on this computer (PATH, nvm, ~/.local/bin, Homebrew, npm, Bun, Cargo, Runo's own) with version and path. Pick the one Runo runs, Use newest when an older copy comes first, Update the one in use, or remove a stray link after a confirmation that names it.
+- Each agent's page lists its models from the CLI's own list, Codex's hidden and retiring ones included with their dates, with Use as default and a Test that tries each model with a one-line prompt and marks it works, not available on your account, or needs a newer CLI. Codex can also save the default into ~/.codex/config.toml (off by default; only the model line changes, after a backup).
+- A turn that fails because the agent is signed out, the model isn't available, or the CLI is too old for the model offers the fix under it: Sign in (runs the agent's login in the terminal panel and checks again), Retry with a model that works, Pick a model, Use the newer copy, Update or Install for Runo, and make the working model the default for the project or every session. Playbook runs get the same card.
+- The composer's model menu marks models that need a newer CLI or are being retired, and a session on a retiring model offers a one-click switch to its replacement.
 
 ### Fixed
 
@@ -104,3 +108,4 @@ All notable changes to Runo are documented here.
 - Spending limits, the spend shown and each session's context meter say that only Claude Code and OpenCode report a cost.
 - Architecture reads Swift, Maven, Gradle, Ruby, .NET, PHP and Dart manifests.
 - A CI workflow checks formatting, Clippy and the tests on macOS and Linux for every push and pull request.
+- Agents: a model an outdated Codex rejects ("not supported when using Codex with a ChatGPT account", "requires a newer version of Codex") is reported as a version problem, not blamed on the account, when a newer Codex wrote its model list.
