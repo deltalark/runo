@@ -4943,7 +4943,8 @@ impl RunoApp {
     }
 
     /// The agent menu: agents on the left, and beside them the models of the one under the
-    /// pointer (the session's own agent at first), so agent and model are one pick.
+    /// pointer (the session's own agent at first), so agent and model are one pick. Only
+    /// agents that are set up are listed; a note points to Settings for the rest.
     fn agent_menu(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let sid = session.id;
         let current = agent::PROVIDERS
@@ -4952,9 +4953,18 @@ impl RunoApp {
             .unwrap_or(0);
         let shown = self.menu_agent.unwrap_or(current);
         let from_bin = cx.global::<AppSettings>().agent(&session.provider).binary;
+        // Agents still being detected stay listed until Runo knows they're missing.
+        let listed = |i: usize| {
+            let caps = caps::get(agent::PROVIDERS[i].id);
+            i == current || caps.installed || !caps.detected
+        };
+        let hidden = (0..agent::PROVIDERS.len()).filter(|&i| !listed(i)).count();
 
         let mut agents = div().v_flex().p_1();
         for (i, p) in agent::PROVIDERS.iter().enumerate() {
+            if !listed(i) {
+                continue;
+            }
             let from_bin = from_bin.clone();
             agents = agents.child(
                 menu_row(
@@ -4978,6 +4988,34 @@ impl RunoApp {
                     cx.notify();
                 }))
                 .child(icon(IconName::ChevronRight, 12., c_muted())),
+            );
+        }
+        if hidden > 0 {
+            agents = agents.child(
+                div()
+                    .id("agent-setup-note")
+                    .mt_1()
+                    .pt(px(6.))
+                    .pb(px(4.))
+                    .px_2()
+                    .border_t_1()
+                    .border_color(rgb(c_border()))
+                    .max_w(px(220.))
+                    .whitespace_normal()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(rgb(c_text())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = None;
+                        this.menu_agent = None;
+                        this.open_settings();
+                        this.settings_page = SettingsPage::Providers;
+                        cx.notify();
+                    }))
+                    .child(
+                        "Set up other agents in Settings › Providers to make them available here.",
+                    ),
             );
         }
 
