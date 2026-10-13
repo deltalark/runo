@@ -1524,6 +1524,7 @@ impl RunoApp {
             }
         });
         app._subscriptions.push(activation_sub);
+        app.init_github(window, cx);
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
         cx.spawn(async move |this, cx| loop {

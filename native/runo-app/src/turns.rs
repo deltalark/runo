@@ -269,6 +269,10 @@ impl RunoApp {
         if let Some(s) = self.state.session(id) {
             crate::mcp::clean_project(std::path::Path::new(&s.dir));
         }
+        // A pull request's state, and a review the agent wrote for it, show right away.
+        if self.state.session(id).is_some_and(|s| !s.pr_url.is_empty()) {
+            self.load_pr_status(id);
+        }
         let checkpoint = self.state.session(id).and_then(|s| {
             s.messages
                 .iter()

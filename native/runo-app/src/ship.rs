@@ -33,6 +33,8 @@ pub(crate) enum Confirm {
     CleanUp(u64),
     /// Merge the session's pull request on GitHub.
     MergePr(u64),
+    /// Post the review the session's agent wrote to its pull request.
+    PostReview(u64),
 }
 
 /// The Create pull request form.
@@ -380,7 +382,7 @@ impl RunoApp {
 
     /// Mark a git step as running for a session, or say why it can't start. Returns
     /// whether it may start.
-    fn begin(&mut self, id: u64, label: &str) -> bool {
+    pub(crate) fn begin(&mut self, id: u64, label: &str) -> bool {
         if let Some(running) = self.git_busy.get(&id) {
             self.notice = Some(format!("{running} Wait for it to finish."));
             return false;
@@ -749,26 +751,39 @@ impl RunoApp {
             return;
         }
         let (dir, branch) = (session.dir.clone(), session.branch.clone());
+        let known = session.pr_url.clone();
         if !std::path::Path::new(&dir).is_dir() || self.pr_loading.contains(&id) {
             return;
         }
         self.pr_loading.insert(id);
         self.bg(
             move || {
-                std::process::Command::new("gh")
-                    .args([
-                        "pr",
-                        "view",
-                        &branch,
-                        "--json",
-                        "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments",
-                    ])
-                    .current_dir(&dir)
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .ok()
-                    .filter(|o| o.status.success())
-                    .and_then(|o| github::parse_pr_status(&String::from_utf8_lossy(&o.stdout)))
+                let view = |which: &str| {
+                    std::process::Command::new("gh")
+                        .args([
+                            "pr",
+                            "view",
+                            which,
+                            "--json",
+                            "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments",
+                        ])
+                        .current_dir(&dir)
+                        .stdin(std::process::Stdio::null())
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .and_then(|o| github::parse_pr_status(&String::from_utf8_lossy(&o.stdout)))
+                };
+                // A reviewed PR's branch may be checked out under another name.
+                let mut status = view(&branch).or_else(|| {
+                    (!known.is_empty()).then(|| view(&known)).flatten()
+                })?;
+                status.draft_review = std::fs::read_to_string(
+                    std::path::Path::new(&dir).join(github::REVIEW_FILE),
+                )
+                .ok()
+                .and_then(|json| github::parse_review_draft(&json));
+                Some(status)
             },
             move |this, status, _| {
                 this.pr_loading.remove(&id);
@@ -1228,6 +1243,7 @@ impl RunoApp {
             Confirm::Merge(id) => self.merge_into_base(id),
             Confirm::CleanUp(id) => self.clean_up(id),
             Confirm::MergePr(id) => self.merge_pr(id),
+            Confirm::PostReview(id) => self.post_review(id),
         }
     }
 
@@ -1285,6 +1301,15 @@ impl RunoApp {
                         }
                     ),
                     "Merge PR",
+                )
+            }
+            Confirm::PostReview(p) if p == id => {
+                let pr = self.pr_status.get(&id)?;
+                let draft = pr.draft_review.as_ref()?;
+                (
+                    format!("Post this review on #{} as you?", pr.number),
+                    github::review_summary(draft),
+                    "Post review",
                 )
             }
             _ => return None,
@@ -1568,6 +1593,21 @@ impl RunoApp {
                                 this.address_review(id);
                                 cx.notify();
                             })),
+                        )
+                    })
+                    .when(open && pr.draft_review.is_some(), |el| {
+                        el.child(
+                            self.ship_button("post-review", "Post review", IconName::Send, true)
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        "Read the review the agent wrote, then post it to GitHub",
+                                    )
+                                    .build(window, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.confirm_git = Some(Confirm::PostReview(id));
+                                    cx.notify();
+                                })),
                         )
                     })
                     .when(open && !pr.draft, |el| {
