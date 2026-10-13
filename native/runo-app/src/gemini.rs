@@ -24,7 +24,11 @@ fn trust_file(env: &str) -> Option<PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|home| PathBuf::from(home).join(".gemini").join("trustedFolders.json"))
+                .map(|home| {
+                    PathBuf::from(home)
+                        .join(".gemini")
+                        .join("trustedFolders.json")
+                })
         })
 }
 
@@ -164,8 +168,7 @@ mod tests {
 
     #[test]
     fn folders_are_trusted_once_and_distrust_is_kept() {
-        let root =
-            std::env::temp_dir().join(format!("runo-gemini-trust-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("runo-gemini-trust-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("wt");
         std::fs::create_dir_all(&dir).unwrap();

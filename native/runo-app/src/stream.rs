@@ -409,7 +409,11 @@ impl JsonStream {
             let Some(rest) = text.get(written..) else {
                 return vec![];
             };
-            let rest = if written == 0 { rest.trim_start() } else { rest };
+            let rest = if written == 0 {
+                rest.trim_start()
+            } else {
+                rest
+            };
             let rest = if done { rest.trim_end() } else { rest };
             if rest.is_empty() {
                 return vec![];
@@ -548,10 +552,12 @@ impl JsonStream {
                     out.push(Update::Usage(self.usage));
                 }
             }
-            "turn.failed" => out.extend(self.error(
-                error_message(&event["error"])
-                    .unwrap_or_else(|| "The agent reported an error.".into()),
-            )),
+            "turn.failed" => out.extend(
+                self.error(
+                    error_message(&event["error"])
+                        .unwrap_or_else(|| "The agent reported an error.".into()),
+                ),
+            ),
             // Cursor: complete assistant messages; Amp-style content blocks.
             "assistant" => {
                 for block in event["message"]["content"].as_array().into_iter().flatten() {
@@ -1044,7 +1050,10 @@ mod tests {
             readable_error(r#"ERROR: {"detail":"The model is not supported"}"#),
             "ERROR: The model is not supported"
         );
-        assert_eq!(readable_error("Error: plain {not json"), "Error: plain {not json");
+        assert_eq!(
+            readable_error("Error: plain {not json"),
+            "Error: plain {not json"
+        );
     }
 
     #[test]

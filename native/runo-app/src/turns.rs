@@ -258,7 +258,9 @@ impl RunoApp {
                     .map(|h| std::path::PathBuf::from(h).join(".copilot"))
             })
             .map(|p| p.join("session-state"));
-        if let Some(found) = root.and_then(|r| newest_copilot_session(&r, &dir, &asked, since, &taken)) {
+        if let Some(found) =
+            root.and_then(|r| newest_copilot_session(&r, &dir, &asked, since, &taken))
+        {
             if let Some(s) = self.state.session_mut(id) {
                 s.agent_session = found;
             }
@@ -2085,7 +2087,11 @@ mod tests {
         let write = |id: &str, cwd: &str, prompt: &str| {
             let dir = root.join(id);
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("workspace.yaml"), format!("id: {id}\ncwd: {cwd}\n")).unwrap();
+            std::fs::write(
+                dir.join("workspace.yaml"),
+                format!("id: {id}\ncwd: {cwd}\n"),
+            )
+            .unwrap();
             let event = serde_json::json!({"type": "user.message", "data": {"content": prompt}});
             std::fs::write(dir.join("events.jsonl"), format!("{event}\n")).unwrap();
         };
@@ -2096,7 +2102,10 @@ mod tests {
         let none = std::collections::HashSet::new();
         let find = |dir, prompt| newest_copilot_session(&root, dir, prompt, since, &none);
         assert_eq!(find("/work/s-1", "Add docs").as_deref(), Some("b"));
-        assert_eq!(find("/work/s-1", "Fix the \"login\" test").as_deref(), Some("c"));
+        assert_eq!(
+            find("/work/s-1", "Fix the \"login\" test").as_deref(),
+            Some("c")
+        );
         assert_eq!(find("/work/s-12", "Add docs").as_deref(), Some("a"));
         assert_eq!(find("/work/s", "Add docs"), None);
         let taken = ["b".to_string()].into_iter().collect();
@@ -2105,7 +2114,10 @@ mod tests {
             Some("c")
         );
         assert!(mentions_folder("cwd: /work/s-1\n", "/work/s-1/"));
-        assert!(mentions_folder(r#"{"path":"C:\\w\\s-1\\a.rs"}"#, r"C:\w\s-1"));
+        assert!(mentions_folder(
+            r#"{"path":"C:\\w\\s-1\\a.rs"}"#,
+            r"C:\w\s-1"
+        ));
         assert!(!mentions_folder(r#"{"path":"C:\\w\\s-12"}"#, r"C:\w\s-1"));
         let _ = std::fs::remove_dir_all(&root);
     }
