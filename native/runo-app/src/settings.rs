@@ -711,7 +711,13 @@ fn frontmatter(text: &str, key: &str) -> Option<String> {
 /// Start a skill in `dir`: a new folder with a SKILL.md to fill in. Returns the file.
 pub fn new_skill(dir: &Path) -> std::io::Result<PathBuf> {
     let name = (1..)
-        .map(|n| if n == 1 { "new-skill".to_string() } else { format!("new-skill-{n}") })
+        .map(|n| {
+            if n == 1 {
+                "new-skill".to_string()
+            } else {
+                format!("new-skill-{n}")
+            }
+        })
         .find(|n| !dir.join(n).exists())
         .expect("some name is free");
     let folder = dir.join(&name);

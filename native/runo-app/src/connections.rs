@@ -3238,7 +3238,7 @@ mod tests {
         let line = format!("{WARNING}Files here changed. They are saved as {kept}.");
         let found = warnings(&["some agent noise".into(), line.clone(), line.clone()]);
         assert_eq!(found.len(), 1);
-        assert_eq!(kept_refs(&found[0]), [kept.clone()]);
+        assert_eq!(kept_refs(&found[0]), std::slice::from_ref(&kept));
         // Restoring puts the agent's version back and saves what was here.
         let saved = restore_kept(&remote.local_dir, 7, &kept).unwrap();
         assert_eq!(

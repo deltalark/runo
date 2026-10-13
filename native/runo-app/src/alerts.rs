@@ -1252,9 +1252,9 @@ impl RunoApp {
                         .child(update_done_badge(n, "Installed"))
                         .child(
                             self.button(("install-sign-in", n), "Sign in…", true)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.sign_in_agent(id, cx)
-                                })),
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.sign_in_agent(id, cx)),
+                                ),
                         ),
                 )
             } else if let Some(failure) = run.failed.clone() {
@@ -1702,7 +1702,11 @@ impl RunoApp {
         cancel_run(&format!("install:{provider}"));
         cancel_run(&format!("update:{provider}"));
         if let Some(run) = self.update_runs.remove(provider) {
-            let what = if run.install { "installing" } else { "updating" };
+            let what = if run.install {
+                "installing"
+            } else {
+                "updating"
+            };
             self.info = Some((
                 format!("Stopped {what} {}.", agent::provider(provider).name),
                 std::time::Instant::now(),
@@ -1838,7 +1842,10 @@ mod tests {
         run_streaming("install:test-cancel".into(), cmd, tx);
         let started = std::time::Instant::now();
         loop {
-            match rx.recv_timeout(Duration::from_secs(5)).expect("a line first") {
+            match rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("a line first")
+            {
                 Event::Output(k, Ok(line)) if k.ends_with("-line") && line == "started" => break,
                 _ => continue,
             }
@@ -1852,7 +1859,11 @@ mod tests {
         };
         assert_eq!(result, Err(CANCELLED.to_string()));
         assert!(started.elapsed() < Duration::from_secs(10));
-        assert!(RUNS.lock().unwrap().iter().all(|r| r.0 != "install:test-cancel"));
+        assert!(RUNS
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.0 != "install:test-cancel"));
     }
 
     #[test]

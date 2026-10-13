@@ -210,7 +210,13 @@ pub fn add_own(path: &Path) -> std::io::Result<String> {
     let mut name = String::new();
     edit_own(path, |servers| {
         name = (1..)
-            .map(|n| if n == 1 { "new-server".to_string() } else { format!("new-server-{n}") })
+            .map(|n| {
+                if n == 1 {
+                    "new-server".to_string()
+                } else {
+                    format!("new-server-{n}")
+                }
+            })
             .find(|n| !servers.contains_key(n))
             .expect("some name is free");
         servers.insert(
@@ -550,10 +556,14 @@ mod tests {
             ..Default::default()
         };
         set_found(&[
-            info("Cursor", "figma", McpSpec {
-                url: "https://mcp.figma.com/mcp".into(),
-                ..Default::default()
-            }),
+            info(
+                "Cursor",
+                "figma",
+                McpSpec {
+                    url: "https://mcp.figma.com/mcp".into(),
+                    ..Default::default()
+                },
+            ),
             info(OWN, "figma", own),
         ]);
         set_shared(&["Cursor/figma".into()]);

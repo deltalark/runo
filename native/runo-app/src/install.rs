@@ -254,10 +254,16 @@ impl RunoApp {
             .unwrap_or_else(|| p.bin.to_string());
         let line = sign_in_command(provider, &bin);
         let said = match open_in_terminal(&line) {
-            Ok(()) => format!("Sign in to {} in the terminal window, then pick it in New session.", p.name),
+            Ok(()) => format!(
+                "Sign in to {} in the terminal window, then pick it in New session.",
+                p.name
+            ),
             Err(_) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(line.clone()));
-                format!("Copied `{line}`. Run it in a terminal to sign in to {}.", p.name)
+                format!(
+                    "Copied `{line}`. Run it in a terminal to sign in to {}.",
+                    p.name
+                )
             }
         };
         self.info = Some((said, std::time::Instant::now()));

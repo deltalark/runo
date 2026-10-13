@@ -825,8 +825,10 @@ impl RunoApp {
             }
             s.limits.push("edit".into());
             let name = s.title.clone();
-            self.state
-                .log(id, format!("Allowed edits beyond the playbook's limits: {name}"));
+            self.state.log(
+                id,
+                format!("Allowed edits beyond the playbook's limits: {name}"),
+            );
         }
         self.pb_widen = None;
         if let Some(s) = self.state.session_mut(id) {

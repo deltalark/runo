@@ -1491,8 +1491,16 @@ impl RunoApp {
                                 .text_color(rgb(c_secondary()))
                                 .child(format!("{{{{{key}}}}}")),
                         )
-                        .child(div().flex_1().child(Input::new(label).bordered(true).h(px(28.))))
-                        .child(div().flex_1().child(Input::new(default).bordered(true).h(px(28.)))),
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Input::new(label).bordered(true).h(px(28.))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(Input::new(default).bordered(true).h(px(28.))),
+                        ),
                 );
             }
             rows

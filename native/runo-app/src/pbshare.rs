@@ -47,9 +47,20 @@ fn changes(a: &store::Automation, file: &pbfile::PlaybookFile) -> Vec<String> {
             .unwrap_or_else(|| key.to_string())
     };
     // No list means it may do anything.
-    let all: Vec<String> = pbfile::PERMISSIONS.iter().map(|p| p.0.to_string()).collect();
-    let before = if a.permissions.is_empty() { &all } else { &a.permissions };
-    let after = if file.permissions.is_empty() { &all } else { &file.permissions };
+    let all: Vec<String> = pbfile::PERMISSIONS
+        .iter()
+        .map(|p| p.0.to_string())
+        .collect();
+    let before = if a.permissions.is_empty() {
+        &all
+    } else {
+        &a.permissions
+    };
+    let after = if file.permissions.is_empty() {
+        &all
+    } else {
+        &file.permissions
+    };
     for key in after.iter().filter(|k| !before.contains(k)) {
         out.push(format!("may now {}", title(key)));
     }
@@ -531,16 +542,13 @@ impl RunoApp {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(format!("Run {}", auto.name)),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(c_muted()))
-                                    .child(if run.fields.is_empty() {
-                                        "Check what it may do, then run it."
-                                    } else {
-                                        "Fill in what this run should use."
-                                    }),
-                            ),
+                            .child(div().text_xs().text_color(rgb(c_muted())).child(
+                                if run.fields.is_empty() {
+                                    "Check what it may do, then run it."
+                                } else {
+                                    "Fill in what this run should use."
+                                },
+                            )),
                     ),
             )
             .child(
@@ -950,12 +958,9 @@ impl RunoApp {
                         )
                     })
                     .when(edited, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(c_amber()))
-                                .child("You've edited this playbook here. Updating replaces your edits."),
-                        )
+                        el.child(div().text_size(px(12.)).text_color(rgb(c_amber())).child(
+                            "You've edited this playbook here. Updating replaces your edits.",
+                        ))
                     }),
             )
             .into_any_element()

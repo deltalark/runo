@@ -343,9 +343,11 @@ impl RunoApp {
         runs.sort_unstable();
         let old = runs.len().saturating_sub(keep);
         for id in runs.into_iter().take(old) {
-            let removable = self.state.session(id).is_some_and(|s| {
-                !s.pinned && !s.unread && s.status != Status::Working
-            }) && !self.handles.contains_key(&Target::Session(id));
+            let removable = self
+                .state
+                .session(id)
+                .is_some_and(|s| !s.pinned && !s.unread && s.status != Status::Working)
+                && !self.handles.contains_key(&Target::Session(id));
             if removable {
                 self.delete_session(id);
             }
@@ -354,7 +356,11 @@ impl RunoApp {
 
     /// A playbook's session finished a turn: note how its run went.
     pub(crate) fn playbook_turn_done(&mut self, id: u64, ok: bool) {
-        let Some(playbook) = self.state.session(id).map(|s| s.playbook).filter(|p| *p != 0)
+        let Some(playbook) = self
+            .state
+            .session(id)
+            .map(|s| s.playbook)
+            .filter(|p| *p != 0)
         else {
             return;
         };
@@ -507,11 +513,10 @@ impl RunoApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!("{} wants to start a playbook", request.from)),
             )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .child(format!("“{}” in {project}, as a new session. {may}", auto.name)),
-            )
+            .child(div().text_size(px(13.)).child(format!(
+                "“{}” in {project}, as a new session. {may}",
+                auto.name
+            )))
             .when_some(warning, |el, w| {
                 el.child(
                     div()
@@ -529,14 +534,15 @@ impl RunoApp {
                     .flex()
                     .justify_end()
                     .gap_2()
-                    .child(
-                        self.button("pb-ask-no", "Don't start", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.answer_playbook_ask(false, cx))),
-                    )
+                    .child(self.button("pb-ask-no", "Don't start", false).on_click(
+                        cx.listener(|this, _, _, cx| this.answer_playbook_ask(false, cx)),
+                    ))
                     .child(
                         self.button("pb-ask-yes", "Start it", true)
                             .child(icon(IconName::Play, 11., c_canvas()))
-                            .on_click(cx.listener(|this, _, _, cx| this.answer_playbook_ask(true, cx))),
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.answer_playbook_ask(true, cx)),
+                            ),
                     ),
             );
         Some(
@@ -771,7 +777,11 @@ pub(crate) fn unheld_limits(provider: &str, permissions: &[String]) -> Vec<&'sta
     }
     // Shell: Claude Code and OpenCode turn it off, Copilot denies it, and Gemini and
     // Qwen ask for every command, which a run nobody watches refuses.
-    if !may("shell") && !matches!(provider, "claude" | "opencode" | "copilot" | "gemini" | "qwen")
+    if !may("shell")
+        && !matches!(
+            provider,
+            "claude" | "opencode" | "copilot" | "gemini" | "qwen"
+        )
     {
         out.push("run commands");
     }
@@ -949,6 +959,9 @@ mod tests {
         session.limits = may(&["read", "edit", "shell"]);
         session.opts.insert("mode".into(), "full".into());
         held_options(&mut session, &settings::AgentOptions::default());
-        assert_eq!(session.opts["mode"], "edit", "full access would reach the network");
+        assert_eq!(
+            session.opts["mode"], "edit",
+            "full access would reach the network"
+        );
     }
 }
