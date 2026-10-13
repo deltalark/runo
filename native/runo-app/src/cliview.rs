@@ -129,15 +129,7 @@ impl RunoApp {
             }
             self.view_changed = Some((id, std::time::Instant::now()));
             // A prompt queued while the CLI was open goes now.
-            let next = self
-                .state
-                .session_mut(id)
-                .filter(|s| !s.queue.is_empty())
-                .map(|s| (s.queue.remove(0), s.provider.clone()));
-            if let Some((prompt, provider)) = next {
-                let opts = cx.global::<AppSettings>().agent(&provider);
-                self.start_turn(id, prompt, Vec::new(), &opts);
-            }
+            self.send_queued(id, 0, cx);
         }
         self.save();
         cx.notify();
@@ -210,6 +202,7 @@ impl RunoApp {
             session_id: &conversation,
             images: &[],
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
+            local: true,
         };
         let program = pty::Program {
             bin: if opts.binary.trim().is_empty() {
@@ -293,6 +286,18 @@ impl RunoApp {
         }
         self.save();
         true
+    }
+
+    /// Runo is quitting with CLIs open, and they close with it: bring their turns into
+    /// the chat now. The sessions stay in CLI view and reopen on the same conversation.
+    pub(crate) fn keep_cli_turns(&mut self) {
+        let ids: Vec<u64> = self.cli_runs.keys().copied().collect();
+        for id in ids {
+            if let Some(run) = self.cli_runs.remove(&id) {
+                run.shell.kill();
+                self.import_cli_turns(id, &run);
+            }
+        }
     }
 
     fn import_cli_turns(&mut self, id: u64, run: &CliRun) {

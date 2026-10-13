@@ -52,7 +52,7 @@ pub(crate) fn recap_prompt(to: &str) -> String {
 /// current conversation, and its CLI can answer a read-only follow-up there.
 pub(crate) fn wants_recap(session: &Session) -> bool {
     let askable = match session.provider.as_str() {
-        "claude" => !session.agent_session.is_empty(),
+        "claude" | "qwen" | "opencode" | "droid" => !session.agent_session.is_empty(),
         "codex" => true,
         _ => false,
     };
@@ -1128,6 +1128,10 @@ mod tests {
         assert!(wants_recap(&session));
         session.provider = "gemini".into();
         assert!(!wants_recap(&session));
+        session.provider = "opencode".into();
+        assert!(!wants_recap(&session), "no OpenCode session to fork");
+        session.agent_session = "ses_1".into();
+        assert!(wants_recap(&session));
         session.provider = "codex".into();
         session.conversation_start = session.messages.len();
         assert!(!wants_recap(&session), "work from before an earlier switch");
