@@ -183,6 +183,8 @@ struct RunoApp {
     project_name: Entity<InputState>,
     /// The project form's worktree setup command.
     project_setup: Entity<InputState>,
+    /// The project form's repository URL, when cloning.
+    clone_url: Entity<InputState>,
     /// A freshly installed CLI found off PATH, to save as the agent's binary.
     pending_binary: Option<(&'static str, String)>,
     cli_focus: FocusHandle,
@@ -1234,6 +1236,9 @@ impl RunoApp {
             project_name,
             project_setup: cx
                 .new(|cx| InputState::new(window, cx).placeholder("npm install (optional)")),
+            clone_url: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("https://github.com/owner/repo.git")
+            }),
             pending_binary: None,
             cli_focus: cx.focus_handle(),
             focus_cli: 0,
@@ -1513,6 +1518,7 @@ impl RunoApp {
             },
         );
         let remove_name_sub = cx.subscribe_in(&app.remove_name, window, repaint);
+        let clone_url_sub = cx.subscribe_in(&app.clone_url, window, repaint);
         let auto_name_sub = cx.subscribe_in(&app.auto_name, window, repaint);
         let auto_prompt_sub = cx.subscribe_in(
             &app.auto_prompt,
@@ -1537,6 +1543,7 @@ impl RunoApp {
             notes_query_sub,
             finder_sub,
             remove_name_sub,
+            clone_url_sub,
             auto_name_sub,
             auto_prompt_sub,
         ]);
@@ -2308,7 +2315,7 @@ impl RunoApp {
             CommandItem::new()
                 .label("Add a project folder…")
                 .icon(IconName::FolderPlus)
-                .keywords(["new project", "open folder"]),
+                .keywords(["new project", "open folder", "clone repository"]),
         );
         command_jumps.push(Jump::AddProject);
         commands = commands.item(

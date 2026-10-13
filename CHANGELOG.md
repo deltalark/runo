@@ -27,6 +27,7 @@ All notable changes to Runo are documented here.
 - App menu with Quit, and the window reopens from the Dock on macOS. Closing the last tab stays in Sessions, the tour starts in Sessions, existing users get a one-time What's new card, shortcut hints follow your keybindings, and blank session names are refused.
 - Sessions page: search over titles, branches, projects and past conversations (matches show a snippet), filters for project, agent, status and archived, and sort by recent, created or name. Quick open lists archived sessions (marked) and sessions whose conversation mentions what you type.
 - New session: pick the base branch (local or remote) and get a branch named after the task, such as `runo/fix-login-redirect`, numbered when taken.
+- New project can clone a repository from a URL into a folder you choose, with git's progress and errors shown, then adds it.
 
 ### Fixed
 
@@ -73,3 +74,4 @@ All notable changes to Runo are documented here.
 - Terminal: dim and strikethrough text are drawn (vt100 is now vendored with both attributes).
 - Cursor, Gemini CLI and Droid get Runo's memory server and shared MCP servers through their project config file, merged with yours, kept out of git and removed after each turn. Grok has no project-level MCP config, so it still gets none.
 - Settings → MCP adds and edits Runo's own servers in a form (name, command or URL, environment) instead of a JSON file.
+- A repository with no commits no longer fails to start an isolated session: Runo's git init makes a first empty commit, and otherwise the session runs in the project folder with a note.

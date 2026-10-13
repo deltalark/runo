@@ -75,6 +75,24 @@ pub(crate) struct ProjectForm {
     /// The setup command to put in its field on the next render.
     pub sync_setup: Option<String>,
     pub error: Option<String>,
+    /// Clone a repository from a URL instead of picking a folder.
+    pub clone: bool,
+    /// The folder the clone goes into, as a new folder named after the repository.
+    pub parent: Option<PathBuf>,
+    /// The clone is running; its latest progress line.
+    pub cloning: Option<String>,
+}
+
+/// Where clones go unless another folder is picked: beside the newest project, else home.
+fn clone_parent(projects: &[Project]) -> Option<PathBuf> {
+    projects
+        .last()
+        .and_then(|p| std::path::Path::new(&p.path).parent().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(PathBuf::from)
+        })
 }
 
 /// The Remove project dialog while it is open.
@@ -491,6 +509,9 @@ impl RunoApp {
             sync_name: Some(String::new()),
             sync_setup: Some(String::new()),
             error: None,
+            clone: false,
+            parent: clone_parent(&self.state.projects),
+            cloning: None,
         });
         cx.notify();
     }
@@ -511,6 +532,9 @@ impl RunoApp {
             sync_name: Some(p.name.clone()),
             sync_setup: Some(p.setup.clone()),
             error: None,
+            clone: false,
+            parent: None,
+            cloning: None,
         });
     }
 
@@ -565,6 +589,109 @@ impl RunoApp {
             });
         })
         .detach();
+    }
+
+    /// Pick the folder a clone goes into.
+    pub(crate) fn browse_clone_parent(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Clone into".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(path) = paths.first().cloned() {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(form) = this.project_form.as_mut() {
+                            form.parent = Some(path);
+                            form.error = None;
+                        }
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Clone the form's URL in the background, showing git's progress, then add the clone
+    /// as the project.
+    fn start_clone(&mut self, cx: &mut Context<Self>) {
+        let url = self.clone_url.read(cx).value().trim().to_string();
+        let Some(form) = self.project_form.as_mut() else {
+            return;
+        };
+        let name = git::clone_dir_name(&url);
+        let why = if url.is_empty() || name.is_empty() {
+            Some("Enter the repository's URL.")
+        } else if form.parent.is_none() {
+            Some("Choose where to clone it.")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            form.error = Some(why.into());
+            cx.notify();
+            return;
+        }
+        let dest = form.parent.clone().unwrap_or_default().join(&name);
+        form.error = None;
+        form.cloning = Some(format!("Cloning into {}…", dest.display()));
+        let tx = self.ui_tx.clone();
+        std::thread::spawn(move || {
+            let progress = tx.clone();
+            let result = git::clone(&url, &dest, |line| {
+                let line = line.to_string();
+                let _ = progress.send(Box::new(move |this: &mut RunoApp, _| {
+                    if let Some(form) = this.project_form.as_mut().filter(|f| f.cloning.is_some()) {
+                        form.cloning = Some(line);
+                    }
+                }));
+            });
+            let _ = tx.send(Box::new(move |this: &mut RunoApp, cx| {
+                this.clone_finished(dest, result, cx)
+            }));
+        });
+        cx.notify();
+    }
+
+    fn clone_finished(
+        &mut self,
+        dest: PathBuf,
+        result: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        match (result, self.project_form.as_mut()) {
+            (Ok(()), Some(form)) => {
+                form.cloning = None;
+                form.clone = false;
+                form.path = Some(dest);
+                self.submit_project_form(cx);
+            }
+            // The popup was closed while cloning: add the project as it is.
+            (Ok(()), None) => {
+                let name = dest
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                match self.add_project(&dest, String::new(), String::new(), String::new(), false) {
+                    Ok(()) => {
+                        self.info = Some((
+                            format!("Cloned and added {name}."),
+                            std::time::Instant::now(),
+                        ))
+                    }
+                    Err(why) => self.notice = Some(why),
+                }
+            }
+            (Err(why), Some(form)) => {
+                form.cloning = None;
+                form.error = Some(format!("Could not clone: {why}"));
+            }
+            (Err(why), None) => self.notice = Some(format!("Could not clone: {why}")),
+        }
+        cx.notify();
     }
 
     pub(crate) fn browse_project_folder(&mut self, cx: &mut Context<Self>) {
@@ -639,6 +766,13 @@ impl RunoApp {
             cx.notify();
             return;
         }
+        if form.cloning.is_some() {
+            return;
+        }
+        if form.clone {
+            self.start_clone(cx);
+            return;
+        }
         let Some(path) = form.path.clone() else {
             if let Some(form) = self.project_form.as_mut() {
                 form.error = Some("Choose a folder first.".into());
@@ -665,6 +799,9 @@ impl RunoApp {
                 cx.notify();
                 return;
             }
+            // Worktrees need a commit to branch from. Without a git identity this fails,
+            // and the first sessions run in the folder until something is committed.
+            let _ = git::initial_commit(&path_str);
         }
         match self.add_project(&path, name, color, glyph, start) {
             Ok(()) => {
@@ -751,6 +888,149 @@ impl RunoApp {
                         } else {
                             "Browse…"
                         }),
+                )
+            });
+
+        let clone_mode = form.clone && !editing;
+        let cloning = form.cloning.clone();
+        let mut source = div()
+            .flex()
+            .items_center()
+            .p(px(3.))
+            .gap(px(2.))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(rgb(c_canvas()));
+        for (j, (value, glyph, text)) in [
+            (false, IconName::FolderOpen, "Local folder"),
+            (true, IconName::GitBranch, "Clone from URL"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let on = clone_mode == value;
+            source = source.child(
+                div()
+                    .id(("project-source", j))
+                    .flex_1()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .when(on, |el| {
+                        el.bg(tint(c_selected()))
+                            .text_color(rgb(c_blue()))
+                            .font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(!on, |el| {
+                        el.text_color(rgb(c_secondary()))
+                            .hover(|el| el.bg(tint(c_subtle())))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.project_form.as_mut().filter(|f| f.cloning.is_none())
+                        {
+                            f.clone = value;
+                            f.error = None;
+                        }
+                        cx.notify();
+                    }))
+                    .child(icon(glyph, 12., if on { c_blue() } else { c_muted() }))
+                    .child(text),
+            );
+        }
+        let url = self.clone_url.read(cx).value().trim().to_string();
+        let repo_name = git::clone_dir_name(&url);
+        let parent_text = form
+            .parent
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        let clone_box = div()
+            .v_flex()
+            .gap_1p5()
+            .child(label("Repository URL"))
+            .child(Input::new(&self.clone_url).bordered(true).h(px(34.)))
+            .child(label("Clone into"))
+            .child(
+                div()
+                    .id("project-clone-parent")
+                    .h(px(40.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(tint(c_subtle()))
+                    .cursor_pointer()
+                    .hover(|el| el.border_color(rgb(c_muted())))
+                    .on_click(cx.listener(|this, _, _, cx| this.browse_clone_parent(cx)))
+                    .child(icon(IconName::FolderOpen, 15., c_muted()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_family(self.mono_font.clone())
+                            .child(
+                                parent_text
+                                    .clone()
+                                    .unwrap_or_else(|| "No folder chosen".into()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(c_blue()))
+                            .child("Change…"),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .truncate()
+                    .child(match (&parent_text, repo_name.is_empty()) {
+                        (Some(parent), false) => format!(
+                            "Creates {}",
+                            std::path::Path::new(parent).join(&repo_name).display()
+                        ),
+                        _ => "Clones into a new folder named after the repository.".into(),
+                    }),
+            )
+            .when_some(cloning.clone(), |el, line| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(tint(c_subtle()))
+                        .child(icon(IconName::LoaderCircle, 13., c_blue()).animated(
+                            "clone-spin",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            |i, d| i.rotate(percentage(d)),
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.5))
+                                .font_family(self.mono_font.clone())
+                                .text_color(rgb(c_secondary()))
+                                .child(line),
+                        ),
                 )
             });
 
@@ -929,7 +1209,11 @@ impl RunoApp {
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(preview)
-            .child(div().v_flex().gap_1p5().child(label("Folder")).child(folder))
+            .when(!editing, |el| el.child(source))
+            .when(clone_mode, |el| el.child(clone_box))
+            .when(!clone_mode, |el| {
+                el.child(div().v_flex().gap_1p5().child(label("Folder")).child(folder))
+            })
             .child(
                 div()
                     .v_flex()
@@ -997,10 +1281,27 @@ impl RunoApp {
                     .child(
                         self.button(
                             "project-save",
-                            if editing { "Save" } else { "Add project" },
+                            if editing {
+                                "Save"
+                            } else if cloning.is_some() {
+                                "Cloning…"
+                            } else if clone_mode {
+                                "Clone and add"
+                            } else {
+                                "Add project"
+                            },
                             true,
                         )
-                        .when(!editing && path_text.is_none(), |el| el.opacity(0.5))
+                        .when(
+                            !editing
+                                && (cloning.is_some()
+                                    || if clone_mode {
+                                        repo_name.is_empty()
+                                    } else {
+                                        path_text.is_none()
+                                    }),
+                            |el| el.opacity(0.5),
+                        )
                         .on_click(cx.listener(|this, _, _, cx| this.submit_project_form(cx))),
                     ),
             );
@@ -1032,6 +1333,21 @@ impl RunoApp {
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn clones_go_beside_the_newest_project() {
+        let projects = vec![
+            Project {
+                path: "/code/old/app".into(),
+                ..Default::default()
+            },
+            Project {
+                path: "/work/api".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(clone_parent(&projects), Some(PathBuf::from("/work")));
+    }
 
     #[test]
     fn project_look_falls_back_to_plain_folder() {
