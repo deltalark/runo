@@ -823,6 +823,7 @@ export GIT_INDEX_FILE="$idx"
 head="$(git rev-parse -q --verify HEAD || true)"
 [ -n "$head" ] && git read-tree "$head"
 git add -A -- .
+git add -f -A -- .runo/attachments 2>/dev/null || true
 tree="$(git write-tree)"
 export GIT_AUTHOR_NAME=Runo GIT_AUTHOR_EMAIL=runo@localhost GIT_COMMITTER_NAME=Runo GIT_COMMITTER_EMAIL=runo@localhost
 if [ -n "$head" ]; then c="$(git commit-tree "$tree" -p "$head" -m 'runo sync')"; else c="$(git commit-tree "$tree" -m 'runo sync')"; fi
@@ -830,9 +831,12 @@ git update-ref "$1" "$c"
 echo "$c $(git symbolic-ref -q --short HEAD || true)""#;
 
 /// Make the folder match checkpoint $1: the branch ($2, or detached) at its parent and
-/// the working tree at its content, with the changes uncommitted as they were.
+/// the working tree at its content, with the changes uncommitted as they were. Images
+/// attached to prompts travel in `.runo/attachments`, which git is told to ignore.
 const RESTORE: &str = r#"set -e
 c="$1"; b="$2"
+ex="$(git rev-parse --git-path info/exclude)"; mkdir -p "$(dirname "$ex")"
+grep -qxF '/.runo/' "$ex" 2>/dev/null || echo '/.runo/' >> "$ex"
 p="$(git rev-parse -q --verify "$c^" || true)"
 if [ -n "$p" ]; then
   if [ -n "$b" ]; then git checkout -q -f -B "$b" "$p"; else git checkout -q -f --detach "$p"; fi

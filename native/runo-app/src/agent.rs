@@ -106,90 +106,14 @@ pub fn resumes(provider: &str) -> bool {
     )
 }
 
-/// CLIs that take a conversation id chosen by Runo on the first run.
+/// CLIs that take a conversation id chosen by Runo on the first run. Copilot does
+/// since it gained `--session-id`.
 pub fn names_conversation(provider: &str) -> bool {
-    matches!(provider, "claude" | "gemini" | "qwen")
-}
-
-/// CLIs whose JSON output carries the conversation id, read by `json_line`.
-pub fn reports_conversation(provider: &str) -> bool {
-    matches!(provider, "cursor" | "droid" | "amp" | "opencode")
-}
-
-/// What one line of JSON output from `cursor`, `droid`, `amp` or `opencode` holds.
-#[derive(Debug, Default, PartialEq)]
-pub struct JsonLine {
-    pub conversation: Option<String>,
-    pub text: Option<String>,
-    /// Final answer text, used only when no text arrived before it.
-    pub result: Option<String>,
-    pub steps: Vec<String>,
-    pub error: Option<String>,
-}
-
-/// Read one line of an agent's JSON output; `None` when the line is not JSON.
-pub fn json_line(line: &str) -> Option<JsonLine> {
-    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-    if !v.is_object() {
-        return None;
+    match provider {
+        "claude" | "gemini" | "qwen" => true,
+        "copilot" => crate::caps::mentions("copilot", "--session-id"),
+        _ => false,
     }
-    let mut out = JsonLine {
-        conversation: ["session_id", "sessionID", "sessionId", "thread_id"]
-            .iter()
-            .find_map(|k| v[*k].as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        ..Default::default()
-    };
-    let kind = v["type"].as_str().unwrap_or("");
-    match kind {
-        "result" => {
-            if v["is_error"] == true {
-                out.error = v["result"]
-                    .as_str()
-                    .or(v["error"].as_str())
-                    .map(str::to_string);
-            } else {
-                out.result = v["result"].as_str().map(str::to_string);
-            }
-        }
-        "assistant" => {
-            for block in v["message"]["content"].as_array().into_iter().flatten() {
-                match block["type"].as_str().unwrap_or("") {
-                    "text" => {
-                        let t = block["text"].as_str().unwrap_or("");
-                        if !t.trim().is_empty() {
-                            out.text = Some(match out.text.take() {
-                                Some(prev) => format!("{prev}\n{t}"),
-                                None => t.to_string(),
-                            });
-                        }
-                    }
-                    "tool_use" => out.steps.push(format!(
-                        "Used {}",
-                        block["name"].as_str().unwrap_or("a tool")
-                    )),
-                    _ => {}
-                }
-            }
-        }
-        // OpenCode: {"type":"text","part":{"text":…}} and {"type":"tool_use","part":{"tool":…}}.
-        "text" => out.text = v["part"]["text"].as_str().map(str::to_string),
-        "tool_use" => {
-            if let Some(tool) = v["part"]["tool"].as_str() {
-                out.steps.push(format!("Used {tool}"));
-            }
-        }
-        "error" => {
-            out.error = v["error"]["message"]
-                .as_str()
-                .or(v["error"].as_str())
-                .or(v["message"].as_str())
-                .map(str::to_string)
-        }
-        _ => {}
-    }
-    Some(out)
 }
 
 pub fn provider(id: &str) -> &'static Provider {
@@ -290,6 +214,8 @@ pub struct RunSpec<'a> {
     pub images: &'a [String],
     /// Runo's memory server for this folder: (Runo's executable, the session folder).
     pub memory: Option<(&'a str, &'a str)>,
+    /// The run is on this machine, so MCP servers that are local programs can start.
+    pub local: bool,
 }
 
 /// A random version-4 UUID, for naming a Claude Code conversation up front.
@@ -320,6 +246,115 @@ pub fn new_uuid() -> String {
     )
 }
 
+/// How a CLI reports a run: Claude Code's stream-json (which Amp and Qwen Code also
+/// speak), its own JSON lines, or plain text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Output {
+    Claude,
+    Json,
+    Text,
+}
+
+/// The output format Runo asks the CLI for. Formats only newer releases have are used
+/// once the installed CLI's help lists them.
+pub fn output(provider: &str) -> Output {
+    match provider {
+        "claude" | "amp" => Output::Claude,
+        "qwen" if crate::caps::mentions("qwen", "stream-json") => Output::Claude,
+        "codex" | "cursor" | "droid" | "opencode" => Output::Json,
+        "gemini" if crate::caps::mentions("gemini", "stream-json") => Output::Json,
+        "copilot" if crate::caps::mentions("copilot", "--output-format") => Output::Json,
+        _ => Output::Text,
+    }
+}
+
+/// Runo's permission levels a CLI can hold to, given its `--help`. Grok runs every tool
+/// without asking; Amp has no read-only mode; Cursor's print mode either only proposes
+/// changes or, with `--force`, also runs commands, so it has no edit-only level.
+pub fn modes(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "grok" => &["full"],
+        "amp" => &["edit", "full"],
+        "cursor" => &["plan", "full"],
+        _ => &["edit", "plan", "full"],
+    }
+}
+
+/// The level a CLI really runs at for the session's mode, for agents that have no exact
+/// match: Grok always runs everything, and Cursor's edits come with commands.
+pub fn effective_mode<'a>(provider: &str, mode: &'a str) -> &'a str {
+    match (provider, mode) {
+        ("grok", "" | "edit") => "full",
+        ("cursor", "" | "edit") => "full",
+        _ => mode,
+    }
+}
+
+/// Why the agent can't run in this mode, when it has no way to stay read-only.
+pub fn mode_error(provider: &str, mode: &str) -> Option<String> {
+    if mode != "plan" || !matches!(provider, "grok" | "amp") {
+        return None;
+    }
+    Some(format!(
+        "{} has no read-only mode, so Runo won't run it in Plan only. Switch to Auto edit or Full access, or plan with another agent.",
+        self::provider(provider).name
+    ))
+}
+
+/// Whether images can be attached for this agent: it takes them as files or reads them
+/// from the paths listed in the prompt.
+pub fn takes_images(provider: &str) -> bool {
+    match provider {
+        "claude" | "codex" | "opencode" | "gemini" | "amp" => true,
+        "copilot" => crate::caps::mentions("copilot", "--attachment"),
+        _ => false,
+    }
+}
+
+/// MCP servers for one run: the ones the person shares, then Cove's and Runo's memory
+/// server when the run is on this machine.
+fn mcp_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
+    use crate::mcp::McpSpec;
+    let mut out = crate::mcp::shared_servers(spec.provider, spec.local);
+    if let Some((exe, dir)) = spec.memory {
+        if let Some(cove) = cove_server() {
+            out.push((
+                "Cove".into(),
+                McpSpec {
+                    command: cove,
+                    args: vec!["mcp".into()],
+                    ..Default::default()
+                },
+            ));
+        }
+        out.push((
+            MEMORY_SERVER.into(),
+            McpSpec {
+                command: exe.to_string(),
+                args: vec!["--mcp-memory".into(), dir.to_string()],
+                ..Default::default()
+            },
+        ));
+    }
+    out
+}
+
+/// Environment for one run, for CLIs that take settings that way.
+fn provider_env(spec: &RunSpec) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if spec.provider == "opencode" {
+        let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
+            .into_iter()
+            .map(|(name, server)| (name, server.opencode_json()))
+            .collect();
+        if !servers.is_empty() {
+            let config = serde_json::json!({ "mcp": servers });
+            env.push(("OPENCODE_CONFIG_CONTENT".into(), config.to_string()));
+        }
+    }
+    env
+}
+
 fn provider_args(spec: &RunSpec) -> Vec<String> {
     let s = |v: &str| v.to_string();
     let opts = spec.opts;
@@ -328,10 +363,19 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
     let model = or(get("model"), &opts.model_override);
     let effort = or(get("effort"), &opts.effort);
     let mode = get("mode");
+    let mode = effective_mode(spec.provider, &mode).to_string();
+    let knows = |flag: &str| crate::caps::mentions(spec.provider, flag);
     let mut args: Vec<String> = Vec::new();
     match spec.provider {
         "codex" => {
-            args.push(s("exec"));
+            args.extend([s("exec"), s("--json")]);
+            // `-i` takes several files; the flag after it ends the list, so the prompt is
+            // never read as an image.
+            if !spec.resume {
+                for image in spec.images {
+                    args.extend([s("-i"), image.clone()]);
+                }
+            }
             let sandbox = match mode.as_str() {
                 "" | "edit" => "workspace-write".to_string(),
                 "plan" => s("read-only"),
@@ -362,32 +406,12 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             if !spec.in_git {
                 args.push(s("--skip-git-repo-check"));
             }
-            for over in crate::mcp::codex_overrides() {
-                args.extend([s("-c"), over]);
-            }
-            if let (Some(cove), Some(_)) = (cove_server(), spec.memory) {
-                args.extend([
-                    s("-c"),
-                    format!("mcp_servers.Cove.command={}", toml_string(&cove)),
-                    s("-c"),
-                    s("mcp_servers.Cove.args=[\"mcp\"]"),
-                ]);
-            }
-            if let Some((exe, dir)) = spec.memory {
-                args.extend([
-                    s("-c"),
-                    format!("mcp_servers.{MEMORY_SERVER}.command={}", toml_string(exe)),
-                    s("-c"),
-                    format!(
-                        "mcp_servers.{MEMORY_SERVER}.args=[\"--mcp-memory\", {}]",
-                        toml_string(dir)
-                    ),
-                ]);
+            for (name, server) in mcp_servers(spec) {
+                for over in server.codex_overrides(&name) {
+                    args.extend([s("-c"), over]);
+                }
             }
             args.extend(split_args(&opts.extra_args));
-            for image in spec.images {
-                args.extend([s("-i"), image.clone()]);
-            }
             if spec.resume {
                 // A known conversation id resumes exactly that one; `--last` is the
                 // newest in the folder, which may belong to another session.
@@ -396,15 +420,20 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 } else {
                     args.extend([s("resume"), spec.session_id.to_string()]);
                 }
+                // `resume` takes one file per `-i`.
+                for image in spec.images {
+                    args.extend([s("-i"), image.clone()]);
+                }
             }
             args.push(spec.prompt.to_string());
         }
         "cursor" => {
-            args.extend([s("-p"), s("--output-format"), s("json")]);
+            args.extend([s("-p"), s("--output-format"), s("stream-json")]);
             if spec.resume && !spec.session_id.is_empty() {
                 args.extend([s("--resume"), spec.session_id.to_string()]);
             }
-            if matches!(mode.as_str(), "" | "edit" | "full") {
+            // Without `--force` print mode only proposes changes.
+            if mode != "plan" {
                 args.push(s("--force"));
             }
             if !model.is_empty() {
@@ -414,12 +443,19 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             args.push(with_images(spec));
         }
         "gemini" | "qwen" => {
+            let qwen = spec.provider == "qwen";
             let approval = match mode.as_str() {
+                "plan" if knows("\"plan\"") => "plan",
                 "plan" => "default",
                 "full" => "yolo",
+                // Qwen Code spells it with a hyphen.
+                _ if qwen && knows("auto-edit") => "auto-edit",
                 _ => "auto_edit",
             };
             args.extend([s("--approval-mode"), s(approval)]);
+            if output(spec.provider) != Output::Text {
+                args.extend([s("--output-format"), s("stream-json")]);
+            }
             if !model.is_empty() {
                 args.extend([s("-m"), model]);
             }
@@ -434,12 +470,30 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 };
                 args.extend([s(flag), spec.session_id.to_string()]);
             }
+            if qwen && knows("--mcp-config") {
+                let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
+                    .into_iter()
+                    .map(|(name, server)| (name, server.claude_json()))
+                    .collect();
+                if !servers.is_empty() {
+                    let config = serde_json::json!({ "mcpServers": servers });
+                    args.extend([s("--mcp-config"), config.to_string()]);
+                }
+            }
             args.extend(split_args(&opts.extra_args));
             args.extend([s("-p"), with_images(spec)]);
         }
         "copilot" => {
-            if mode != "plan" {
-                args.push(s("--allow-all-tools"));
+            // Non-interactive runs need tools allowed up front; a denial outranks it, so
+            // Auto edit keeps the shell off and Plan only also keeps file writes off.
+            args.push(s("--allow-all-tools"));
+            match mode.as_str() {
+                "full" => {}
+                "plan" => args.extend([s("--deny-tool"), s("shell"), s("--deny-tool"), s("write")]),
+                _ => args.extend([s("--deny-tool"), s("shell")]),
+            }
+            if output("copilot") == Output::Json {
+                args.extend([s("--output-format"), s("json")]);
             }
             if !model.is_empty() {
                 args.extend([s("--model"), model]);
@@ -449,26 +503,58 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             }
             if spec.resume && !spec.session_id.is_empty() {
                 args.extend([s("--resume"), spec.session_id.to_string()]);
+            } else if !spec.resume && names_conversation("copilot") && !spec.session_id.is_empty() {
+                args.extend([s("--session-id"), spec.session_id.to_string()]);
+            }
+            if knows("--additional-mcp-config") {
+                let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
+                    .into_iter()
+                    .map(|(name, server)| (name, server.copilot_json()))
+                    .collect();
+                if !servers.is_empty() {
+                    let config = serde_json::json!({ "mcpServers": servers });
+                    args.extend([s("--additional-mcp-config"), config.to_string()]);
+                }
             }
             args.extend(split_args(&opts.extra_args));
-            args.extend([s("-p"), with_images(spec)]);
+            if knows("--attachment") {
+                for image in spec.images {
+                    args.extend([s("--attachment"), image.clone()]);
+                }
+                args.extend([s("-p"), spec.prompt.to_string()]);
+            } else {
+                args.extend([s("-p"), with_images(spec)]);
+            }
         }
         "amp" => {
             if spec.resume && !spec.session_id.is_empty() {
                 args.extend([s("threads"), s("continue"), spec.session_id.to_string()]);
             }
-            if mode != "plan" {
+            // Amp edits files on its own and asks before most commands, which execute mode
+            // turns into a refusal; Full access allows everything.
+            if mode == "full" {
                 args.push(s("--dangerously-allow-all"));
             }
             args.push(s("--stream-json"));
+            let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
+                .into_iter()
+                .map(|(name, server)| (name, server.amp_json()))
+                .collect();
+            if !servers.is_empty() {
+                args.extend([
+                    s("--mcp-config"),
+                    serde_json::Value::Object(servers).to_string(),
+                ]);
+            }
             args.extend(split_args(&opts.extra_args));
             args.extend([s("-x"), with_images(spec)]);
         }
         "droid" => {
-            args.extend([s("exec"), s("-o"), s("json")]);
+            args.extend([s("exec"), s("-o"), s("stream-json")]);
             if spec.resume && !spec.session_id.is_empty() {
                 args.extend([s("-s"), spec.session_id.to_string()]);
             }
+            // Droid is read-only unless given an autonomy level.
             match mode.as_str() {
                 "plan" => {}
                 "full" => args.extend([s("--auto"), s("high")]),
@@ -501,12 +587,14 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             if !model.is_empty() {
                 args.extend([s("-m"), model]);
             }
-            let agent = if !get("agent").is_empty() {
+            // Plan only always runs OpenCode's read-only plan agent, whatever agent the
+            // session or Settings picked.
+            let agent = if mode == "plan" {
+                Some(s("plan"))
+            } else if !get("agent").is_empty() {
                 Some(get("agent"))
             } else if !opts.sub_agent.is_empty() {
                 Some(opts.sub_agent.clone())
-            } else if mode == "plan" {
-                Some(s("plan"))
             } else {
                 None
             };
@@ -524,10 +612,11 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 args.push(s("--auto"));
             }
             args.extend(split_args(&opts.extra_args));
+            // `-f` takes several files, so it goes after the prompt.
+            args.push(spec.prompt.to_string());
             for image in spec.images {
                 args.extend([s("-f"), image.clone()]);
             }
-            args.push(spec.prompt.to_string());
         }
         _ => {
             let permission = match mode.as_str() {
@@ -555,20 +644,11 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 args.extend([s("--append-system-prompt"), opts.append_prompt.clone()]);
             }
             let mut allowed = list(&opts.allowed_tools);
-            // Servers shared from other apps, plus Runo's memory server.
-            let mut servers: serde_json::Map<String, serde_json::Value> =
-                crate::mcp::claude_servers().into_iter().collect();
-            if let (Some(cove), Some(_)) = (cove_server(), spec.memory) {
-                servers.insert(
-                    "Cove".into(),
-                    serde_json::json!({ "command": cove, "args": ["mcp"] }),
-                );
-            }
-            if let Some((exe, dir)) = spec.memory {
-                servers.insert(
-                    MEMORY_SERVER.into(),
-                    serde_json::json!({ "command": exe, "args": ["--mcp-memory", dir] }),
-                );
+            let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
+                .into_iter()
+                .map(|(name, server)| (name, server.claude_json()))
+                .collect();
+            if spec.memory.is_some() {
                 // Memory and reading playbooks need no approval; starting a playbook as a
                 // new session asks first.
                 for tool in [
@@ -669,6 +749,8 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             let mut args = with_model(Vec::new(), flag);
             if resume {
                 args.extend([s("--resume"), id]);
+            } else if !spec.resume && !id.is_empty() && names_conversation(spec.provider) {
+                args.extend([s("--session-id"), id]);
             }
             return args;
         }
@@ -696,7 +778,7 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             let mut iter = args.into_iter().skip(1).peekable();
             while let Some(arg) = iter.next() {
                 match arg.as_str() {
-                    "--skip-git-repo-check" => {}
+                    "--skip-git-repo-check" | "--json" => {}
                     "-i" => {
                         iter.next();
                     }
@@ -763,6 +845,7 @@ mod interactive_tests {
             session_id: "abc-123",
             images: &[],
             memory: None,
+            local: true,
         };
         let claude = interactive_args(&spec("claude", true, ""));
         assert!(!claude
@@ -797,11 +880,6 @@ fn cove_server() -> Option<String> {
 
 /// Name of Runo's memory MCP server in the agents' config.
 pub const MEMORY_SERVER: &str = "runo";
-
-/// A TOML basic string.
-fn toml_string(text: &str) -> String {
-    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
-}
 
 /// The prompt with attached image paths listed, for CLIs that read images from disk.
 fn with_images(spec: &RunSpec) -> String {
@@ -928,7 +1006,8 @@ pub fn oneshot_within(
 }
 
 /// A read-only follow-up in an agent's own conversation, for the recap it writes when
-/// a session switches away from it. `None` for CLIs this is not supported for.
+/// a session switches away from it. It runs in a fork or without saving, so the
+/// conversation itself is left as it was. `None` for CLIs this is not supported for.
 pub fn recap_command(
     provider: &str,
     configured_bin: &str,
@@ -963,18 +1042,100 @@ pub fn recap_command(
                 "--sandbox",
                 "read-only",
                 "--skip-git-repo-check",
-                "resume",
+                "--ephemeral",
             ]);
             if conversation.is_empty() {
-                command.arg("--last");
+                command.args(["resume", "--last"]);
             } else {
-                command.arg(conversation);
+                command.args(["fork", conversation]);
             }
             command.arg(prompt);
+        }
+        "qwen" if !conversation.is_empty() => {
+            command.args([
+                "--approval-mode",
+                "plan",
+                "--resume",
+                conversation,
+                "--fork-session",
+                "-p",
+                prompt,
+            ]);
+        }
+        "opencode" if !conversation.is_empty() => {
+            command.args([
+                "run",
+                "-s",
+                conversation,
+                "--fork",
+                "--agent",
+                "plan",
+                prompt,
+            ]);
+        }
+        // Droid is read-only without an autonomy level.
+        "droid" if !conversation.is_empty() => {
+            command.args(["exec", "--fork", conversation, prompt]);
         }
         _ => return None,
     }
     Some(command)
+}
+
+/// What to do to sign an agent in, when its output says it isn't. Only lines from the
+/// CLI itself are checked (its errors and stderr), never the agent's reply.
+pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
+    let lower = log.to_lowercase();
+    let signs = [
+        "not logged in",
+        "please log in",
+        "please login",
+        "please run /login",
+        "login required",
+        "log in with",
+        "not signed in",
+        "please sign in",
+        "not authenticated",
+        "authentication required",
+        "authentication failed",
+        "unauthorized",
+        "invalid api key",
+        "no api key",
+        "api key not found",
+        "missing api key",
+        "starting login flow",
+        "token expired",
+        "could not be validated",
+        "status 401",
+        "(401)",
+        "code 401",
+    ];
+    if !signs.iter().any(|s| lower.contains(s)) {
+        return None;
+    }
+    let name = self::provider(provider).name;
+    let how = match provider {
+        "claude" => "Open a terminal, run `claude` and type `/login`, or set ANTHROPIC_API_KEY under Settings > Claude Code > Environment.",
+        "codex" => "Open a terminal and run `codex login`, or set OPENAI_API_KEY under Settings > Codex > Environment.",
+        "gemini" => "Open a terminal and run `gemini` to sign in, or set GEMINI_API_KEY under Settings > Gemini > Environment.",
+        "qwen" => "Open a terminal and run `qwen` to sign in, or set an API key under Settings > Qwen Code > Environment.",
+        "copilot" => "Open a terminal, run `copilot` and type `/login`, or set GH_TOKEN under Settings > Copilot > Environment.",
+        "amp" => "Open a terminal and run `amp login`, or set AMP_API_KEY under Settings > Amp > Environment.",
+        "cursor" => "Open a terminal and run `cursor-agent login`, or set CURSOR_API_KEY under Settings > Cursor > Environment.",
+        "droid" => "Open a terminal and run `droid` to sign in, or set FACTORY_API_KEY under Settings > Droid > Environment.",
+        "opencode" => "Open a terminal and run `opencode auth login`.",
+        "grok" => "Set GROK_API_KEY under Settings > Grok > Environment.",
+        _ => "Sign in to it in a terminal, then try again.",
+    };
+    Some(format!("{name} isn't signed in. {how}"))
+}
+
+/// Whether a line shows the CLI waiting for a browser sign-in, which never finishes in
+/// a run without a terminal.
+pub fn waits_for_sign_in(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.contains("starting login flow")
+        || (lower.contains("visit") && lower.contains("/auth/") && lower.contains("login"))
 }
 
 /// A plain, one-shot run of an agent CLI with a prompt, for small jobs such as
@@ -1019,8 +1180,9 @@ pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Comman
 }
 
 #[derive(Clone)]
-/// A running process. `group` marks Runo's own connection runner, which leads a
-/// process group: stopping it stops the ssh or cove process it started too.
+/// A running process, which leads its own process group so stopping it also stops what
+/// it started (dev servers, test runs, the ssh or cove process of a connection run).
+/// `runner` marks Runo's own connection runner.
 pub struct Handle(Arc<Mutex<Child>>, bool);
 
 impl Handle {
@@ -1037,8 +1199,29 @@ impl Handle {
                     .status();
                 return;
             }
+            #[cfg(unix)]
+            {
+                // Ask the whole group to stop, then make sure of it a moment later.
+                let group = child.id() as i32;
+                // SAFETY: plain signal sends to a process group this handle started.
+                unsafe {
+                    libc::kill(-group, libc::SIGTERM);
+                }
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    // SAFETY: as above; a group that already ended just returns an error.
+                    unsafe {
+                        libc::kill(-group, libc::SIGKILL);
+                    }
+                });
+            }
             let _ = child.kill();
         }
+    }
+
+    /// Runo's connection runner, whose turn keeps going on the connection when Runo quits.
+    pub fn runner(&self) -> bool {
+        self.1
     }
 }
 
@@ -1057,6 +1240,7 @@ pub fn run_agent(
     };
     let mut command = Command::new(bin);
     command.args(provider_args(spec));
+    command.envs(provider_env(spec));
     for line in spec.opts.env.lines() {
         if let Some((key, value)) = line.split_once('=') {
             if !key.trim().is_empty() {
@@ -1115,12 +1299,12 @@ pub(crate) fn spawn(
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
-    let group = command
+    let runner = command
         .get_args()
         .next()
         .is_some_and(|a| a == "--connection-run");
     #[cfg(unix)]
-    if group {
+    {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
@@ -1152,7 +1336,7 @@ pub(crate) fn spawn(
         }
         std::thread::sleep(Duration::from_millis(100));
     });
-    Ok(Handle(child, group))
+    Ok(Handle(child, runner))
 }
 
 #[cfg(test)]
@@ -1203,11 +1387,25 @@ mod tests {
                 "--sandbox",
                 "read-only",
                 "--skip-git-repo-check",
+                "--ephemeral",
                 "resume",
                 "--last",
                 "recap?"
             ]
         );
+        // A known Codex conversation is forked, and nothing of the recap is saved.
+        let codex = args(recap_command("codex", "", "0199", "recap?").unwrap());
+        assert!(codex.contains(&"--ephemeral".to_string()));
+        assert!(codex.windows(2).any(|w| w == ["fork", "0199"]));
+        let qwen = args(recap_command("qwen", "", "q-1", "recap?").unwrap());
+        assert!(qwen.contains(&"--fork-session".to_string()));
+        assert!(qwen.windows(2).any(|w| w == ["--approval-mode", "plan"]));
+        let opencode = args(recap_command("opencode", "", "ses_1", "recap?").unwrap());
+        assert!(opencode.contains(&"--fork".to_string()));
+        assert!(opencode.windows(2).any(|w| w == ["--agent", "plan"]));
+        let droid = args(recap_command("droid", "", "d-1", "recap?").unwrap());
+        assert_eq!(droid, ["exec", "--fork", "d-1", "recap?"]);
+        assert!(recap_command("droid", "", "", "recap?").is_none());
         assert!(recap_command("gemini", "", "x", "recap?").is_none());
     }
 
@@ -1269,6 +1467,7 @@ mod arg_tests {
             session_id: "",
             images: &[],
             memory: None,
+            local: true,
         })
     }
 
@@ -1287,6 +1486,7 @@ mod arg_tests {
                 session_id,
                 images: &[],
                 memory: None,
+                local: true,
             })
         };
         assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
@@ -1307,6 +1507,7 @@ mod arg_tests {
             session_id,
             images: &[],
             memory: None,
+            local: true,
         };
         let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
         let first = provider_args(&spec(false, id));
@@ -1380,6 +1581,7 @@ mod arg_tests {
             session_id: "",
             images: &[],
             memory: None,
+            local: true,
         };
         run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), None, tx).unwrap();
         let (mut out, mut err) = (vec![], vec![]);
@@ -1423,6 +1625,7 @@ mod arg_tests {
             session_id: "",
             images: &[],
             memory: None,
+            local: true,
         };
         let error = run_agent(Target::Session(1), &spec, "/", None, tx)
             .err()
@@ -1542,11 +1745,11 @@ mod arg_tests {
         let o = AgentOptions::default();
         assert_eq!(
             args("codex", false, &[], &o, true),
-            ["exec", "--sandbox", "workspace-write", "hi"]
+            ["exec", "--json", "--sandbox", "workspace-write", "hi"]
         );
         assert_eq!(
             args("codex", false, &[("mode", "full")], &o, true),
-            ["exec", "--sandbox", "danger-full-access", "hi"]
+            ["exec", "--json", "--sandbox", "danger-full-access", "hi"]
         );
         let o = AgentOptions {
             profile: "work".into(),
@@ -1568,6 +1771,7 @@ mod arg_tests {
             ),
             [
                 "exec",
+                "--json",
                 "--sandbox",
                 "read-only",
                 "-m",
@@ -1642,21 +1846,7 @@ mod arg_tests {
     }
 
     #[test]
-    fn json_output_gives_text_steps_and_the_conversation_id() {
-        let cursor = json_line(r#"{"type":"result","subtype":"success","is_error":false,"result":"Done.","session_id":"c-1"}"#).unwrap();
-        assert_eq!(cursor.conversation.as_deref(), Some("c-1"));
-        assert_eq!(cursor.result.as_deref(), Some("Done."));
-        let amp = json_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hi"},{"type":"tool_use","name":"Bash"}]},"session_id":"T-9"}"#).unwrap();
-        assert_eq!(amp.text.as_deref(), Some("Hi"));
-        assert_eq!(amp.steps, vec!["Used Bash"]);
-        assert_eq!(amp.conversation.as_deref(), Some("T-9"));
-        let open =
-            json_line(r#"{"type":"text","sessionID":"ses_1","part":{"text":"Yes"}}"#).unwrap();
-        assert_eq!(
-            (open.text.as_deref(), open.conversation.as_deref()),
-            (Some("Yes"), Some("ses_1"))
-        );
-        assert_eq!(json_line("plain text"), None);
+    fn each_cli_continues_its_own_conversation() {
         // Each CLI is given the conversation it should continue.
         let o = AgentOptions::default();
         let sel = std::collections::HashMap::new();
@@ -1670,6 +1860,7 @@ mod arg_tests {
             session_id: "id-1",
             images: &[],
             memory: None,
+            local: true,
         };
         let has = |p, resume, pair: [&str; 2]| {
             provider_args(&spec(p, resume))
@@ -1687,6 +1878,202 @@ mod arg_tests {
             &provider_args(&spec("amp", true))[..3],
             ["threads", "continue", "id-1"]
         );
+    }
+
+    fn run_args(provider: &str, mode: &str, resume: bool, images: &[String]) -> Vec<String> {
+        let sel = sel(&[("mode", mode)]);
+        let o = AgentOptions::default();
+        provider_args(&RunSpec {
+            provider,
+            prompt: "hi",
+            resume,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "id-1",
+            images,
+            memory: None,
+            local: true,
+        })
+    }
+
+    #[test]
+    fn images_never_swallow_the_prompt() {
+        let images = ["a.png".to_string(), "b.png".to_string()];
+        // Codex's `-i` takes several files, so a flag always follows it.
+        let fresh = run_args("codex", "edit", false, &images);
+        assert_eq!(
+            &fresh[..6],
+            ["exec", "--json", "-i", "a.png", "-i", "b.png"]
+        );
+        assert_eq!(fresh[6], "--sandbox");
+        assert_eq!(fresh.last().unwrap(), "hi");
+        // `resume` takes one file per flag, after the conversation id.
+        let resumed = run_args("codex", "edit", true, &images);
+        assert!(resumed.ends_with(&[
+            "resume".into(),
+            "id-1".into(),
+            "-i".into(),
+            "a.png".into(),
+            "-i".into(),
+            "b.png".into(),
+            "hi".into()
+        ]));
+        // OpenCode's `-f` is variadic too, so it comes after the prompt.
+        let opencode = run_args("opencode", "edit", false, &images);
+        assert!(opencode.ends_with(&[
+            "hi".into(),
+            "-f".into(),
+            "a.png".into(),
+            "-f".into(),
+            "b.png".into()
+        ]));
+        // Others read the files from the paths listed in the prompt.
+        let claude = run_args("claude", "edit", false, &images);
+        assert!(claude.last().unwrap().contains("- a.png"));
+    }
+
+    #[test]
+    fn permission_levels_map_to_each_cli() {
+        let has = |provider: &str, mode: &str, flag: &[&str]| {
+            let args = run_args(provider, mode, false, &[]);
+            args.windows(flag.len()).any(|w| w == flag)
+        };
+        // Copilot: Auto edit keeps the shell off, Plan only file writes too.
+        assert!(has("copilot", "edit", &["--deny-tool", "shell"]));
+        assert!(!has("copilot", "edit", &["--deny-tool", "write"]));
+        assert!(has("copilot", "plan", &["--deny-tool", "write"]));
+        assert!(has("copilot", "plan", &["--deny-tool", "shell"]));
+        assert!(!has("copilot", "full", &["--deny-tool"]));
+        assert!(has("copilot", "full", &["--allow-all-tools"]));
+        // Amp: edits on its own, everything only with Full access.
+        assert!(!has("amp", "edit", &["--dangerously-allow-all"]));
+        assert!(has("amp", "full", &["--dangerously-allow-all"]));
+        // Cursor: Plan only proposes changes; anything else is `--force`.
+        assert!(!has("cursor", "plan", &["--force"]));
+        assert!(has("cursor", "edit", &["--force"]));
+        assert!(has("cursor", "full", &["--force"]));
+        // Droid is read-only without an autonomy level.
+        assert!(!has("droid", "plan", &["--auto"]));
+        assert!(has("droid", "full", &["--auto", "high"]));
+        // Gemini and Qwen: approval modes.
+        assert!(has("gemini", "full", &["--approval-mode", "yolo"]));
+        assert!(has("gemini", "edit", &["--approval-mode", "auto_edit"]));
+        // OpenCode's plan agent wins over any picked sub-agent.
+        let sel = sel(&[("mode", "plan"), ("agent", "build")]);
+        let o = AgentOptions {
+            sub_agent: "general".into(),
+            ..Default::default()
+        };
+        let opencode = provider_args(&RunSpec {
+            provider: "opencode",
+            prompt: "hi",
+            resume: false,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "",
+            images: &[],
+            memory: None,
+            local: true,
+        });
+        assert!(opencode.windows(2).any(|w| w == ["--agent", "plan"]));
+        assert!(!opencode.contains(&"build".to_string()));
+        // Grok and Amp can't stay read-only, so they don't run in Plan only.
+        assert!(mode_error("grok", "plan").is_some());
+        assert!(mode_error("amp", "plan").is_some());
+        assert!(mode_error("amp", "edit").is_none());
+        assert!(mode_error("copilot", "plan").is_none());
+        assert_eq!(modes("grok"), ["full"]);
+        assert_eq!(modes("cursor"), ["plan", "full"]);
+        assert_eq!(effective_mode("grok", "edit"), "full");
+        assert_eq!(effective_mode("cursor", ""), "full");
+        assert_eq!(effective_mode("copilot", "edit"), "edit");
+    }
+
+    #[test]
+    fn structured_output_for_every_cli_that_has_it() {
+        assert!(run_args("cursor", "edit", false, &[])
+            .windows(2)
+            .any(|w| w == ["--output-format", "stream-json"]));
+        assert!(run_args("droid", "edit", false, &[])
+            .windows(2)
+            .any(|w| w == ["-o", "stream-json"]));
+        assert!(run_args("amp", "edit", false, &[]).contains(&"--stream-json".to_string()));
+        assert_eq!(output("codex"), Output::Json);
+        assert_eq!(output("amp"), Output::Claude);
+        assert_eq!(output("grok"), Output::Text);
+    }
+
+    #[test]
+    fn memory_server_reaches_every_cli_that_takes_servers() {
+        let sel = HashMap::new();
+        let o = AgentOptions::default();
+        let spec = |provider| RunSpec {
+            provider,
+            prompt: "hi",
+            resume: false,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "",
+            images: &[],
+            memory: Some(("/bin/runo", "/work/app")),
+            local: true,
+        };
+        let claude = provider_args(&spec("claude"));
+        let config = claude[claude.iter().position(|a| a == "--mcp-config").unwrap() + 1].clone();
+        assert!(config.contains("\"--mcp-memory\""));
+        let codex = provider_args(&spec("codex"));
+        assert!(codex.contains(&"mcp_servers.runo.command=\"/bin/runo\"".to_string()));
+        let amp = provider_args(&spec("amp"));
+        let config = &amp[amp.iter().position(|a| a == "--mcp-config").unwrap() + 1];
+        let config: serde_json::Value = serde_json::from_str(config).unwrap();
+        assert_eq!(config["runo"]["command"], "/bin/runo");
+        let env = provider_env(&spec("opencode"));
+        assert_eq!(env[0].0, "OPENCODE_CONFIG_CONTENT");
+        let config: serde_json::Value = serde_json::from_str(&env[0].1).unwrap();
+        assert_eq!(
+            config["mcp"]["runo"]["command"],
+            serde_json::json!(["/bin/runo", "--mcp-memory", "/work/app"])
+        );
+        assert!(provider_env(&spec("gemini")).is_empty());
+    }
+
+    #[test]
+    fn copilot_uses_newer_flags_once_its_help_lists_them() {
+        crate::caps::set(
+            "copilot",
+            crate::caps::Caps {
+                help: "--session-id --output-format --attachment --additional-mcp-config".into(),
+                ..Default::default()
+            },
+        );
+        assert!(names_conversation("copilot"));
+        assert_eq!(output("copilot"), Output::Json);
+        assert!(takes_images("copilot"));
+        let images = ["shot.png".to_string()];
+        let fresh = run_args("copilot", "edit", false, &images);
+        assert!(fresh.windows(2).any(|w| w == ["--session-id", "id-1"]));
+        assert!(fresh.windows(2).any(|w| w == ["--output-format", "json"]));
+        assert!(fresh.windows(2).any(|w| w == ["--attachment", "shot.png"]));
+        assert!(fresh.ends_with(&["-p".into(), "hi".into()]));
+        let resumed = run_args("copilot", "edit", true, &[]);
+        assert!(resumed.windows(2).any(|w| w == ["--resume", "id-1"]));
+        assert!(!resumed.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
+    fn sign_in_problems_get_a_hint() {
+        let hint = sign_in_hint("codex", "Error: 401 Unauthorized: Missing bearer").unwrap();
+        assert!(hint.starts_with("Codex isn't signed in."));
+        assert!(hint.contains("codex login"));
+        assert!(sign_in_hint("claude", "Invalid API key · Please run /login").is_some());
+        assert!(sign_in_hint("claude", "error: model not found").is_none());
+        assert!(waits_for_sign_in(
+            "No API key found. Starting login flow..."
+        ));
+        assert!(!waits_for_sign_in("Reading src/login.rs"));
     }
 
     #[test]

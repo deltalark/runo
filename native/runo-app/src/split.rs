@@ -69,17 +69,7 @@ impl RunoApp {
         if text.is_empty() || self.demo_guard(cx) {
             return;
         }
-        if self.handles.contains_key(&Target::Session(id)) {
-            if let Some(session) = self.state.session_mut(id) {
-                session.queue.push(text);
-            }
-            self.save();
-            self.info = Some((
-                "Queued. It is sent when the agent finishes.".into(),
-                std::time::Instant::now(),
-            ));
-            return;
-        }
+        // A busy session queues it.
         let opts = self
             .state
             .session(id)
@@ -141,6 +131,20 @@ impl RunoApp {
                     .text_color(rgb(c_muted()))
                     .child(status),
             )
+            .when(working, |el| {
+                el.child(
+                    self.ghost_button_sized(
+                        "split-stop",
+                        IconName::CircleStop,
+                        "Stop the agent",
+                        26.,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.stop_session(id);
+                        cx.notify();
+                    })),
+                )
+            })
             .child(
                 self.ghost_button_sized(
                     "split-swap",

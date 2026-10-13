@@ -25,3 +25,16 @@ All notable changes to Runo are documented here.
 - Top bar: the project switcher handles empty projects, the Agents pill lists running agents to open or stop, spend shows today, the branch and breadcrumb are clickable, and Runs on shows the session's real connection and moves it.
 - Home follows the top-bar project with an All projects toggle and Add project. Reviews follows it too and badges only review requests and failed checks. A project whose folder is gone offers Relink or Remove.
 - App menu with Quit, and the window reopens from the Dock on macOS. Closing the last tab stays in Sessions, the tour starts in Sessions, existing users get a one-time What's new card, shortcut hints follow your keybindings, and blank session names are refused.
+
+### Fixed
+
+- Agents: permission modes now match what each CLI can do. Plan is read-only everywhere it is offered, Grok runs in full access only, and Amp, Copilot and Cursor respect Edit vs Full.
+- Agents: Runo's memory server and shared MCP servers reach every CLI that takes servers by flag or env (Claude, Codex, OpenCode, Qwen, Copilot, Amp), and local servers are skipped for sandboxed or remote runs.
+- Agents: Codex, Cursor, Droid, Gemini, Qwen, Copilot and OpenCode turns stream as structured JSON, with live steps, conversation ids, resume and token usage.
+- Images: drafts and attachments belong to each session, queued prompts keep their images, files live in `.runo/attachments` in the worktree, and the attach button only shows for agents that read images.
+- Queue: Send now and Retry, and the queue drains in order after a failure, a stop or a restart; a prompt sent during setup is queued.
+- Turns: Stop ends the agent's whole process group, a first-turn stop keeps the conversation, and the split pane has a Stop button.
+- Turns: a sign-in failure, even with exit code 0, shows how to sign in instead of an empty reply.
+- Questions: an agent asking several questions gets an answer to each, and the alert stays after an error.
+- CLI view: turns typed in the CLI are kept on quit, and the CLI no longer opens over a running chat turn.
+- Handoff and history: recaps work for more agents without changing the conversation, past conversations load in the background without duplicates, and a resumed one shows its earlier turns.

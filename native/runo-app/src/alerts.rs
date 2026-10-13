@@ -443,7 +443,8 @@ fn update_done_badge(n: usize, label: &'static str) -> AnyElement {
 /// Something a session is waiting on the person for.
 pub(crate) enum Waiting {
     Denied(Vec<String>),
-    Question(store::Question),
+    /// The agent's questions; each is answered in turn and the answers go back together.
+    Questions(Vec<store::Question>),
     Plan,
 }
 
@@ -479,17 +480,21 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
     !l.is_empty() && !c.is_empty() && l > c
 }
 
-/// What the latest message of a session asks of the person, if anything.
+/// What the latest reply of a session asks of the person, if anything. Notices after it,
+/// such as the error a run ended with, don't hide the request.
 pub(crate) fn waiting_on(session: &Session) -> Option<(usize, Waiting)> {
-    let index = session.messages.len().checked_sub(1)?;
+    let index = session
+        .messages
+        .iter()
+        .rposition(|m| m.role != Role::System)?;
     let m = &session.messages[index];
     if m.role != Role::Agent {
         return None;
     }
     if !m.denied.is_empty() {
         Some((index, Waiting::Denied(m.denied.clone())))
-    } else if let Some(q) = m.questions.first().filter(|q| !q.options.is_empty()) {
-        Some((index, Waiting::Question(q.clone())))
+    } else if m.questions.iter().any(|q| !q.options.is_empty()) {
+        Some((index, Waiting::Questions(m.questions.clone())))
     } else if !m.plan.trim().is_empty() {
         Some((index, Waiting::Plan))
     } else {
@@ -921,12 +926,23 @@ impl RunoApp {
                         and_list(tools)
                     ),
                 ),
-                Waiting::Question(q) => (
-                    c_blue(),
-                    IconName::CircleQuestionMark,
-                    "Question",
-                    q.question.clone(),
-                ),
+                Waiting::Questions(questions) => {
+                    let (qi, q) = self.next_question(id, index, questions);
+                    (
+                        c_blue(),
+                        IconName::CircleQuestionMark,
+                        if questions.len() > 1 {
+                            "Questions"
+                        } else {
+                            "Question"
+                        },
+                        if questions.len() > 1 {
+                            format!("{} ({} of {})", q.question, qi + 1, questions.len())
+                        } else {
+                            q.question.clone()
+                        },
+                    )
+                }
                 Waiting::Plan => (
                     c_blue(),
                     IconName::ListChecks,
@@ -982,14 +998,15 @@ impl RunoApp {
                                 })),
                         );
                 }
-                Waiting::Question(q) => {
+                Waiting::Questions(questions) => {
+                    let (qi, q) = self.next_question(id, index, &questions);
                     for (oi, option) in q.options.iter().take(4).enumerate() {
-                        let answer = format!("My answer: {} {option}", q.question);
+                        let option = option.clone();
                         actions = actions.child(
                             self.chip(("al-opt", n * 10 + oi), option.clone(), false)
                                 .h(px(26.))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.answer_session(id, answer.clone(), Vec::new(), cx);
+                                    this.pick_answer(id, index, qi, option.clone(), cx);
                                     cx.notify();
                                 })),
                         );
@@ -1744,6 +1761,12 @@ mod tests {
         };
         assert!(waiting_on(&s).is_none());
         s.messages[0].denied = vec!["Bash".into()];
+        assert!(matches!(waiting_on(&s), Some((0, Waiting::Denied(_)))));
+        // An error notice after the request leaves it waiting.
+        s.messages.push(Message::new(
+            Role::System,
+            "The agent stopped with an error.",
+        ));
         assert!(matches!(waiting_on(&s), Some((0, Waiting::Denied(_)))));
         s.messages.push(Message::new(Role::User, "ok"));
         assert!(waiting_on(&s).is_none());

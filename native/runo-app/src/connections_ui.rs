@@ -191,8 +191,8 @@ impl RunoApp {
                     {
                         *m = Message::now(Role::Agent, "");
                     }
-                    if provider == "claude" {
-                        self.streams.insert(id, stream::ClaudeStream::new(&dir));
+                    if let Some(parser) = stream::Parser::for_provider(&provider, &dir) {
+                        self.streams.insert(id, parser);
                     }
                     self.handles.insert(Target::Session(id), handle);
                     self.started.insert(id, std::time::Instant::now());

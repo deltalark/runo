@@ -173,9 +173,6 @@ struct RunoApp {
     next_shell: u64,
     /// Agent CLIs open in the CLI view, by session.
     cli_runs: HashMap<u64, cliview::CliRun>,
-    /// Sessions whose JSON output already gave text this turn, so the final result is not
-    /// shown twice.
-    json_text: std::collections::HashSet<u64>,
     /// The agent whose install confirm card is open.
     install_confirm: Option<&'static str>,
     project_form: Option<projects::ProjectForm>,
@@ -228,8 +225,8 @@ struct RunoApp {
     split_input: Entity<InputState>,
     split_scroll: ScrollHandle,
     stderr: HashMap<u64, Vec<String>>,
-    /// Parsers for Claude runs, which print stream-json rather than plain text.
-    streams: HashMap<u64, stream::ClaudeStream>,
+    /// Parsers for runs that print JSON rather than plain text.
+    streams: HashMap<u64, stream::Parser>,
     search: Entity<InputState>,
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
@@ -273,6 +270,8 @@ struct RunoApp {
     tour_rects: HashMap<&'static str, Bounds<Pixels>>,
     /// Past Claude and Codex conversations found on this machine.
     history: Vec<history::Past>,
+    /// The history list is being read.
+    history_loading: bool,
     /// Change counts (files, added, removed) of each session racing the selected one.
     race_stats: HashMap<u64, (usize, usize, usize)>,
     new_race: Vec<usize>,
@@ -338,10 +337,20 @@ struct RunoApp {
     started: HashMap<u64, std::time::Instant>,
     /// Sessions the user asked to stop, so their exit is not reported as an error.
     stopping: std::collections::HashSet<u64>,
+    /// Runs stopped because their CLI waited for a browser sign-in.
+    signed_out: std::collections::HashSet<u64>,
     /// Files changed by each session's latest turn, once it finished (for Undo / Keep).
     turn_files: HashMap<u64, usize>,
-    /// Images attached to the prompt being written.
-    attachments: Vec<String>,
+    /// Images attached to each session's unsent prompt.
+    attachments: HashMap<u64, Vec<String>>,
+    /// Each session's unsent prompt while another session is on screen, and the session
+    /// whose text the composer holds now.
+    drafts: HashMap<u64, String>,
+    draft_for: Option<u64>,
+    /// Answers picked so far for an agent's several questions, by (session, message).
+    question_picks: HashMap<(u64, usize), Vec<Option<String>>>,
+    /// When closing the window was asked while agents ran, so a second close goes through.
+    close_armed: Option<std::time::Instant>,
     /// Dropped files waiting to be added to the prompt as @mentions.
     pending_mentions: Vec<String>,
     /// The `@query` being typed in the composer.
@@ -988,7 +997,6 @@ impl RunoApp {
             shell_tab: None,
             next_shell: 0,
             cli_runs: HashMap::new(),
-            json_text: Default::default(),
             install_confirm: None,
             project_form: None,
             project_name,
@@ -1068,6 +1076,7 @@ impl RunoApp {
             tour_rects: HashMap::new(),
             race_mode: false,
             history: Vec::new(),
+            history_loading: false,
             race_stats: HashMap::new(),
             new_race: Vec::new(),
             confirm_delete: None,
@@ -1089,8 +1098,13 @@ impl RunoApp {
             panel_wide: None,
             started: HashMap::new(),
             stopping: Default::default(),
+            signed_out: Default::default(),
             turn_files: HashMap::new(),
-            attachments: Vec::new(),
+            attachments: HashMap::new(),
+            drafts: HashMap::new(),
+            draft_for: None,
+            question_picks: HashMap::new(),
+            close_armed: None,
             pending_mentions: Vec::new(),
             mention: None,
             slash: None,
@@ -1231,7 +1245,7 @@ impl RunoApp {
         // Chromium would exit when its pipe closes, but stop it right away.
         cx.on_app_quit(|this, _| {
             this.browser = None;
-            this.save();
+            this.before_quit();
             async {}
         })
         .detach();
@@ -1250,10 +1264,16 @@ impl RunoApp {
             });
         });
         app._subscriptions.push(bounds_sub);
-        let me = cx.entity().downgrade();
+        // Closing the window while agents run here asks first: they stop with it. The
+        // layout is saved either way.
+        let app_entity = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
-            let _ = me.update(cx, |this, _| this.save());
-            true
+            app_entity
+                .update(cx, |this, cx| {
+                    this.save();
+                    this.may_close(cx)
+                })
+                .unwrap_or(true)
         });
         // Playbooks agents asked for start within a couple of seconds; scheduled ones are
         // checked twice a minute.
@@ -1286,6 +1306,7 @@ impl RunoApp {
             app.tabs.push(id);
         }
         app.resume_remote_turns();
+        app.send_waiting_queues(cx);
         app.refresh();
         app.chat_scroll.scroll_to_bottom();
         window.focus(&app.focus, cx);
@@ -1464,14 +1485,11 @@ impl RunoApp {
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Line(Target::Session(id), line) => {
-                let provider = self
-                    .state
-                    .session(id)
-                    .map(|s| s.provider.clone())
-                    .unwrap_or_default();
+                if agent::waits_for_sign_in(&line) {
+                    self.sign_in_wait(id, &line);
+                }
                 let updates = match self.streams.get_mut(&id) {
                     Some(parser) => parser.feed(&line),
-                    None if agent::reports_conversation(&provider) => self.json_updates(id, &line),
                     None => vec![stream::Update::Text(line)],
                 };
                 let plain = !self.streams.contains_key(&id);
@@ -1499,6 +1517,9 @@ impl RunoApp {
                             stream::Update::Denied(tools) => m.denied = tools,
                             stream::Update::Plan(plan) => m.plan = plan,
                             stream::Update::Questions(questions) => m.questions = questions,
+                            stream::Update::Conversation(conversation) => {
+                                session.agent_session = conversation
+                            }
                         }
                     }
                 }
@@ -1510,6 +1531,9 @@ impl RunoApp {
                 }
             }
             Event::Err(Target::Session(id), line) => {
+                if agent::waits_for_sign_in(&line) {
+                    self.sign_in_wait(id, &line);
+                }
                 let log = self.stderr.entry(id).or_default();
                 log.push(line);
                 if log.len() > 200 {
@@ -1525,7 +1549,9 @@ impl RunoApp {
                 }
             }
             Event::Done(Target::Session(id), ok) => {
-                let stopped = self.stopping.contains(&id);
+                // Taken here so a stopped run that still exits cleanly doesn't leave the
+                // flag behind for the next real failure.
+                let stopped = self.stopping.remove(&id);
                 self.handles.remove(&Target::Session(id));
                 self.streams.remove(&id);
                 if let Some(start) = self.started.remove(&id) {
@@ -1536,13 +1562,33 @@ impl RunoApp {
                 self.measure(id);
                 self.record_spend(id);
                 let on_screen = self.selected == Some(id) && self.view == View::Session;
+                let all = self.stderr.get(&id).cloned().unwrap_or_default();
+                let signed_out = self.signed_out.remove(&id);
+                let mut hold = false;
                 if let Some(session) = self.state.session_mut(id) {
+                    // A CLI that exits cleanly without replying may have refused to run
+                    // because it isn't signed in; say so instead of reporting an empty reply.
+                    let silent = session.messages.last().is_some_and(|m| {
+                        m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
+                    });
+                    let errors: String = session.messages
+                        [session.messages.len().saturating_sub(3)..]
+                        .iter()
+                        .filter(|m| m.role == Role::System)
+                        .map(|m| m.text.as_str())
+                        .chain(all.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let sign_in = if (silent || !ok || signed_out) && !stopped {
+                        agent::sign_in_hint(&session.provider, &errors)
+                    } else {
+                        None
+                    };
+                    let ok = ok && sign_in.is_none();
                     session.status = if ok { Status::Done } else { Status::Failed };
                     session.remote_turn = false;
                     session.unread = !on_screen;
-                    if session.messages.last().is_some_and(|m| {
-                        m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
-                    }) {
+                    if silent {
                         if ok {
                             if let Some(m) = session.messages.last_mut() {
                                 m.text = "(The agent finished without any output.)".into();
@@ -1559,8 +1605,10 @@ impl RunoApp {
                             "Agent stopped or failed"
                         },
                     );
-                    if !ok {
-                        let all = self.stderr.get(&id).cloned().unwrap_or_default();
+                    if let Some(hint) = sign_in {
+                        hold = true;
+                        session.messages.push(Message::new(Role::System, hint));
+                    } else if !ok {
                         let mut errors: Vec<String> = Vec::new();
                         for line in all.iter().filter(|l| {
                             l.starts_with("ERROR:")
@@ -1577,7 +1625,6 @@ impl RunoApp {
                             errors
                         };
                         let log = tail.join("\n");
-                        let stopped = self.stopping.remove(&id);
                         let mut text = String::from(if stopped {
                             "Stopped."
                         } else {
@@ -1599,7 +1646,11 @@ impl RunoApp {
                         session.messages.push(Message::new(Role::System, text));
                     }
                 }
-                self.finish_turn(id, ok, stopped, cx);
+                let ok = self
+                    .state
+                    .session(id)
+                    .is_some_and(|s| s.status == Status::Done);
+                self.finish_turn(id, ok, stopped, hold, cx);
                 self.write_memory(id);
                 self.save();
                 if self.split == Some(id) {
@@ -1681,10 +1732,54 @@ impl RunoApp {
 
     fn stop(&mut self) {
         if let Some(id) = self.selected {
-            if let Some(handle) = self.handles.get(&Target::Session(id)) {
-                self.stopping.insert(id);
-                handle.kill();
-            }
+            self.stop_session(id);
+        }
+    }
+
+    /// Agents still running on this machine; turns on connections keep going without Runo.
+    fn local_runs(&self) -> usize {
+        self.handles
+            .iter()
+            .filter(|(t, h)| matches!(t, Target::Session(_)) && !h.runner())
+            .count()
+    }
+
+    /// Whether the window may close now. With agents running here, the first close only
+    /// warns; closing again within a few seconds goes ahead.
+    fn may_close(&mut self, cx: &mut Context<Self>) -> bool {
+        let running = self.local_runs();
+        if running == 0
+            || self
+                .close_armed
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
+        {
+            return true;
+        }
+        self.close_armed = Some(std::time::Instant::now());
+        self.notice = Some(format!(
+            "{running} agent{} still running. Closing Runo stops {}. Close again to quit anyway.",
+            if running == 1 { " is" } else { "s are" },
+            if running == 1 { "it" } else { "them" }
+        ));
+        cx.notify();
+        false
+    }
+
+    /// Runo is quitting: keep the turns made in open CLIs, and stop agents and commands
+    /// running on this machine together with everything they started.
+    fn before_quit(&mut self) {
+        self.keep_cli_turns();
+        for handle in self.handles.values().filter(|h| !h.runner()) {
+            handle.kill();
+        }
+        self.save();
+    }
+
+    /// Stop a session's agent, and everything it started.
+    fn stop_session(&mut self, id: u64) {
+        if let Some(handle) = self.handles.get(&Target::Session(id)) {
+            self.stopping.insert(id);
+            handle.kill();
         }
     }
 
@@ -1749,7 +1844,7 @@ impl RunoApp {
                 self.run_playbook(id, here, cx);
             }
             Jump::View(view) => match view {
-                View::History => self.open_history(),
+                View::History => self.open_history(cx),
                 View::Notes => self.open_notes(window, cx),
                 View::GitHub => self.load_github(),
                 _ => self.view = view,
@@ -2465,11 +2560,26 @@ impl RunoApp {
         self.start_agent(id, task, &opts);
     }
 
-    fn open_history(&mut self) {
+    fn open_history(&mut self, cx: &mut Context<Self>) {
         self.view = View::History;
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-            self.history = history::scan(std::path::Path::new(&home));
-        }
+        let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        else {
+            return;
+        };
+        // Hundreds of transcripts are read; do it off the UI thread.
+        self.history_loading = true;
+        let scan = cx
+            .background_executor()
+            .spawn(async move { history::scan(std::path::Path::new(&home)) });
+        cx.spawn(async move |this, cx| {
+            let found = scan.await;
+            let _ = this.update(cx, |this, cx| {
+                this.history = found;
+                this.history_loading = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// The Runo project a folder belongs to: the project itself or one of its worktrees.
@@ -2519,6 +2629,42 @@ impl RunoApp {
         };
         let id = self.state.next_id();
         let provider = agent::provider(past.provider);
+        // The conversation's earlier turns, read from the CLI's transcript, so the chat
+        // shows where it left off.
+        let prefix = format!("{}/", past.cwd.trim_end_matches('/'));
+        let mut earlier: Vec<Message> = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .and_then(|home| {
+                history::transcript(std::path::Path::new(&home), past.provider, &past.id)
+            })
+            .map(|path| history::turns(past.provider, &history::read_from(&path, 0)))
+            .unwrap_or_default();
+        for m in &mut earlier {
+            for step in &mut m.steps {
+                *step = step.replace(&prefix, "");
+            }
+        }
+        let picked_up = format!(
+            "Picked up the {} conversation “{}” from {}.",
+            provider.name,
+            past.title,
+            history::ago(past.modified),
+        );
+        let messages = if earlier.iter().any(|m| m.role == Role::Agent) {
+            earlier.push(Message::now(
+                Role::System,
+                format!("{picked_up} Send a message to continue it."),
+            ));
+            earlier
+        } else {
+            vec![Message::now(
+                Role::Agent,
+                format!(
+                    "{picked_up} Earlier messages stay in {}; send a message to continue it.",
+                    provider.name
+                ),
+            )]
+        };
         let branch = if git::is_repo(&past.cwd) {
             git::current_branch(&past.cwd)
         } else {
@@ -2539,16 +2685,7 @@ impl RunoApp {
                 cx.global::<AppSettings>().default_mode.clone(),
             )]),
             status: Status::Idle,
-            messages: vec![Message::now(
-                Role::Agent,
-                format!(
-                    "Picked up the {} conversation “{}” from {}. Earlier messages stay in {}; send a message to continue it.",
-                    provider.name,
-                    past.title,
-                    history::ago(past.modified),
-                    provider.name
-                ),
-            )],
+            messages,
             agent_session: past.id.clone(),
             conversation_start: 0,
             pinned: false,
@@ -2631,7 +2768,17 @@ impl RunoApp {
                 i.min(12),
             ));
         }
-        if self.history.is_empty() {
+        if self.history.is_empty() && self.history_loading {
+            rows = rows.child(
+                div()
+                    .py_10()
+                    .flex()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(rgb(c_muted()))
+                    .child("Looking for past conversations…"),
+            );
+        } else if self.history.is_empty() {
             rows = rows.child(
                 div()
                     .py_10()
@@ -2941,7 +3088,7 @@ impl RunoApp {
             .on_click(cx.listener(move |this, _, window, cx| {
                 match view {
                     View::Settings => this.open_settings(),
-                    View::History => this.open_history(),
+                    View::History => this.open_history(cx),
                     View::Notes => this.open_notes(window, cx),
                     View::GitHub => this.load_github(),
                     _ => this.view = view,
@@ -4588,7 +4735,11 @@ impl RunoApp {
                 }),
         );
         for control in &controls {
-            let current = sel.get(control.id).cloned().unwrap_or_default();
+            let mut current = sel.get(control.id).cloned().unwrap_or_default();
+            if control.id == "mode" {
+                // The level the agent really runs at, for CLIs without the one picked.
+                current = agent::effective_mode(&session.provider, &current).to_string();
+            }
             let label = control
                 .choices
                 .iter()
@@ -4631,19 +4782,22 @@ impl RunoApp {
         let picked = self
             .picked_playbook
             .and_then(|id| self.state.automations.iter().find(|a| a.id == id));
-        let ready = !empty_prompt || !self.attachments.is_empty() || picked.is_some();
-        chips = chips.child(
-            self.ghost_button_sized(
-                "attach",
-                IconName::Paperclip,
-                "Attach an image or file (pastes a copied image)",
-                26.,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.attach(cx);
-                cx.notify();
-            })),
-        );
+        let ready = !empty_prompt || !self.attached().is_empty() || picked.is_some();
+        // Only agents that can read images get the attach button.
+        if agent::takes_images(&session.provider) {
+            chips = chips.child(
+                self.ghost_button_sized(
+                    "attach",
+                    IconName::Paperclip,
+                    "Attach an image or file (pastes a copied image)",
+                    26.,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.attach(cx);
+                    cx.notify();
+                })),
+            );
+        }
         div()
             .w_full()
             .max_w(px(780.))
@@ -7034,7 +7188,20 @@ impl Render for RunoApp {
         if let Some(id) = self.selected.filter(|_| self.view == View::Session) {
             let wants = self.state.session(id).is_some_and(|s| s.cli);
             if wants && !self.cli_runs.contains_key(&id) {
-                self.open_cli(id, "", cx);
+                if self.handles.contains_key(&Target::Session(id)) {
+                    // A chat turn is running (for example one picked up on a connection
+                    // after a restart); two writers would fork the conversation.
+                    if let Some(s) = self.state.session_mut(id) {
+                        s.cli = false;
+                    }
+                    self.info = Some((
+                        "The agent is still answering in Chat. Switch to the CLI when it's done."
+                            .into(),
+                        std::time::Instant::now(),
+                    ));
+                } else {
+                    self.open_cli(id, "", cx);
+                }
             }
         }
         if self.focus_cli > 0 {
