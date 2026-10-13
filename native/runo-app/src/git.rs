@@ -1305,7 +1305,8 @@ mod tests {
         sh(&repo, &["init", "-q"]);
         sh(&repo, &["config", "user.email", "t@t"]);
         sh(&repo, &["config", "user.name", "t"]);
-        repo
+        // Git reports real paths, and on a Mac the temporary folder is a symlink.
+        repo.canonicalize().unwrap()
     }
 
     #[test]
@@ -1501,6 +1502,7 @@ index 1..2 100644
         let root = std::env::temp_dir().join(format!("runo-test-{}", std::process::id()));
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
         sh(&repo, &["init", "-q"]);
         sh(&repo, &["config", "user.email", "t@t"]);
         sh(&repo, &["config", "user.name", "t"]);
