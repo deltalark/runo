@@ -724,9 +724,8 @@ pub fn imports_cli_turns(provider: &str) -> bool {
     matches!(provider, "claude" | "codex")
 }
 
-/// Gemini's and Qwen Code's conversation flags: `--resume` to continue, or a new
-/// conversation's id up front. Gemini resumes by its number for the session (or
-/// "latest"), and names a new one only when it has `--session-id`.
+/// Gemini's and Qwen Code's conversation flags: `--resume <id>` to continue, or a new
+/// conversation's id up front. Gemini names a new one only when it has `--session-id`.
 fn conversation_args(spec: &RunSpec) -> Vec<String> {
     let id = spec.session_id;
     if id.is_empty() {
@@ -734,12 +733,7 @@ fn conversation_args(spec: &RunSpec) -> Vec<String> {
     }
     let gemini = spec.provider == "gemini";
     if spec.resume {
-        let to = if gemini {
-            crate::gemini::resume_arg(id)
-        } else {
-            id.to_string()
-        };
-        vec!["--resume".into(), to]
+        vec!["--resume".into(), id.to_string()]
     } else if !gemini || names_conversation("gemini") {
         vec!["--session-id".into(), id.to_string()]
     } else {
@@ -2014,8 +2008,7 @@ mod arg_tests {
                 .windows(2)
                 .any(|w| w == pair)
         };
-        // Gemini resumes by number, or the folder's latest while the number is unknown.
-        assert!(has("gemini", true, ["--resume", "latest"]));
+        assert!(has("gemini", true, ["--resume", "id-1"]));
         assert!(has("qwen", true, ["--resume", "id-1"]));
         assert!(has("cursor", true, ["--resume", "id-1"]));
         assert!(has("copilot", true, ["--resume", "id-1"]));
@@ -2219,7 +2212,7 @@ mod arg_tests {
         let fresh = run_args("gemini", "edit", false, &[]);
         assert!(fresh.windows(2).any(|w| w == ["--session-id", "id-1"]));
         let resumed = run_args("gemini", "edit", true, &[]);
-        assert!(resumed.windows(2).any(|w| w == ["--resume", "latest"]));
+        assert!(resumed.windows(2).any(|w| w == ["--resume", "id-1"]));
         assert!(!resumed.contains(&"--session-id".to_string()));
     }
 

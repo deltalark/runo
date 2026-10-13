@@ -318,13 +318,6 @@ impl RunoApp {
         // Servers Runo merged into the agent's project file go before the snapshot.
         if let Some(s) = self.state.session(id) {
             crate::mcp::clean_project(std::path::Path::new(&s.dir));
-            // Gemini resumes by the conversation's number in its list for the folder.
-            if s.provider == "gemini" && !s.agent_session.is_empty() && s.sandbox().is_none() {
-                crate::gemini::learn_sessions(
-                    crate::caps::binary(agent::provider("gemini")),
-                    s.dir.clone(),
-                );
-            }
         }
         // A pull request's state, and a review the agent wrote for it, show right away.
         if self.state.session(id).is_some_and(|s| !s.pr_url.is_empty()) {
