@@ -22,6 +22,8 @@ pub enum Source {
 }
 
 static FOUND: RwLock<Vec<(PathBuf, Source)>> = RwLock::new(Vec::new());
+/// Variables the login shell's profile sets, such as API keys exported in ~/.zshrc.
+static LOGIN_ENV: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
 
 /// Build the full PATH and put it in this process's environment. Call before any thread
 /// starts; Settings > Providers > Re-detect calls it again.
@@ -30,11 +32,15 @@ pub fn init() {
     let inherited: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    let shell = if cfg!(windows) || std::env::var_os("RUNO_NO_SHELL_PATH").is_some() {
-        Vec::new()
+    let env = if cfg!(windows) || std::env::var_os("RUNO_NO_SHELL_PATH").is_some() {
+        None
     } else {
-        login_shell_path(Duration::from_secs(4)).unwrap_or_default()
+        login_shell_env(Duration::from_secs(4))
     };
+    let shell = env.as_deref().and_then(parse_env_path).unwrap_or_default();
+    if let (Some(env), Ok(mut vars)) = (&env, LOGIN_ENV.write()) {
+        *vars = parse_env(env);
+    }
     let known = known_dirs(&home);
     let merged = merge(&shell, &inherited, &known);
     if let Ok(joined) = std::env::join_paths(merged.iter().map(|(p, _)| p)) {
@@ -44,6 +50,19 @@ pub fn init() {
     if let Ok(mut found) = FOUND.write() {
         *found = merged;
     }
+}
+
+/// A variable the login shell sets but this app didn't inherit, as happens to apps
+/// opened from the Dock.
+pub fn login_var(name: &str) -> Option<String> {
+    LOGIN_ENV
+        .read()
+        .ok()?
+        .iter()
+        .rev()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.is_empty())
 }
 
 /// The PATH folders and where each came from.
@@ -128,9 +147,9 @@ fn merge(
     out
 }
 
-/// Ask the login shell for its PATH. Interactive and login, so .zshrc / .bashrc and
-/// .profile both run, which is where nvm and friends put themselves.
-fn login_shell_path(timeout: Duration) -> Option<Vec<PathBuf>> {
+/// Ask the login shell for its environment. Interactive and login, so .zshrc / .bashrc
+/// and .profile both run, which is where nvm and friends put themselves.
+fn login_shell_env(timeout: Duration) -> Option<String> {
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -168,8 +187,20 @@ fn login_shell_path(timeout: Duration) -> Option<Vec<PathBuf>> {
             }
         }
     }
-    let out = reader.join().ok()?;
-    parse_env_path(&out)
+    reader.join().ok()
+}
+
+/// `NAME=value` lines of `env` output. Lines of a multi-line value are skipped.
+fn parse_env(out: &str) -> Vec<(String, String)> {
+    out.lines()
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, _)| {
+            !k.is_empty()
+                && !k.starts_with(|c: char| c.is_ascii_digit())
+                && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
 }
 
 /// The PATH from `env` output; the last one wins, after anything profiles printed.
@@ -354,6 +385,8 @@ mod tests {
             Some(vec![PathBuf::from("/a/bin"), PathBuf::from("/b/bin")])
         );
         assert_eq!(parse_env_path("nothing here"), None);
+        let vars = parse_env("Welcome!\nOPENAI_API_KEY=sk-1=2\nline two of a value\n1X=no\n");
+        assert_eq!(vars, [("OPENAI_API_KEY".to_string(), "sk-1=2".to_string())]);
     }
 
     #[test]

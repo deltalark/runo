@@ -100,11 +100,13 @@ impl RunoApp {
             Some((provider.clone(), agent_session.clone())),
             crate::settings::sync_backup(),
         );
-        // Runo's memory server is a program on this machine, which a VM can't start.
+        // On a connection the agent reaches Runo's memory server through a relay.
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| !demo && memory_server() && sandbox.is_none());
+            .filter(|_| {
+                !demo && memory_server() && crate::connections::mcp_reachable(sandbox.as_ref())
+            });
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: &sent,

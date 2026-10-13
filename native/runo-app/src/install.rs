@@ -44,7 +44,7 @@ fn npm(package: &str) -> Install {
     }
 }
 
-const GROK: &str =
+pub(crate) const GROK: &str =
     "curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash";
 
 /// How to install an agent here, from its vendor's documentation, or why it can't be.

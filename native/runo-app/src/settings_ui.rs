@@ -955,7 +955,7 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
         rows.push(conn_switch(c, "Agents may use it", "Lets agents in any session run commands here with Runo's run_on tool, for research, untrusted code or heavy jobs.", c.agents, |c, v| c.agents = v));
         rows.push(row(
             "Remove",
-            "Sessions that run here move back to this machine.",
+            "Sessions that run here move back to this machine, and their copies there are deleted.",
             Ctl::Button(
                 "Remove".into(),
                 Rc::new(move |this, cx| this.remove_connection(id, cx)),
@@ -995,9 +995,23 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
     ));
     cove_rows.push(switch_row(
         "Back up checkpoints to GitHub",
-        "After each turn on a remote connection, push the session's checkpoint to the project's origin as refs/runo/sessions/<id>, which no branch list shows.",
+        "After each turn on a remote connection, push the session's files to the project's origin as refs/runo/sessions/<id>, which no branch list shows. Never for public repositories, and deleted with the session.",
         st.sync_backup,
         |s, v| s.sync_backup = v,
+    ));
+    if st.sync_backup {
+        cove_rows.push(switch_row(
+            "Back up untracked files too",
+            "Off keeps new files that git doesn't track yet (notes, local config, secrets) out of the backup.",
+            st.sync_backup_untracked,
+            |s, v| s.sync_backup_untracked = v,
+        ));
+    }
+    cove_rows.push(switch_row(
+        "Stop at the first blocked command",
+        "A turn on a server or Cove can't ask you mid-turn. When the agent tries something it isn't allowed to (Claude Code), the turn stops there and shows Allow and retry, instead of carrying on without it for hours.",
+        st.stop_on_denial,
+        |s, v| s.stop_on_denial = v,
     ));
     out.push(section(
         "Cove",

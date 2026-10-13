@@ -303,6 +303,16 @@ pub struct Session {
     /// The running turn is on a connection, where it keeps going while Runo is closed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remote_turn: bool,
+    /// Connections it ran on before, whose copies are deleted along with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_on: Vec<u64>,
+    /// The playbook that started it, or 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub playbook: u64,
+    /// What that playbook declared it may do (`read`, `edit`, `shell`, `network`); every
+    /// turn of the session keeps to it. Empty means no limits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limits: Vec<String>,
 }
 
 /// What a switch replaced, enough to undo it before anything is sent.

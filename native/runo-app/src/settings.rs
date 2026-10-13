@@ -99,6 +99,10 @@ pub struct AppSettings {
     pub connections: Vec<crate::connections::Connection>,
     /// Back up each remote session checkpoint to the project's GitHub remote.
     pub sync_backup: bool,
+    /// Include untracked files in those backups.
+    pub sync_backup_untracked: bool,
+    /// End a turn on a connection at the first command it isn't allowed to run.
+    pub stop_on_denial: bool,
     /// Give agents Cove's own tools (`cove mcp`): scratch VMs, commands, files, ports.
     pub cove_tools: bool,
 }
@@ -155,7 +159,9 @@ impl Default for AppSettings {
             browser_asked: false,
             keybindings: HashMap::new(),
             connections: Vec::new(),
-            sync_backup: true,
+            sync_backup: false,
+            sync_backup_untracked: false,
+            stop_on_denial: true,
             cove_tools: true,
         }
     }
@@ -225,6 +231,8 @@ impl AppSettings {
         crate::connections::set_all(&self.connections);
         COVE_TOOLS.store(self.cove_tools, Ordering::Relaxed);
         SYNC_BACKUP.store(self.sync_backup, Ordering::Relaxed);
+        SYNC_BACKUP_UNTRACKED.store(self.sync_backup_untracked, Ordering::Relaxed);
+        STOP_ON_DENIAL.store(self.stop_on_denial, Ordering::Relaxed);
         crate::terminal::configure(
             self.term_font_size,
             match self.term_scroll.as_str() {
@@ -272,7 +280,9 @@ static REMOVE_WORKTREE: AtomicBool = AtomicBool::new(true);
 static AUTOSCROLL: AtomicBool = AtomicBool::new(true);
 static KEEP_AWAKE: AtomicBool = AtomicBool::new(true);
 static COVE_TOOLS: AtomicBool = AtomicBool::new(true);
-static SYNC_BACKUP: AtomicBool = AtomicBool::new(true);
+static SYNC_BACKUP: AtomicBool = AtomicBool::new(false);
+static SYNC_BACKUP_UNTRACKED: AtomicBool = AtomicBool::new(false);
+static STOP_ON_DENIAL: AtomicBool = AtomicBool::new(true);
 
 pub fn cove_tools() -> bool {
     COVE_TOOLS.load(Ordering::Relaxed)
@@ -280,6 +290,14 @@ pub fn cove_tools() -> bool {
 
 pub fn sync_backup() -> bool {
     SYNC_BACKUP.load(Ordering::Relaxed)
+}
+
+pub fn sync_backup_untracked() -> bool {
+    SYNC_BACKUP_UNTRACKED.load(Ordering::Relaxed)
+}
+
+pub fn stop_on_denial() -> bool {
+    STOP_ON_DENIAL.load(Ordering::Relaxed)
 }
 
 pub fn keep_awake() -> bool {

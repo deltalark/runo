@@ -147,7 +147,7 @@ fn shared_for(agent: &str) -> Vec<(String, McpSpec)> {
     let all = FOUND.lock().map(|f| f.clone()).unwrap_or_default();
     let mut seen = std::collections::HashSet::new();
     all.into_iter()
-        .filter(|m| keys.contains(&key(m)))
+        .filter(|m| m.enabled && keys.contains(&key(m)))
         .filter(|m| m.spec.transport() != "unknown" && m.provider != "Project")
         // Codex only speaks streamable HTTP, not SSE.
         .filter(|m| !(agent == "codex" && m.spec.sse))

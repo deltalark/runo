@@ -1451,6 +1451,7 @@ impl RunoApp {
                 }
                 self.measure(id);
                 let on_screen = self.selected == Some(id) && self.view == View::Session;
+                let sync_warning = self.sync_warning(id);
                 if let Some(session) = self.state.session_mut(id) {
                     session.status = if ok { Status::Done } else { Status::Failed };
                     session.remote_turn = false;
@@ -1474,8 +1475,18 @@ impl RunoApp {
                             "Agent stopped or failed"
                         },
                     );
+                    if let Some(warning) = sync_warning {
+                        session.messages.push(warning);
+                    }
                     if !ok {
-                        let all = self.stderr.get(&id).cloned().unwrap_or_default();
+                        let all: Vec<String> = self
+                            .stderr
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|l| !l.starts_with(connections::WARNING))
+                            .collect();
                         let mut errors: Vec<String> = Vec::new();
                         for line in all.iter().filter(|l| {
                             l.starts_with("ERROR:")
@@ -2551,7 +2562,7 @@ impl RunoApp {
         self.prune_shells();
         self.tabs.retain(|t| *t != id);
         self.stats.remove(&id);
-        if session.elsewhere() && !self.demo {
+        if !self.demo {
             connections::cleanup_session(&session);
         }
         if session.isolated && !self.demo && remove_worktree() {
@@ -3579,6 +3590,9 @@ impl RunoApp {
             .flatten()
         {
             return divider;
+        }
+        if message.role == Role::System && message.meta == "sync" {
+            return self.sync_card(index, message, cx);
         }
         if message.role == Role::System && message.meta == "moved" {
             return fade(
