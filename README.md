@@ -83,17 +83,20 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 - **Share playbooks as files.** A playbook is a `.playbook.md` file: a short header (name, author, version, agent, permissions, inputs) and the instructions. Export one, copy it into a chat, or keep a folder of them in a git repo.
 - **Install from anywhere.** Paste a GitHub repo, a link to one file, a local folder or the clipboard into **Install**. Runo lists what it found, marks new and updated playbooks, and shows what each one asks permission to do before you install it. **Update** checks the source again later.
 - **Inputs.** Write `{{area}}` in the instructions and Runo asks for it before the run, with a default for scheduled runs.
-- **Permissions.** A playbook says whether it may edit files, run commands or use the network. Read-only playbooks run in plan mode, so a review can't change your code.
+- **Permissions.** A playbook says whether it may edit files, run commands or use the network, and Runo holds every turn of its session to that in the way each agent allows: plan mode for read-only, turning off shell or web tools, Codex's sandbox without network. Where an agent can't be held to a limit, the card and the run form say so. Approving a read-only playbook's plan asks before allowing edits.
+- **Schedules.** Scheduled runs use the project's default connection and its setup command, skip a run while the last one is still going, note runs missed while Runo was closed, and keep the last few sessions (set in Settings → Chat). Each card shows its recent runs and any failure.
+- **Agents can start playbooks**, and Runo asks you first (on by default). An agent in plan mode can't start one that edits or runs commands.
 
 ### Memory and MCP
 
 - **Project notes and memory.** Runo ships a small MCP server that lets any agent read the session memory, search earlier sessions in the project and save notes, instead of having the whole history pasted into every prompt.
 - **Shared MCP servers.** Runo finds the MCP servers configured in every app on your computer, and you can share any of them with all agents, not just the one it was set up for.
-- **Hooks and skills.** See the Claude Code hooks and skills that apply to a project.
+- **Runo's own servers.** Add servers to Runo's own list in Settings → MCP and every Claude Code and Codex session gets them.
+- **Hooks and skills.** See the Claude Code hooks and skills that apply to a project, open them in Runo's editor, and start a new skill.
 
 ### Agent setup, built in
 
-- **Install and update agents from Runo.** See which agent CLIs are installed and their versions, install missing ones, and get a heads-up when an update is out. Runo updates the exact copy it runs and tells you plainly when it shouldn't.
+- **Install and update agents from Runo.** See which agent CLIs are installed and their versions, install missing ones (cancel any time; an install stops after 15 minutes), sign in right after, and get a heads-up when an update is out. Runo updates the exact copy it runs and tells you plainly when it shouldn't.
 - **Per-agent settings.** Default model, executable path, extra arguments, environment variables and agent-specific options.
 
 ### Made to feel at home
@@ -184,10 +187,11 @@ flowchart LR
 
 - **Everything travels.** Before each agent turn Runo commits the whole working tree, uncommitted and untracked files included, to a hidden ref and sends it over the connection itself. After the turn it brings the result back the same way. Commits the agent made come back on the branch; everything else comes back uncommitted, exactly as it was left.
 - **The conversation travels too.** Claude Code's conversation files go along everywhere, and Codex's to SSH and Cove servers, so after a move the agent resumes the same conversation instead of starting over. Other agents get Runo's handoff brief.
-- **Nobody's work is lost.** If files changed on both sides, your machine's version wins and the other is saved under `refs/runo/s<id>/kept-…`, ready to diff or restore.
+- **Nobody's work is lost.** If files changed on both sides, your machine's version wins and the other is saved under `refs/runo/s<id>/kept-…`. A warning card in the chat says so, with **Restore kept changes**; what you had is saved first, so restoring can be undone too.
+- **What can't move.** A session whose agent can't take its conversation along starts there with Runo's handoff brief. Folders that aren't git repositories can only run on this machine or Cove on this machine.
 - **Terminals open there.** A terminal tab in a remote session is a shell in the session's copy on that machine, synced before it opens and after it closes.
 - **No GitHub access needed.** Syncing goes over `ssh` or `cove exec`, never through GitHub, so a VM never needs your credentials. Your machine keeps doing the commits, pushes and pull requests. Turn on **GitHub access** for a connection only if the agent there needs `gh` for its own work; the token is passed per command and never written to disk.
-- **Backups.** After each turn the checkpoint is also pushed to your project's `origin` as `refs/runo/sessions/<id>`, which no branch list shows. Turn it off in Settings.
+- **Backups (off by default).** Turn them on in Settings and after each turn the checkpoint is also pushed to your project's `origin` as `refs/runo/sessions/<id>`, which no branch list shows. Untracked files stay out unless you ask for them, public repositories are never backed up, and the ref is deleted with the session.
 
 ### Close your laptop, the agent keeps going
 
@@ -198,6 +202,8 @@ On a Cove server or an SSH server, the agent runs **detached** from your compute
 - **Dropped connections** are handled the same way: Runo reconnects and carries on from the last line it showed, while the agent keeps going.
 - **Stop** still stops it: Runo ends the agent's processes there, then brings back what it did so far.
 - **Your keys** reach that machine in a script only its owner can read, and the script deletes itself as soon as it starts.
+- **Approvals.** Nobody is there to answer a permission prompt mid-turn, so a detached Claude Code turn stops at the first command it isn't allowed to run, and the permission card offers to allow it and retry. Turn this off in Settings → Connections to let the agent carry on without it. (Answering prompts mid-turn would need a permission-prompt tool over the MCP relay; that's not built yet.)
+- **A turn that never starts**, because the machine rebooted before it ran, ends after a few minutes with a message instead of waiting forever.
 
 Runo also stops keeping your computer awake while only remote turns are running. Cove on this machine runs alongside your computer, so it pauses when the computer does; use a Cove server or an SSH server for work that should go on without it.
 
@@ -205,7 +211,7 @@ Runo also stops keeping your computer awake while only remote turns are running.
 
 <img src="docs/images/connections.png" alt="Settings, Connections: This machine, an SSH server that tested fine, and the form to add another" width="900" />
 
-Through Runo's MCP server, agents get `list_connections` and `run_on`, so they can run a heavy build, a test matrix or some research on another machine without moving the whole session. With **Let agents use Cove** on, agents on your machine also get Cove's own tools and can make throwaway VMs for untrusted code. Each connection has an **Agents may use it** switch, and only the API keys you list for a connection ever reach it.
+Runo's MCP server works in every session, in Cove VMs and on servers too: the agent there talks to a small relay script, and Runo answers it over the connection, so nothing listens on a port. Through it, agents get `list_connections` and `run_on`, so they can run a heavy build, a test matrix or some research on another machine without moving the whole session. With **Let agents use Cove** on, agents on your machine also get Cove's own tools and can make throwaway VMs for untrusted code. Each connection has an **Agents may use it** switch, and only the API keys you list for a connection ever reach it.
 
 ### Setting one up
 
@@ -213,7 +219,13 @@ Through Runo's MCP server, agents get `list_connections` and `run_on`, so they c
 - **Cove on this machine:** install Cove (see its [install guide](https://github.com/deltalark/cove#install)) and Runo offers a Cove VM under **Runs on** on its own. Set the VM's CPUs, memory, network (on or off) and idle stop in Settings.
 - **Cove on a server:** install Cove on the server, run `cove key` there, then add a Cove connection in Runo with the server's URL and that key.
 
-Agent CLIs are installed on the connection on first use, and deleting a session deletes its VM or its copy on the server.
+Agent CLIs are installed on the connection on first use, with npm (into a private Node.js when the machine has none) or the vendor's script, and kept at the version you run here. Signing in:
+
+- **API keys** listed for the connection are forwarded, including ones set only in your shell profile.
+- **Codex** and **Claude Code on Linux** keep their login in a file, which Runo copies over. Claude Code on macOS keeps it in the keychain, which can't be copied: run `claude setup-token` and export the token as `CLAUDE_CODE_OAUTH_TOKEN`, or set `ANTHROPIC_API_KEY`.
+- **Test** lists each agent with whether it's installed there and how it will sign in, and what to do when it can't. Testing Cove on this machine doesn't start a VM.
+
+Deleting a session deletes its VM or its copies on every connection it ran on, and removing a connection cleans up what Runo left there.
 
 ## Status
 
