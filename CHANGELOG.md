@@ -17,3 +17,11 @@ All notable changes to Runo are documented here.
 - Per-agent settings: default model, executable, extra arguments, environment variables and agent-specific options.
 - Settings screen with search, light and dark themes, accent colors and colorblind-friendly diff colors.
 - Desktop notifications when an agent finishes (macOS and Linux).
+- Inbox lists agents waiting on a permission, plan or question, with Allow, Approve and answers inline; the bell, rail, Home and sidebar share one "Needs you" rule and the same status words.
+- Quick open no longer opens the wrong item, and adds projects, Add project, split, close tab, settings pages and the open session's files from any mode.
+- The layout comes back after a restart: mode, split, window size and place, right-panel tab, open projects and sidebar width; a panel you hid stays hidden.
+- Tabs scroll, list in an overflow menu and drag into a new order. New shortcuts for close, next and previous tab, Inbox, split, message box, archive and the context menu (Shift+F10); arrow keys move through the sidebar, Home and Inbox.
+- In a terminal, Ctrl+Shift shortcuts and Esc twice get you back to Runo. Esc no longer switches modes.
+- Top bar: the project switcher handles empty projects, the Agents pill lists running agents to open or stop, spend shows today, the branch and breadcrumb are clickable, and Runs on shows the session's real connection and moves it.
+- Home follows the top-bar project with an All projects toggle and Add project. Reviews follows it too and badges only review requests and failed checks. A project whose folder is gone offers Relink or Remove.
+- App menu with Quit, and the window reopens from the Dock on macOS. Closing the last tab stays in Sessions, the tour starts in Sessions, existing users get a one-time What's new card, shortcut hints follow your keybindings, and blank session names are refused.

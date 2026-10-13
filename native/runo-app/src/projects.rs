@@ -172,6 +172,9 @@ impl RunoApp {
         }
         self.state.projects.retain(|p| p.id != pid);
         self.expanded.retain(|p| *p != pid);
+        if self.project == Some(pid) {
+            self.project = None;
+        }
         for slot in [
             &mut self.new_project,
             &mut self.notes_project,
@@ -190,10 +193,15 @@ impl RunoApp {
         if self.selected.is_some_and(|id| ids.contains(&id)) {
             match self.tabs.last().copied() {
                 Some(next) => self.select(next),
+                // Nothing left open: stay in Sessions, on the list of sessions.
                 None => {
                     self.selected = None;
                     if self.view == View::Session {
-                        self.view = View::Inbox;
+                        self.view = if self.state.projects.is_empty() {
+                            View::Home
+                        } else {
+                            View::AllSessions
+                        };
                     }
                 }
             }
@@ -502,6 +510,59 @@ impl RunoApp {
             sync_name: Some(p.name.clone()),
             error: None,
         });
+    }
+
+    /// Point a project whose folder moved at its new place. Sessions that worked in the
+    /// project folder itself follow it; isolated ones keep their own worktrees.
+    pub(crate) fn relink_project(&mut self, pid: u64, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose the project's folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = rx.await else {
+                return;
+            };
+            let Some(path) = paths.first().cloned() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                let new = path.to_string_lossy().into_owned();
+                if this
+                    .state
+                    .projects
+                    .iter()
+                    .any(|p| p.path == new && p.id != pid)
+                {
+                    this.notice = Some("That folder is already a project.".into());
+                    cx.notify();
+                    return;
+                }
+                let Some(project) = this.state.projects.iter_mut().find(|p| p.id == pid) else {
+                    return;
+                };
+                let old = std::mem::replace(&mut project.path, new.clone());
+                let name = project.name.clone();
+                for s in this
+                    .state
+                    .sessions
+                    .iter_mut()
+                    .filter(|s| s.project_id == pid && s.dir == old)
+                {
+                    s.dir = new.clone();
+                }
+                this.info = Some((
+                    format!("{name} now points at {new}."),
+                    std::time::Instant::now(),
+                ));
+                this.save();
+                this.refresh();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn browse_project_folder(&mut self, cx: &mut Context<Self>) {
