@@ -1,6 +1,7 @@
 //! Scheduled playbooks while Runo is closed. On macOS a launchd agent runs
 //! `runo --run-due-playbooks` every few minutes; it runs each due playbook in a new
-//! worktree with the agent's one-shot command and leaves the result in a file. Runo
+//! worktree, after the project's setup command, with the same agent settings and limits
+//! as a run in Runo, and leaves the result in a file. Runo
 //! turns those files into sessions when it opens. While Runo is open it runs the
 //! schedules itself, so the runner does nothing.
 
@@ -22,6 +23,9 @@ const ALIVE_SECS: u64 = 90;
 
 /// The longest a run may take before it is stopped.
 const RUN_LIMIT: Duration = Duration::from_secs(2 * 60 * 60);
+
+/// The longest the worktree setup command may take.
+const SETUP_LIMIT: Duration = Duration::from_secs(30 * 60);
 
 /// A run the runner made while Runo was closed, for Runo to pick up.
 #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
@@ -105,43 +109,73 @@ fn last_result(playbook: u64) -> u64 {
         .unwrap_or(0)
 }
 
-/// The command for one unattended run. Playbooks that may edit get the agent's
-/// edit mode where Runo knows it; the rest run read-only.
+/// The level an unattended run works at: read-only without `edit`, else the agent's
+/// edit mode. Claude Code's edit mode refuses commands in a run nobody watches, so it
+/// runs everything when the playbook may run commands; its other limits still hold.
+fn unattended_mode(auto: &Automation) -> &'static str {
+    if !auto.may("edit") {
+        "plan"
+    } else if auto.provider == "claude" && auto.may("shell") {
+        "full"
+    } else {
+        "edit"
+    }
+}
+
+/// The command for one unattended run: the same arguments as a turn in Runo (the
+/// agent's model, effort, extra arguments, profile and tools), held to the playbook's
+/// permissions. `conversation` names a new conversation for agents that take one.
 pub fn command(
     auto: &Automation,
-    bin: &str,
+    opts: &AgentOptions,
     prompt: &str,
     conversation: &str,
-) -> std::process::Command {
-    let edit = auto.may("edit");
-    let program = if bin.trim().is_empty() {
-        agent::provider(&auto.provider).bin
-    } else {
-        bin.trim()
-    };
-    match auto.provider.as_str() {
-        "claude" if edit => {
-            let mut c = std::process::Command::new(program);
-            c.args(["-p", "--permission-mode", "acceptEdits"]);
-            if !conversation.is_empty() {
-                c.args(["--session-id", conversation]);
-            }
-            c.args(["--", prompt]);
-            c
-        }
-        "codex" if edit => {
-            let mut c = std::process::Command::new(program);
-            c.args([
-                "exec",
-                "--sandbox",
-                "workspace-write",
-                "--skip-git-repo-check",
-                prompt,
-            ]);
-            c
-        }
-        _ => agent::ask_command(&auto.provider, bin, prompt),
+    in_git: bool,
+) -> Result<std::process::Command, String> {
+    let mode = unattended_mode(auto);
+    if let Some(error) = agent::mode_error(&auto.provider, mode) {
+        return Err(error);
     }
+    let mut opts = opts.clone();
+    if mode == "plan" {
+        // An OpenCode agent picked by name would replace its plan agent.
+        opts.sub_agent.clear();
+    }
+    workspace::playbook_limits(&auto.provider, &auto.permissions, &mut opts);
+    let sel = std::collections::HashMap::from([("mode".to_string(), mode.to_string())]);
+    let spec = agent::RunSpec {
+        provider: &auto.provider,
+        prompt,
+        resume: false,
+        sel: &sel,
+        opts: &opts,
+        in_git,
+        session_id: conversation,
+        images: &[],
+        memory: None,
+        local: true,
+    };
+    Ok(agent::turn_command(&spec))
+}
+
+/// The reply in a run's output, read as Runo reads a turn: its text, the error it
+/// reported and the conversation it named. Plain output is the reply as it is.
+fn read_output(provider: &str, dir: &str, out: &str) -> (String, Option<String>, String) {
+    let Some(mut parser) = crate::stream::Parser::for_provider(provider, dir) else {
+        return (out.trim().to_string(), None, String::new());
+    };
+    let (mut text, mut error, mut conversation) = (String::new(), None, String::new());
+    for line in out.lines() {
+        for update in parser.feed(line) {
+            match update {
+                crate::stream::Update::Text(t) => text.push_str(&t),
+                crate::stream::Update::Error(e) => error = Some(e),
+                crate::stream::Update::Conversation(c) => conversation = c,
+                _ => {}
+            }
+        }
+    }
+    (text.trim().to_string(), error, conversation)
 }
 
 /// `runo --run-due-playbooks`: run the scheduled playbooks that are due, unless Runo is
@@ -167,6 +201,13 @@ pub fn run_due() -> i32 {
         return 0;
     }
     let settings = AppSettings::load();
+    crate::caps::set_binaries(
+        settings
+            .agents
+            .iter()
+            .map(|(id, a)| (id.clone(), a.binary.clone()))
+            .collect(),
+    );
     let state = State::load();
     for auto in &state.automations {
         let mut auto = auto.clone();
@@ -256,32 +297,83 @@ fn run_one(auto: &Automation, project: &Project, settings: &AppSettings) -> Head
         run.dir = project.path.clone();
         run.branch = "local folder".into();
     }
-    let opts = settings.agent(&auto.provider);
-    // Claude Code takes the conversation's id, so the session can carry on with it.
-    if auto.provider == "claude" && auto.may("edit") {
-        run.agent_session = agent::new_uuid();
-    }
-    let mut command = command(auto, &opts.binary, &prompt, &run.agent_session);
-    for line in opts.env.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            command.env(key.trim(), value.trim());
+    // The project's setup command runs first in the new worktree, as in Runo.
+    let setup = settings.setup_for(&project.setup);
+    if run.branch != "local folder" && !setup.is_empty() {
+        let mut shell = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", &setup]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", &setup]);
+            c
+        };
+        shell
+            .current_dir(&run.dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if !matches!(wait_with_limit(shell, SETUP_LIMIT), Ok((true, ..))) {
+            run.note = format!("The setup command `{setup}` failed; the agent ran anyway.");
         }
     }
+    // What the installed CLI supports decides some of its flags.
+    crate::caps::detect(agent::provider(&auto.provider));
+    // Agents that take a new conversation's id get one, so the session can carry on.
+    let conversation = if agent::names_conversation(&auto.provider) {
+        agent::new_uuid()
+    } else {
+        String::new()
+    };
+    let opts = settings.agent(&auto.provider);
+    let mut command = match command(auto, &opts, &prompt, &conversation, git::is_repo(&run.dir)) {
+        Ok(command) => command,
+        Err(error) => {
+            run.status = "failed".into();
+            run.output = error;
+            return run;
+        }
+    };
+    agent::prepare_folder(
+        &agent::RunSpec {
+            provider: &auto.provider,
+            prompt: &prompt,
+            resume: false,
+            sel: &Default::default(),
+            opts: &opts,
+            in_git: true,
+            session_id: "",
+            images: &[],
+            memory: None,
+            local: true,
+        },
+        &run.dir,
+        false,
+    );
     command
         .current_dir(&run.dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     match wait_with_limit(command, RUN_LIMIT) {
-        Ok((true, out, _)) => {
-            run.status = "done".into();
-            run.output = out.trim().to_string();
-        }
-        Ok((false, out, err)) => {
-            run.status = "failed".into();
-            run.output = if err.trim().is_empty() { out } else { err }
-                .trim()
-                .to_string();
+        Ok((ok, out, err)) => {
+            let (reply, error, named) = read_output(&auto.provider, &run.dir, &out);
+            run.agent_session = if named.is_empty() {
+                conversation
+            } else {
+                named
+            };
+            if ok && error.is_none() {
+                run.status = "done".into();
+                run.output = reply;
+            } else {
+                run.status = "failed".into();
+                run.output = error
+                    .or_else(|| agent::sign_in_hint(&auto.provider, &err))
+                    .unwrap_or_else(|| if err.trim().is_empty() { reply } else { err });
+                run.output = run.output.trim().to_string();
+            }
         }
         Err(error) => {
             run.status = "failed".into();
@@ -530,34 +622,122 @@ mod tests {
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
 
+    fn args(c: &std::process::Command) -> String {
+        c.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn playbook(provider: &str, permissions: &[&str]) -> Automation {
+        Automation {
+            provider: provider.into(),
+            permissions: permissions.iter().map(|p| p.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn unattended_runs_edit_only_when_allowed() {
-        let mut auto = Automation {
-            provider: "claude".into(),
+    fn unattended_runs_use_the_agent_settings_and_the_playbook_limits() {
+        let opts = AgentOptions {
+            model_override: "opus".into(),
+            effort: "high".into(),
+            extra_args: "--verbose-x".into(),
+            allowed_tools: "Read".into(),
             ..Default::default()
         };
-        let args = |c: &std::process::Command| {
-            c.get_args()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" ")
+        // Allowed to run commands, Claude Code runs everything else it isn't denied.
+        let all = command(&playbook("claude", &[]), &opts, "Fix it", "abc", true).unwrap();
+        let line = args(&all);
+        assert!(
+            line.contains("--permission-mode bypassPermissions"),
+            "{line}"
+        );
+        assert!(line.contains("--model opus") && line.contains("--effort high"));
+        assert!(line.contains("--allowed-tools Read") && line.contains("--verbose-x"));
+        assert!(line.ends_with("--session-id abc -- Fix it"), "{line}");
+        // Edits without commands keep its edit mode, with the shell turned off.
+        let edit = args(
+            &command(
+                &playbook("claude", &["read", "edit"]),
+                &opts,
+                "Fix",
+                "",
+                true,
+            )
+            .unwrap(),
+        );
+        assert!(edit.contains("--permission-mode acceptEdits"), "{edit}");
+        assert!(
+            edit.contains("--disallowed-tools Bash,WebFetch,WebSearch"),
+            "{edit}"
+        );
+        let read = args(&command(&playbook("claude", &["read"]), &opts, "Look", "", true).unwrap());
+        assert!(read.contains("--permission-mode plan"), "{read}");
+
+        let codex_opts = AgentOptions {
+            binary: "/opt/codex".into(),
+            profile: "work".into(),
+            ..Default::default()
         };
-        assert_eq!(
-            args(&command(&auto, "", "Fix it", "abc")),
-            "-p --permission-mode acceptEdits --session-id abc -- Fix it"
-        );
-        auto.permissions = vec!["read".into()];
-        assert_eq!(
-            args(&command(&auto, "", "Look", "")),
-            "-p --permission-mode plan -- Look"
-        );
-        auto.provider = "codex".into();
-        auto.permissions = vec!["read".into(), "edit".into()];
-        let codex = command(&auto, "/opt/codex", "Fix it", "");
+        let codex = command(
+            &playbook("codex", &["read", "edit"]),
+            &codex_opts,
+            "Fix it",
+            "",
+            true,
+        )
+        .unwrap();
         assert_eq!(codex.get_program(), "/opt/codex");
+        let line = args(&codex);
+        assert!(
+            line.starts_with("exec --json --sandbox workspace-write"),
+            "{line}"
+        );
+        assert!(
+            line.contains("-p work") && line.ends_with("Fix it"),
+            "{line}"
+        );
+        assert!(line.contains("sandbox_workspace_write.network_access=false"));
+    }
+
+    #[test]
+    fn every_agent_gets_its_edit_mode() {
+        let opts = AgentOptions::default();
+        let edit = |provider: &str| {
+            args(
+                &command(
+                    &playbook(provider, &["read", "edit"]),
+                    &opts,
+                    "Go",
+                    "",
+                    true,
+                )
+                .unwrap(),
+            )
+        };
+        assert!(edit("droid").contains("--auto medium"));
+        assert!(edit("gemini").contains("--approval-mode auto_edit"));
+        assert!(edit("copilot").contains("--allow-all-tools"));
+        assert!(!edit("opencode").contains("--agent plan"));
+        let read = args(&command(&playbook("opencode", &["read"]), &opts, "Go", "", true).unwrap());
+        assert!(read.contains("--agent plan"));
+        // Amp has no read-only mode, so a read-only playbook doesn't run on it.
+        assert!(command(&playbook("amp", &["read"]), &opts, "Go", "", true).is_err());
+    }
+
+    #[test]
+    fn the_reply_is_read_from_structured_output() {
+        let out = r#"{"type":"thread.started","thread_id":"t-1"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"All good."}}
+{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":2}}"#;
         assert_eq!(
-            args(&codex),
-            "exec --sandbox workspace-write --skip-git-repo-check Fix it"
+            read_output("codex", "/w", out),
+            ("All good.".to_string(), None, "t-1".to_string())
+        );
+        assert_eq!(
+            read_output("grok", "/w", " Plain reply \n"),
+            ("Plain reply".to_string(), None, String::new())
         );
     }
 

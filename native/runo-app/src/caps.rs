@@ -118,20 +118,25 @@ pub fn refresh() {
     std::thread::spawn(|| {
         crate::install::refresh_node();
         for provider in crate::agent::PROVIDERS.iter() {
-            let bin = binary(provider);
-            let caps = match provider.id {
-                "claude" => claude(&bin),
-                "codex" => codex(&bin),
-                "opencode" => opencode(&bin),
-                id => generic(id, &bin),
-            };
-            if let Ok(mut map) = store().write() {
-                map.insert(provider.id.to_string(), caps);
-            }
+            detect(provider);
             UPDATED.store(true, Ordering::Relaxed);
         }
         crate::signin::refresh(true);
     });
+}
+
+/// Discover one provider now, on this thread.
+pub fn detect(provider: &'static crate::agent::Provider) {
+    let bin = binary(provider);
+    let caps = match provider.id {
+        "claude" => claude(&bin),
+        "codex" => codex(&bin),
+        "opencode" => opencode(&bin),
+        id => generic(id, &bin),
+    };
+    if let Ok(mut map) = store().write() {
+        map.insert(provider.id.to_string(), caps);
+    }
 }
 
 /// Agents without parseable help: the version, and Runo's three permission levels,

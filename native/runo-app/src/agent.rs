@@ -1341,20 +1341,19 @@ impl Handle {
     }
 }
 
-/// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
-pub fn run_agent(
-    target: Target,
-    spec: &RunSpec,
-    dir: &str,
-    sandbox: Option<&crate::connections::Sandbox>,
-    tx: Sender<Event>,
-) -> Result<Handle, String> {
-    let bin = if spec.opts.binary.trim().is_empty() {
+/// The program to run for a turn: the agent's Settings binary, else its usual name.
+fn program<'a>(spec: &RunSpec<'a>) -> &'a str {
+    if spec.opts.binary.trim().is_empty() {
         self::provider(spec.provider).bin
     } else {
         spec.opts.binary.trim()
-    };
-    let mut command = Command::new(bin);
+    }
+}
+
+/// The command for one turn: the agent's program with the arguments and environment
+/// its settings and the session's selections call for.
+pub fn turn_command(spec: &RunSpec) -> Command {
+    let mut command = Command::new(program(spec));
     command.args(provider_args(spec));
     command.envs(provider_env(spec));
     for line in spec.opts.env.lines() {
@@ -1364,8 +1363,13 @@ pub fn run_agent(
             }
         }
     }
-    // Gemini holds to the session's mode only in a folder it trusts.
-    if spec.provider == "gemini" && spec.local && sandbox.is_none() {
+    command
+}
+
+/// What the folder needs before a turn: Gemini's trust, so it holds to the session's
+/// mode, and MCP servers for CLIs that read them from a project file.
+pub fn prepare_folder(spec: &RunSpec, dir: &str, sandboxed: bool) {
+    if spec.provider == "gemini" && spec.local && !sandboxed {
         crate::gemini::trust(dir, &spec.opts.env);
     }
     if crate::mcp::project_file(spec.provider).is_some() {
@@ -1375,6 +1379,19 @@ pub fn run_agent(
             &file_servers(spec),
         );
     }
+}
+
+/// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
+pub fn run_agent(
+    target: Target,
+    spec: &RunSpec,
+    dir: &str,
+    sandbox: Option<&crate::connections::Sandbox>,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
+    let bin = program(spec);
+    let mut command = turn_command(spec);
+    prepare_folder(spec, dir, sandbox.is_some());
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
     } else if let (Target::Session(id), Some(root)) = (target, crate::detach::root()) {

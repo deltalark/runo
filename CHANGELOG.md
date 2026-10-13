@@ -40,7 +40,7 @@ All notable changes to Runo are documented here.
 - Reviews refreshes every five minutes in the background, filters pull requests and issues by state, author and review request, loads past 30 with Load more, and lets you pick the agent for sessions started there.
 - Review this PR: the agent writes its review to `.runo/review.json`, and Post review shows it for confirmation, then posts it to GitHub with its line comments.
 - Playbook schedules can run at a time of day on chosen weekdays, or on a cron expression. Runs missed while Runo was closed catch up once on launch (Settings can turn this off).
-- On macOS, scheduled playbooks can run while Runo is closed, from a launchd job; their runs show up as sessions when Runo opens.
+- On macOS, scheduled playbooks can run while Runo is closed, from a launchd job: each runs in a new worktree after the project's setup command, with the agent's settings and the playbook's permissions, and shows up as a session when Runo opens.
 
 ### Fixed
 
