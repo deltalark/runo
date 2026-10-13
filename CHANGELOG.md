@@ -64,3 +64,7 @@ All notable changes to Runo are documented here.
 - Playbook updates show what changes and aren't pre-ticked when you edited your copy; input labels and defaults are editable, and `{{ key }}` works with spaces.
 - Runo keeps its own list of MCP servers for every agent, and Settings can start a new skill.
 - Agent installs can be cancelled, stop after 15 minutes, and offer to sign in when done.
+- Claude Code asks for permission while its turn runs: Allow once, Always allow or Deny in the corner card or the Inbox, and the turn carries on. Requests from servers wait for a reconnecting Runo (Settings → Chat → Wait for permission answers).
+- The CLI view works for sessions on a Cove VM or server, syncing the files and conversation there and back.
+- The worktree setup command runs in a terminal tab, so its prompts can be answered; the agent starts when it exits.
+- The Browser tab lists dev servers running where a remote session runs and forwards one to this machine to open it.

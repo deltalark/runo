@@ -40,7 +40,7 @@ Coding agents are good at working on their own, but juggling several of them acr
 <img src="docs/images/new-session.png" alt="The New session dialog with a project, a grid of agents, and a choice between an isolated worktree and the project directory" width="900" />
 
 - **Projects and sessions.** Add any local folder and start sessions on it. Sessions are grouped by project, with live status dots, unread markers and `+/-` line counts.
-- **Isolated worktrees.** A session can run in its own branch and folder under `.runo-worktrees/`, or right in your checkout. A setup command runs in each new worktree, and git-ignored files listed in `.worktreeinclude` (such as `.env`) are copied in.
+- **Isolated worktrees.** A session can run in its own branch and folder under `.runo-worktrees/`, or right in your checkout. A setup command runs in each new worktree, in a terminal tab where you can answer its prompts, before the agent starts, and git-ignored files listed in `.worktreeinclude` (such as `.env`) are copied in.
 - **Race several agents.** Send one task to several agents at once, each in its own worktree, compare the results and keep the best one.
 - **Tabs and split view.** Open sessions stay in tabs, and any two sessions can sit side by side, each live with its own reply box.
 - **Agent history.** Past Claude Code and Codex conversations on this machine are listed, and opening one resumes that exact conversation.
@@ -71,7 +71,7 @@ Every session has two views of the same conversation. **Chat** is Runo's own int
 - **Diff notes.** Click any diff line, leave a note, and send all notes back to the agent as one follow-up.
 - **Files.** Browse and edit the worktree, with syntax highlighting, rendered Markdown, images and CSV tables.
 - **Terminal.** A real interactive shell (PTY) in the session's folder, with several tabs per session, your saved commands as one-click buttons, and the agent's own command output.
-- **Browser.** A live, interactive page from a Chromium-based browser already on your Mac, embedded in the session. Before a page is open it lists the dev servers running on your machine.
+- **Browser.** A live, interactive page from a Chromium-based browser already on your Mac, embedded in the session. Before a page is open it lists the dev servers running on your machine, and for a session on a connection the ones running there, which it forwards to your machine when you open them.
 - **GitHub.** Pull requests, issues and Actions runs for the project through the `gh` CLI, with one-click "review this PR" sessions.
 
 ### Playbooks and automations
@@ -189,7 +189,7 @@ flowchart LR
 - **The conversation travels too.** Claude Code's conversation files go along everywhere, and Codex's to SSH and Cove servers, so after a move the agent resumes the same conversation instead of starting over. Other agents get Runo's handoff brief.
 - **Nobody's work is lost.** If files changed on both sides, your machine's version wins and the other is saved under `refs/runo/s<id>/kept-…`. A warning card in the chat says so, with **Restore kept changes**; what you had is saved first, so restoring can be undone too.
 - **What can't move.** A session whose agent can't take its conversation along starts there with Runo's handoff brief. Folders that aren't git repositories can only run on this machine or Cove on this machine.
-- **Terminals open there.** A terminal tab in a remote session is a shell in the session's copy on that machine, synced before it opens and after it closes.
+- **Terminals open there.** A terminal tab in a remote session is a shell in the session's copy on that machine, synced before it opens and after it closes. The CLI view and the worktree setup command run there the same way, with the agent's conversation carried along, and the Browser tab forwards that machine's dev servers to yours (an SSH tunnel, or through `cove exec` for Cove).
 - **No GitHub access needed.** Syncing goes over `ssh` or `cove exec`, never through GitHub, so a VM never needs your credentials. Your machine keeps doing the commits, pushes and pull requests. Turn on **GitHub access** for a connection only if the agent there needs `gh` for its own work; the token is passed per command and never written to disk.
 - **Backups (off by default).** Turn them on in Settings and after each turn the checkpoint is also pushed to your project's `origin` as `refs/runo/sessions/<id>`, which no branch list shows. Untracked files stay out unless you ask for them, public repositories are never backed up, and the ref is deleted with the session.
 
