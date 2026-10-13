@@ -2,6 +2,7 @@
 //! @file mentions, plans, questions and permission requests.
 
 use super::*;
+use crate::store::Queued;
 
 /// Most recent conversation, written into follow-ups for CLIs that cannot resume.
 const CONTEXT_MESSAGES: usize = 8;
@@ -16,11 +17,24 @@ impl RunoApp {
         images: Vec<String>,
         opts: &AgentOptions,
     ) {
+        // One run per session: a prompt that arrives while the agent or the worktree setup
+        // command is running waits its turn.
+        if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+            if let Some(s) = self.state.session_mut(id) {
+                s.queue.push(Queued::new(prompt, images));
+            }
+            self.save();
+            self.info = Some((
+                "Queued. It is sent when the agent finishes.".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
         self.stderr.remove(&id);
         // The CLI view owns the conversation while it is open; two writers would fork it.
         if self.cli_runs.contains_key(&id) {
             if let Some(s) = self.state.session_mut(id) {
-                s.queue.insert(0, prompt);
+                s.queue.insert(0, Queued::new(prompt, images));
             }
             self.notice = Some(
                 "This session is open in the CLI. The prompt is queued for when you switch back to Chat."
@@ -38,6 +52,17 @@ impl RunoApp {
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
+        let mode = session
+            .selections()
+            .get("mode")
+            .cloned()
+            .unwrap_or_default();
+        if let Some(error) = agent::mode_error(&session.provider, &mode) {
+            session.status = Status::Failed;
+            session.messages.push(Message::new(Role::System, error));
+            self.save();
+            return;
+        }
         let has = session.has_conversation();
         let provider = session.provider.clone();
         // Resume the CLI's own conversation when its id is known (Claude Code and Codex can
@@ -50,7 +75,6 @@ impl RunoApp {
             session.agent_session = agent::new_uuid();
         }
         let resume = has;
-        self.json_text.remove(&id);
         let dir = session.dir.clone();
         let in_git = !demo && git::is_repo(&dir);
         // Agents that cannot resume their own conversation get it written into the prompt.
@@ -105,6 +129,17 @@ impl RunoApp {
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
             .filter(|_| !demo && memory_server() && sandbox.is_none());
+        // Images inside the session folder go by their place in it, which is the same on
+        // a connection; others by their full path.
+        let attached: Vec<String> = images
+            .iter()
+            .map(|path| {
+                std::path::Path::new(path)
+                    .strip_prefix(&dir)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.clone())
+            })
+            .collect();
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: &sent,
@@ -113,8 +148,9 @@ impl RunoApp {
             opts,
             in_git,
             session_id: &agent_session,
-            images: &images,
+            images: &attached,
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
+            local: sandbox.is_none(),
         };
         match agent::run_agent(
             Target::Session(id),
@@ -127,9 +163,10 @@ impl RunoApp {
                 session.status = Status::Working;
                 session.remote_turn =
                     matches!(sandbox, Some(crate::connections::Sandbox::Remote(_)));
-                if provider == "claude" {
-                    self.streams.insert(id, stream::ClaudeStream::new(&dir));
-                }
+                match stream::Parser::for_provider(&provider, &dir) {
+                    Some(parser) => self.streams.insert(id, parser),
+                    None => self.streams.remove(&id),
+                };
                 self.handles.insert(Target::Session(id), handle);
                 self.started.insert(id, std::time::Instant::now());
                 self.turn_files.remove(&id);
@@ -147,36 +184,21 @@ impl RunoApp {
         self.keep_awake_update();
     }
 
-    /// Updates from one line of JSON output, remembering the conversation id it names.
-    pub(crate) fn json_updates(&mut self, id: u64, line: &str) -> Vec<stream::Update> {
-        let Some(parsed) = agent::json_line(line) else {
-            return if line.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![stream::Update::Text(line.to_string())]
-            };
-        };
-        if let Some(conversation) = parsed.conversation {
-            if let Some(s) = self.state.session_mut(id) {
-                s.agent_session = conversation;
-            }
+    /// The CLI is waiting for a browser sign-in, which never completes without a terminal:
+    /// stop the run and say how to sign in.
+    pub(crate) fn sign_in_wait(&mut self, id: u64, line: &str) {
+        if !self.signed_out.insert(id) {
+            return;
         }
-        let mut out: Vec<stream::Update> =
-            parsed.steps.into_iter().map(stream::Update::Step).collect();
-        if let Some(text) = parsed.text {
-            self.json_text.insert(id);
-            out.push(stream::Update::Text(text));
+        self.stderr.entry(id).or_default().push(line.to_string());
+        if let Some(handle) = self.handles.get(&Target::Session(id)) {
+            handle.kill();
         }
-        if let Some(result) = parsed.result.filter(|_| !self.json_text.contains(&id)) {
-            out.push(stream::Update::Text(result));
-        }
-        if let Some(error) = parsed.error {
-            out.push(stream::Update::Error(error));
-        }
-        out
     }
 
-    /// Copilot prints no conversation id; after a run, its newest saved session is this one.
+    /// Copilot without `--session-id` prints no conversation id. After a run, take the
+    /// newest saved session written during it, if it ran in this session's folder and
+    /// no other session already uses it.
     pub(crate) fn find_copilot_session(&mut self, id: u64, since: std::time::SystemTime) {
         let Some(session) = self.state.session(id) else {
             return;
@@ -184,6 +206,14 @@ impl RunoApp {
         if session.provider != "copilot" || !session.agent_session.is_empty() {
             return;
         }
+        let dir = session.dir.clone();
+        let taken: std::collections::HashSet<String> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.provider == "copilot" && s.id != id)
+            .map(|s| s.agent_session.clone())
+            .collect();
         let root = std::env::var_os("COPILOT_HOME")
             .map(std::path::PathBuf::from)
             .or_else(|| {
@@ -192,26 +222,23 @@ impl RunoApp {
                     .map(|h| std::path::PathBuf::from(h).join(".copilot"))
             })
             .map(|p| p.join("session-state"));
-        let newest = root
-            .and_then(|r| std::fs::read_dir(r).ok())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let modified = e.metadata().ok()?.modified().ok()?;
-                (e.path().is_dir() && modified >= since)
-                    .then(|| (modified, e.file_name().to_string_lossy().into_owned()))
-            })
-            .max();
-        if let Some((_, found)) = newest {
+        if let Some(found) = root.and_then(|r| newest_copilot_session(&r, &dir, since, &taken)) {
             if let Some(s) = self.state.session_mut(id) {
                 s.agent_session = found;
             }
         }
     }
 
-    /// After a turn: count what it changed, then send the next queued prompt.
-    pub(crate) fn finish_turn(&mut self, id: u64, ok: bool, stopped: bool, cx: &mut Context<Self>) {
+    /// After a turn: count what it changed, then send the next queued prompt. With `hold`
+    /// (the agent isn't signed in) the queue waits for the person.
+    pub(crate) fn finish_turn(
+        &mut self,
+        id: u64,
+        ok: bool,
+        stopped: bool,
+        hold: bool,
+        cx: &mut Context<Self>,
+    ) {
         let checkpoint = self.state.session(id).and_then(|s| {
             s.messages
                 .iter()
@@ -237,18 +264,80 @@ impl RunoApp {
             },
         );
         self.keep_awake_update();
-        if !ok {
+        // Queued prompts go out in order whether the turn finished, failed or was stopped;
+        // they wait only when the agent can't run at all.
+        if !hold {
+            self.send_queued(id, 0, cx);
+        }
+    }
+
+    /// Send queued prompt `index` of a session now. While the agent works it is stopped
+    /// first, and the prompt goes out once it has exited.
+    pub(crate) fn send_queued(&mut self, id: u64, index: usize, cx: &mut Context<Self>) {
+        if self.handles.contains_key(&Target::Session(id)) {
+            if let Some(s) = self.state.session_mut(id) {
+                if index < s.queue.len() {
+                    let item = s.queue.remove(index);
+                    s.queue.insert(0, item);
+                }
+            }
+            self.save();
+            self.stop_session(id);
             return;
         }
         let next = self
             .state
             .session_mut(id)
-            .filter(|s| !s.queue.is_empty())
-            .map(|s| (s.queue.remove(0), s.provider.clone()));
-        if let Some((prompt, provider)) = next {
+            .filter(|s| index < s.queue.len())
+            .map(|s| (s.queue.remove(index), s.provider.clone()));
+        if let Some((item, provider)) = next {
             let opts = cx.global::<AppSettings>().agent(&provider);
-            self.start_turn(id, prompt, Vec::new(), &opts);
+            self.start_turn(id, item.text, item.images, &opts);
         }
+    }
+
+    /// Send the last prompt again, with its images, after a failed or stopped turn.
+    pub(crate) fn retry_last(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.handles.contains_key(&Target::Session(id)) {
+            return;
+        }
+        let last = self.state.session(id).and_then(|s| {
+            s.messages
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+                .map(|m| (m.text.clone(), m.images.clone(), s.provider.clone()))
+        });
+        if let Some((text, images, provider)) = last {
+            let opts = cx.global::<AppSettings>().agent(&provider);
+            self.start_turn(id, text, images, &opts);
+        }
+    }
+
+    /// Prompts that were still queued when Runo last closed go out now, in order.
+    pub(crate) fn send_waiting_queues(&mut self, cx: &mut Context<Self>) {
+        if self.demo {
+            return;
+        }
+        let ids: Vec<u64> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| !s.queue.is_empty() && !s.cli && !s.archived)
+            .filter(|s| !self.handles.contains_key(&Target::Session(s.id)))
+            .map(|s| s.id)
+            .collect();
+        for id in ids {
+            self.send_queued(id, 0, cx);
+        }
+    }
+
+    /// Images attached to the selected session's unsent prompt.
+    pub(crate) fn attached(&self) -> &[String] {
+        self.selected
+            .and_then(|id| self.attachments.get(&id))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Send the composer's prompt, or queue it while the agent is busy.
@@ -265,7 +354,7 @@ impl RunoApp {
                 let prompt = crate::pbfile::fill(&a.prompt, &a.run_inputs(), &self.picked_values);
                 (a.name.clone(), prompt)
             });
-        if typed.is_empty() && self.attachments.is_empty() && playbook.is_none() {
+        if typed.is_empty() && self.attached().is_empty() && playbook.is_none() {
             return;
         }
         // A playbook goes out as its full instructions, with anything typed added after.
@@ -282,10 +371,18 @@ impl RunoApp {
             }
         }
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+        self.drafts.remove(&id);
         self.mention = None;
-        if self.handles.contains_key(&Target::Session(id)) {
+        let images = self.attachments.remove(&id).unwrap_or_default();
+        let text = if text.is_empty() {
+            "Look at the attached image.".to_string()
+        } else {
+            text
+        };
+        // While the agent or its setup command runs, the prompt and its images wait.
+        if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
             if let Some(session) = self.state.session_mut(id) {
-                session.queue.push(text);
+                session.queue.push(Queued::new(text, images));
             }
             self.save();
             self.info = Some((
@@ -294,12 +391,6 @@ impl RunoApp {
             ));
             return;
         }
-        let images = std::mem::take(&mut self.attachments);
-        let text = if text.is_empty() {
-            "Look at the attached image.".to_string()
-        } else {
-            text
-        };
         let opts = self
             .current()
             .map(|s| cx.global::<AppSettings>().agent(&s.provider))
@@ -436,19 +527,22 @@ impl RunoApp {
 
     /// Attach an image from the clipboard, or pick files when the clipboard has none.
     pub(crate) fn attach(&mut self, cx: &mut Context<Self>) {
+        let Some((id, dir)) = self.current().map(|s| (s.id, s.dir.clone())) else {
+            return;
+        };
         if let Some(item) = cx.read_from_clipboard() {
             for entry in item.entries() {
                 match entry {
                     ClipboardEntry::Image(image) => {
-                        if let Some(path) = save_image(&image.bytes, image.format) {
-                            self.attachments.push(path);
+                        if let Some(path) = save_image(&dir, &image.bytes, image.format) {
+                            self.attachments.entry(id).or_default().push(path);
                             return;
                         }
                     }
                     ClipboardEntry::ExternalPaths(paths) => {
-                        let before = self.attachments.len();
+                        let before = self.attached().len();
                         self.attach_paths(paths.paths());
-                        if self.attachments.len() > before {
+                        if self.attached().len() > before {
                             return;
                         }
                     }
@@ -473,14 +567,31 @@ impl RunoApp {
         .detach();
     }
 
-    /// Images become attachments; other files are mentioned in the prompt as @path.
+    /// Images become attachments, copied into the session folder so the agent can read
+    /// them wherever it runs; other files are mentioned in the prompt as @path.
     pub(crate) fn attach_paths(&mut self, paths: &[std::path::PathBuf]) {
-        let dir = self.current().map(|s| s.dir.clone()).unwrap_or_default();
+        let Some((id, dir, provider)) = self
+            .current()
+            .map(|s| (s.id, s.dir.clone(), s.provider.clone()))
+        else {
+            return;
+        };
         for path in paths {
             if is_image(path) {
-                let p = path.to_string_lossy().into_owned();
-                if !self.attachments.contains(&p) {
-                    self.attachments.push(p);
+                if !agent::takes_images(&provider) {
+                    self.notice = Some(format!(
+                        "{} can't read images, so the image wasn't attached.",
+                        agent::provider(&provider).name
+                    ));
+                    continue;
+                }
+                let Some(p) = copy_image(&dir, path) else {
+                    self.notice = Some(format!("Could not attach {}.", path.display()));
+                    continue;
+                };
+                let list = self.attachments.entry(id).or_default();
+                if !list.contains(&p) {
+                    list.push(p);
                 }
             } else {
                 let rel = path
@@ -666,6 +777,28 @@ impl RunoApp {
 
     /// Apply values produced outside of render (they need a window to reach inputs).
     pub(crate) fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Each session keeps its own unsent prompt while another one is on screen.
+        if self.draft_for != self.selected {
+            let text = self.prompt.read(cx).value().to_string();
+            if let Some(old) = self.draft_for {
+                if text.trim().is_empty() {
+                    self.drafts.remove(&old);
+                } else {
+                    self.drafts.insert(old, text.clone());
+                }
+            }
+            let draft = self
+                .selected
+                .and_then(|id| self.drafts.remove(&id))
+                .unwrap_or_default();
+            if draft != text {
+                self.prompt
+                    .update(cx, |p, cx| p.set_value(draft, window, cx));
+            }
+            self.draft_for = self.selected;
+            self.mention = None;
+            self.slash = None;
+        }
         if let Some(message) = self.commit_suggestion.take() {
             self.commit_msg
                 .update(cx, |input, cx| input.set_value(message, window, cx));
@@ -886,7 +1019,67 @@ impl RunoApp {
             .into_any_element()
     }
 
-    /// The agent's multiple-choice questions; picking an option sends it as the answer.
+    /// The first of the agent's questions still without an answer, and its position.
+    pub(crate) fn next_question(
+        &self,
+        id: u64,
+        index: usize,
+        questions: &[store::Question],
+    ) -> (usize, store::Question) {
+        let picks = self.question_picks.get(&(id, index));
+        let qi = (0..questions.len())
+            .find(|qi| {
+                !questions[*qi].options.is_empty()
+                    && picks.and_then(|p| p.get(*qi)).is_none_or(Option::is_none)
+            })
+            .unwrap_or(0);
+        (
+            qi,
+            questions.get(qi).cloned().unwrap_or(store::Question {
+                question: String::new(),
+                options: Vec::new(),
+            }),
+        )
+    }
+
+    /// Answer question `qi` of the agent's message `index`. Once every question has an
+    /// answer they go back to the agent together.
+    pub(crate) fn pick_answer(
+        &mut self,
+        id: u64,
+        index: usize,
+        qi: usize,
+        option: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(questions) = self
+            .state
+            .session(id)
+            .and_then(|s| s.messages.get(index))
+            .map(|m| m.questions.clone())
+        else {
+            return;
+        };
+        let picks = self
+            .question_picks
+            .entry((id, index))
+            .or_insert_with(|| vec![None; questions.len()]);
+        if let Some(pick) = picks.get_mut(qi) {
+            *pick = Some(option);
+        }
+        // Questions without options can't be picked; they are left out of the answer.
+        let done = questions
+            .iter()
+            .zip(picks.iter())
+            .all(|(q, p)| q.options.is_empty() || p.is_some());
+        if done {
+            let picks = self.question_picks.remove(&(id, index)).unwrap_or_default();
+            self.answer_session(id, answers_prompt(&questions, &picks), Vec::new(), cx);
+        }
+    }
+
+    /// The agent's multiple-choice questions. Each pick is kept until every question has
+    /// one; then the answers are sent together.
     pub(crate) fn question_card(
         &self,
         index: usize,
@@ -894,6 +1087,8 @@ impl RunoApp {
         last: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let id = self.selected.unwrap_or(0);
+        let picks = self.question_picks.get(&(id, index));
         let mut card = div()
             .p_3()
             .v_flex()
@@ -903,19 +1098,21 @@ impl RunoApp {
             .border_color(rgb(c_border()))
             .bg(rgb(c_raised()));
         for (qi, q) in questions.iter().enumerate() {
+            let picked = picks.and_then(|p| p.get(qi)).cloned().flatten();
             let mut options = div().flex().flex_wrap().gap_2();
             for (oi, option) in q.options.iter().enumerate() {
-                let answer = format!("{} {}", q.question, option);
+                let chosen = picked.as_deref() == Some(option.as_str());
+                let answer = option.clone();
                 options = options.child(
                     self.chip(
                         ("answer", index * 100 + qi * 10 + oi),
                         option.clone(),
-                        false,
+                        chosen,
                     )
                     .when(!last, |el| el.opacity(0.5))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if last {
-                            this.answer(format!("My answer: {answer}"), Vec::new(), cx);
+                            this.pick_answer(id, index, qi, answer.clone(), cx);
                         }
                         cx.notify();
                     })),
@@ -936,6 +1133,14 @@ impl RunoApp {
                             .child(q.question.clone()),
                     )
                     .child(options),
+            );
+        }
+        if last && questions.len() > 1 {
+            card = card.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .child("Pick an answer for each question; they're sent together."),
             );
         }
         card.into_any_element()
@@ -1014,15 +1219,66 @@ impl RunoApp {
         let id = session.id;
         let matches = self.mention_matches();
         let playbooks = self.slash_matches();
+        let attached = self.attached();
+        let working = self.handles.contains_key(&Target::Session(id));
+        // A turn that failed or was stopped can be sent again as it was.
+        let retry = !working
+            && session.status == Status::Failed
+            && session
+                .messages
+                .last()
+                .is_some_and(|m| m.role == Role::System)
+            && session.messages.iter().any(|m| m.role == Role::User);
         if session.queue.is_empty()
-            && self.attachments.is_empty()
+            && attached.is_empty()
             && matches.is_empty()
             && playbooks.is_empty()
+            && !retry
         {
             return None;
         }
         let mut col = div().v_flex().gap_1();
+        if retry {
+            col = col.child(
+                div()
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .bg(tint(c_subtle()))
+                    .text_size(px(12.5))
+                    .child(icon(IconName::TriangleAlert, 12., c_amber()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(c_secondary()))
+                            .child("The last turn didn't finish."),
+                    )
+                    .child(
+                        self.button("retry-turn", "Retry", false)
+                            .h(px(22.))
+                            .px_2()
+                            .text_size(px(12.))
+                            .child(icon(IconName::RefreshCw, 11., c_secondary()))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Send the last message again, with its images",
+                                )
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.retry_last(id, cx);
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
         for (i, queued) in session.queue.iter().enumerate() {
+            let images = queued.images.len();
             col = col.child(
                 div()
                     .id(("queued", i))
@@ -1041,7 +1297,34 @@ impl RunoApp {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(queued.lines().next().unwrap_or("").to_string()),
+                            .child(queued.text.lines().next().unwrap_or("").to_string()),
+                    )
+                    .when(images > 0, |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_color(rgb(c_muted()))
+                                .child(icon(IconName::Image, 12., c_muted()))
+                                .child(images.to_string()),
+                        )
+                    })
+                    .child(
+                        self.ghost_button_sized(
+                            ("send-queued", i),
+                            IconName::Send,
+                            if working {
+                                "Send now: stop the agent and send this next"
+                            } else {
+                                "Send now"
+                            },
+                            20.,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.send_queued(id, i, cx);
+                            cx.notify();
+                        })),
                     )
                     .child(
                         self.ghost_button_sized(("unqueue", i), IconName::X, "Remove", 20.)
@@ -1057,9 +1340,9 @@ impl RunoApp {
                     ),
             );
         }
-        if !self.attachments.is_empty() {
+        if !attached.is_empty() {
             let mut row = div().flex().flex_wrap().gap_2();
-            for (i, path) in self.attachments.iter().enumerate() {
+            for (i, path) in attached.iter().enumerate() {
                 let name = std::path::Path::new(path)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -1091,8 +1374,10 @@ impl RunoApp {
                         .child(
                             self.ghost_button_sized(("unattach", i), IconName::X, "Remove", 20.)
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if i < this.attachments.len() {
-                                        this.attachments.remove(i);
+                                    if let Some(list) = this.attachments.get_mut(&id) {
+                                        if i < list.len() {
+                                            list.remove(i);
+                                        }
                                     }
                                     cx.notify();
                                 })),
@@ -1241,6 +1526,25 @@ fn cx_keep_awake() -> bool {
     settings::keep_awake()
 }
 
+/// The reply to the agent's questions: one answer as before, several as a list.
+pub fn answers_prompt(questions: &[store::Question], picks: &[Option<String>]) -> String {
+    let answered: Vec<(&str, &str)> = questions
+        .iter()
+        .zip(picks)
+        .filter_map(|(q, p)| p.as_deref().map(|a| (q.question.as_str(), a)))
+        .collect();
+    match answered.as_slice() {
+        [(q, a)] => format!("My answer: {q} {a}"),
+        _ => {
+            let mut out = String::from("My answers:");
+            for (q, a) in answered {
+                out.push_str(&format!("\n- {q} {a}"));
+            }
+            out
+        }
+    }
+}
+
 /// Earlier turns, for CLIs that do not keep a conversation, ahead of the new request.
 pub fn context_prompt(messages: &[Message], prompt: &str) -> String {
     context_prompt_last(messages, prompt, CONTEXT_MESSAGES)
@@ -1305,8 +1609,55 @@ fn is_image(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Save pasted image bytes under Runo's data folder; returns the file path.
-fn save_image(bytes: &[u8], format: ImageFormat) -> Option<String> {
+/// Where a session keeps the images attached to its prompts: inside its own folder, so
+/// an agent on a connection or in a VM finds them at the same place. Git is told to
+/// ignore the folder through the repository's exclude file, not `.gitignore`.
+pub const ATTACHMENTS: &str = ".runo/attachments";
+
+/// The session's attachments folder, created and kept out of git.
+fn attachments_dir(dir: &str) -> Option<std::path::PathBuf> {
+    let folder = std::path::Path::new(dir).join(ATTACHMENTS);
+    std::fs::create_dir_all(&folder).ok()?;
+    exclude_runo_folder(dir);
+    Some(folder)
+}
+
+/// Add `/.runo/` to the repository's `info/exclude`, once.
+fn exclude_runo_folder(dir: &str) {
+    let Ok(out) = std::process::Command::new("git")
+        .args(["-C", dir, "rev-parse", "--git-path", "info/exclude"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let path = std::path::Path::new(dir).join(path);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    if text.lines().any(|l| l.trim() == "/.runo/") {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let sep = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = std::fs::write(&path, format!("{text}{sep}/.runo/\n"));
+}
+
+fn stamp() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S%3f").to_string()
+}
+
+/// Save pasted image bytes in the session's attachments folder; returns the file path.
+fn save_image(dir: &str, bytes: &[u8], format: ImageFormat) -> Option<String> {
     let ext = match format {
         ImageFormat::Png => "png",
         ImageFormat::Jpeg => "jpg",
@@ -1315,12 +1666,70 @@ fn save_image(bytes: &[u8], format: ImageFormat) -> Option<String> {
         ImageFormat::Bmp => "bmp",
         _ => "png",
     };
-    let dir = store::data_dir().join("images");
-    std::fs::create_dir_all(&dir).ok()?;
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S%3f");
-    let path = dir.join(format!("paste-{stamp}.{ext}"));
+    let path = attachments_dir(dir)?.join(format!("paste-{}.{ext}", stamp()));
     std::fs::write(&path, bytes).ok()?;
     Some(path.to_string_lossy().into_owned())
+}
+
+/// Copy an image into the session's attachments folder, unless it is already there.
+fn copy_image(dir: &str, image: &std::path::Path) -> Option<String> {
+    let folder = attachments_dir(dir)?;
+    if image.parent() == Some(folder.as_path()) {
+        return Some(image.to_string_lossy().into_owned());
+    }
+    let name = image.file_name()?.to_string_lossy().into_owned();
+    let target = folder.join(format!("{}-{name}", stamp()));
+    std::fs::copy(image, &target).ok()?;
+    Some(target.to_string_lossy().into_owned())
+}
+
+/// The newest Copilot session written since `since` that ran in `dir` and no other
+/// session uses: a folder `<id>/` or a file `<id>.jsonl` under `root`.
+pub fn newest_copilot_session(
+    root: &std::path::Path,
+    dir: &str,
+    since: std::time::SystemTime,
+    taken: &std::collections::HashSet<String>,
+) -> Option<String> {
+    use std::io::Read;
+    let mentions_dir = |path: &std::path::Path| {
+        let files: Vec<std::path::PathBuf> = if path.is_dir() {
+            std::fs::read_dir(path)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file())
+                .collect()
+        } else {
+            vec![path.to_path_buf()]
+        };
+        files.iter().any(|file| {
+            let mut head = Vec::new();
+            std::fs::File::open(file)
+                .and_then(|f| f.take(256 * 1024).read_to_end(&mut head))
+                .is_ok()
+                && String::from_utf8_lossy(&head).contains(dir)
+        })
+    };
+    std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let modified = e.metadata().ok()?.modified().ok()?;
+            let id = if path.is_dir() {
+                e.file_name().to_string_lossy().into_owned()
+            } else if path.extension().is_some_and(|x| x == "jsonl") {
+                path.file_stem()?.to_string_lossy().into_owned()
+            } else {
+                return None;
+            };
+            (modified >= since && !taken.contains(&id)).then_some((modified, id, path))
+        })
+        .filter(|(_, _, path)| mentions_dir(path))
+        .max_by_key(|(modified, ..)| *modified)
+        .map(|(_, id, _)| id)
 }
 
 #[cfg(test)]

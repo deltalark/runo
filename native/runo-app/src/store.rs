@@ -111,9 +111,11 @@ impl Session {
 
 impl Session {
     /// Whether the current agent already replied, so the next prompt continues its conversation.
+    /// A turn stopped after it ran tools but before it wrote anything still counts: the CLI
+    /// saved that conversation.
     pub fn has_conversation(&self) -> bool {
         self.messages.iter().skip(self.conversation_start).any(|m| {
-            (m.role == Role::Agent && !m.text.is_empty())
+            (m.role == Role::Agent && (!m.text.is_empty() || !m.steps.is_empty()))
                 || (m.role == Role::System && m.meta.starts_with("cli:"))
         })
     }
@@ -279,7 +281,7 @@ pub struct Session {
     pub race: u64,
     /// Prompts typed while the agent was working; each is sent when the turn ends.
     #[serde(default)]
-    pub queue: Vec<String>,
+    pub queue: Vec<Queued>,
     /// A handoff brief from the previous agent, sent with the next prompt.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub handoff: String,
@@ -303,6 +305,45 @@ pub struct Session {
     /// The running turn is on a connection, where it keeps going while Runo is closed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remote_turn: bool,
+}
+
+/// A prompt waiting for the agent, with the images attached to it.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(from = "SavedQueued")]
+pub struct Queued {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
+impl Queued {
+    pub fn new(text: impl Into<String>, images: Vec<String>) -> Self {
+        Self {
+            text: text.into(),
+            images,
+        }
+    }
+}
+
+/// Older saves keep queued prompts as plain strings.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedQueued {
+    Text(String),
+    Full {
+        text: String,
+        #[serde(default)]
+        images: Vec<String>,
+    },
+}
+
+impl From<SavedQueued> for Queued {
+    fn from(saved: SavedQueued) -> Self {
+        match saved {
+            SavedQueued::Text(text) => Queued::new(text, Vec::new()),
+            SavedQueued::Full { text, images } => Queued::new(text, images),
+        }
+    }
 }
 
 /// What a switch replaced, enough to undo it before anything is sent.
@@ -969,6 +1010,22 @@ mod tests {
         );
         session.messages.last_mut().unwrap().text = "done".into();
         assert!(session.has_conversation());
+        // A first turn stopped after it ran tools keeps its conversation.
+        session.switch_provider("codex");
+        let mut stopped = Message::new(Role::Agent, "");
+        stopped.steps.push("Read src/main.rs".into());
+        session.messages.push(stopped);
+        assert!(session.has_conversation());
+    }
+
+    #[test]
+    fn queued_prompts_load_from_older_saves() {
+        let old: Vec<Queued> =
+            serde_json::from_str(r#"["Fix it",{"text":"Look","images":["a.png"]}]"#).unwrap();
+        assert_eq!(old[0], Queued::new("Fix it", Vec::new()));
+        assert_eq!(old[1].images, ["a.png"]);
+        let saved = serde_json::to_string(&old[0]).unwrap();
+        assert_eq!(saved, r#"{"text":"Fix it"}"#);
     }
 
     #[test]
