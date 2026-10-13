@@ -373,7 +373,18 @@ impl RunoApp {
                 v
             }
             CtxTarget::Terminal => vec![
-                item("Copy screen", IconName::Copy, Act::TermCopy),
+                item(
+                    if self
+                        .active_shell()
+                        .is_some_and(|s| s.view(|v| v.ordered().is_some_and(|(a, b)| a != b)))
+                    {
+                        "Copy selection"
+                    } else {
+                        "Copy screen"
+                    },
+                    IconName::Copy,
+                    Act::TermCopy,
+                ),
                 item("Paste", IconName::Clipboard, Act::TermPaste),
                 item("Clear", IconName::Eraser, Act::TermClear),
                 None,
@@ -504,11 +515,16 @@ impl RunoApp {
             }
             Act::TermCopy => {
                 if let Some(shell) = self.active_shell() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(shell.text()));
-                    self.info = Some((
-                        "Copied the terminal screen.".into(),
-                        std::time::Instant::now(),
+                    let selection = shell.selection_text();
+                    let what = if selection.is_some() {
+                        "selection"
+                    } else {
+                        "terminal screen"
+                    };
+                    cx.write_to_clipboard(ClipboardItem::new_string(
+                        selection.unwrap_or_else(|| shell.text()),
                     ));
+                    self.info = Some((format!("Copied the {what}."), std::time::Instant::now()));
                 }
             }
             Act::TermPaste => {

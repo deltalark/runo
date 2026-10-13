@@ -457,6 +457,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Interaction", "How the mouse works in the terminal.", vec![
                 row("Scroll speed", "Lines moved per wheel step. Fast suits long logs.", Ctl::Segment(options(&[("normal", "Normal"), ("fast", "Fast"), ("faster", "Faster")]), st.term_scroll.clone(), Rc::new(|s, v| s.term_scroll = v))),
+                row("Scrollback", "Lines each new terminal keeps to scroll back through and find in.", Ctl::Segment(options(&[("2000", "2,000"), ("10000", "10,000"), ("50000", "50,000")]), st.term_history.to_string(), Rc::new(|s, v| s.term_history = v.parse().unwrap_or(10_000)))),
                 row("Right-click", "Show the terminal menu, or paste the clipboard straight in like many terminals do.", Ctl::Segment(options(&[("menu", "Menu"), ("paste", "Paste")]), st.term_right_click.clone(), Rc::new(|s, v| s.term_right_click = v))),
             ]),
         ],

@@ -166,26 +166,76 @@ impl RunoApp {
         let Some(shell) = self.active_shell() else {
             return;
         };
-        if self.pty_key(shell, event, cx) {
-            self.info = Some((
-                "Copied the terminal screen.".into(),
-                std::time::Instant::now(),
-            ));
-            cx.notify();
+        if let Some(selection) = self.pty_key(shell, event, cx) {
+            let what = if selection {
+                "selection"
+            } else {
+                "terminal screen"
+            };
+            self.info = Some((format!("Copied the {what}."), std::time::Instant::now()));
         }
+        cx.notify();
         let _ = window;
     }
 
-    /// Send a keystroke to a PTY program, handling copy and paste. Returns whether it
-    /// changed something the UI shows.
+    /// Send a keystroke to a PTY program, handling copy, paste and the find bar.
+    /// Returns `Some(true)` when the selection was copied, `Some(false)` for the screen.
     pub(crate) fn pty_key(
         &self,
         shell: &pty::Shell,
         event: &KeyDownEvent,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Option<bool> {
         let ks = &event.keystroke;
         let m = ks.modifiers;
+        // Find in the scrollback: Cmd-F on macOS, Ctrl-Shift-F elsewhere.
+        if (m.platform && ks.key == "f") || (m.control && m.shift && ks.key == "f") {
+            shell.view(|v| {
+                if v.find.is_none() {
+                    v.find = Some(String::new());
+                    v.find_at = 0;
+                }
+            });
+            cx.stop_propagation();
+            return None;
+        }
+        if shell.view(|v| v.find.is_some()) && !m.platform {
+            match ks.key.as_str() {
+                "escape" => shell.view(|v| {
+                    v.find = None;
+                    v.find_hit = None;
+                    v.find_count = 0;
+                }),
+                "enter" => shell.find_step(if m.shift { -1 } else { 1 }),
+                "backspace" => {
+                    shell.view(|v| {
+                        if let Some(q) = v.find.as_mut() {
+                            q.pop();
+                        }
+                        v.find_at = 0;
+                    });
+                    shell.find_step(0);
+                }
+                key if !m.control => {
+                    let text = ks
+                        .key_char
+                        .clone()
+                        .or_else(|| (key == "space").then(|| " ".to_string()));
+                    if let Some(text) = text {
+                        shell.view(|v| {
+                            if let Some(q) = v.find.as_mut() {
+                                q.push_str(&text);
+                            }
+                            v.find_at = 0;
+                        });
+                        shell.find_step(0);
+                    }
+                }
+                _ => {}
+            }
+            cx.stop_propagation();
+            return None;
+        }
         // Paste: Cmd-V on macOS, Ctrl-Shift-V elsewhere.
         let paste = (m.platform && ks.key == "v") || (m.control && m.shift && ks.key == "v");
         if paste {
@@ -193,16 +243,20 @@ impl RunoApp {
                 shell.paste(&text);
             }
             cx.stop_propagation();
-            return false;
+            return None;
         }
         let copy = (m.platform && ks.key == "c") || (m.control && m.shift && ks.key == "c");
         if copy {
-            cx.write_to_clipboard(ClipboardItem::new_string(shell.text()));
+            let selection = shell.selection_text();
+            let found = selection.is_some();
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                selection.unwrap_or_else(|| shell.text()),
+            ));
             cx.stop_propagation();
-            return true;
+            return Some(found);
         }
         if m.platform {
-            return false;
+            return None;
         }
         let app_cursor = shell.with_screen(|s| s.application_cursor());
         if let Some(bytes) = pty::key_bytes(
@@ -216,7 +270,7 @@ impl RunoApp {
             shell.write(&bytes);
             cx.stop_propagation();
         }
-        false
+        None
     }
 
     pub(crate) fn shell_tab_button(&self, shell: &pty::Shell, cx: &mut Context<Self>) -> Div {
@@ -313,40 +367,60 @@ impl RunoApp {
             vt100::Color::Idx(i) => pty::palette(i, dark),
             vt100::Color::Rgb(r, g, b) => ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
         };
+        let view = shell.view(|v| v.clone());
+        let query = view.find.clone().filter(|q| !q.is_empty());
+        let selection_bg = rgb(c_blue()).alpha(0.35);
+        let match_bg = rgb(c_amber()).alpha(0.35);
         let lines = shell.with_screen(|screen| {
             let mut lines = div().v_flex();
             let (rows, cols) = screen.size();
+            let scrolled = screen.scrollback();
             let (cur_row, cur_col) = screen.cursor_position();
-            let show_cursor = !screen.hide_cursor() && screen.scrollback() == 0 && !shell.exited();
+            let show_cursor = !screen.hide_cursor() && scrolled == 0 && !shell.exited();
             for row in 0..rows {
+                let back = scrolled + (rows - 1 - row) as usize;
+                // One character per column, so links and matches map onto cells.
+                let text: Vec<String> = (0..cols)
+                    .map(|col| match screen.cell(row, col) {
+                        Some(cell) if !cell.is_wide_continuation() => {
+                            cell.contents().chars().next().unwrap_or(' ').to_string()
+                        }
+                        _ => " ".to_string(),
+                    })
+                    .collect();
+                let text = text.concat();
+                let links = pty::links(&text);
+                let found = query
+                    .as_deref()
+                    .map(|q| pty::find_in(std::slice::from_ref(&text), q))
+                    .unwrap_or_default();
                 let mut line = div().h(px(term_line())).flex().whitespace_nowrap();
                 // Runs of cells that share a style become one text span.
                 let mut run = String::new();
-                let mut style: Option<(u32, Option<u32>, bool, bool, bool)> = None;
-                let flush =
-                    |line: Div,
-                     run: &mut String,
-                     style: Option<(u32, Option<u32>, bool, bool, bool)>| {
-                        let Some((fg, bg, bold, underline, cursor)) = style else {
-                            return line;
-                        };
-                        if run.is_empty() {
-                            return line;
-                        }
-                        let text = std::mem::take(run);
-                        line.child(
-                            div()
-                                .flex_none()
-                                .text_color(rgb(fg))
-                                .when_some(bg, |el, bg| el.bg(rgb(bg)))
-                                .when(bold, |el| el.font_weight(FontWeight::SEMIBOLD))
-                                .when(underline, |el| el.underline())
-                                .when(cursor && !focused, |el| {
-                                    el.border_1().border_color(rgb(c_secondary()))
-                                })
-                                .child(text),
-                        )
+                type Style = (Rgba, Option<Rgba>, bool, bool, bool, bool);
+                let mut style: Option<Style> = None;
+                let flush = |line: Div, run: &mut String, style: Option<Style>| {
+                    let Some((fg, bg, bold, italic, underline, cursor)) = style else {
+                        return line;
                     };
+                    if run.is_empty() {
+                        return line;
+                    }
+                    let text = std::mem::take(run);
+                    line.child(
+                        div()
+                            .flex_none()
+                            .text_color(fg)
+                            .when_some(bg, |el, bg| el.bg(bg))
+                            .when(bold, |el| el.font_weight(FontWeight::SEMIBOLD))
+                            .when(italic, |el| el.italic())
+                            .when(underline, |el| el.underline())
+                            .when(cursor && !focused, |el| {
+                                el.border_1().border_color(rgb(c_secondary()))
+                            })
+                            .child(text),
+                    )
+                };
                 let mut col = 0;
                 while col < cols {
                     let Some(cell) = screen.cell(row, col) else {
@@ -372,7 +446,29 @@ impl RunoApp {
                         bg = Some(fg);
                         fg = back;
                     }
-                    let next = Some((fg, bg, cell.bold(), cell.underline(), cursor));
+                    let c = col as usize;
+                    let current = view
+                        .find_hit
+                        .is_some_and(|(b, s, e)| b == back && (s..e).contains(&c));
+                    let mut fg = rgb(fg);
+                    let mut bg = bg.map(rgb);
+                    if current {
+                        bg = Some(rgb(c_amber()));
+                        fg = rgb(0x1a1a1a);
+                    } else if found.iter().any(|&(_, s, e)| (s..e).contains(&c)) {
+                        bg = Some(match_bg);
+                    } else if view.selected(back, col) {
+                        bg = Some(selection_bg);
+                    }
+                    let link = links.iter().any(|(s, e, _)| (*s..*e).contains(&c));
+                    let next = Some((
+                        fg,
+                        bg,
+                        cell.bold(),
+                        cell.italic(),
+                        cell.underline() || link,
+                        cursor,
+                    ));
                     if next != style || cursor {
                         line = flush(line, &mut run, style);
                         style = next;
@@ -391,6 +487,57 @@ impl RunoApp {
             lines
         });
         let scrolled = shell.with_screen(|s| s.scrollback());
+        let shared = shell.view.clone();
+        let cell_size = (self.cell_w, term_line());
+        // Records where the grid is drawn, to turn mouse positions into cells.
+        let measure = canvas(
+            move |b, _, _| {
+                let mut v = shared.lock().unwrap_or_else(|e| e.into_inner());
+                v.origin = (f32::from(b.origin.x), f32::from(b.origin.y));
+                v.cell = cell_size;
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full();
+        let lines = div().relative().child(measure).child(lines);
+        let find_bar = view.find.as_ref().map(|q| {
+            let count = match (view.find_count, q.is_empty()) {
+                (_, true) => "Type to find".to_string(),
+                (0, false) => "No matches".to_string(),
+                (n, false) => format!("{} of {n}", view.find_at + 1),
+            };
+            div()
+                .absolute()
+                .top_2()
+                .right_3()
+                .px_2()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .bg(float(c_raised()))
+                .border_1()
+                .border_color(rgb(c_border()))
+                .text_size(px(12.))
+                .child(icon(IconName::Search, 12., c_muted()))
+                .child(
+                    div()
+                        .min_w(px(80.))
+                        .text_color(rgb(c_text()))
+                        .child(format!("{q}▏")),
+                )
+                .child(div().text_color(rgb(c_muted())).child(count))
+                .child(
+                    div()
+                        .text_color(rgb(c_muted()))
+                        .text_size(px(11.))
+                        .child("Enter: older · Shift-Enter: newer · Esc"),
+                )
+        });
         div()
             .id(SharedString::from(format!("shell-{}", shell.id)))
             .key_context("RunoTerminal")
@@ -413,13 +560,31 @@ impl RunoApp {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
+                cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                     let focus = if cli.is_some() {
                         &this.cli_focus
                     } else {
                         &this.term_focus
                     };
                     window.focus(focus, cx);
+                    if let Some(url) = this.term_mouse(cli, TermMouse::Down(ev), (rows, cols)) {
+                        cx.open_url(&url);
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                if this
+                    .term_mouse(cli, TermMouse::Move(ev), (rows, cols))
+                    .is_some()
+                {
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseUpEvent, _, cx| {
+                    this.term_mouse(cli, TermMouse::Up(ev), (rows, cols));
                     cx.notify();
                 }),
             )
@@ -459,13 +624,14 @@ impl RunoApp {
                         None => this.active_shell(),
                     };
                     if let Some(shell) = shell {
-                        shell.scroll_by(lines);
+                        wheel(shell, ev, lines, (rows, cols));
                     }
                     cx.notify();
                 }
             }))
             .child(lines)
-            .when(scrolled > 0, |el| {
+            .children(find_bar)
+            .when(scrolled > 0 && view.find.is_none(), |el| {
                 el.child(
                     div()
                         .absolute()
@@ -487,5 +653,192 @@ impl RunoApp {
                     "Process exited. Close this tab or open a new shell."
                 }))
             })
+    }
+
+    /// Handle the mouse over a PTY: report it to a program that asked for the mouse
+    /// (Shift bypasses that), else select text. A Cmd/Ctrl-click on a link returns it.
+    fn term_mouse(
+        &mut self,
+        cli: Option<u64>,
+        event: TermMouse,
+        (rows, cols): (u16, u16),
+    ) -> Option<String> {
+        let shell = match cli {
+            Some(id) => self.cli_runs.get(&id).map(|r| &r.shell),
+            None => self.active_shell(),
+        }?;
+        let (position, m) = match event {
+            TermMouse::Down(e) => (e.position, e.modifiers),
+            TermMouse::Move(e) => (e.position, e.modifiers),
+            TermMouse::Up(e) => (e.position, e.modifiers),
+        };
+        let (row, col) = shell.view(|v| cell_at(v, position, (rows, cols)));
+        let (mode, encoding, scrolled) = shell.with_screen(|s| {
+            (
+                s.mouse_protocol_mode(),
+                s.mouse_protocol_encoding(),
+                s.scrollback(),
+            )
+        });
+        let mods = (m.shift, m.alt, m.control);
+        if mode != vt100::MouseProtocolMode::None && !m.shift {
+            let act = match event {
+                TermMouse::Down(_) => pty::MouseAct::Press(0),
+                TermMouse::Up(_) => pty::MouseAct::Release(0),
+                TermMouse::Move(e) => {
+                    pty::MouseAct::Move((e.pressed_button == Some(MouseButton::Left)).then_some(0))
+                }
+            };
+            if let Some(bytes) = pty::mouse_report(mode, encoding, act, row, col, mods) {
+                shell.write_raw(&bytes);
+            }
+            return None;
+        }
+        let back = scrolled + (rows.saturating_sub(1).saturating_sub(row)) as usize;
+        let spot = pty::Spot { back, col };
+        match event {
+            TermMouse::Down(e) => {
+                let text = shell.with_screen(|s| s.rows(0, cols).nth(row as usize));
+                let text = text.unwrap_or_default();
+                if m.platform || m.control {
+                    let c = col as usize;
+                    if let Some((_, _, url)) = pty::links(&text)
+                        .into_iter()
+                        .find(|(s, e, _)| (*s..*e).contains(&c))
+                    {
+                        return Some(url);
+                    }
+                }
+                shell.view(|v| {
+                    v.selecting = true;
+                    v.selection = Some(match e.click_count {
+                        1 => (spot, spot),
+                        2 => {
+                            let (s, e) = word_at(&text, col as usize);
+                            (
+                                pty::Spot {
+                                    back,
+                                    col: s as u16,
+                                },
+                                pty::Spot {
+                                    back,
+                                    col: e as u16,
+                                },
+                            )
+                        }
+                        _ => (pty::Spot { back, col: 0 }, pty::Spot { back, col: cols }),
+                    });
+                });
+                None
+            }
+            TermMouse::Move(e) => {
+                let held = e.pressed_button == Some(MouseButton::Left);
+                shell
+                    .view(|v| {
+                        if !(v.selecting && held) {
+                            return false;
+                        }
+                        if let Some((start, _)) = v.selection {
+                            v.selection = Some((start, spot));
+                        }
+                        true
+                    })
+                    .then(String::new)
+            }
+            TermMouse::Up(_) => {
+                shell.view(|v| v.selecting = false);
+                None
+            }
+        }
+    }
+}
+
+/// A mouse event over a PTY view.
+#[derive(Clone, Copy)]
+enum TermMouse<'a> {
+    Down(&'a MouseDownEvent),
+    Move(&'a MouseMoveEvent),
+    Up(&'a MouseUpEvent),
+}
+
+/// The cell under a window position, clamped to the grid.
+fn cell_at(v: &pty::ViewState, position: Point<Pixels>, (rows, cols): (u16, u16)) -> (u16, u16) {
+    let (w, h) = (v.cell.0.max(1.), v.cell.1.max(1.));
+    let x = (f32::from(position.x) - v.origin.0) / w;
+    let y = (f32::from(position.y) - v.origin.1) / h;
+    let clamp = |n: f32, max: u16| (n.max(0.) as u16).min(max.saturating_sub(1));
+    (clamp(y, rows), clamp(x.round(), cols + 1))
+}
+
+/// The word around character `col`, as `[start, end)`.
+fn word_at(text: &str, col: usize) -> (usize, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let word = |c: char| !c.is_whitespace() && !"\"'`()[]{}<>|,;".contains(c);
+    if !chars.get(col).is_some_and(|&c| word(c)) {
+        return (col, col + 1);
+    }
+    let mut start = col;
+    while start > 0 && word(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = col;
+    while end < chars.len() && word(chars[end]) {
+        end += 1;
+    }
+    (start, end)
+}
+
+/// Scroll a PTY, or pass the wheel on: as mouse reports to a program that asked for the
+/// mouse, or as arrow keys to a full-screen program without scrollback.
+fn wheel(shell: &pty::Shell, ev: &ScrollWheelEvent, lines: isize, (rows, cols): (u16, u16)) {
+    let (mode, encoding, alternate, app_cursor) = shell.with_screen(|s| {
+        (
+            s.mouse_protocol_mode(),
+            s.mouse_protocol_encoding(),
+            s.alternate_screen(),
+            s.application_cursor(),
+        )
+    });
+    let m = ev.modifiers;
+    if mode != vt100::MouseProtocolMode::None && !m.shift {
+        let (row, col) = shell.view(|v| cell_at(v, ev.position, (rows, cols)));
+        let act = pty::MouseAct::Wheel(lines > 0);
+        for _ in 0..lines.unsigned_abs().min(10) {
+            if let Some(bytes) =
+                pty::mouse_report(mode, encoding, act, row, col, (false, m.alt, m.control))
+            {
+                shell.write_raw(&bytes);
+            }
+        }
+    } else if alternate {
+        let key = if lines > 0 { "up" } else { "down" };
+        if let Some(bytes) = pty::key_bytes(key, None, false, false, false, app_cursor) {
+            for _ in 0..lines.unsigned_abs().min(10) {
+                shell.write_raw(&bytes);
+            }
+        }
+    } else {
+        shell.scroll_by(lines);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `super::*` brings in gpui's own `test` attribute; use the built-in one.
+    use std::prelude::v1::test;
+
+    #[test]
+    fn words_and_cells_under_the_mouse() {
+        assert_eq!(word_at("cargo test --release", 8), (6, 10));
+        assert_eq!(word_at("a  b", 1), (1, 2));
+        let v = pty::ViewState {
+            origin: (10., 20.),
+            cell: (8., 16.),
+            ..Default::default()
+        };
+        assert_eq!(cell_at(&v, point(px(10.), px(20.)), (24, 80)), (0, 0));
+        assert_eq!(cell_at(&v, point(px(51.), px(53.)), (24, 80)), (2, 5));
+        assert_eq!(cell_at(&v, point(px(9000.), px(9000.)), (24, 80)), (23, 80));
     }
 }

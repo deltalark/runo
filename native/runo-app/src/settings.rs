@@ -87,6 +87,8 @@ pub struct AppSettings {
     pub term_scroll: String,
     /// Right-click in the terminal: "menu" or "paste".
     pub term_right_click: String,
+    /// Lines a terminal keeps above the screen, for new shells.
+    pub term_history: u32,
     /// MCP servers (`<app>/<name>`) handed to every agent that doesn't load them itself.
     pub mcp_shared: Vec<String>,
     /// Show pages in the Browser tab with a headless Chromium.
@@ -150,6 +152,7 @@ impl Default for AppSettings {
             term_font: String::new(),
             term_scroll: "normal".into(),
             term_right_click: "menu".into(),
+            term_history: 10_000,
             mcp_shared: Vec::new(),
             browser_enabled: false,
             browser_asked: false,
@@ -234,6 +237,7 @@ impl AppSettings {
             },
             self.term_right_click == "paste",
         );
+        crate::pty::set_scrollback(self.term_history as usize);
     }
 
     /// The widest the conversation column gets, or None to fill the window.

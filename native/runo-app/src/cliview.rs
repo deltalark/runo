@@ -393,8 +393,9 @@ impl RunoApp {
         let Some(run) = self.cli_runs.get(&id) else {
             return;
         };
-        if self.pty_key(&run.shell, event, cx) {
-            self.info = Some(("Copied the CLI screen.".into(), std::time::Instant::now()));
+        if let Some(selection) = self.pty_key(&run.shell, event, cx) {
+            let what = if selection { "selection" } else { "CLI screen" };
+            self.info = Some((format!("Copied the {what}."), std::time::Instant::now()));
         }
         cx.notify();
     }
