@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn memory_server_speaks_mcp() {
-        let dir = std::env::temp_dir().join(format!("runo-mcp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("runo-memory-mcp-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".runo")).unwrap();
         std::fs::write(
             dir.join(MEMORY_FILE),
