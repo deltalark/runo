@@ -641,8 +641,49 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     Ctl::Chip(format!("{shared} shared"), if shared == 0 { 3 } else { 0 }),
                 )],
             ));
+            let own_path = crate::mcp::own_path();
+            let mut own: Vec<Row> = data
+                .mcp
+                .iter()
+                .filter(|m| m.provider == crate::mcp::OWN)
+                .map(|m| {
+                    let (name, path) = (m.name.clone(), own_path.clone());
+                    let edit = own_path.clone();
+                    row(
+                        &m.name,
+                        &if m.transport == "unknown" {
+                            "Not set up yet. Edit it to give a command or a URL.".to_string()
+                        } else {
+                            format!("{} · {}{}", m.transport, if m.enabled { "On" } else { "Disabled" }, if m.detail.is_empty() { String::new() } else { format!(" · {}", m.detail) })
+                        },
+                        Ctl::Buttons(vec![
+                            ("Edit".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| this.edit_path(&edit)) as Action),
+                            ("Remove".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                                if let Err(e) = crate::mcp::remove_own(&path, &name) {
+                                    this.notice = Some(format!("Couldn't remove {name}: {e}"));
+                                }
+                                this.open_settings();
+                            }) as Action),
+                        ]),
+                    )
+                })
+                .collect();
+            let add_path = own_path.clone();
+            own.push(row(
+                "Add a server",
+                "Adds a blank entry to Runo's list and opens it to fill in a command and arguments, or a URL.",
+                Ctl::Buttons(vec![("Add…".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| match crate::mcp::add_own(&add_path) {
+                    Ok(_) => this.edit_path(&add_path),
+                    Err(e) => this.notice = Some(format!("Couldn't add a server: {e}")),
+                }) as Action)]),
+            ));
+            sections.push(section(
+                "Runo's servers",
+                &format!("Given to every Claude Code and Codex session, on this computer and on connections. Kept in {}.", tilde(&own_path)),
+                own,
+            ));
             let mut providers: Vec<&'static str> = Vec::new();
-            for m in &data.mcp {
+            for m in data.mcp.iter().filter(|m| m.provider != crate::mcp::OWN) {
                 if !providers.contains(&m.provider) {
                     providers.push(m.provider);
                 }
@@ -686,7 +727,21 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             sections
         }
         SettingsPage::Skills => {
-            let mut sections = Vec::new();
+            let mut sections = vec![section(
+                "Create",
+                "A skill is a folder with a SKILL.md: a name, a description saying when to use it, and the steps.",
+                vec![row(
+                    "New skill",
+                    "Starts one in ~/.claude/skills and opens it in Runo's editor.",
+                    Ctl::Buttons(vec![("New skill…".into(), Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                        match settings::skills_home().map(|dir| settings::new_skill(&dir)) {
+                            Some(Ok(file)) => this.edit_path(&file),
+                            Some(Err(e)) => this.notice = Some(format!("Couldn't create a skill: {e}")),
+                            None => this.notice = Some("Couldn't find your home folder.".into()),
+                        }
+                    }) as Action)]),
+                )],
+            )];
             for source in ["project", "claude", "agents", "codex"] {
                 let rows: Vec<Row> = data
                     .skills
@@ -704,7 +759,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     sections.push(section(title, &format!("{} found", rows.len()), rows));
                 }
             }
-            if sections.is_empty() {
+            if sections.len() == 1 {
                 sections.push(section("Skills", "Skills live in SKILL.md files under your agents' skills folders.", vec![row("No skills found", "Create one in ~/.claude/skills, ~/.agents/skills or ~/.codex/skills.", Ctl::Chip("0".into(), 3))]));
             }
             sections

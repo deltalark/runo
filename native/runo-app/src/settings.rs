@@ -708,6 +708,29 @@ fn frontmatter(text: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Start a skill in `dir`: a new folder with a SKILL.md to fill in. Returns the file.
+pub fn new_skill(dir: &Path) -> std::io::Result<PathBuf> {
+    let name = (1..)
+        .map(|n| if n == 1 { "new-skill".to_string() } else { format!("new-skill-{n}") })
+        .find(|n| !dir.join(n).exists())
+        .expect("some name is free");
+    let folder = dir.join(&name);
+    std::fs::create_dir_all(&folder)?;
+    let file = folder.join("SKILL.md");
+    std::fs::write(
+        &file,
+        format!(
+            "---\nname: {name}\ndescription: What this skill does and when the agent should use it.\n---\n\nSteps for the agent to follow.\n"
+        ),
+    )?;
+    Ok(file)
+}
+
+/// Where new personal skills go.
+pub fn skills_home() -> Option<PathBuf> {
+    home().map(|h| h.join(".claude").join("skills"))
+}
+
 fn scan_skills(dir: &Path, source: &'static str, out: &mut Vec<SkillInfo>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -835,6 +858,7 @@ fn scan_mcp(home: &Path, out: &mut Vec<McpInfo>) {
     for (provider, path, field) in crate::mcp::other_sources(home) {
         crate::mcp::scan_json(provider, &path, field, out);
     }
+    crate::mcp::scan_json(crate::mcp::OWN, &crate::mcp::own_path(), "mcpServers", out);
     out.sort_by(|a, b| a.name.cmp(&b.name));
 }
 
@@ -953,7 +977,8 @@ pub fn discover(project_dir: Option<&str>) -> Discovered {
 #[cfg(test)]
 mod tests {
     use super::{
-        frontmatter, mix, parse_quick_commands, scan_hooks, scan_mcp, scan_skills, AppSettings,
+        frontmatter, mix, new_skill, parse_quick_commands, scan_hooks, scan_mcp, scan_skills,
+        AppSettings,
     };
     use std::path::PathBuf;
 
@@ -1111,5 +1136,18 @@ mod tests {
         assert_eq!(out[0].commands, ["Edit: cargo fmt"]);
         assert_eq!(out[1].commands, ["say done"]);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_new_skill_gets_a_folder_of_its_own() {
+        let dir = temp("new-skill");
+        let first = new_skill(&dir).unwrap();
+        let second = new_skill(&dir).unwrap();
+        assert!(first.ends_with("new-skill/SKILL.md"));
+        assert!(second.ends_with("new-skill-2/SKILL.md"));
+        let mut out = Vec::new();
+        scan_skills(&dir, "claude", &mut out);
+        assert_eq!(out.len(), 2);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

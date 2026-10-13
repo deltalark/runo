@@ -1606,7 +1606,7 @@ impl RunoApp {
         self.pending_file = Some(path.to_string());
     }
 
-    fn open_settings(&mut self) {
+    pub(crate) fn open_settings(&mut self) {
         self.view = View::Settings;
         let dir = self.current().filter(|_| !self.demo).map(|s| s.dir.clone());
         self.discovered = Some(settings::discover(dir.as_deref()));

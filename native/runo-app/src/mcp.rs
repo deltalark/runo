@@ -139,15 +139,15 @@ pub fn set_shared(keys: &[String]) {
 }
 
 /// Shared servers to hand to `agent`, leaving out the ones that agent already loads.
+/// Servers in Runo's own list always go to every agent.
 fn shared_for(agent: &str) -> Vec<(String, McpSpec)> {
     let keys = SHARED.lock().map(|k| k.clone()).unwrap_or_default();
-    if keys.is_empty() {
-        return Vec::new();
-    }
-    let all = FOUND.lock().map(|f| f.clone()).unwrap_or_default();
+    let mut all = FOUND.lock().map(|f| f.clone()).unwrap_or_default();
+    // Runo's own come first, so they win a clash of names.
+    all.sort_by_key(|m| m.provider != OWN);
     let mut seen = std::collections::HashSet::new();
     all.into_iter()
-        .filter(|m| m.enabled && keys.contains(&key(m)))
+        .filter(|m| m.enabled && (m.provider == OWN || keys.contains(&key(m))))
         .filter(|m| m.spec.transport() != "unknown" && m.provider != "Project")
         // Codex only speaks streamable HTTP, not SSE.
         .filter(|m| !(agent == "codex" && m.spec.sse))
@@ -175,6 +175,57 @@ pub fn codex_overrides() -> Vec<String> {
         .into_iter()
         .flat_map(|(name, spec)| spec.codex_overrides(&name))
         .collect()
+}
+
+/// The name Runo's own servers are listed under.
+pub const OWN: &str = "Runo";
+
+/// Runo's own list of servers, in Claude Code's `mcpServers` form.
+pub fn own_path() -> PathBuf {
+    crate::store::data_dir().join("mcp.json")
+}
+
+fn edit_own(path: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> std::io::Result<()> {
+    let mut value = read_json(path).unwrap_or_else(|| Value::Object(Map::new()));
+    if !value.is_object() {
+        value = Value::Object(Map::new());
+    }
+    let root = value.as_object_mut().expect("made an object above");
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !servers.is_object() {
+        *servers = Value::Object(Map::new());
+    }
+    change(servers.as_object_mut().expect("made an object above"));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(&value).unwrap_or_default();
+    std::fs::write(path, text + "\n")
+}
+
+/// Add a blank server to Runo's list for the person to fill in; returns its name.
+pub fn add_own(path: &Path) -> std::io::Result<String> {
+    let mut name = String::new();
+    edit_own(path, |servers| {
+        name = (1..)
+            .map(|n| if n == 1 { "new-server".to_string() } else { format!("new-server-{n}") })
+            .find(|n| !servers.contains_key(n))
+            .expect("some name is free");
+        servers.insert(
+            name.clone(),
+            serde_json::json!({ "command": "", "args": [], "env": {} }),
+        );
+    })?;
+    Ok(name)
+}
+
+/// Remove a server from Runo's list.
+pub fn remove_own(path: &Path, name: &str) -> std::io::Result<()> {
+    edit_own(path, |servers| {
+        servers.remove(name);
+    })
 }
 
 /// Remove `//` and `/* */` comments and trailing commas, for VS Code style JSON.
@@ -492,5 +543,39 @@ mod tests {
         assert!(!codex.iter().any(|c| c.contains("blender_lab")));
         set_shared(&[]);
         assert!(claude_servers().is_empty());
+
+        // Runo's own servers need no switch, and win over a same-named one.
+        let own = McpSpec {
+            command: "runo-tools".into(),
+            ..Default::default()
+        };
+        set_found(&[
+            info("Cursor", "figma", McpSpec {
+                url: "https://mcp.figma.com/mcp".into(),
+                ..Default::default()
+            }),
+            info(OWN, "figma", own),
+        ]);
+        set_shared(&["Cursor/figma".into()]);
+        let claude = claude_servers();
+        assert_eq!(claude.len(), 1);
+        assert_eq!(claude[0].1["command"], "runo-tools");
+        set_found(&[]);
+        set_shared(&[]);
+    }
+
+    #[test]
+    fn runo_keeps_its_own_list_of_servers() {
+        let dir = std::env::temp_dir().join(format!("runo-own-mcp-{}", std::process::id()));
+        let path = dir.join("mcp.json");
+        assert_eq!(add_own(&path).unwrap(), "new-server");
+        assert_eq!(add_own(&path).unwrap(), "new-server-2");
+        remove_own(&path, "new-server").unwrap();
+        let mut out = Vec::new();
+        scan_json(OWN, &path, "mcpServers", &mut out);
+        let names: Vec<&str> = out.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["new-server-2"]);
+        assert_eq!(out[0].transport, "unknown", "blank until filled in");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
