@@ -512,6 +512,10 @@ pub struct Automation {
     pub description: String,
     /// Minutes between scheduled runs; 0 runs it only when started by hand.
     pub every_minutes: u64,
+    /// A cron expression it runs on instead, in local time; a time of day on chosen
+    /// weekdays is stored this way too. Empty uses `every_minutes`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cron: String,
     /// Unix seconds of the last run; 0 if it never ran.
     #[serde(default)]
     pub last_run: u64,
@@ -681,12 +685,43 @@ impl Automation {
 
     /// Whether the automation should run now.
     pub fn due(&self, now: u64) -> bool {
-        self.scheduled() && self.enabled && now >= self.last_run + self.every_minutes * 60
+        self.enabled && self.next_run().is_some_and(|at| now >= at)
+    }
+
+    /// When the schedule next runs (Unix seconds), counting from the last run.
+    pub fn next_run(&self) -> Option<u64> {
+        if !self.scheduled() {
+            None
+        } else if self.cron.is_empty() {
+            Some(self.last_run + self.every_minutes * 60)
+        } else {
+            crate::schedule::next_local(&self.cron, self.last_run)
+        }
+    }
+
+    /// How many scheduled runs fell between the last run and `now`, up to 1000.
+    pub fn runs_due(&self, now: u64) -> u64 {
+        if !self.scheduled() || now <= self.last_run {
+            0
+        } else if self.cron.is_empty() {
+            (now - self.last_run) / (self.every_minutes * 60).max(1)
+        } else {
+            crate::schedule::runs_between(&self.cron, self.last_run, now, 1000)
+        }
+    }
+
+    /// "Hourly", "Weekdays at 09:00", "Cron 0 */2 * * *".
+    pub fn schedule_label(&self) -> String {
+        if self.cron.is_empty() {
+            crate::playbooks::every_label(self.every_minutes)
+        } else {
+            crate::schedule::describe(&self.cron)
+        }
     }
 
     /// Runs on a timer as well as by hand. A schedule needs a project to run in.
     pub fn scheduled(&self) -> bool {
-        self.every_minutes > 0 && self.project_id != 0
+        (self.every_minutes > 0 || !self.cron.is_empty()) && self.project_id != 0
     }
 }
 
@@ -1043,6 +1078,31 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedules_say_when_they_run_next() {
+        let mut a = Automation {
+            project_id: 1,
+            every_minutes: 60,
+            last_run: 1_000_000,
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(a.next_run(), Some(1_003_600));
+        assert!(!a.due(1_003_599) && a.due(1_003_600));
+        assert_eq!(a.runs_due(1_000_000 + 3 * 3600 + 5), 3);
+        // A cron schedule wins over the minutes; this one runs every minute.
+        a.cron = "* * * * *".into();
+        let start = 1_000_020;
+        a.last_run = start;
+        assert_eq!(a.next_run(), Some(1_000_080));
+        assert_eq!(a.runs_due(start + 600), 10);
+        assert_eq!(a.schedule_label(), "Cron * * * * *");
+        a.cron = "30 9 * * 1,2,3,4,5".into();
+        assert_eq!(a.schedule_label(), "Weekdays at 09:30");
+        a.project_id = 0;
+        assert!(!a.scheduled() && a.next_run().is_none());
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("runo-store-{name}-{}", std::process::id()));

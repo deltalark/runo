@@ -169,6 +169,7 @@ impl RunoApp {
         {
             a.project_id = 0;
             a.every_minutes = 0;
+            a.cron.clear();
         }
         self.state.projects.retain(|p| p.id != pid);
         self.expanded.retain(|p| *p != pid);

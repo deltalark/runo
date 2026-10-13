@@ -27,6 +27,7 @@ mod pbshare;
 mod playbooks;
 mod projects;
 mod pty;
+mod schedule;
 mod settings;
 mod settings_ui;
 mod shell;
