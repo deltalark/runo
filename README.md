@@ -227,6 +227,10 @@ Agent CLIs are installed on the connection on first use, with npm (into a privat
 
 Deleting a session deletes its VM or its copies on every connection it ran on, and removing a connection cleans up what Runo left there.
 
+## On your phone
+
+The [Runo mobile app](mobile/README.md) (iOS and Android) shows every session, what each one needs from you, and the conversation. You can allow or deny a permission request, approve a plan, answer an agent's questions, send a follow-up or stop a run. Run `runo --phone` on your computer and scan the code it prints. Use it on your home network or over Tailscale.
+
 ## Status
 
 Runo is early and moving quickly. Expect rough edges, and please [open an issue](https://github.com/deltalark/runo/issues) when you hit one.
