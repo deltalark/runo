@@ -176,14 +176,20 @@ pub fn newest(copies: &[Install]) -> Option<&Install> {
 }
 
 /// The copy Runo runs for an agent, among `copies`.
-pub fn in_use<'a>(provider: &'static crate::agent::Provider, copies: &'a [Install]) -> Option<&'a Install> {
+pub fn in_use<'a>(
+    provider: &'static crate::agent::Provider,
+    copies: &'a [Install],
+) -> Option<&'a Install> {
     let runs = crate::updater::resolve(&crate::caps::binary(provider))?;
     let real = std::fs::canonicalize(&runs).unwrap_or(runs);
     copies.iter().find(|c| c.real == real)
 }
 
 /// The copy Runo runs and a newer one it could run instead, when the one it runs is older.
-pub fn shadow<'a>(copies: &'a [Install], using: Option<&'a Install>) -> Option<(&'a Install, &'a Install)> {
+pub fn shadow<'a>(
+    copies: &'a [Install],
+    using: Option<&'a Install>,
+) -> Option<(&'a Install, &'a Install)> {
     let using = using?;
     let newest = newest(copies)?;
     crate::alerts::is_newer(&newest.version, &using.version).then_some((using, newest))
@@ -253,7 +259,9 @@ mod tests {
         assert_eq!(dirs[0], (home.join("bin"), true));
         assert_eq!(dirs[1], (home.join(".local/bin"), true));
         assert_eq!(
-            dirs.iter().filter(|(d, _)| *d == home.join(".local/bin")).count(),
+            dirs.iter()
+                .filter(|(d, _)| *d == home.join(".local/bin"))
+                .count(),
             1,
             "a PATH folder isn't listed twice"
         );
@@ -304,7 +312,10 @@ mod tests {
         assert!(!found[1].link && !found[1].on_path && found[1].owner.is_none());
         assert!(find("gemini", &dirs).is_empty());
 
-        assert!(remove_link(&nvm.join("codex")).is_err(), "only links are removed");
+        assert!(
+            remove_link(&nvm.join("codex")).is_err(),
+            "only links are removed"
+        );
         remove_link(&local.join("codex")).unwrap();
         assert!(!local.join("codex").exists() && app.join("codex").is_file());
     }
@@ -318,7 +329,10 @@ mod tests {
         ];
         assert_eq!(newest(&copies).unwrap().version, "0.162.1");
         let (using, better) = shadow(&copies, Some(&copies[0])).unwrap();
-        assert_eq!((using.version.as_str(), better.version.as_str()), ("0.147.0", "0.162.1"));
+        assert_eq!(
+            (using.version.as_str(), better.version.as_str()),
+            ("0.147.0", "0.162.1")
+        );
         assert!(shadow(&copies, Some(&copies[1])).is_none());
         assert!(shadow(&copies, None).is_none());
         assert!(newest(&[copy("/x", "")]).is_none());

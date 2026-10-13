@@ -1414,6 +1414,10 @@ impl RunoApp {
                 .collect::<Vec<_>>()
                 .join(".");
             let (body, actions) = match run {
+                Some(_) if done && latest == "latest" => (
+                    format!("{} is up to date.", provider.name),
+                    div().flex().child(update_done_badge(n, "Updated")),
+                ),
                 Some(_) if done => (
                     format!("{} is now on version {latest}.", provider.name),
                     div().flex().child(update_done_badge(n, "Updated")),

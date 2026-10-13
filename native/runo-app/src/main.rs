@@ -19,6 +19,7 @@ mod desktop_notify;
 mod detach;
 mod files;
 mod fileview;
+mod fixes;
 mod gemini;
 mod git;
 mod github;
@@ -194,6 +195,12 @@ struct RunoApp {
     cli_runs: HashMap<u64, cliview::CliRun>,
     /// The agent whose install confirm card is open.
     install_confirm: Option<&'static str>,
+    /// A copy of an agent's CLI waiting for the person to confirm its removal.
+    remove_copy: Option<fixes::RemoveCopy>,
+    /// Terminal tabs signing an agent in: shell id → agent.
+    sign_ins: HashMap<u64, &'static str>,
+    /// The session whose failed turn shows the model list.
+    fix_models: Option<u64>,
     project_form: Option<projects::ProjectForm>,
     project_name: Entity<InputState>,
     /// The project form's worktree setup command.
@@ -1264,6 +1271,9 @@ impl RunoApp {
             next_shell: 0,
             cli_runs: HashMap::new(),
             install_confirm: None,
+            remove_copy: None,
+            sign_ins: HashMap::new(),
+            fix_models: None,
             project_form: None,
             project_name,
             project_setup: cx
@@ -2149,6 +2159,7 @@ impl RunoApp {
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
                 self.cli_exited(id);
+                self.sign_in_exited(id);
                 if self.setups.contains_key(&id) {
                     self.setup_exited(id, cx);
                 }
@@ -8104,6 +8115,8 @@ impl Render for RunoApp {
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if this.tour.is_some() {
                     this.end_tour(cx);
+                } else if this.remove_copy.is_some() {
+                    this.remove_copy = None;
                 } else if this.install_confirm.is_some() {
                     this.install_confirm = None;
                 } else if this.project_form.is_some() {
@@ -8419,6 +8432,7 @@ impl Render for RunoApp {
             .children(palette)
             .children(self.ctx_menu_view(cx))
             .children(self.install_modal(cx))
+            .children(self.remove_copy_modal(cx))
             .children(self.project_modal(cx))
             .children(self.remove_project_modal(cx))
             .children(self.playbook_run_form(cx))

@@ -36,6 +36,25 @@ pub struct AgentOptions {
     pub sub_agent: String,
     /// OpenCode: show thinking blocks.
     pub thinking: bool,
+    /// Codex: also write the default model into ~/.codex/config.toml (after a backup).
+    pub save_to_config: bool,
+    /// Default models of single projects, by project id; they win over `model_override`.
+    pub project_models: HashMap<String, String>,
+}
+
+impl AgentOptions {
+    /// These options with the project's own default model, when it has one.
+    pub fn for_project(&self, project: u64) -> AgentOptions {
+        let mut opts = self.clone();
+        if let Some(model) = self
+            .project_models
+            .get(&project.to_string())
+            .filter(|m| !m.trim().is_empty())
+        {
+            opts.model_override = model.trim().to_string();
+        }
+        opts
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

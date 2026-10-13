@@ -51,6 +51,8 @@ pub struct Caps {
     pub hidden_models: Vec<ModelInfo>,
     /// The CLI release that wrote its model list, which can be newer than the one installed.
     pub client_version: String,
+    /// The model the CLI's own config file picks (Codex's config.toml).
+    pub config_model: String,
 }
 
 /// One dropdown shown in the composer.
@@ -103,6 +105,15 @@ pub fn set(provider: &str, caps: Caps) {
     if let Ok(mut map) = store().write() {
         map.insert(provider.to_string(), caps);
     }
+}
+
+/// The installed CLI's version, without copying the rest.
+pub fn version(provider: &str) -> String {
+    store()
+        .read()
+        .ok()
+        .and_then(|m| m.get(provider).map(|c| c.version.clone()))
+        .unwrap_or_default()
 }
 
 pub fn get(provider: &str) -> Caps {
@@ -401,12 +412,14 @@ fn codex(bin: &str) -> Caps {
         })
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    parse_codex(
+    let mut caps = parse_codex(
         &version,
         &run(bin, &["exec", "--help"]),
         &run(bin, &["--help"]),
         cache.as_ref(),
-    )
+    );
+    caps.config_model = crate::modelcheck::codex_config_model().unwrap_or_default();
+    caps
 }
 
 /// Codex: sandbox modes from `codex exec --help`, approval policies from `codex --help`,
@@ -945,14 +958,29 @@ mod fixture_tests {
         let caps = parse_codex("codex-cli 0.147.0", "", "", Some(&cache));
         assert_eq!(caps.client_version, "0.162.1");
         assert_eq!(caps.models.len(), 3);
-        assert_eq!(values(&caps.hidden_models.iter().map(|m| m.choice.clone()).collect::<Vec<_>>()), ["gpt-6-astra"]);
+        assert_eq!(
+            values(
+                &caps
+                    .hidden_models
+                    .iter()
+                    .map(|m| m.choice.clone())
+                    .collect::<Vec<_>>()
+            ),
+            ["gpt-6-astra"]
+        );
         assert_eq!(all_models(&caps).count(), 4);
         let note = |i: usize| model_note("codex", &caps.models[i], &caps.version, "2026-10-13");
         assert_eq!(note(0), "Needs Codex 0.160.0+");
         assert_eq!(note(1), "Retires today, switch to gpt-6.1-sol");
         assert_eq!(note(2), "Retires 2026-11-01, switch to gpt-5.6-sol");
-        assert_eq!(model_note("codex", &caps.models[0], "0.162.1", "2026-10-13"), "");
-        assert_eq!(model_note("codex", &caps.models[1], "0.162.1", "2026-10-14"), "Retired 2026-10-13, switch to gpt-6.1-sol");
+        assert_eq!(
+            model_note("codex", &caps.models[0], "0.162.1", "2026-10-13"),
+            ""
+        );
+        assert_eq!(
+            model_note("codex", &caps.models[1], "0.162.1", "2026-10-14"),
+            "Retired 2026-10-13, switch to gpt-6.1-sol"
+        );
         assert_eq!(first_date("no date"), None);
         assert_eq!(short_version("codex-cli 0.162.1\n"), "0.162.1");
     }

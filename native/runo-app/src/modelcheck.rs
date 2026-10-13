@@ -23,12 +23,7 @@ pub enum Problem {
 /// Read a CLI's error output. `version` is the installed CLI's; `client_version` is the
 /// release that wrote its model list. A model the CLI rejects while a newer release
 /// listed it is a version problem, not an account one.
-pub fn classify(
-    provider: &str,
-    log: &str,
-    version: &str,
-    client_version: &str,
-) -> Option<Problem> {
+pub fn classify(provider: &str, log: &str, version: &str, client_version: &str) -> Option<Problem> {
     let lower = log.to_lowercase();
     let model = model_in(log);
     let older = crate::alerts::is_newer(client_version, version);
@@ -61,7 +56,11 @@ pub fn model_in(log: &str) -> String {
     for quote in ['\'', '`', '"'] {
         let parts: Vec<&str> = log.split(quote).collect();
         for (i, part) in parts.iter().enumerate() {
-            let near = |j: usize| parts.get(j).is_some_and(|p| p.to_lowercase().contains("model"));
+            let near = |j: usize| {
+                parts
+                    .get(j)
+                    .is_some_and(|p| p.to_lowercase().contains("model"))
+            };
             let looks = !part.is_empty()
                 && part.len() < 80
                 && part
@@ -162,7 +161,7 @@ fn with_results<T>(f: impl FnOnce(&mut HashMap<String, Tested>) -> T) -> Option<
 
 /// How `model` did when last tested with the agent's current CLI.
 pub fn verdict(provider: &str, model: &str) -> Option<Verdict> {
-    let version = crate::caps::get(provider).version;
+    let version = crate::caps::version(provider);
     with_results(|map| {
         map.get(provider)
             .filter(|t| t.version == version)
@@ -370,6 +369,13 @@ pub fn codex_config() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".codex").join("config.toml"))
 }
 
+/// The model Codex's config file picks, when it picks one.
+pub fn codex_config_model() -> Option<String> {
+    let text = std::fs::read_to_string(codex_config()?).ok()?;
+    let table: toml::Table = text.parse().ok()?;
+    table.get("model")?.as_str().map(str::to_string)
+}
+
 /// `text` with its top-level `model` key set to `model`, and nothing else changed. The
 /// key is added before the first table when it isn't there.
 pub fn set_toml_model(text: &str, model: &str) -> String {
@@ -419,7 +425,8 @@ pub fn save_codex_model(model: &str) -> Result<Option<PathBuf>, String> {
     let backup = if path.is_file() {
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let backup = path.with_file_name(format!("config.toml.runo-{stamp}.bak"));
-        std::fs::copy(&path, &backup).map_err(|e| format!("Couldn't back up {}: {e}", path.display()))?;
+        std::fs::copy(&path, &backup)
+            .map_err(|e| format!("Couldn't back up {}: {e}", path.display()))?;
         Some(backup)
     } else {
         if let Some(dir) = path.parent() {
@@ -489,7 +496,10 @@ mod tests {
             judge(false, ACCOUNT, "codex", "0.147.0", "0.162.1"),
             Verdict::NeedsNewer
         );
-        assert_eq!(judge(false, NEWER, "codex", "0.147.0", ""), Verdict::NeedsNewer);
+        assert_eq!(
+            judge(false, NEWER, "codex", "0.147.0", ""),
+            Verdict::NeedsNewer
+        );
         assert_eq!(judge(false, "boom", "codex", "", ""), Verdict::Failed);
         let args: Vec<String> = test_command("codex", "codex", "gpt-5.6-sol")
             .get_args()
@@ -513,7 +523,10 @@ mod tests {
             "approval_policy = \"never\"\nmodel = \"m\"\n\n[mcp_servers.a]\ncommand = \"x\"\n"
         );
         assert_eq!(set_toml_model("", "m"), "model = \"m\"\n");
-        assert_eq!(set_toml_model("[a]\nb = 1", "m"), "model = \"m\"\n\n[a]\nb = 1");
+        assert_eq!(
+            set_toml_model("[a]\nb = 1", "m"),
+            "model = \"m\"\n\n[a]\nb = 1"
+        );
         for edited in [set_toml_model(text, "q\"x"), set] {
             assert!(edited.parse::<toml::Table>().is_ok());
         }

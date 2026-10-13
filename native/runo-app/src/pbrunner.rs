@@ -326,7 +326,7 @@ fn run_one(auto: &Automation, project: &Project, settings: &AppSettings) -> Head
     } else {
         String::new()
     };
-    let opts = settings.agent(&auto.provider);
+    let opts = settings.agent(&auto.provider).for_project(project.id);
     let mut command = match command(auto, &opts, &prompt, &conversation, git::is_repo(&run.dir)) {
         Ok(command) => command,
         Err(error) => {
@@ -369,10 +369,18 @@ fn run_one(auto: &Automation, project: &Project, settings: &AppSettings) -> Head
                 run.output = reply;
             } else {
                 run.status = "failed".into();
+                let tip = crate::modelcheck::tip(
+                    &auto.provider,
+                    &format!("{}\n{err}", error.clone().unwrap_or_default()),
+                );
                 run.output = error
                     .or_else(|| agent::sign_in_hint(&auto.provider, &err))
                     .unwrap_or_else(|| if err.trim().is_empty() { reply } else { err });
                 run.output = run.output.trim().to_string();
+                // A model or version problem says what to do; the run's session offers the fix.
+                if let Some(tip) = tip {
+                    run.output = format!("{}\n{tip}", run.output);
+                }
             }
         }
         Err(error) => {
