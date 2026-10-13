@@ -6,14 +6,15 @@ Each item says what to do and what should happen. Tick it off with the date and 
 
 ## 1. Agents other than Claude Code
 
-Runo has never run any of these CLIs for real. Their flags come from each vendor's documentation, checked on 2026-10-11.
+Their flags come from each vendor's documentation, checked on 2026-10-11. On 2026-10-13 the real Codex, OpenCode and Gemini CLIs were run on a Mac (main 0e95854): Codex chat across two turns works, and the Gemini and OpenCode flags are accepted. Real Gemini and OpenCode turns are still untested because both were signed out.
 
 | Agent | What to test | Expected |
 | --- | --- | --- |
-| Codex | Chat: two turns, then ask "what did I ask first?" | The second turn runs `codex exec … resume <id>` and remembers the first |
+| ✓ Codex (2026-10-13, macOS, main 0e95854) | Chat: two turns, then ask "what did I ask first?" | The second turn runs `codex exec … resume <id>` and remembers the first |
+| Codex | A model the account can't use, such as one with no metadata | Codex's warning shows once above the reply, and the failure points to the model chip and Settings → Codex |
 | Codex | CLI view: switch Chat → CLI → Chat, do one turn in the CLI | The TUI opens with `codex resume <id>` on the same conversation, and the CLI turn appears in chat under the divider |
 | Codex | First chat turn in a new session | Runo finds the conversation id from `~/.codex/sessions` (newest rollout in the folder) |
-| Gemini CLI | Chat: two turns | The first turn sends `--session-id <uuid>` and the second `--resume <uuid>`, and the context is kept |
+| Gemini CLI | Chat: two turns | The first turn sends `--session-id <uuid>` and the second `--resume <uuid>` (Gemini 0.46 takes the id directly), and the context is kept |
 | Gemini CLI | CLI view | `gemini --resume <uuid>` opens the same chat. Coming back shows "Used Gemini's CLI", and the next chat turn knows what happened in the CLI |
 | Qwen Code | Same two checks as Gemini | Same results (`--session-id` / `--resume`) |
 | Cursor CLI | Chat with `--output-format json` | The reply text shows, `session_id` is saved, and the next turn sends `--resume <id>` |
@@ -33,7 +34,9 @@ Runo has never run any of these CLIs for real. Their flags come from each vendor
 | Copilot, Gemini, Qwen, Amp, Droid, Grok | Model menu | Filled from the `--model` choices in each CLI's help, where the help lists them. Agents whose help lists none show only Default |
 | Claude Code on macOS (native and npm installs) | Model menu | "Default · <model>" plus versioned aliases and pinned versions; `/model` runs without creating a transcript |
 | All of the above | Switching agents mid-session (handoff dialog) | Cost shown, brief carried over, new agent continues the task |
-| All of the above | Memory server | Only Claude Code and Codex get it. Check that the others ignore `.runo/memory.md` without errors |
+| All of the above | Memory server | Every agent but Grok gets it: by flag or environment for Claude Code, Codex, OpenCode, Qwen Code, Copilot and Amp, and through the project config file for Cursor, Gemini CLI and Droid. Check that each can call `read_memory`, and that Grok runs without it |
+| All of the above | Sign-in check, signed in and signed out | Settings → Providers says Signed in or how to sign in, New session marks a signed-out agent, and a turn on one shows the hint before it starts. Codex and Cursor ask their CLI; Claude Code reads the macOS keychain; Copilot, Amp, Droid, Qwen Code and Grok are judged by API keys only |
+| All but Claude Code and OpenCode | Spending limits | These report no cost: the session's context meter says so, and Settings and the top bar's spend say the limits don't count them |
 
 ## 2. CLI view (Chat ↔ CLI)
 
@@ -42,7 +45,7 @@ Tested with real Claude Code only: Chat → CLI → Chat → CLI, `/cost` unchan
 | What to test | Expected |
 | --- | --- |
 | Real keyboard typing and pasting a long prompt into the Claude Code TUI | Nothing is dropped. In automated tests, very fast synthetic typing lost text |
-| Mouse in the TUI (clicking, selecting, scrolling inside the agent UI) | Runo does not forward mouse events yet. Decide whether to add this |
+| Mouse in the TUI (clicking, selecting, scrolling inside the agent UI) | Clicks, drags and the wheel reach a TUI that turns on mouse reporting, at the cell under the pointer; Shift keeps Runo's own selection |
 | Resizing the window and toggling the side panels while in the CLI | The TUI reflows to the new size |
 | Switching to Chat while the CLI shows a permission prompt or is mid-answer | The switch is refused with a notice, and nothing is lost |
 | Quitting Runo while the CLI is busy, then reopening | The CLI reopens on the same conversation, and the turns made before quitting are imported |
@@ -84,7 +87,7 @@ Tested with real Claude Code only: Chat → CLI → Chat → CLI, `/cost` unchan
 | Updating while the agent runs in a session | The card asks first and offers "Update anyway" |
 | A copy earlier on PATH shadowing the updated one | After a "successful" update, the card says Runo still runs the old copy and offers to switch |
 | A real npm failure (EACCES, ENOTEMPTY, EEXIST, offline) | The card turns into "Update failed" with a plain-words reason, Try again and View log. ENOTEMPTY names the leftover folder to delete |
-| Desktop notifications on macOS, Linux and Windows | Notifications appear when an agent finishes or fails |
+| Desktop notifications on Linux and Windows (macOS checked 2026-10-13) | Notifications appear when an agent finishes or fails |
 | Keep the computer awake (caffeinate, systemd-inhibit) | The machine doesn't sleep while agents run, and sleeps again afterwards |
 | Permission popups from three sessions at once | Each answer reaches the right session |
 
@@ -95,6 +98,7 @@ Tested with real Claude Code only: Chat → CLI → Chat → CLI, `/cost` unchan
 | Commit, push and Create PR on a real GitHub repo with `gh` signed in | A PR opens with the message |
 | The Pull requests page with a real account | PRs and runs list, and links open |
 | The worktree setup command and `.worktreeinclude` | The setup runs first, and ignored files are copied in |
+| A playbook started from the Playbooks page in a project with its own setup command | The project's command runs in the new worktree's terminal tab once the worktree exists, then the agent starts; nothing runs in the home folder |
 | Racing agents on one task with real CLIs | Each agent runs in its own worktree, and picking a winner works |
 | Deleting a session together with its worktree | The worktree and branch are removed |
 
@@ -123,3 +127,13 @@ Tested in the cloud with a fake `npm` only: the confirm card, the "Installing…
 | An installer that asks a question on stdin | It does not hang Runo; the install fails with a message |
 | A desktop launch on macOS (Finder/Dock, so PATH is minimal) | The newly installed CLI is still found, through the saved binary path |
 | Signing in after install | The info line tells you to run the CLI once in a terminal; check that a first chat turn works afterwards |
+
+## 9. Playbooks while Runo is closed (macOS)
+
+| What to test | Expected |
+| --- | --- |
+| A scheduled playbook that comes due with Runo closed and "Run while Runo is closed" on | The launchd job runs it in a new worktree after the project's setup command, and it shows up as a session when Runo opens |
+| The agent's settings (model, effort, extra arguments, Codex profile, Claude Code allowed tools) | The closed-Runo run passes the same flags as a run in Runo |
+| A playbook allowed to edit, on Gemini, OpenCode, Droid or Copilot | It edits in the agent's edit mode instead of running read-only |
+| A Claude Code playbook allowed to run commands, such as running the tests | It runs them (`bypassPermissions`, with web tools denied when the network isn't allowed); without commands it runs with `acceptEdits` |
+| A read-only playbook on Amp | The run fails with a note that Amp has no read-only mode |

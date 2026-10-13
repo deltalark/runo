@@ -97,3 +97,10 @@ All notable changes to Runo are documented here.
 - Notifications are on by default, cover turns waiting for you, open the session when clicked, and work on Windows. Permission requests can wait indefinitely.
 - Agents that can't resume (such as Grok) keep a one-line summary of earlier requests; Copilot sessions no longer pick up each other's conversation.
 - Tests pass on macOS.
+- Playbooks started in Runo wait for their worktree and run the project's own setup command there, instead of possibly running the setup in your home folder.
+- Playbooks run while Runo is closed use the agent's settings, run the setup command first, edit in every agent's edit mode, and let Claude Code run commands when allowed.
+- Codex: no Approval chip in Chat, where `codex exec` ignored it; warnings such as missing model metadata show once in the chat, and a model your account can't use points to the model chip.
+- Sign-in is checked ahead of time: Settings → Providers and New session show signed-out agents, and a turn on one shows the sign-in hint before it starts.
+- Spending limits, the spend shown and each session's context meter say that only Claude Code and OpenCode report a cost.
+- Architecture reads Swift, Maven, Gradle, Ruby, .NET, PHP and Dart manifests.
+- A CI workflow checks formatting, Clippy and the tests on macOS and Linux for every push and pull request.
