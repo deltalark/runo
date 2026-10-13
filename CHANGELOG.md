@@ -51,3 +51,16 @@ All notable changes to Runo are documented here.
 - Terminal: drag to select and copy, find in scrollback, Cmd/Ctrl-click links, mouse reporting for full-screen programs, italic text and a scrollback-length setting.
 - Browser panel: Cmd/Ctrl-C copies the page selection, new tabs and popups open in place, console errors can be sent to the agent, downloads are saved, Linux browsers are found on PATH or via `CHROME_PATH`, and the dev-server list shows every listening local port.
 - The login shell's whole environment (API keys and the like) now reaches agents when Runo is opened from the Dock or a launcher.
+- Connections sign agents in: API keys forward even when set only in your login shell, Codex and Claude (Linux) login files are copied, and Test checks each agent's sign-in without booting a VM.
+- Agent CLIs install on SSH and Cove servers for every agent (npm into a private Node, or the vendor's script, with sudo-aware apt) and follow the version you run locally.
+- Sync problems after a remote turn show as a warning card with Restore kept changes.
+- Moving a session hands the agent a brief when its conversation can't follow, and non-git folders can't be moved to remote connections.
+- Detached Claude Code turns stop at the first refused command, so you can allow it and retry.
+- Runo's own MCP tools reach sessions in Cove VMs and on servers through a relay, and shared MCP secrets stay out of remote command lines.
+- Remote turns work on macOS hosts without setsid or GNU tail, and a turn that never starts ends instead of waiting forever.
+- Backups to origin are off by default, never made for public repositories, leave out untracked files unless asked, and are deleted with the session; leftover copies, job folders and scratch VMs are cleaned up.
+- Playbooks are held to their permissions on every turn and agent, with a warning where an agent can't be held, and agents ask before starting one.
+- Scheduled playbooks run on the project's default connection with its setup command, never overlap, note missed runs, keep a set number of sessions and record a run history.
+- Playbook updates show what changes and aren't pre-ticked when you edited your copy; input labels and defaults are editable, and `{{ key }}` works with spaces.
+- Runo keeps its own list of MCP servers for every agent, and Settings can start a new skill.
+- Agent installs can be cancelled, stop after 15 minutes, and offer to sign in when done.

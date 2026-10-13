@@ -27,6 +27,9 @@ pub enum Source {
 
 static FOUND: RwLock<Vec<(PathBuf, Source)>> = RwLock::new(Vec::new());
 
+/// The login shell's variables, as it had them, for forwarding to connections.
+static LOGIN_ENV: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
+
 /// Build the full PATH and put it in this process's environment. Call before any thread
 /// starts; Settings > Providers > Re-detect calls it again.
 pub fn init() {
@@ -44,6 +47,9 @@ pub fn init() {
         // Single-threaded at startup, like PATH below.
         std::env::set_var(key, value);
     }
+    if let Ok(mut vars) = LOGIN_ENV.write() {
+        vars.clone_from(&env);
+    }
     let known = known_dirs(&home);
     let merged = merge(&shell, &inherited, &known);
     if let Ok(joined) = std::env::join_paths(merged.iter().map(|(p, _)| p)) {
@@ -53,6 +59,18 @@ pub fn init() {
     if let Ok(mut found) = FOUND.write() {
         *found = merged;
     }
+}
+
+/// A variable as the login shell has it, when it is set and not empty.
+pub fn login_var(name: &str) -> Option<String> {
+    LOGIN_ENV
+        .read()
+        .ok()?
+        .iter()
+        .rev()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.clone())
+        .filter(|v| !v.is_empty())
 }
 
 /// The PATH folders and where each came from.

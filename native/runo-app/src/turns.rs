@@ -66,6 +66,9 @@ impl RunoApp {
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
+        // A session a playbook started keeps to its limits on every turn.
+        let held = crate::workspace::held_options(session, opts);
+        let opts = &held;
         let mode = session
             .selections()
             .get("mode")
@@ -145,11 +148,13 @@ impl RunoApp {
             Some((provider.clone(), agent_session.clone())),
             crate::settings::sync_backup(),
         );
-        // Runo's memory server is a program on this machine, which a VM can't start.
+        // On a connection the agent reaches Runo's memory server through a relay.
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| !demo && memory_server() && sandbox.is_none());
+            .filter(|_| {
+                !demo && memory_server() && crate::connections::mcp_reachable(sandbox.as_ref())
+            });
         // Images inside the session folder go by their place in it, which is the same on
         // a connection; others by their full path.
         let attached: Vec<String> = images
@@ -1100,6 +1105,36 @@ impl RunoApp {
         )
     }
 
+    /// Approve the plan and let the agent build it. A playbook that declared it only reads
+    /// asks first, unless `widen` says the person already agreed to let it edit.
+    pub(crate) fn approve_plan(&mut self, widen: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else { return };
+        let Some(s) = self.state.session_mut(id) else {
+            return;
+        };
+        if !s.limits.is_empty() && !s.limits.iter().any(|p| p == "edit") {
+            if !widen {
+                self.pb_widen = Some(id);
+                return;
+            }
+            s.limits.push("edit".into());
+            let name = s.title.clone();
+            self.state.log(
+                id,
+                format!("Allowed edits beyond the playbook's limits: {name}"),
+            );
+        }
+        self.pb_widen = None;
+        if let Some(s) = self.state.session_mut(id) {
+            s.opts.insert("mode".into(), "edit".into());
+        }
+        self.answer(
+            "The plan is approved. Go ahead and implement it.".into(),
+            Vec::new(),
+            cx,
+        );
+    }
+
     /// The plan the agent proposed, with Approve and Keep planning.
     pub(crate) fn plan_card(
         &self,
@@ -1111,6 +1146,7 @@ impl RunoApp {
         let busy = self
             .current()
             .is_some_and(|s| self.handles.contains_key(&Target::Session(s.id)));
+        let widen = self.pb_widen.is_some() && self.pb_widen == self.selected;
         div()
             .rounded_lg()
             .border_1()
@@ -1138,7 +1174,44 @@ impl RunoApp {
                     .selectable(true),
                 ),
             )
-            .when(last && !busy, |el| {
+            .when(last && !busy && widen, |el| {
+                el.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .border_t_1()
+                        .border_color(rgb(c_border()))
+                        .bg(rgb(settings::mix(c_amber(), c_canvas(), 0.08)))
+                        .child(icon(IconName::ShieldAlert, 13., c_amber()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.5))
+                                .child("This session's playbook said it only reads files. Let it edit files in this session?"),
+                        )
+                        .child(
+                            self.button(("plan-widen-no", index), "Keep it read-only", false)
+                                .h(px(26.))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.pb_widen = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            self.button(("plan-widen-yes", index), "Allow edits", true)
+                                .h(px(26.))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_plan(true, cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
+            .when(last && !busy && !widen, |el| {
                 el.child(
                     div()
                         .px_3()
@@ -1162,16 +1235,7 @@ impl RunoApp {
                                 .child(icon(IconName::Play, 12., c_canvas()))
                                 .h(px(26.))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(id) = this.selected {
-                                        if let Some(s) = this.state.session_mut(id) {
-                                            s.opts.insert("mode".into(), "edit".into());
-                                        }
-                                    }
-                                    this.answer(
-                                        "The plan is approved. Go ahead and implement it.".into(),
-                                        Vec::new(),
-                                        cx,
-                                    );
+                                    this.approve_plan(false, cx);
                                     cx.notify();
                                 })),
                         ),

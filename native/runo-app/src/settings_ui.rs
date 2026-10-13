@@ -507,6 +507,10 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Default agent", "Preselected in New session.", Ctl::Dropdown(agent::PROVIDERS.iter().map(|p| (p.id.to_string(), p.name.to_string())).collect(), st.default_provider.clone(), Rc::new(|s, v| s.default_provider = v))),
                 row("Default permission level", "Maps to each agent's closest mode: auto edit, read-only, or full access.", Ctl::Segment(options(&[("edit", "Auto edit"), ("plan", "Plan only"), ("full", "Full access")]), st.default_mode.clone(), Rc::new(|s, v| s.default_mode = v))),
             ]),
+            section("Playbooks", "Saved tasks that run as their own sessions, by hand, on a schedule or when an agent asks.", vec![
+                switch_row("Ask before agents start playbooks", "When an agent asks Runo to start a playbook, show what it may do and wait for you. Off starts it right away.", st.confirm_agent_playbooks, |s, v| s.confirm_agent_playbooks = v),
+                row("Scheduled runs to keep", "Older runs of each scheduled playbook are deleted, with their worktrees. Pinned and unread runs stay.", Ctl::Dropdown(options(&[("5", "5"), ("10", "10"), ("20", "20"), ("50", "50"), ("0", "All")]), st.playbook_keep_runs.to_string(), Rc::new(|s, v| s.playbook_keep_runs = v.parse().unwrap_or(10)))),
+            ]),
         ],
         SettingsPage::Providers => {
             let _ = &data.provider_paths;
@@ -645,8 +649,49 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     Ctl::Chip(format!("{shared} shared"), if shared == 0 { 3 } else { 0 }),
                 )],
             ));
+            let own_path = crate::mcp::own_path();
+            let mut own: Vec<Row> = data
+                .mcp
+                .iter()
+                .filter(|m| m.provider == crate::mcp::OWN)
+                .map(|m| {
+                    let (name, path) = (m.name.clone(), own_path.clone());
+                    let edit = own_path.clone();
+                    row(
+                        &m.name,
+                        &if m.transport == "unknown" {
+                            "Not set up yet. Edit it to give a command or a URL.".to_string()
+                        } else {
+                            format!("{} · {}{}", m.transport, if m.enabled { "On" } else { "Disabled" }, if m.detail.is_empty() { String::new() } else { format!(" · {}", m.detail) })
+                        },
+                        Ctl::Buttons(vec![
+                            ("Edit".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| this.edit_path(&edit)) as Action),
+                            ("Remove".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                                if let Err(e) = crate::mcp::remove_own(&path, &name) {
+                                    this.notice = Some(format!("Couldn't remove {name}: {e}"));
+                                }
+                                this.open_settings();
+                            }) as Action),
+                        ]),
+                    )
+                })
+                .collect();
+            let add_path = own_path.clone();
+            own.push(row(
+                "Add a server",
+                "Adds a blank entry to Runo's list and opens it to fill in a command and arguments, or a URL.",
+                Ctl::Buttons(vec![("Add…".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| match crate::mcp::add_own(&add_path) {
+                    Ok(_) => this.edit_path(&add_path),
+                    Err(e) => this.notice = Some(format!("Couldn't add a server: {e}")),
+                }) as Action)]),
+            ));
+            sections.push(section(
+                "Runo's servers",
+                &format!("Given to every Claude Code and Codex session, on this computer and on connections. Kept in {}.", tilde(&own_path)),
+                own,
+            ));
             let mut providers: Vec<&'static str> = Vec::new();
-            for m in &data.mcp {
+            for m in data.mcp.iter().filter(|m| m.provider != crate::mcp::OWN) {
                 if !providers.contains(&m.provider) {
                     providers.push(m.provider);
                 }
@@ -690,7 +735,21 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             sections
         }
         SettingsPage::Skills => {
-            let mut sections = Vec::new();
+            let mut sections = vec![section(
+                "Create",
+                "A skill is a folder with a SKILL.md: a name, a description saying when to use it, and the steps.",
+                vec![row(
+                    "New skill",
+                    "Starts one in ~/.claude/skills and opens it in Runo's editor.",
+                    Ctl::Buttons(vec![("New skill…".into(), Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                        match settings::skills_home().map(|dir| settings::new_skill(&dir)) {
+                            Some(Ok(file)) => this.edit_path(&file),
+                            Some(Err(e)) => this.notice = Some(format!("Couldn't create a skill: {e}")),
+                            None => this.notice = Some("Couldn't find your home folder.".into()),
+                        }
+                    }) as Action)]),
+                )],
+            )];
             for source in ["project", "claude", "agents", "codex"] {
                 let rows: Vec<Row> = data
                     .skills
@@ -708,7 +767,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     sections.push(section(title, &format!("{} found", rows.len()), rows));
                 }
             }
-            if sections.is_empty() {
+            if sections.len() == 1 {
                 sections.push(section("Skills", "Skills live in SKILL.md files under your agents' skills folders.", vec![row("No skills found", "Create one in ~/.claude/skills, ~/.agents/skills or ~/.codex/skills.", Ctl::Chip("0".into(), 3))]));
             }
             sections
@@ -963,7 +1022,7 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
         rows.push(conn_switch(c, "Agents may use it", "Lets agents in any session run commands here with Runo's run_on tool, for research, untrusted code or heavy jobs.", c.agents, |c, v| c.agents = v));
         rows.push(row(
             "Remove",
-            "Sessions that run here move back to this machine.",
+            "Sessions that run here move back to this machine, and their copies there are deleted.",
             Ctl::Button(
                 "Remove".into(),
                 Rc::new(move |this, cx| this.remove_connection(id, cx)),
@@ -1003,9 +1062,23 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
     ));
     cove_rows.push(switch_row(
         "Back up checkpoints to GitHub",
-        "After each turn on a remote connection, push the session's checkpoint to the project's origin as refs/runo/sessions/<id>, which no branch list shows.",
+        "After each turn on a remote connection, push the session's files to the project's origin as refs/runo/sessions/<id>, which no branch list shows. Never for public repositories, and deleted with the session.",
         st.sync_backup,
         |s, v| s.sync_backup = v,
+    ));
+    if st.sync_backup {
+        cove_rows.push(switch_row(
+            "Back up untracked files too",
+            "Off keeps new files that git doesn't track yet (notes, local config, secrets) out of the backup.",
+            st.sync_backup_untracked,
+            |s, v| s.sync_backup_untracked = v,
+        ));
+    }
+    cove_rows.push(switch_row(
+        "Stop at the first blocked command",
+        "A turn on a server or Cove can't ask you mid-turn. When the agent tries something it isn't allowed to (Claude Code), the turn stops there and shows Allow and retry, instead of carrying on without it for hours.",
+        st.stop_on_denial,
+        |s, v| s.stop_on_denial = v,
     ));
     out.push(section(
         "Cove",

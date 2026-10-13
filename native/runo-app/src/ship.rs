@@ -449,7 +449,8 @@ impl RunoApp {
                     let busy = self.turn_running(id) || self.pending_start.contains_key(&id);
                     if busy {
                         if let Some(s) = self.state.session_mut(id) {
-                            s.queue.push(crate::store::Queued::new(turn.prompt, turn.images));
+                            s.queue
+                                .push(crate::store::Queued::new(turn.prompt, turn.images));
                         }
                         continue;
                     }
