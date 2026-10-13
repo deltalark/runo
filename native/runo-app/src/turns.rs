@@ -7,6 +7,9 @@ use crate::store::Queued;
 /// Most recent conversation, written into follow-ups for CLIs that cannot resume.
 const CONTEXT_MESSAGES: usize = 8;
 const CONTEXT_CHARS: usize = 1500;
+/// Earlier requests summed up in one line each, before the recent conversation.
+const EARLIER_REQUESTS: usize = 10;
+const EARLIER_CHARS: usize = 120;
 
 impl RunoApp {
     /// Start one agent turn: snapshot the worktree, then launch the CLI.
@@ -1822,6 +1825,29 @@ pub fn context_prompt_last(messages: &[Message], prompt: &str, keep: usize) -> S
         .collect();
     let start = recent.len().saturating_sub(keep);
     let mut out = String::from("Our conversation so far:\n");
+    // What fell out of the window still shows, as one line per earlier request.
+    let earlier: Vec<String> = recent[..start]
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| {
+            let line = m.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            let mut line: String = line.trim().chars().take(EARLIER_CHARS).collect();
+            if m.text.trim().chars().count() > line.chars().count() {
+                line.push('…');
+            }
+            line
+        })
+        .collect();
+    if !earlier.is_empty() {
+        let skipped = earlier.len().saturating_sub(EARLIER_REQUESTS);
+        out.push_str("\nEarlier, I asked you to:\n");
+        if skipped > 0 {
+            out.push_str(&format!("- ({skipped} more before these)\n"));
+        }
+        for line in &earlier[skipped..] {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
     for m in &recent[start..] {
         let who = if m.role == Role::User { "Me" } else { "You" };
         let mut text: String = m.text.chars().take(CONTEXT_CHARS).collect();
@@ -2048,7 +2074,10 @@ mod tests {
         assert!(!prompt.contains("ignored"));
         assert!(prompt.ends_with("Now: Now document it"));
         let long = context_prompt(&messages, "x");
-        assert!(!long.contains("Add a flag"));
-        assert!(long.contains("turn 9"));
+        assert!(!long.contains("Me: Add a flag"));
+        assert!(long.contains("Me: turn 9"));
+        // Requests that fell out of the window are still listed, one line each.
+        assert!(long.contains("Earlier, I asked you to:\n- Add a flag\n- turn 0\n"));
+        assert!(!long.contains("Added --verbose."));
     }
 }
