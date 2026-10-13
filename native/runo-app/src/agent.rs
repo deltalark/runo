@@ -1184,6 +1184,29 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
     Some(format!("{name} isn't signed in. {how}"))
 }
 
+/// Where to pick another model, when the CLI's errors say the model can't be used.
+pub fn model_hint(provider: &str, log: &str) -> Option<String> {
+    let lower = log.to_lowercase();
+    let unusable = [
+        "not supported",
+        "not found",
+        "does not exist",
+        "unknown model",
+        "invalid model",
+        "model_not_found",
+        "unsupported model",
+        "do not have access",
+        "does not have access",
+    ];
+    if !lower.contains("model") || !unusable.iter().any(|s| lower.contains(s)) {
+        return None;
+    }
+    let name = self::provider(provider).name;
+    Some(format!(
+        "Tip: this model isn't available to your {name} account. Pick another from the model chip under the message box, or change the default model under Settings → {name}."
+    ))
+}
+
 /// Whether a line shows the CLI waiting for a browser sign-in, which never finishes in
 /// a run without a terminal.
 pub fn waits_for_sign_in(line: &str) -> bool {
@@ -2184,6 +2207,14 @@ mod arg_tests {
         assert!(hint.contains("codex login"));
         assert!(sign_in_hint("claude", "Invalid API key · Please run /login").is_some());
         assert!(sign_in_hint("claude", "error: model not found").is_none());
+        let tip = model_hint(
+            "codex",
+            "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.",
+        )
+        .unwrap();
+        assert!(tip.contains("model chip") && tip.contains("Settings → Codex"));
+        assert!(model_hint("codex", "Model metadata for `x` not found.").is_some());
+        assert!(model_hint("codex", "file not found").is_none());
         assert!(sign_in_hint("opencode", "Error: Token refresh failed: 401")
             .unwrap()
             .contains("opencode auth login"));

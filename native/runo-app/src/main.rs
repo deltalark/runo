@@ -1909,6 +1909,23 @@ impl RunoApp {
                                 self.stream_failed.insert(id);
                                 session.messages.push(Message::new(Role::System, error))
                             }
+                            stream::Update::Notice(text) => {
+                                let turn = session
+                                    .messages
+                                    .iter()
+                                    .rposition(|m| m.role == Role::User)
+                                    .unwrap_or(0);
+                                let seen = session.messages[turn..]
+                                    .iter()
+                                    .any(|m| m.meta == "warning" && m.text == text);
+                                if !seen {
+                                    // Ahead of the reply, which carries on below it.
+                                    let mut warning = Message::new(Role::System, text);
+                                    warning.meta = "warning".into();
+                                    let at = session.messages.len() - 1;
+                                    session.messages.insert(at, warning);
+                                }
+                            }
                             stream::Update::Usage(usage) => m.usage = usage,
                             stream::Update::Denied(tools) => {
                                 m.denied =
@@ -2083,12 +2100,8 @@ impl RunoApp {
                                 log.replace("```", "'''")
                             ));
                         }
-                        if log.contains("model")
-                            && (log.contains("not supported")
-                                || log.contains("not found")
-                                || log.contains("does not exist"))
-                        {
-                            text.push_str("\nTip: choose another model from the model menu, or set one under Settings for this agent.");
+                        if let Some(tip) = agent::model_hint(&session.provider, &log) {
+                            text.push_str(&format!("\n{tip}"));
                         }
                         let text = text.trim_start().to_string();
                         if !text.is_empty() {
@@ -4402,7 +4415,9 @@ impl RunoApp {
         if message.role == Role::System && message.meta == "sync" {
             return self.sync_card(index, message, cx);
         }
-        if message.role == Role::System && (message.meta == "moved" || message.meta == "note") {
+        if message.role == Role::System
+            && matches!(message.meta.as_str(), "moved" | "note" | "warning")
+        {
             return fade(
                 div()
                     .id(("message", index))
@@ -4415,15 +4430,11 @@ impl RunoApp {
                     .bg(tint(c_subtle()))
                     .text_size(px(12.5))
                     .text_color(rgb(c_secondary()))
-                    .child(icon(
-                        if message.meta == "note" {
-                            IconName::Info
-                        } else {
-                            IconName::Server
-                        },
-                        13.,
-                        c_blue(),
-                    ))
+                    .child(match message.meta.as_str() {
+                        "note" => icon(IconName::Info, 13., c_blue()),
+                        "warning" => icon(IconName::TriangleAlert, 13., c_amber()),
+                        _ => icon(IconName::Server, 13., c_blue()),
+                    })
                     .child(div().flex_1().min_w_0().child(message.text.clone())),
             )
             .into_any_element();
