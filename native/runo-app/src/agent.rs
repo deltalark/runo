@@ -1213,11 +1213,20 @@ pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Comman
 /// A running process, which leads its own process group so stopping it also stops what
 /// it started (dev servers, test runs, the ssh or cove process of a connection run).
 /// `runner` marks Runo's own connection runner.
-pub struct Handle(Arc<Mutex<Child>>, bool);
+pub struct Handle(Option<Arc<Mutex<Child>>>, bool, Option<u32>);
 
 impl Handle {
+    /// A local turn running detached from Runo in process group `group`.
+    pub(crate) fn detached(group: u32) -> Self {
+        Self(None, false, Some(group))
+    }
+
     pub fn kill(&self) {
-        if let Ok(mut child) = self.0.lock() {
+        if let Some(group) = self.2 {
+            crate::detach::stop(group);
+            return;
+        }
+        if let Some(Ok(mut child)) = self.0.as_ref().map(|c| c.lock()) {
             // A connection runner stops the turn on the connection and brings back what
             // it did, then exits on its own.
             if self.1 && cfg!(unix) {
@@ -1249,9 +1258,10 @@ impl Handle {
         }
     }
 
-    /// Runo's connection runner, whose turn keeps going on the connection when Runo quits.
+    /// A turn that keeps going when Runo quits: Runo's connection runner, or a local turn
+    /// running detached.
     pub fn runner(&self) -> bool {
-        self.1
+        self.1 || self.2.is_some()
     }
 }
 
@@ -1287,6 +1297,11 @@ pub fn run_agent(
     }
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
+    } else if let (Target::Session(id), Some(root)) = (target, crate::detach::root()) {
+        // Local turns outlive Runo, so closing or a crash doesn't stop them.
+        if crate::updater::resolve(bin).is_some() {
+            return crate::detach::spawn(root, id, command, dir, tx);
+        }
     }
     spawn(target, command, dir, tx)
 }
@@ -1373,7 +1388,7 @@ pub(crate) fn spawn(
         }
         std::thread::sleep(Duration::from_millis(100));
     });
-    Ok(Handle(child, runner))
+    Ok(Handle(Some(child), runner, None))
 }
 
 #[cfg(test)]
