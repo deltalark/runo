@@ -86,10 +86,12 @@ impl RunoApp {
             "Architecture" => View::Architecture,
             "Playbooks" => View::Automations,
             "Inbox" => View::Inbox,
-            "Reviews" => {
+            // "Reviews" is what GitHub was called before Review got its own page.
+            "GitHub" | "Reviews" => {
                 self.load_github();
                 View::GitHub
             }
+            "Review" => View::Review,
             _ if self.selected.is_none() && !self.state.sessions.is_empty() => View::AllSessions,
             _ => View::Session,
         };

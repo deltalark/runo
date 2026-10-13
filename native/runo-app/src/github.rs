@@ -1133,7 +1133,7 @@ impl RunoApp {
             })
         };
         self.page(
-            "Reviews",
+            "GitHub",
             div()
                 .v_flex()
                 .gap_2()

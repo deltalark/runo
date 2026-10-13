@@ -436,9 +436,9 @@ impl RunoApp {
             (
                 IconName::Layers,
                 format!(
-                    "A rail on the left for Home, Sessions, Playbooks and Reviews ({} to {}).",
+                    "A rail on the left for Home, Sessions, Review, GitHub, Playbooks and History ({} to {}).",
                     keymap::label(cx, "go-home"),
-                    keymap::label(cx, "go-reviews")
+                    keymap::label(cx, "go-history")
                 ),
             ),
             (
