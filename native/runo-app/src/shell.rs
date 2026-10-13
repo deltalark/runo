@@ -1369,7 +1369,8 @@ impl RunoApp {
                 continue;
             };
             let provider = agent::provider(&session.provider);
-            let active = self.selected == Some(id) && self.view == View::Session;
+            let active =
+                self.selected == Some(id) && self.view == View::Session && !self.browser_main;
             let working = self.handles.contains_key(&Target::Session(id));
             let dot = match self.need(session) {
                 _ if working => Some(c_blue()),
@@ -1382,7 +1383,8 @@ impl RunoApp {
                 id,
                 title: session.title.clone().into(),
             };
-            tabs = tabs.child(
+            tabs = tabs.child(tab_slot(
+                active,
                 div()
                     .id(("tab", id as usize))
                     .on_mouse_down(
@@ -1397,29 +1399,15 @@ impl RunoApp {
                         cx.notify();
                     }))
                     .group("tab")
-                    .h(px(28.))
-                    .mb(px(3.))
-                    .mr_1()
                     .flex_none()
                     .w(px(180.))
                     .px_3()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(transparent_black())
                     .cursor_pointer()
                     .text_size(px(12.5))
-                    .when(active, |el| {
-                        el.bg(glass_fill(c_canvas()))
-                            .text_color(rgb(c_text()))
-                            .border_color(divider())
-                    })
-                    .when(!active, |el| {
-                        el.text_color(rgb(c_secondary()))
-                            .hover(|el| el.bg(tint(c_subtle())))
-                    })
+                    .map(|el| tab_shape(el, active))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select(id);
                         cx.notify();
@@ -1457,7 +1445,49 @@ impl RunoApp {
                                 None => icon(IconName::X, 11., c_muted()).into_any_element(),
                             }),
                     ),
-            );
+            ));
+        }
+        if self.browser_open {
+            let active = self.browser_main && self.view == View::Session;
+            tabs = tabs.child(tab_slot(
+                active,
+                div()
+                    .id("tab-browser")
+                    .group("tab")
+                    .flex_none()
+                    .w(px(140.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .map(|el| tab_shape(el, active))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_browser();
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::Globe, 12., c_secondary()))
+                    .child(div().flex_1().min_w_0().truncate().child("Browser"))
+                    .child(
+                        div()
+                            .id("tab-browser-x")
+                            .size(px(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .hover(|el| el.bg(rgb(c_border())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.browser_open = false;
+                                this.browser_main = false;
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::X, 11., c_muted())),
+                    ),
+            ));
         }
         let (added, removed) = self
             .changes
@@ -1470,11 +1500,10 @@ impl RunoApp {
             .flex_none()
             .flex()
             .items_end()
-            .gap_2()
-            .px_2()
-            .border_b_1()
-            .border_color(divider())
             .bg(pane(c_sidebar()))
+            // Every part of the strip draws its own bottom edge except the open tab, which
+            // runs straight into the page below.
+            .child(strip_edge(div().w(px(8.))))
             .child(
                 div()
                     .flex_1()
@@ -1482,12 +1511,12 @@ impl RunoApp {
                     .h_full()
                     .flex()
                     .items_end()
-                    .child(tabs.relative().child(tour::anchor(&self.anchors, "tabs"))),
+                    .child(tabs.relative().child(tour::anchor(&self.anchors, "tabs")))
+                    .child(strip_edge(div().flex_1())),
             )
             .when(show_stats, |el| {
                 el.child(
-                    div()
-                        .h_full()
+                    strip_edge(div())
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1500,8 +1529,7 @@ impl RunoApp {
             })
             .when(self.tabs.len() > 1, |el| {
                 el.child(
-                    div()
-                        .h_full()
+                    strip_edge(div())
                         .flex()
                         .items_center()
                         .relative()
@@ -1525,6 +1553,7 @@ impl RunoApp {
                         .when(menu_open, |el| el.child(self.tabs_menu(cx))),
                 )
             })
+            .child(strip_edge(div().w(px(8.))))
     }
 
     // ---------- Home ----------
@@ -2191,6 +2220,45 @@ pub(crate) fn mode_frame(
 }
 
 /// A project's square badge: its icon on its colour, or its initial.
+/// A piece of the tab strip that carries the strip's bottom edge.
+fn strip_edge(el: Div) -> Div {
+    el.h_full().border_b_1().border_color(divider())
+}
+
+/// Where a tab sits in the strip, with the gap after it. Only the open tab's slot has no
+/// bottom edge.
+fn tab_slot(active: bool, tab: Stateful<Div>) -> Div {
+    let slot = div().h_full().flex_none().flex().items_end().child(tab);
+    if active {
+        slot.child(strip_edge(div().w(px(4.))))
+    } else {
+        strip_edge(slot.pr_1())
+    }
+}
+
+/// A tab's outline: the open tab is the page's own colour with no bottom edge, so it
+/// joins the page under the strip; the others float above the strip's edge.
+fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
+    if active {
+        el.h(px(32.))
+            .rounded_t_md()
+            .border_t_1()
+            .border_l_1()
+            .border_r_1()
+            .border_color(divider())
+            .bg(glass_fill(c_canvas()))
+            .text_color(rgb(c_text()))
+    } else {
+        el.h(px(28.))
+            .mb(px(3.))
+            .rounded_md()
+            .border_1()
+            .border_color(transparent_black())
+            .text_color(rgb(c_secondary()))
+            .hover(|el| el.bg(tint(c_subtle())))
+    }
+}
+
 pub(crate) fn project_mark(project: &Project, size: f32) -> Div {
     let color = projects::color_of(project).unwrap_or(c_secondary());
     let initial = project

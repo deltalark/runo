@@ -25,7 +25,6 @@ impl RunoApp {
             split: self.split,
             right_tab: match self.right_tab {
                 RightTab::Changes => "changes",
-                RightTab::Browser => "browser",
                 RightTab::Files => "files",
             }
             .to_string(),
@@ -59,7 +58,6 @@ impl RunoApp {
         self.show_sidebar = !layout.hide_sidebar;
         self.show_panel = !layout.hide_panel;
         self.right_tab = match layout.right_tab.as_str() {
-            "browser" => RightTab::Browser,
             "files" => RightTab::Files,
             _ => RightTab::Changes,
         };

@@ -81,7 +81,7 @@ const STEPS: &[Step] = &[
         side: Side::Left,
         glyph: IconName::GitCompare,
         title: "Review the work",
-        body: "Changes shows every edit as a diff with commit, push and pull request buttons. Browser previews your app, and Files lets you read and edit the code yourself.",
+        body: "Changes shows every edit as a diff, and Review and ship takes it to commit, push and pull request. Files lets you read and edit the code yourself, and the Browser button over the chat opens your app in its own tab.",
     },
     Step {
         anchor: Some("terminal"),

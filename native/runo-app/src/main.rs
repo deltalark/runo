@@ -182,7 +182,6 @@ enum Jump {
 #[repr(u8)]
 enum RightTab {
     Changes,
-    Browser,
     Files,
 }
 
@@ -192,6 +191,9 @@ struct RunoApp {
     selected: Option<u64>,
     view: View,
     right_tab: RightTab,
+    /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
+    browser_open: bool,
+    browser_main: bool,
     cli_tab: bool,
     /// Interactive shells, across all sessions.
     shells: Vec<pty::Shell>,
@@ -1272,6 +1274,8 @@ impl RunoApp {
             demo,
             selected,
             right_tab: RightTab::Changes,
+            browser_open: false,
+            browser_main: false,
             cli_tab: false,
             shells: Vec::new(),
             shell_tab: None,
@@ -1846,6 +1850,7 @@ impl RunoApp {
             self.stash_open_file(old);
         }
         self.selected = Some(id);
+        self.browser_main = false;
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
         }
@@ -5002,6 +5007,35 @@ impl RunoApp {
                     .child(icon(IconName::Play, 11., c_secondary()))
                     .child("Playbooks"),
             )
+            .when(cx.global::<AppSettings>().browser_enabled, |el| {
+                el.child(
+                    div()
+                        .id("hdr-browser")
+                        .h(px(26.))
+                        .px_2()
+                        .mr_2()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(5.))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .hover(|el| el.bg(tint(c_subtle())))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Open your app in a Browser tab",
+                            )
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_browser();
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::Globe, 13., c_secondary())),
+                )
+            })
             .children(self.runs_on_badge(session, cx))
             .child(self.view_toggle(session, cx))
             .child(
@@ -6683,9 +6717,6 @@ impl RunoApp {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.right_tab = tab;
-                if tab == RightTab::Browser {
-                    this.scan_ports();
-                }
                 cx.notify();
             }))
             .child(icon(name, 13., if selected { c_text() } else { c_muted() }))
@@ -7744,14 +7775,6 @@ impl RunoApp {
                         },
                         cx,
                     ))
-                    .when(cx.global::<AppSettings>().browser_enabled, |el| {
-                        el.child(self.right_tab_button(
-                            RightTab::Browser,
-                            IconName::Globe,
-                            "Browser".into(),
-                            cx,
-                        ))
-                    })
                     .child(self.right_tab_button(
                         RightTab::Files,
                         IconName::FileText,
@@ -7767,7 +7790,6 @@ impl RunoApp {
                     .flex_col()
                     .child(match self.right_tab {
                         RightTab::Changes => self.changes_tab(cx),
-                        RightTab::Browser => self.browser_tab(cx),
                         RightTab::Files => self.files_tab(cx),
                     }),
                 SharedString::from(format!(
@@ -7860,10 +7882,11 @@ impl Render for RunoApp {
             self.open_or_ask(&path, window, cx);
         }
         self.restore_open_file(window, cx);
-        if self.right_tab == RightTab::Browser && !st.browser_enabled {
-            self.right_tab = RightTab::Changes;
+        if !st.browser_enabled {
+            self.browser_open = false;
+            self.browser_main = false;
         }
-        if self.right_tab == RightTab::Browser || self.design_page_key().is_some() {
+        if self.browser_main || self.design_page_key().is_some() {
             self.sync_browser_address(window, cx);
         }
         // Design and Architecture follow the project in the top bar.
@@ -7957,6 +7980,14 @@ impl Render for RunoApp {
             View::Home => self.home_view(cx),
             View::Design => self.design_view(window, cx),
             View::Architecture => self.architecture_view(cx),
+            // The Browser tab takes the work area while it is the tab shown.
+            View::Session if self.browser_main && self.current().is_some() => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .v_flex()
+                .child(self.browser_tab(cx))
+                .into_any_element(),
             View::Session | View::NewSession => self.session_view(window, cx),
             View::Inbox => self.inbox_view(cx),
             View::AllSessions => self.list_view(View::AllSessions, cx),
