@@ -1048,13 +1048,13 @@ impl RunoApp {
             .iter()
             .filter(|r| !self.approvals.iter().any(|a| a.id == r.id))
         {
-            if let Some(session) = self
-                .approval_session(request)
-                .and_then(|id| self.state.session(id))
-            {
+            let id = self.approval_session(request);
+            if let Some(session) = id.and_then(|id| self.state.session(id)) {
                 let name = agent::provider(&session.provider).name;
-                settings::notify(
-                    "Permission needed",
+                crate::desktop_notify::send(
+                    cx,
+                    id,
+                    &format!("Permission needed: {}", session.title),
                     &format!(
                         "{name} wants to {}",
                         approvals::describe(&request.tool, &request.input)

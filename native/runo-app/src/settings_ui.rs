@@ -491,7 +491,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 },
             ]),
             section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
-                switch_row("Notifications", "Show a desktop notification when an agent finishes or fails (macOS and Linux).", st.notifications, |s, v| s.notifications = v),
+                switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
             ]),
             section("Behavior", "Motion and safety around destructive actions.", vec![
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
@@ -593,7 +593,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Memory", "Runo keeps a summary of each session in .runo/memory.md inside its folder, kept out of git.", vec![
                 switch_row("Runo tools for agents", "Give Claude Code and Codex Runo's tools: read the session memory, search earlier sessions, save notes, and use playbooks (as /mcp__runo__… commands in Claude Code).", st.memory_server, |s, v| s.memory_server = v),
-                row("Wait for permission answers", "With Runo tools on, Claude Code asks you mid-turn before using a tool it isn't allowed, and waits this long for Allow or Deny before carrying on without it. Turns on servers keep waiting while Runo is closed, so you can answer when it reconnects.", Ctl::Dropdown(options(&[("2", "2 minutes"), ("5", "5 minutes"), ("15", "15 minutes"), ("60", "1 hour"), ("480", "8 hours")]), st.approval_wait_mins.to_string(), Rc::new(|s, v| s.approval_wait_mins = v.parse().unwrap_or(5)))),
+                row("Wait for permission answers", "With Runo tools on, Claude Code asks you mid-turn before using a tool it isn't allowed, and waits this long for Allow or Deny before carrying on without it. Turns on servers keep waiting while Runo is closed, so you can answer when it reconnects.", Ctl::Dropdown(options(&[("2", "2 minutes"), ("5", "5 minutes"), ("15", "15 minutes"), ("60", "1 hour"), ("480", "8 hours"), ("0", "Wait indefinitely")]), st.approval_wait_mins.to_string(), Rc::new(|s, v| s.approval_wait_mins = v.parse().unwrap_or(5)))),
             ]),
             section("New sessions", "What a session starts with before you change it in the composer.", vec![
                 row("Default view", "How new sessions open. CLI shows the agent's own command line on the same conversation (Claude Code and Codex); switch any time from the session header at no token cost.", Ctl::Segment(vec![("chat".into(), "Chat".into()), ("cli".into(), "CLI".into())], st.default_view.clone(), Rc::new(|s, v| s.default_view = v))),

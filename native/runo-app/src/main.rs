@@ -9,6 +9,7 @@ mod connections;
 mod connections_ui;
 mod cove;
 mod ctxmenu;
+mod desktop_notify;
 mod files;
 mod fileview;
 mod git;
@@ -1524,6 +1525,7 @@ impl RunoApp {
             }
         });
         app._subscriptions.push(activation_sub);
+        cx.set_global(MainApp(cx.entity().downgrade()));
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
         cx.spawn(async move |this, cx| loop {
@@ -1920,14 +1922,16 @@ impl RunoApp {
                             session.messages.pop();
                         }
                     }
-                    notify(
-                        &session.title,
-                        if ok {
-                            "Agent finished"
-                        } else {
-                            "Agent stopped or failed"
-                        },
-                    );
+                    let body = if alerts::waiting_on(session).is_some() {
+                        "The agent needs your answer"
+                    } else if ok {
+                        "Agent finished"
+                    } else if stopped {
+                        "Agent stopped"
+                    } else {
+                        "Agent failed"
+                    };
+                    desktop_notify::send(cx, Some(id), &session.title, body);
                     if let Some(warning) = sync_warning {
                         session.messages.push(warning);
                     }
@@ -2100,7 +2104,7 @@ impl RunoApp {
         }
         self.close_armed = Some(std::time::Instant::now());
         self.notice = Some(format!(
-            "{running} agent{} still running. Closing Runo stops {}. Close again to quit anyway.",
+            "{running} agent{} still running. Quitting Runo stops {}. Close or quit again to quit anyway.",
             if running == 1 { " is" } else { "s are" },
             if running == 1 { "it" } else { "them" }
         ));
@@ -8265,10 +8269,48 @@ fn main() {
         set_dock_icon();
         cx.set_global(settings);
         bind_keys(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(quit);
+        desktop_notify::install(cx);
         cx.set_menus(app_menus());
         open_main_window(cx);
     });
+}
+
+/// The open main window's app, so quitting can warn about running agents first.
+struct MainApp(WeakEntity<RunoApp>);
+
+impl Global for MainApp {}
+
+/// Quit from the shortcut, the menu or the command palette. With agents running in the
+/// window, this warns first, the same as closing the window.
+fn quit(_: &Quit, cx: &mut App) {
+    let app = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade());
+    let go = app.is_none_or(|app| {
+        app.update(cx, |this, cx| {
+            this.save();
+            this.may_close(cx)
+        })
+    });
+    if go {
+        cx.quit();
+    }
+}
+
+/// A clicked notification: bring the window forward on its session.
+fn open_session_from_notification(id: u64, cx: &mut App) {
+    let Some(app) = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade()) else {
+        open_main_window(cx);
+        return;
+    };
+    app.update(cx, |this, cx| {
+        if this.state.session(id).is_some() {
+            this.select(id);
+            cx.notify();
+        }
+    });
+    for window in cx.windows() {
+        let _ = window.update(cx, |_, window, _| window.activate_window());
+    }
 }
 
 /// The menu bar: the app menu with Settings and Quit, and the main commands with their
