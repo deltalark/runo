@@ -52,7 +52,7 @@ use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use settings::*;
-use settings_ui::SettingsPage;
+use settings_ui::{McpForm, SettingsPage};
 use shell::Mode;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
@@ -199,6 +199,9 @@ struct RunoApp {
     settings_page: SettingsPage,
     settings_search: Entity<InputState>,
     settings_inputs: HashMap<String, Entity<InputState>>,
+    settings_areas: HashMap<String, Entity<TextareaState>>,
+    /// The open form for adding or editing one of Runo's MCP servers.
+    mcp_form: Option<McpForm>,
     settings_menu: Option<String>,
     discovered: Option<Discovered>,
     applied_dark: Option<bool>,
@@ -1129,6 +1132,8 @@ impl RunoApp {
             settings_page: SettingsPage::General,
             settings_search,
             settings_inputs: HashMap::new(),
+            settings_areas: HashMap::new(),
+            mcp_form: None,
             settings_menu: None,
             discovered: None,
             applied_dark: None,

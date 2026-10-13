@@ -339,6 +339,19 @@ fn mcp_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
     out
 }
 
+/// MCP servers for a CLI that reads them from a project file. That file is in the
+/// session folder, which a run elsewhere sees too, so only servers reached by URL go
+/// along there.
+fn file_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
+    if crate::mcp::project_file(spec.provider).is_none() {
+        return Vec::new();
+    }
+    mcp_servers(spec)
+        .into_iter()
+        .filter(|(_, server)| spec.local || server.command.is_empty())
+        .collect()
+}
+
 /// Environment for one run, for CLIs that take settings that way.
 fn provider_env(spec: &RunSpec) -> Vec<(String, String)> {
     let mut env = Vec::new();
@@ -435,6 +448,10 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             // Without `--force` print mode only proposes changes.
             if mode != "plan" {
                 args.push(s("--force"));
+            }
+            // Servers from the project file wait for approval unless approved up front.
+            if knows("--approve-mcps") && !file_servers(spec).is_empty() {
+                args.push(s("--approve-mcps"));
             }
             if !model.is_empty() {
                 args.extend([s("-m"), model]);
@@ -1261,6 +1278,13 @@ pub fn run_agent(
             }
         }
     }
+    if crate::mcp::project_file(spec.provider).is_some() {
+        crate::mcp::write_project(
+            std::path::Path::new(dir),
+            spec.provider,
+            &file_servers(spec),
+        );
+    }
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
     }
@@ -2058,6 +2082,18 @@ mod arg_tests {
             serde_json::json!(["/bin/runo", "--mcp-memory", "/work/app"])
         );
         assert!(provider_env(&spec("gemini")).is_empty());
+        // Cursor, Gemini and Droid get it through their project file.
+        for provider in ["cursor", "gemini", "droid"] {
+            let servers = file_servers(&spec(provider));
+            assert!(servers.iter().any(|(name, _)| name == MEMORY_SERVER));
+        }
+        assert!(file_servers(&spec("grok")).is_empty());
+        let mut remote = spec("cursor");
+        remote.local = false;
+        assert!(
+            file_servers(&remote).is_empty(),
+            "no local programs elsewhere"
+        );
     }
 
     #[test]

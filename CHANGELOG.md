@@ -68,3 +68,6 @@ All notable changes to Runo are documented here.
 - The CLI view works for sessions on a Cove VM or server, syncing the files and conversation there and back.
 - The worktree setup command runs in a terminal tab, so its prompts can be answered; the agent starts when it exits.
 - The Browser tab lists dev servers running where a remote session runs and forwards one to this machine to open it.
+- Terminal: dim and strikethrough text are drawn (vt100 is now vendored with both attributes).
+- Cursor, Gemini CLI and Droid get Runo's memory server and shared MCP servers through their project config file, merged with yours, kept out of git and removed after each turn. Grok has no project-level MCP config, so it still gets none.
+- Settings → MCP adds and edits Runo's own servers in a form (name, command or URL, environment) instead of a JSON file.

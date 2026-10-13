@@ -265,6 +265,10 @@ impl RunoApp {
         hold: bool,
         cx: &mut Context<Self>,
     ) {
+        // Servers Runo merged into the agent's project file go before the snapshot.
+        if let Some(s) = self.state.session(id) {
+            crate::mcp::clean_project(std::path::Path::new(&s.dir));
+        }
         let checkpoint = self.state.session(id).and_then(|s| {
             s.messages
                 .iter()
