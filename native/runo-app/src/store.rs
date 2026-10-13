@@ -39,6 +39,9 @@ pub struct Message {
     /// Agent turns: "kept" or "undone" once the person decided on the turn's changes.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub resolved: String,
+    /// Agent turns that were undone: a snapshot from just before the undo, for Redo.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub redo: String,
     /// User turns: images attached to the prompt (absolute paths).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
@@ -196,6 +199,7 @@ impl Message {
             meta: String::new(),
             checkpoint: String::new(),
             resolved: String::new(),
+            redo: String::new(),
             images: Vec::new(),
             usage: Usage::default(),
             denied: Vec::new(),
@@ -229,6 +233,10 @@ pub struct Project {
     /// Where new sessions in this project run by default: a connection id, or 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub connection: u64,
+    /// Command run in each new worktree of this project before its agent starts; empty
+    /// uses the one in Settings.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub setup: String,
 }
 
 fn default_mode() -> String {
@@ -303,6 +311,19 @@ pub struct Session {
     /// The running turn is on a connection, where it keeps going while Runo is closed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remote_turn: bool,
+    /// The branch this session's branch started from and lands in, such as `main`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base: String,
+    /// The pull request opened for this session's branch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pr_url: String,
+    /// The newest snapshot of the folder Runo took (end of a turn, an undo or a redo),
+    /// so Undo can leave alone what changed after it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub snapshot: String,
+    /// Told to the agent with the next prompt, such as that its last turn was undone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub undo_note: String,
 }
 
 /// What a switch replaced, enough to undo it before anything is sent.
@@ -350,11 +371,18 @@ pub struct Note {
 pub fn notes_prompt(notes: &[Note]) -> String {
     let mut out = String::from("Please address these review notes on your changes:\n");
     for (i, note) in notes.iter().enumerate() {
+        // Removed lines only exist in the old file, so their number is the old one.
+        let place = if note.code.starts_with('−') {
+            format!(
+                "{}, line {} of the old version (removed)",
+                note.path, note.line
+            )
+        } else {
+            format!("{}:{}", note.path, note.line)
+        };
         out.push_str(&format!(
-            "\n{}. `{}:{}`: {}\n   On the line `{}`\n",
+            "\n{}. `{place}`: {}\n   On the line `{}`\n",
             i + 1,
-            note.path,
-            note.line,
             note.text.trim(),
             note.code.trim()
         ));
@@ -1002,7 +1030,7 @@ mod tests {
         ];
         assert_eq!(
             notes_prompt(&notes),
-            "Please address these review notes on your changes:\n\n1. `src/a.rs:12`: Name this better\n   On the line `+    let x = 1;`\n\n2. `b.css:3`: Keep red here\n   On the line `−color: red;`\n"
+            "Please address these review notes on your changes:\n\n1. `src/a.rs:12`: Name this better\n   On the line `+    let x = 1;`\n\n2. `b.css, line 3 of the old version (removed)`: Keep red here\n   On the line `−color: red;`\n"
         );
     }
 }

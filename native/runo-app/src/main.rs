@@ -8,6 +8,7 @@ mod connections;
 mod connections_ui;
 mod cove;
 mod ctxmenu;
+mod files;
 mod fileview;
 mod git;
 mod github;
@@ -28,6 +29,7 @@ mod settings;
 mod settings_ui;
 mod shell;
 mod shellenv;
+mod ship;
 mod split;
 mod store;
 mod stream;
@@ -359,6 +361,37 @@ struct RunoApp {
     auto_project: Option<u64>,
     auto_provider: usize,
     gh: github::GhData,
+    /// Results of background git and gh work, applied on the UI thread.
+    ui_tx: Sender<ship::UiJob>,
+    /// Bumped by each refresh, so an older scan finishing late is dropped.
+    refresh_seq: u64,
+    /// The selected session's branch against its base branch.
+    branch_info: ship::BranchInfo,
+    /// The Changes panel shows everything since the branch left its base, commits included.
+    diff_base: bool,
+    /// What the shown diffs compare with: HEAD or the branch's merge base.
+    diff_against: String,
+    /// Each session's pull request, and the sessions whose PR is being looked up.
+    pr_status: HashMap<u64, github::PrStatus>,
+    pr_loading: std::collections::HashSet<u64>,
+    pr_form: Option<ship::PrForm>,
+    pr_title: Entity<InputState>,
+    pr_base: Entity<InputState>,
+    pr_branch: Entity<InputState>,
+    pr_body: Entity<TextareaState>,
+    /// A git step running for a session (commit, push, update, merge), by session.
+    git_busy: HashMap<u64, String>,
+    /// A git step waiting for confirmation.
+    confirm_git: Option<ship::Confirm>,
+    /// A racer just kept, offered a merge or pull request.
+    kept: Option<u64>,
+    /// Sessions whose worktree is still being made, with the turns waiting for it.
+    preparing: HashMap<u64, Vec<ship::Deferred>>,
+    /// The Files tab's filter, its search-in-files results, and the open folders.
+    file_query: Entity<InputState>,
+    file_hits: Option<(Vec<git::Hit>, bool)>,
+    file_searching: bool,
+    files_open: std::collections::HashSet<String>,
     /// Holds off system sleep while agents run.
     awake: Option<std::process::Child>,
     _subscriptions: Vec<Subscription>,
@@ -377,6 +410,8 @@ fn demo_changes() -> Vec<git::Change> {
         status: "M".into(),
         added,
         removed,
+        unstaged: true,
+        ..Default::default()
     })
     .collect()
 }
@@ -594,14 +629,18 @@ fn working_indicator() -> impl IntoElement {
         .child(dots)
 }
 
-/// File listing for folders that are not git repositories (shallow, capped).
+/// Most files listed for a folder that is not a git repository; the Files tab says so
+/// when a folder has more.
+const PLAIN_FILES_MAX: usize = 20_000;
+
+/// File listing for folders that are not git repositories (capped at `PLAIN_FILES_MAX`).
 fn plain_files(dir: &str) -> Vec<String> {
     fn walk(root: &std::path::Path, dir: &std::path::Path, depth: usize, out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
-            if out.len() >= 2000 {
+            if out.len() >= PLAIN_FILES_MAX {
                 return;
             }
             let path = entry.path();
@@ -610,7 +649,7 @@ fn plain_files(dir: &str) -> Vec<String> {
                 continue;
             }
             if path.is_dir() {
-                if depth < 4 {
+                if depth < 12 {
                     walk(root, &path, depth + 1, out);
                 }
             } else if let Ok(rel) = path.strip_prefix(root) {
@@ -710,6 +749,34 @@ impl RunoApp {
             settings::discover(None);
         });
         let (tx, rx) = channel::<Event>();
+        let (ui_tx, ui_rx) = channel::<ship::UiJob>();
+        // Background git work hands its results back here.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(30))
+                .await;
+            let mut jobs = Vec::new();
+            loop {
+                match ui_rx.try_recv() {
+                    Ok(job) => jobs.push(job),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                }
+            }
+            if jobs.is_empty() {
+                continue;
+            }
+            let alive = this.update(cx, |this, cx| {
+                for job in jobs {
+                    job(this, cx);
+                }
+                cx.notify();
+            });
+            if alive.is_err() {
+                break;
+            }
+        })
+        .detach();
         let mut ticks = 0u32;
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -724,6 +791,10 @@ impl RunoApp {
                 // Every ~2s, re-read git status for the session being watched while its
                 // agent works, so the Changes panel fills in as files are edited.
                 let rescan = ticks.is_multiple_of(40);
+                // Every ~10s when idle, so terminal git commands and outside edits show
+                // up; the pull request's checks every minute.
+                let idle_scan = ticks.is_multiple_of(200);
+                let pr_check = ticks % 1200 == 600;
                 let check = ticks % 1200 == 2;
                 let alive = this.update(cx, |this, cx| {
                     if check && !this.demo {
@@ -733,7 +804,13 @@ impl RunoApp {
                         && this
                             .selected
                             .is_some_and(|id| this.started.contains_key(&id));
-                    if rescan && watching && !this.demo {
+                    let on_session = this.view == View::Session && this.selected.is_some();
+                    if pr_check && on_session && !this.demo {
+                        if let Some(id) = this.selected {
+                            this.load_pr_status(id);
+                        }
+                    }
+                    if ((rescan && watching) || (idle_scan && on_session)) && !this.demo {
                         this.refresh();
                         cx.notify();
                     } else if repaint
@@ -1084,6 +1161,30 @@ impl RunoApp {
             auto_project: None,
             auto_provider: 0,
             gh: Default::default(),
+            ui_tx,
+            refresh_seq: 0,
+            branch_info: Default::default(),
+            diff_base: false,
+            diff_against: "HEAD".into(),
+            pr_status: HashMap::new(),
+            pr_loading: Default::default(),
+            pr_form: None,
+            pr_title: cx.new(|cx| InputState::new(window, cx).placeholder("Pull request title")),
+            pr_base: cx.new(|cx| InputState::new(window, cx).placeholder("main")),
+            pr_branch: cx.new(|cx| InputState::new(window, cx).placeholder("runo/my-change")),
+            pr_body: cx.new(|cx| {
+                TextareaState::new(window, cx).placeholder("What changed and why (optional)")
+            }),
+            git_busy: HashMap::new(),
+            file_query: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Filter files · Enter searches inside them")
+            }),
+            file_hits: None,
+            file_searching: false,
+            files_open: Default::default(),
+            confirm_git: None,
+            kept: None,
+            preparing: HashMap::new(),
             diff_all: false,
             diff_whole: false,
             diff_wrap: false,
@@ -1140,6 +1241,21 @@ impl RunoApp {
         });
         // Search boxes on the Playbooks and Project notes pages filter as you type.
         let pb_query_sub = cx.subscribe_in(&app.pb_query, window, repaint);
+        let file_query_sub = cx.subscribe_in(
+            &app.file_query,
+            window,
+            |this, _, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => {
+                    this.file_hits = None;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.search_files(cx);
+                    cx.notify();
+                }
+                _ => {}
+            },
+        );
         let pb_source_sub = cx.subscribe_in(&app.pb_source, window, repaint);
         let notes_query_sub = cx.subscribe_in(&app.notes_query, window, repaint);
         let remove_name_sub = cx.subscribe_in(&app.remove_name, window, repaint);
@@ -1162,12 +1278,21 @@ impl RunoApp {
             address_sub,
             keys_sub,
             pb_query_sub,
+            file_query_sub,
             pb_source_sub,
             notes_query_sub,
             remove_name_sub,
             auto_name_sub,
             auto_prompt_sub,
         ]);
+        // Coming back to the window picks up git commands run elsewhere.
+        let activation_sub = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && !this.demo {
+                this.refresh();
+                cx.notify();
+            }
+        });
+        app._subscriptions.push(activation_sub);
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
         cx.spawn(async move |this, cx| loop {
@@ -1235,14 +1360,16 @@ impl RunoApp {
         self.selected.and_then(|id| self.state.session(id))
     }
 
+    /// Re-read the selected session's git state (changes, files, branch, races) on a
+    /// background thread; the results land a moment later.
     fn refresh(&mut self) {
-        let Some(dir) = self.current().map(|s| s.dir.clone()) else {
+        let Some(session) = self.current() else {
             self.changes.clear();
             self.files.clear();
             return;
         };
-        self.dir_is_git = self.demo || git::is_repo(&dir);
         if self.demo {
+            self.dir_is_git = true;
             self.changes = demo_changes();
             self.files = self.changes.iter().map(|c| c.path.clone()).collect();
             self.selected_file = Some(self.changes[0].path.clone());
@@ -1254,57 +1381,37 @@ impl RunoApp {
             };
             return;
         }
-        if !self.dir_is_git {
-            self.changes.clear();
-            self.selected_file = None;
-            self.diff.clear();
-            self.files = plain_files(&dir);
-            return;
-        }
-        self.changes = git::changes(&dir);
-        if let Some(id) = self.selected {
-            let (a, r) = self
-                .changes
-                .iter()
-                .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-            self.stats.insert(id, (self.changes.len(), a, r));
-        }
-        self.files = git::tracked_files(&dir);
-        self.sync = git::sync_state(&dir);
-        self.race_stats.clear();
-        if let Some(race) = self.current().map(|s| s.race).filter(|r| *r != 0) {
-            let others: Vec<(u64, String)> = self
-                .state
+        let id = session.id;
+        let racers: Vec<(u64, String)> = if session.race != 0 {
+            self.state
                 .sessions
                 .iter()
-                .filter(|s| s.race == race)
+                .filter(|s| s.race == session.race)
                 .map(|s| (s.id, s.dir.clone()))
-                .collect();
-            for (id, dir) in others {
-                let changes = git::changes(&dir);
-                let (a, r) = changes
-                    .iter()
-                    .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-                self.race_stats.insert(id, (changes.len(), a, r));
-            }
-        }
-        if let Some(file) = self.selected_file.clone() {
-            if self.changes.iter().any(|c| c.path == file) {
-                self.diff = self.load_diff(&dir, &file);
-            } else {
-                self.selected_file = None;
-                self.diff.clear();
-            }
-        }
-        if self.selected_file.is_none() {
-            if let Some(first) = self.changes.first() {
-                self.selected_file = Some(first.path.clone());
-                self.diff = self.load_diff(&dir, &first.path);
-            }
-        }
-        if self.diff_all {
-            self.reload_diff();
-        }
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let request = ship::ScanRequest {
+            dir: session.dir.clone(),
+            base: session.base.clone(),
+            since_base: self.diff_base,
+            selected_file: self.selected_file.clone(),
+            whole: self.diff_whole,
+            all: self.diff_all,
+            racers,
+        };
+        let asked = self.selected_file.clone();
+        self.refresh_seq += 1;
+        let seq = self.refresh_seq;
+        self.bg(
+            move || ship::scan(request),
+            move |this, scan, _| {
+                if this.refresh_seq == seq && this.selected == Some(id) {
+                    this.apply_scan(id, scan, asked);
+                }
+            },
+        );
     }
 
     /// Files changed and lines added/removed in a session's folder, for its sidebar card.
@@ -1312,17 +1419,18 @@ impl RunoApp {
         let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
             return;
         };
-        let changes = if self.demo {
-            demo_changes()
-        } else if git::is_repo(&dir) {
-            git::changes(&dir)
-        } else {
+        if self.demo {
+            self.stats.insert(id, git::totals(&demo_changes()));
             return;
-        };
-        let (a, r) = changes
-            .iter()
-            .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-        self.stats.insert(id, (changes.len(), a, r));
+        }
+        self.bg(
+            move || git::is_repo(&dir).then(|| git::totals(&git::changes(&dir))),
+            move |this, totals, _| {
+                if let Some(totals) = totals {
+                    this.stats.insert(id, totals);
+                }
+            },
+        );
     }
 
     fn open_change(&mut self, path: &str) {
@@ -1373,7 +1481,11 @@ impl RunoApp {
         self.notice = None;
         self.info = None;
         self.menu = None;
+        self.pr_form = None;
+        self.confirm_git = None;
+        self.file_hits = None;
         self.refresh();
+        self.load_pr_status(id);
         self.chat_scroll.scroll_to_bottom();
     }
 
@@ -1911,10 +2023,23 @@ impl RunoApp {
             return;
         }
         let prompt = store::notes_prompt(&session.notes);
-        session.notes.clear();
         let provider = session.provider.clone();
         let opts = cx.global::<AppSettings>().agent(&provider);
+        let before = session.messages.len();
         self.start_agent(id, prompt, &opts);
+        // The notes go only once the follow-up really started (or is waiting for the
+        // worktree); a failed start keeps them for another try.
+        let sent = self.preparing.contains_key(&id)
+            || self
+                .state
+                .session(id)
+                .is_some_and(|s| s.messages.len() > before && s.status == Status::Working);
+        if sent {
+            if let Some(session) = self.state.session_mut(id) {
+                session.notes.clear();
+            }
+            self.save();
+        }
     }
 
     fn toggle_pin(&mut self, id: u64) {
@@ -1941,41 +2066,6 @@ impl RunoApp {
         ));
     }
 
-    /// Commit every change in the session folder. An empty message falls back to the
-    /// session title.
-    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
-        let Some((dir, title)) = self.current().map(|s| (s.dir.clone(), s.title.clone())) else {
-            return;
-        };
-        let typed = self.commit_msg.read(cx).value().trim().to_string();
-        let mut message = if typed.is_empty() { title } else { typed };
-        if cx.global::<AppSettings>().attribution {
-            if let Some(name) = self.current().map(|s| agent::provider(&s.provider).name) {
-                message.push_str(&format!("\n\nMade with {name} in Runo"));
-            }
-        }
-        match git::commit_all(&dir, &message) {
-            Ok(hash) => {
-                self.commit_msg
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                self.notice = None;
-                self.info = Some((
-                    format!("Committed {hash}: {message}"),
-                    std::time::Instant::now(),
-                ));
-                if let Some(id) = self.selected {
-                    let first = message.lines().next().unwrap_or_default().to_string();
-                    self.state.log(id, format!("Committed {hash}: {first}"));
-                }
-                self.refresh();
-            }
-            Err(error) => self.notice = Some(format!("Commit failed: {error}")),
-        }
-    }
-
     fn discard(&mut self, path: &str) {
         self.confirm_discard = None;
         if self.demo {
@@ -1994,31 +2084,6 @@ impl RunoApp {
             }
             Err(error) => self.notice = Some(format!("Could not discard {path}: {error}")),
         }
-    }
-
-    /// Push the branch, then optionally open a pull request with `gh`. Output goes to
-    /// the Terminal so progress and links stay visible.
-    fn ship(&mut self, open_pr: bool, cx: &mut Context<Self>) {
-        let remote = self.sync.remote.clone();
-        if remote.is_empty() {
-            self.notice = Some("This repository has no remote to push to.".into());
-            return;
-        }
-        if let Some(id) = self.selected {
-            self.state.log(
-                id,
-                if open_pr {
-                    "Pushed and opened a pull request"
-                } else {
-                    "Pushed the branch"
-                },
-            );
-        }
-        let mut line = format!("git push -u {remote} HEAD");
-        if open_pr {
-            line.push_str(" && gh pr create --fill");
-        }
-        self.run_terminal(line, cx);
     }
 
     fn run_terminal(&mut self, line: String, cx: &mut Context<Self>) {
@@ -2093,7 +2158,7 @@ impl RunoApp {
             path: path_str,
             color,
             icon,
-            connection: 0,
+            ..Default::default()
         });
         self.expanded.push(id);
         self.new_project = Some(id);
@@ -2189,7 +2254,8 @@ impl RunoApp {
         self.race_mode && self.new_race.len() > 1
     }
 
-    /// Create one session (and its worktree) without starting the agent.
+    /// Create one session without starting the agent. An isolated session's worktree is
+    /// made in the background; turns started before it is ready wait for it.
     #[allow(clippy::too_many_arguments)]
     fn spawn_session(
         &mut self,
@@ -2201,8 +2267,37 @@ impl RunoApp {
         task: &str,
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
+        self.spawn_session_for(
+            project,
+            provider,
+            typed_branch,
+            isolated,
+            is_git,
+            task,
+            None,
+            cx,
+        )
+    }
+
+    /// `spawn_session`, checking out pull request `pr` in the new worktree.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_session_for(
+        &mut self,
+        project: &Project,
+        provider: usize,
+        typed_branch: &str,
+        isolated: bool,
+        is_git: bool,
+        task: &str,
+        pr: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
         let id = self.state.next_id();
-        let mut setup_log = Vec::new();
+        let base = if is_git {
+            git::default_branch(&project.path)
+        } else {
+            String::new()
+        };
         let (branch, dir) = if !is_git {
             ("local folder".to_string(), project.path.clone())
         } else if isolated {
@@ -2211,21 +2306,14 @@ impl RunoApp {
             } else {
                 typed_branch.to_string()
             };
-            let dir = git::add_worktree(&project.path, &branch)
-                .map_err(|error| format!("Could not create worktree: {error}"))?;
-            match git::copy_included(&project.path, &dir) {
-                Ok(copied) if !copied.is_empty() => setup_log.push(format!(
-                    "Copied {} file{} from .worktreeinclude: {}",
-                    copied.len(),
-                    if copied.len() == 1 { "" } else { "s" },
-                    copied.join(", ")
-                )),
-                Ok(_) => {}
-                Err(error) => {
-                    setup_log.push(format!("Could not copy .worktreeinclude files: {error}"))
-                }
+            let dir = git::worktree_path(&project.path, &branch);
+            if dir.exists() {
+                return Err(format!(
+                    "Could not create worktree: {} already exists",
+                    dir.display()
+                ));
             }
-            (branch, dir)
+            (branch, dir.to_string_lossy().into_owned())
         } else {
             (git::current_branch(&project.path), project.path.clone())
         };
@@ -2241,7 +2329,7 @@ impl RunoApp {
             project_id: project.id,
             title,
             provider: agent::PROVIDERS[provider].id.into(),
-            branch,
+            branch: branch.clone(),
             dir,
             isolated,
             mode: String::new(),
@@ -2259,10 +2347,11 @@ impl RunoApp {
             unread: false,
             notes: Vec::new(),
             race: 0,
+            base,
             ..Default::default()
         });
-        if !setup_log.is_empty() {
-            self.terminal.entry(id).or_default().extend(setup_log);
+        if isolated && is_git && !self.demo {
+            self.make_worktree(id, project.path.clone(), branch, pr);
         }
         Ok(id)
     }
@@ -2274,7 +2363,17 @@ impl RunoApp {
             return;
         };
         let (isolated, provider) = (session.isolated, session.provider.clone());
-        let setup = cx.global::<AppSettings>().worktree_setup.trim().to_string();
+        // The worktree is still being made; it launches when ready.
+        if self.preparing.contains_key(&id) {
+            self.pending_start.insert(id, task);
+            return;
+        }
+        // The project's own setup command, else the one in Settings.
+        let setup = self
+            .project_of(session)
+            .map(|p| p.setup.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| cx.global::<AppSettings>().worktree_setup.trim().to_string());
         if isolated && !setup.is_empty() {
             self.pending_start.insert(id, task);
             self.run_terminal(setup, cx);
@@ -2515,28 +2614,6 @@ impl RunoApp {
         )
     }
 
-    /// Keep one session of a race: archive the others.
-    fn keep_racer(&mut self, keep: u64) {
-        let Some(race) = self.state.session(keep).map(|s| s.race).filter(|r| *r != 0) else {
-            return;
-        };
-        let mut archived = 0;
-        for session in self.state.sessions.iter_mut() {
-            if session.race == race && session.id != keep && !session.archived {
-                session.archived = true;
-                archived += 1;
-            }
-        }
-        self.save();
-        self.info = Some((
-            format!(
-                "Kept this one and archived {archived} other{}.",
-                if archived == 1 { "" } else { "s" }
-            ),
-            std::time::Instant::now(),
-        ));
-    }
-
     fn delete_session(&mut self, id: u64) {
         if let Some(handle) = self.handles.remove(&Target::Session(id)) {
             handle.kill();
@@ -2551,22 +2628,15 @@ impl RunoApp {
         self.prune_shells();
         self.tabs.retain(|t| *t != id);
         self.stats.remove(&id);
+        self.started.remove(&id);
+        self.pending_start.remove(&id);
+        self.preparing.remove(&id);
+        self.pr_status.remove(&id);
         if session.elsewhere() && !self.demo {
             connections::cleanup_session(&session);
         }
-        if session.isolated && !self.demo && remove_worktree() {
-            if let Some(project) = self
-                .state
-                .projects
-                .iter()
-                .find(|p| p.id == session.project_id)
-            {
-                if let Err(error) = git::remove_worktree(&project.path, &session.dir) {
-                    self.notice =
-                        Some(format!("Session removed; worktree cleanup failed: {error}"));
-                }
-            }
-        }
+        // The worktree, the branch when nothing in it is unmerged, and Undo snapshots.
+        self.remove_session_files(&session, false);
         self.terminal.remove(&id);
         self.confirm_delete = None;
         if self.split == Some(id) {
@@ -3810,15 +3880,8 @@ impl RunoApp {
             let id = racer.id;
             let provider = agent::provider(&racer.provider);
             let current = id == me;
-            let changes = if current {
-                let (a, r) = self
-                    .changes
-                    .iter()
-                    .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-                Some((self.changes.len(), a, r))
-            } else {
-                self.race_stats.get(&id).copied()
-            };
+            // Committed work counts too: everything since the branch left its base.
+            let changes = self.race_stats.get(&id).copied();
             chips = chips.child(
                 div()
                     .id(("racer", id as usize))
@@ -3838,7 +3901,16 @@ impl RunoApp {
                             .hover(|el| el.bg(tint(c_subtle())))
                     })
                     .when(racer.archived, |el| el.opacity(0.5))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            "Open this agent's session with its whole diff against the base branch",
+                        )
+                        .build(window, cx)
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.diff_base = true;
+                        this.right_tab = RightTab::Changes;
+                        this.show_panel = true;
                         this.select(id);
                         cx.notify();
                     }))
@@ -3889,24 +3961,27 @@ impl RunoApp {
                     .when(others > 0, |el| {
                         el.child(
                             self.button("keep-racer", "Keep this one", false)
-                        .child(icon(IconName::Trophy, 12., c_secondary()))
                                 .h(px(28.))
                                 .text_xs()
                                 .tooltip(|window, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new(
-                                        "Archive the other agents' sessions. Their worktrees stay until you delete them.",
+                                        "Stop the other agents and delete their worktrees and branches, then merge or open a PR for this one.",
                                     )
                                     .build(window, cx)
                                 })
                                 .child(icon(IconName::Trophy, 13., c_secondary()))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.keep_racer(me);
+                                    this.confirm_git = Some(ship::Confirm::Keep(me));
                                     cx.notify();
                                 })),
                         )
                     }),
             )
             .child(chips)
+            .when(
+                matches!(self.confirm_git, Some(ship::Confirm::Keep(k)) if k == me),
+                |el| el.children(self.confirm_card(me, cx)),
+            )
     }
 
     fn session_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -3932,6 +4007,9 @@ impl RunoApp {
             .pb_8();
         if session.race != 0 {
             list = list.child(self.race_strip(session, cx));
+        }
+        if let Some(card) = self.kept_card(id, cx) {
+            list = list.child(card);
         }
         if let Some(first) = session.messages.first().filter(|m| !m.time.is_empty()) {
             list = list.child(
@@ -5644,7 +5722,7 @@ impl RunoApp {
     }
 
     fn load_diff(&self, dir: &str, path: &str) -> String {
-        git::file_diff_context(dir, path, self.diff_whole)
+        git::file_diff_context(dir, path, self.diff_whole, &self.diff_against)
     }
 
     /// Re-read the diff after a view option changed.
@@ -5697,7 +5775,9 @@ impl RunoApp {
             .position(|c| c.path == path)
             .unwrap_or(0)
             * 100_000;
-        for (local, row) in rows.into_iter().enumerate().take(4000) {
+        const MAX_ROWS: usize = 4000;
+        let more = rows.len().saturating_sub(MAX_ROWS);
+        for (local, row) in rows.into_iter().enumerate().take(MAX_ROWS) {
             let i = base + local;
             if local < skip_to {
                 continue;
@@ -5877,6 +5957,19 @@ impl RunoApp {
                 );
             }
         }
+        if more > 0 {
+            col = col.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_color(rgb(c_muted()))
+                    .italic()
+                    .child(format!(
+                        "{more} more line{} not shown. Open the file to see all of it.",
+                        if more == 1 { "" } else { "s" }
+                    )),
+            );
+        }
         col
     }
 
@@ -5930,6 +6023,53 @@ impl RunoApp {
                         }
                         cx.notify();
                     }))
+                    .when(!self.diff_base, |el| {
+                        let (stage_path, staged) = (change.path.clone(), change.staged);
+                        let partly = change.staged && change.unstaged;
+                        el.child(
+                            div()
+                                .id(("stage", i))
+                                .size(px(14.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .border_1()
+                                .cursor_pointer()
+                                .when(staged, |el| {
+                                    el.bg(rgb(c_blue())).border_color(rgb(c_blue()))
+                                })
+                                .when(!staged, |el| el.border_color(rgb(c_border())))
+                                .hover(|el| el.border_color(rgb(c_blue())))
+                                .tooltip(move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(if partly {
+                                        "Partly staged. Click to unstage"
+                                    } else if staged {
+                                        "Staged. Click to unstage"
+                                    } else {
+                                        "Stage this file; Commit then takes only staged files"
+                                    })
+                                    .build(window, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_stage(&stage_path, staged);
+                                    cx.notify();
+                                }))
+                                .when(staged, |el| {
+                                    el.child(icon(
+                                        if partly {
+                                            IconName::Minus
+                                        } else {
+                                            IconName::Check
+                                        },
+                                        10.,
+                                        c_canvas(),
+                                    ))
+                                }),
+                        )
+                    })
                     .child(
                         div()
                             .w(px(12.))
@@ -6004,41 +6144,48 @@ impl RunoApp {
                             .items_center()
                             .gap_2()
                             .text_size(px(11.5))
-                            .child(
-                                div()
-                                    .text_color(rgb(c_add()))
-                                    .child(format!("+{}", change.added)),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(c_del()))
-                                    .child(format!("−{}", change.removed)),
-                            )
-                            .child(
-                                div()
-                                    .id(("discard", i))
-                                    .size(px(22.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .opacity(0.)
-                                    .group_hover("change-row", |el| el.opacity(1.))
-                                    .hover(|el| el.bg(tint(c_subtle())))
-                                    .tooltip(|window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(
-                                            "Discard changes to this file",
-                                        )
-                                        .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.confirm_discard = Some(ask.clone());
-                                        cx.notify();
-                                    }))
-                                    .child(icon(IconName::Undo2, 13., c_muted())),
-                            )
+                            .when(change.binary, |el| {
+                                el.child(div().text_color(rgb(c_muted())).child("binary"))
+                            })
+                            .when(!change.binary, |el| {
+                                el.child(
+                                    div()
+                                        .text_color(rgb(c_add()))
+                                        .child(format!("+{}", change.added)),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(c_del()))
+                                        .child(format!("−{}", change.removed)),
+                                )
+                            })
+                            .when(!self.diff_base, |el| {
+                                el.child(
+                                    div()
+                                        .id(("discard", i))
+                                        .size(px(22.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .opacity(0.)
+                                        .group_hover("change-row", |el| el.opacity(1.))
+                                        .hover(|el| el.bg(tint(c_subtle())))
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                "Discard changes to this file",
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.confirm_discard = Some(ask.clone());
+                                            cx.notify();
+                                        }))
+                                        .child(icon(IconName::Undo2, 13., c_muted())),
+                                )
+                            })
                             .into_any_element()
                     }),
                 SharedString::from(format!("chg-{}-{}", self.selected.unwrap_or(0), i)),
@@ -6084,6 +6231,40 @@ impl RunoApp {
                         )
                     })
                     .child(div().flex_1())
+                    .when(!self.branch_info.base_ref.is_empty(), |el| {
+                        let label = if self.diff_base {
+                            format!("Since {}", self.branch_info.base)
+                        } else {
+                            "Uncommitted".to_string()
+                        };
+                        el.child(
+                            div()
+                                .id("changes-scope")
+                                .px_2()
+                                .h(px(20.))
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(rgb(c_secondary()))
+                                .bg(tint(c_subtle()))
+                                .hover(|el| el.text_color(rgb(c_text())))
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        "Switch between uncommitted changes and everything the branch changed since it left its base, commits included",
+                                    )
+                                    .build(window, cx)
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.diff_base = !this.diff_base;
+                                    this.selected_file = None;
+                                    this.refresh();
+                                    cx.notify();
+                                }))
+                                .child(label),
+                        )
+                    })
                     .child(
                         self.ghost_button_sized(
                             "refresh-changes",
@@ -6110,7 +6291,11 @@ impl RunoApp {
                         div()
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
-                            .child("No uncommitted changes"),
+                            .child(if self.diff_base {
+                                format!("No changes since {}", self.branch_info.base)
+                            } else {
+                                "No uncommitted changes".to_string()
+                            }),
                     )
                     .child(
                         div()
@@ -6231,247 +6416,6 @@ impl RunoApp {
                         )),
                 )
             })
-            .into_any_element()
-    }
-
-    /// Commit box and push / pull request actions for the session branch.
-    fn ship_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_changes = !self.changes.is_empty();
-        let sync = &self.sync;
-        let busy = self
-            .selected
-            .is_some_and(|id| self.handles.contains_key(&Target::Terminal(id)));
-        let status = if sync.remote.is_empty() {
-            "No remote".to_string()
-        } else if sync.ahead > 0 {
-            format!(
-                "{} unpushed commit{}",
-                sync.ahead,
-                if sync.ahead == 1 { "" } else { "s" }
-            )
-        } else if sync.upstream {
-            format!("Up to date with {}", sync.remote)
-        } else {
-            "Not pushed yet".to_string()
-        };
-        let can_push = !sync.remote.is_empty() && !busy && (sync.ahead > 0 || !sync.upstream);
-        let can_pr = !sync.remote.is_empty() && !busy;
-        let notes = self.current().map(|s| s.notes.len()).unwrap_or(0);
-        div()
-            .v_flex()
-            .gap_2()
-            .when(notes > 0, |el| {
-                el.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_lg()
-                        .bg(tint(c_selected()))
-                        .child(icon(IconName::MessageSquareText, 14., c_blue()))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_sm()
-                                .text_color(rgb(c_text()))
-                                .child(format!(
-                                    "{notes} review note{}",
-                                    if notes == 1 { "" } else { "s" }
-                                )),
-                        )
-                        .child(
-                            self.button("clear-notes", "Clear", false)
-                        .child(icon(IconName::Eraser, 12., c_secondary()))
-                                .h(px(28.))
-                                .text_xs()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(id) = this.selected {
-                                        if let Some(s) = this.state.session_mut(id) {
-                                            s.notes.clear();
-                                        }
-                                        this.save();
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            self.button("send-notes", "Send to agent", true)
-                        .child(icon(IconName::Send, 12., c_canvas()))
-                                .h(px(28.))
-                                .text_xs()
-                                .child(icon(IconName::ArrowUp, 13., c_canvas()))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.send_notes(cx);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
-            .when(has_changes, |el| {
-                el.child(
-                    div()
-                        .v_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div().flex_1().text_size(px(12.5)).child(
-                                        Input::new(&self.commit_msg)
-                                            .bordered(true)
-                                            .bg(rgb(c_canvas()))
-                                            .h(px(30.)),
-                                    ),
-                                )
-                                .child(if self.writing_commit {
-                                    div()
-                                        .size(px(30.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(
-                                            icon(IconName::Loader, 14., c_secondary()).animated(
-                                                "commit-spin",
-                                                Animation::new(Duration::from_millis(900)).repeat(),
-                                                |i, d| i.rotate(percentage(d)),
-                                            ),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    self.ghost_button_sized(
-                                        "ai-commit",
-                                        IconName::Sparkles,
-                                        "Write the message with the agent",
-                                        30.,
-                                    )
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.suggest_commit(cx);
-                                        cx.notify();
-                                    }))
-                                    .into_any_element()
-                                }),
-                        )
-                        .child(
-                            self.button("commit", "Commit", true)
-                                .w_full()
-                                .justify_center()
-                                .h(px(28.))
-                                .tooltip(|window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(
-                                        "Stage and commit every change. An empty message uses the session title.",
-                                    )
-                                    .build(window, cx)
-                                })
-                                .child(icon(IconName::GitCommitHorizontal, 14., c_canvas()))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.commit(window, cx);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(icon(IconName::GitBranch, 12., c_muted()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_secondary()))
-                            .child(status),
-                    )
-                    .child(
-                        self.button("push", "Push", false)
-                            .h(px(24.))
-                            .px_2()
-                            .text_size(px(12.))
-                            .when(!can_push, |el| el.opacity(0.45))
-                            .child(icon(IconName::CloudUpload, 13., c_secondary()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if can_push {
-                                    this.ship(false, cx);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        self.button("create-pr", "Create PR", false)
-                            .h(px(24.))
-                            .px_2()
-                            .text_size(px(12.))
-                            .when(!can_pr, |el| el.opacity(0.45))
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(
-                                    "Push the branch and open a pull request with the GitHub CLI (gh).",
-                                )
-                                .build(window, cx)
-                            })
-                            .child(icon(IconName::GitPullRequestCreate, 13., c_secondary()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if can_pr {
-                                    this.ship(true, cx);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            )
-    }
-
-    fn files_tab(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut list = div().v_flex();
-        for (i, path) in self.files.iter().enumerate() {
-            let p = path.clone();
-            list = list.child(
-                div()
-                    .id(("file", i))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        self.on_context(ctxmenu::CtxTarget::File(path.clone()), cx),
-                    )
-                    .h(px(28.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .cursor_pointer()
-                    .text_sm()
-                    .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_subtle())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_preview(&p);
-                        cx.notify();
-                    }))
-                    .child(icon(
-                        Self::file_icon(fileview::file_kind(path, b"")),
-                        14.,
-                        c_muted(),
-                    ))
-                    .child(div().truncate().child(path.clone())),
-            );
-        }
-        div()
-            .flex_1()
-            .min_h_0()
-            .v_flex()
-            .child(div().max_h(px(220.)).overflow_y_scrollbar().child(list))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .v_flex()
-                    .border_t_1()
-                    .border_color(rgb(c_border()))
-                    .child(self.file_view(false, cx)),
-            )
             .into_any_element()
     }
 

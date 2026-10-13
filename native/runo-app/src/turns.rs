@@ -16,6 +16,20 @@ impl RunoApp {
         images: Vec<String>,
         opts: &AgentOptions,
     ) {
+        // The worktree is still being made: the turn starts once it is ready.
+        if let Some(waiting) = self.preparing.get_mut(&id) {
+            waiting.push(crate::ship::Deferred {
+                prompt,
+                images,
+                opts: opts.clone(),
+                tag: None,
+            });
+            self.info = Some((
+                "Starts as soon as the worktree is ready.".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
         self.stderr.remove(&id);
         // The CLI view owns the conversation while it is open; two writers would fork it.
         if self.cli_runs.contains_key(&id) {
@@ -85,6 +99,13 @@ impl RunoApp {
         let sent = match notes {
             Some(notes) => format!("{notes}{sent}"),
             None => sent,
+        };
+        // Tell the agent its earlier work was undone (or redone) behind its back.
+        let undo_note = std::mem::take(&mut session.undo_note);
+        let sent = if undo_note.is_empty() {
+            sent
+        } else {
+            format!("{undo_note}\n\n{sent}")
         };
         let mut user = Message::now(Role::User, prompt.clone());
         user.images = images.clone();
@@ -219,9 +240,18 @@ impl RunoApp {
                 .find(|m| m.role == Role::User)
                 .map(|m| (m.checkpoint.clone(), s.dir.clone()))
         });
+        // How many files the turn changed, and a snapshot of where it ended for Undo.
         if let Some((cp, dir)) = checkpoint.filter(|(cp, _)| !cp.is_empty()) {
-            let files = git::changed_since(&dir, &cp).len();
-            self.turn_files.insert(id, files);
+            self.bg(
+                move || (git::changed_since(&dir, &cp).len(), git::checkpoint(&dir)),
+                move |this, (files, end), _| {
+                    this.turn_files.insert(id, files);
+                    if let (Ok(end), Some(s)) = (end, this.state.session_mut(id)) {
+                        s.snapshot = end;
+                    }
+                    this.save();
+                },
+            );
         }
         let title = self
             .state
@@ -316,6 +346,10 @@ impl RunoApp {
     /// Mark the session's latest message as a playbook run, so it shows as the playbook's
     /// name rather than its whole prompt.
     pub(crate) fn tag_playbook(&mut self, id: u64, name: &str, note: &str) {
+        if let Some(turn) = self.preparing.get_mut(&id).and_then(|w| w.last_mut()) {
+            turn.tag = Some((name.to_string(), note.to_string()));
+            return;
+        }
         if let Some(m) = self
             .state
             .session_mut(id)
@@ -327,7 +361,9 @@ impl RunoApp {
         self.save();
     }
 
-    /// Put the worktree back as it was before user message `index` ran.
+    /// Put the worktree back as it was before user message `index` ran: files, their
+    /// staging, and the branch if the agent committed. A snapshot taken first makes it
+    /// redoable, and files changed after the agent's last turn are left alone.
     pub(crate) fn undo_to(&mut self, id: u64, index: usize) {
         if self.handles.contains_key(&Target::Session(id)) {
             self.notice = Some("Stop the agent before undoing its changes.".into());
@@ -344,27 +380,121 @@ impl RunoApp {
         else {
             return;
         };
-        match git::restore(&session.dir, &cp) {
-            Ok(n) => {
-                if let Some(session) = self.state.session_mut(id) {
-                    for m in session.messages.iter_mut().skip(index) {
-                        if m.role == Role::Agent && m.resolved.is_empty() {
-                            m.resolved = "undone".into();
-                        }
+        let dir = session.dir.clone();
+        let guard = Some(session.snapshot.clone()).filter(|s| !s.is_empty());
+        if self.git_busy.contains_key(&id) {
+            return;
+        }
+        self.git_busy.insert(id, "Undoing.".into());
+        self.bg(
+            move || {
+                let redo = git::checkpoint(&dir)?;
+                let done = git::restore(&dir, &cp, guard.as_deref())?;
+                let after = git::checkpoint(&dir).unwrap_or_default();
+                Ok::<_, String>((redo, done, after))
+            },
+            move |this, result, _| {
+                this.git_busy.remove(&id);
+                match result {
+                    Ok((redo, done, after)) => this.undone(id, index, redo, done, after),
+                    Err(error) => this.notice = Some(format!("Could not undo: {error}")),
+                }
+            },
+        );
+    }
+
+    fn undone(&mut self, id: u64, index: usize, redo: String, done: git::Restored, after: String) {
+        let n = done.files.len();
+        if let Some(session) = self.state.session_mut(id) {
+            let mut first = true;
+            for m in session.messages.iter_mut().skip(index) {
+                if m.role == Role::Agent && m.resolved.is_empty() {
+                    m.resolved = "undone".into();
+                    // Redo lives on the first undone reply.
+                    if first {
+                        m.redo = redo.clone();
+                        first = false;
                     }
                 }
-                self.turn_files.insert(id, 0);
-                self.state.log(id, format!("Undid changes to {n} files"));
-                self.info = Some((
-                    format!("Restored {n} file{}.", if n == 1 { "" } else { "s" }),
+            }
+            session.snapshot = after;
+            session.undo_note = undo_note(&done, false);
+        }
+        self.turn_files.insert(id, 0);
+        self.state.log(id, format!("Undid changes to {n} files"));
+        let mut text = format!("Restored {n} file{}", if n == 1 { "" } else { "s" });
+        if done.moved_head {
+            text.push_str(" and moved the branch back past the agent's commits");
+        }
+        if !done.skipped.is_empty() {
+            text.push_str(&format!(
+                ". Left {} you changed since alone: {}",
+                done.skipped.len(),
+                done.skipped.join(", ")
+            ));
+        }
+        self.info = Some((format!("{text}."), std::time::Instant::now()));
+        self.save();
+        self.measure(id);
+        self.refresh();
+    }
+
+    /// Bring back what an Undo removed, from the snapshot it took.
+    pub(crate) fn redo_turn(&mut self, id: u64, index: usize) {
+        if self.handles.contains_key(&Target::Session(id)) || self.git_busy.contains_key(&id) {
+            return;
+        }
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        let Some(redo) = session
+            .messages
+            .get(index)
+            .map(|m| m.redo.clone())
+            .filter(|r| !r.is_empty())
+        else {
+            return;
+        };
+        let dir = session.dir.clone();
+        let guard = Some(session.snapshot.clone()).filter(|s| !s.is_empty());
+        self.git_busy.insert(id, "Redoing.".into());
+        self.bg(
+            move || {
+                let done = git::restore(&dir, &redo, guard.as_deref())?;
+                let after = git::checkpoint(&dir).unwrap_or_default();
+                Ok::<_, String>((done, after))
+            },
+            move |this, result, _| {
+                this.git_busy.remove(&id);
+                let (done, after) = match result {
+                    Ok(r) => r,
+                    Err(error) => {
+                        this.notice = Some(format!("Could not redo: {error}"));
+                        return;
+                    }
+                };
+                if let Some(session) = this.state.session_mut(id) {
+                    for m in session.messages.iter_mut().skip(index) {
+                        if m.role == Role::Agent && m.resolved == "undone" {
+                            m.resolved.clear();
+                            m.redo.clear();
+                        }
+                    }
+                    session.snapshot = after;
+                    session.undo_note = undo_note(&done, true);
+                }
+                let n = done.files.len();
+                this.turn_files.remove(&id);
+                this.state.log(id, format!("Redid changes to {n} files"));
+                this.info = Some((
+                    format!("Put back {n} file{}.", if n == 1 { "" } else { "s" }),
                     std::time::Instant::now(),
                 ));
-                self.save();
-                self.measure(id);
-                self.refresh();
-            }
-            Err(error) => self.notice = Some(format!("Could not undo: {error}")),
-        }
+                this.save();
+                this.measure(id);
+                this.refresh();
+            },
+        );
     }
 
     pub(crate) fn keep_turn(&mut self, id: u64, index: usize) {
@@ -733,6 +863,37 @@ impl RunoApp {
     pub(crate) fn turn_bar(&self, index: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.current()?;
         let message = session.messages.get(index)?;
+        if message.resolved == "undone" && !message.redo.is_empty() {
+            let id = session.id;
+            return Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .child("This turn's changes were undone.")
+                    .child(div().flex_1())
+                    .child(
+                        self.button(("redo-turn", index), "Redo", false)
+                            .h(px(24.))
+                            .px_2()
+                            .text_size(px(12.))
+                            .child(icon(IconName::Redo2, 12., c_secondary()))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Put the files and commits back as they were before the undo",
+                                )
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.redo_turn(id, index);
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
         if !message.resolved.is_empty() {
             return None;
         }
@@ -1218,6 +1379,34 @@ impl RunoApp {
 }
 
 /// Strip fences, quotes and chatter around a generated commit message.
+/// What the agent is told with its next prompt after an undo or redo.
+pub fn undo_note(done: &git::Restored, redo: bool) -> String {
+    let mut files: Vec<&str> = done.files.iter().map(String::as_str).take(20).collect();
+    if done.files.len() > 20 {
+        files.push("…");
+    }
+    let mut note = if redo {
+        format!(
+            "(Note: I redid the changes I had undone, so these files are back as you left them: {}.",
+            files.join(", ")
+        )
+    } else {
+        format!(
+            "(Note: I undid your changes from the last turn. These files are back as they were before it: {}.",
+            files.join(", ")
+        )
+    };
+    if done.moved_head {
+        note.push_str(if redo {
+            " Your commits are back on the branch."
+        } else {
+            " The commits you made in that turn were removed from the branch too."
+        });
+    }
+    note.push_str(" Check the files before relying on what you remember of them.)");
+    note
+}
+
 pub fn clean_commit_message(text: &str) -> String {
     let mut lines: Vec<&str> = text
         .lines()
