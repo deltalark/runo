@@ -71,3 +71,10 @@ All notable changes to Runo are documented here.
 - Terminal: dim and strikethrough text are drawn (vt100 is now vendored with both attributes).
 - Cursor, Gemini CLI and Droid get Runo's memory server and shared MCP servers through their project config file, merged with yours, kept out of git and removed after each turn. Grok has no project-level MCP config, so it still gets none.
 - Settings → MCP adds and edits Runo's own servers in a form (name, command or URL, environment) instead of a JSON file.
+- Quit (Cmd+Q, the menu and Cmd+K) warns about running agents, the same as closing the window.
+- Agents: OpenCode and Codex errors show their message instead of nothing or raw JSON, a turn that reports an error counts as failed, and expired OpenCode and signed-out Gemini sign-ins get the sign-in hint.
+- Gemini: the session's mode applies in new worktrees (Runo marks the folder trusted), and follow-ups resume by Gemini's session number.
+- Codex: commands, edits and reasoning show while they run, and reply text streams when the CLI sends updates.
+- Notifications are on by default, cover turns waiting for you, open the session when clicked, and work on Windows. Permission requests can wait indefinitely.
+- Agents that can't resume (such as Grok) keep a one-line summary of earlier requests; Copilot sessions no longer pick up each other's conversation.
+- Tests pass on macOS.
