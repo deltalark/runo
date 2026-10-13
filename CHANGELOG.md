@@ -25,6 +25,11 @@ All notable changes to Runo are documented here.
 - Top bar: the project switcher handles empty projects, the Agents pill lists running agents to open or stop, spend shows today, the branch and breadcrumb are clickable, and Runs on shows the session's real connection and moves it.
 - Home follows the top-bar project with an All projects toggle and Add project. Reviews follows it too and badges only review requests and failed checks. A project whose folder is gone offers Relink or Remove.
 - App menu with Quit, and the window reopens from the Dock on macOS. Closing the last tab stays in Sessions, the tour starts in Sessions, existing users get a one-time What's new card, shortcut hints follow your keybindings, and blank session names are refused.
+- Local agent turns keep running when Runo closes or crashes; Runo follows them again on its next start instead of marking them Interrupted.
+- Limits in Settings → General: a card with Stop when an agent goes quiet for too long, spending limits per session and per day that hold new turns (with Send anyway), and a cap on agents running at once with a visible "Waiting for a slot".
+- A log file per launch and crash reports in `~/.runo/logs`, with a card on the next start to view or report a crash.
+- Runo checks GitHub for a newer release and offers to download it; nothing installs on its own. A release workflow builds signed and notarized macOS zips and disk images when the signing secrets are set.
+- Each session is saved in its own file under `~/.runo/sessions`, only when it changed and off the UI thread. The old `state.json` is split on first start and kept as `state.json.v1-backup`.
 
 ### Fixed
 

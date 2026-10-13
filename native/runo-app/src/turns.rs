@@ -56,6 +56,15 @@ impl RunoApp {
             );
             return;
         }
+        // A spending limit or the cap on running agents holds the prompt in the queue.
+        if let Some(why) = self.hold_turn(id) {
+            if let Some(s) = self.state.session_mut(id) {
+                s.queue.insert(0, Queued::new(prompt, images));
+            }
+            self.save();
+            self.info = Some((why, std::time::Instant::now()));
+            return;
+        }
         let demo = self.demo;
         // Notes the person shared with agents open each new conversation in the project.
         let notes = self
@@ -1505,6 +1514,9 @@ impl RunoApp {
                             })),
                     ),
             );
+        }
+        if let Some(line) = self.held_line(id, cx) {
+            col = col.child(line);
         }
         for (i, queued) in session.queue.iter().enumerate() {
             let images = queued.images.len();

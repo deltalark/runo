@@ -1551,6 +1551,7 @@ impl RunoApp {
             );
             run_cards.push(card);
         }
+        cards.extend(self.health_cards(cx));
         run_cards.extend(cards);
         let cards = run_cards;
         if cards.is_empty() {
@@ -1967,7 +1968,7 @@ impl RunoApp {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn alert_card(
+    pub(crate) fn alert_card(
         &self,
         id: SharedString,
         accent: u32,

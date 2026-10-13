@@ -1,5 +1,6 @@
 mod agent;
 mod alerts;
+mod applog;
 mod approvals;
 mod browser;
 mod browser_engine;
@@ -9,11 +10,13 @@ mod connections;
 mod connections_ui;
 mod cove;
 mod ctxmenu;
+mod detach;
 mod files;
 mod fileview;
 mod git;
 mod github;
 mod handoff;
+mod health;
 mod history;
 mod inbox;
 mod install;
@@ -24,6 +27,7 @@ mod models;
 mod notes;
 mod pbfile;
 mod pbshare;
+mod persist;
 mod playbooks;
 mod projects;
 mod pty;
@@ -474,6 +478,8 @@ struct RunoApp {
     files_open: std::collections::HashSet<String>,
     /// Holds off system sleep while agents run.
     awake: Option<std::process::Child>,
+    /// Saving, quiet agents, limits, slots, crash reports and Runo updates.
+    health: health::Health,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1354,6 +1360,7 @@ impl RunoApp {
             commit_suggestion: None,
             writing_commit: false,
             awake: None,
+            health: Default::default(),
             notes_input: notes_input.clone(),
             notes_project: None,
             loading_notes: false,
@@ -1563,11 +1570,21 @@ impl RunoApp {
         window.on_window_should_close(cx, move |_, cx| {
             app_entity
                 .update(cx, |this, cx| {
-                    this.save();
+                    this.save_now();
                     this.may_close(cx)
                 })
                 .unwrap_or(true)
         });
+        // Saves, turns waiting for a slot, crash reports and Runo updates.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            if this.update(cx, |this, cx| this.health_tick(cx)).is_err() {
+                return;
+            }
+        })
+        .detach();
         // Agents asking for permission mid-turn are shown within half a second.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -1609,6 +1626,7 @@ impl RunoApp {
             app.tabs.push(id);
         }
         app.resume_remote_turns();
+        app.resume_local_turns();
         app.send_waiting_queues(cx);
         app.refresh();
         app.chat_scroll.scroll_to_bottom();
@@ -1618,10 +1636,10 @@ impl RunoApp {
 
     // ---------- state & events ----------
 
+    /// Mark the state changed; it is saved within half a second, off the UI thread.
     fn save(&mut self) {
         if !self.demo {
-            self.store_layout();
-            self.state.save();
+            self.health.save_due = true;
         }
     }
 
@@ -1777,6 +1795,7 @@ impl RunoApp {
     }
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        self.health.saw(&event);
         match event {
             Event::Line(Target::Session(id), line) => {
                 if agent::waits_for_sign_in(&line) {
@@ -2115,7 +2134,8 @@ impl RunoApp {
         for handle in self.handles.values().filter(|h| !h.runner()) {
             handle.kill();
         }
-        self.save();
+        self.save_now();
+        State::flush();
     }
 
     /// Stop a session's agent, and everything it started.
@@ -8248,6 +8268,8 @@ fn main() {
     }
     // Before any thread starts: find agents and Node.js where the person's terminal would.
     shellenv::init();
+    applog::init();
+    detach::enable(store::data_dir());
     let app = application().with_assets(assets::AllAssets);
     // Clicking the Dock icon with the window closed (macOS keeps Runo running) opens it again.
     app.on_reopen(|cx| {

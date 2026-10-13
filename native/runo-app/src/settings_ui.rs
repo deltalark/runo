@@ -500,6 +500,16 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
                 switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
             ]),
+            section("Limits", "Keep agents from running away with time or money.", vec![
+                row("Flag a quiet agent after", "An agent that prints nothing for this long gets a card with Stop. A long build or test run can be quiet too.", Ctl::Dropdown(options(&[("5", "5 minutes"), ("10", "10 minutes"), ("20", "20 minutes"), ("60", "1 hour"), ("0", "Never")]), st.stuck_after_mins.to_string(), Rc::new(|s, v| s.stuck_after_mins = v.parse().unwrap_or(10)))),
+                row("Spending limit per session", "Counts the cost agents report. Once a session reaches it, new turns wait until you raise the limit or send anyway.", Ctl::Dropdown(options(&[("0", "No limit"), ("1", "$1"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100")]), st.session_limit_usd.to_string(), Rc::new(|s, v| s.session_limit_usd = v.parse().unwrap_or(0)))),
+                row("Spending limit per day", "Across every session. New turns wait once today's reported cost reaches it.", Ctl::Dropdown(options(&[("0", "No limit"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100"), ("250", "$250")]), st.daily_limit_usd.to_string(), Rc::new(|s, v| s.daily_limit_usd = v.parse().unwrap_or(0)))),
+                row("Agents running at once", "Turns past this many wait for a free slot, shown as Waiting for a slot, and start in order.", Ctl::Dropdown(options(&[("0", "No cap"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("6", "6"), ("8", "8")]), st.max_running.to_string(), Rc::new(|s, v| s.max_running = v.parse().unwrap_or(0)))),
+            ]),
+            section("Updates", "Runo looks for a newer release on GitHub and offers to download it. Nothing installs without you.", vec![
+                switch_row("Check for Runo updates", "Checks at start and every few hours.", st.check_runo_updates, |s, v| s.check_runo_updates = v),
+                row("Logs and crash reports", "Each launch writes a log, and crashes leave a report, in ~/.runo/logs.", Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
+            ]),
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
                 row(
@@ -898,7 +908,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::Connections => connection_sections(st),
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
             row("Worktree folder", "Created next to each repository as .runo-worktrees/<repo>/<branch>.", Ctl::Chip(".runo-worktrees".into(), 3)),
-            row("Runo data", "Projects and sessions are saved here. Settings live next to it in settings.json.", Ctl::Chip("~/.runo/state.json".into(), 3)),
+            row("Runo data", "Projects are saved in state.json and each session in its own file under sessions. Settings live next to them in settings.json.", Ctl::Chip("~/.runo".into(), 3)),
         ])],
     }
 }
