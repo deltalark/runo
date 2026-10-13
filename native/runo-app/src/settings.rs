@@ -46,6 +46,8 @@ pub struct AppSettings {
     pub accent: String,
     pub diff_colors: String,
     pub animations: bool,
+    /// Saved under a new name so the old default (off) no longer applies.
+    #[serde(rename = "desktop_notifications")]
     pub notifications: bool,
     pub confirm_delete: bool,
     pub remove_worktree_on_delete: bool,
@@ -111,10 +113,23 @@ pub struct AppSettings {
     pub approval_wait_mins: u32,
     /// Runs of each scheduled playbook to keep; 0 keeps them all.
     pub playbook_keep_runs: u32,
+    /// Run a scheduled playbook once on launch when it came due while Runo was closed.
+    pub playbook_catch_up: bool,
+    /// Run scheduled playbooks while Runo is closed, from a launchd agent (macOS).
+    pub playbooks_while_closed: bool,
     /// Ask before a playbook an agent asked for starts.
     pub confirm_agent_playbooks: bool,
     /// Give agents Cove's own tools (`cove mcp`): scratch VMs, commands, files, ports.
     pub cove_tools: bool,
+    /// Minutes without output before a running agent is flagged as maybe stuck; 0 never.
+    pub stuck_after_mins: u32,
+    /// Spending limits in US dollars, per session and per day; 0 for none.
+    pub session_limit_usd: u32,
+    pub daily_limit_usd: u32,
+    /// Agents that may run at the same time on this machine; 0 for no cap.
+    pub max_running: u32,
+    /// Look for a newer Runo on GitHub now and then.
+    pub check_runo_updates: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -139,7 +154,7 @@ impl Default for AppSettings {
             accent: "indigo".into(),
             diff_colors: "default".into(),
             animations: true,
-            notifications: false,
+            notifications: true,
             confirm_delete: true,
             remove_worktree_on_delete: true,
             send_on_enter: true,
@@ -176,8 +191,15 @@ impl Default for AppSettings {
             stop_on_denial: true,
             approval_wait_mins: 5,
             playbook_keep_runs: 10,
+            playbook_catch_up: true,
+            playbooks_while_closed: false,
             confirm_agent_playbooks: true,
             cove_tools: true,
+            stuck_after_mins: 10,
+            session_limit_usd: 0,
+            daily_limit_usd: 0,
+            max_running: 0,
+            check_runo_updates: true,
         }
     }
 }
@@ -249,6 +271,12 @@ impl AppSettings {
         SYNC_BACKUP_UNTRACKED.store(self.sync_backup_untracked, Ordering::Relaxed);
         STOP_ON_DENIAL.store(self.stop_on_denial, Ordering::Relaxed);
         KEEP_RUNS.store(self.playbook_keep_runs, Ordering::Relaxed);
+        STUCK_AFTER.store(self.stuck_after_mins, Ordering::Relaxed);
+        SESSION_LIMIT.store(self.session_limit_usd, Ordering::Relaxed);
+        DAILY_LIMIT.store(self.daily_limit_usd, Ordering::Relaxed);
+        MAX_RUNNING.store(self.max_running, Ordering::Relaxed);
+        CATCH_UP.store(self.playbook_catch_up, Ordering::Relaxed);
+        crate::pbrunner::sync_launch_agent(self.playbooks_while_closed);
         crate::terminal::configure(
             self.term_font_size,
             match self.term_scroll.as_str() {
@@ -301,6 +329,29 @@ static SYNC_BACKUP: AtomicBool = AtomicBool::new(false);
 static SYNC_BACKUP_UNTRACKED: AtomicBool = AtomicBool::new(false);
 static STOP_ON_DENIAL: AtomicBool = AtomicBool::new(true);
 static KEEP_RUNS: AtomicU32 = AtomicU32::new(10);
+static STUCK_AFTER: AtomicU32 = AtomicU32::new(10);
+static SESSION_LIMIT: AtomicU32 = AtomicU32::new(0);
+static DAILY_LIMIT: AtomicU32 = AtomicU32::new(0);
+static MAX_RUNNING: AtomicU32 = AtomicU32::new(0);
+
+/// Minutes of silence before an agent is flagged as maybe stuck; 0 never.
+pub fn stuck_after_mins() -> u32 {
+    STUCK_AFTER.load(Ordering::Relaxed)
+}
+
+/// Spending limits in US cents (session, day); 0 for none.
+pub fn spend_limits() -> (f64, f64) {
+    (
+        SESSION_LIMIT.load(Ordering::Relaxed) as f64 * 100.,
+        DAILY_LIMIT.load(Ordering::Relaxed) as f64 * 100.,
+    )
+}
+
+/// Agents allowed to run at once; 0 for no cap.
+pub fn max_running() -> usize {
+    MAX_RUNNING.load(Ordering::Relaxed) as usize
+}
+static CATCH_UP: AtomicBool = AtomicBool::new(true);
 
 pub fn cove_tools() -> bool {
     COVE_TOOLS.load(Ordering::Relaxed)
@@ -316,6 +367,10 @@ pub fn sync_backup_untracked() -> bool {
 
 pub fn playbook_keep_runs() -> usize {
     KEEP_RUNS.load(Ordering::Relaxed) as usize
+}
+
+pub fn playbook_catch_up() -> bool {
+    CATCH_UP.load(Ordering::Relaxed)
 }
 
 pub fn stop_on_denial() -> bool {

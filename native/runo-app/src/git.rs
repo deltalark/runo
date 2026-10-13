@@ -184,6 +184,162 @@ pub fn worktree_path(repo: &str, branch: &str) -> std::path::PathBuf {
     path
 }
 
+/// A branch name drawn from a task, such as `runo/fix-login-redirect` for "Fix the login
+/// redirect". Uses the first line's first few words; empty when it has no usable words.
+pub fn branch_slug(task: &str) -> String {
+    const SKIP: &[&str] = &[
+        "a", "an", "the", "please", "can", "could", "you", "to", "of", "for", "and", "in", "on",
+        "with",
+    ];
+    let line = task.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut slug = String::new();
+    for word in line
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_ascii_lowercase())
+        .filter(|w| !SKIP.contains(&w.as_str()))
+        .take(5)
+    {
+        if !slug.is_empty() && slug.len() + 1 + word.len() > 40 {
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        slug.push_str(&word[..word.len().min(40)]);
+    }
+    if slug.is_empty() {
+        slug
+    } else {
+        format!("runo/{slug}")
+    }
+}
+
+/// `wanted`, or `wanted-2`, `wanted-3`… when `taken` says the name is in use.
+pub fn unique_branch(wanted: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(wanted) {
+        return wanted.to_string();
+    }
+    (2..)
+        .map(|n| format!("{wanted}-{n}"))
+        .find(|name| !taken(name))
+        .unwrap_or_default()
+}
+
+/// Whether the repository has a local branch called `name`.
+pub fn has_branch(repo: &str, name: &str) -> bool {
+    exists(repo, &format!("refs/heads/{name}"))
+}
+
+/// Branches a new session can start from, most recently committed first: local ones, then
+/// the remote's that have no local copy (`remote` set). Names carry no remote prefix.
+pub fn branches(dir: &str) -> Vec<(String, bool)> {
+    let remote = remote_name(dir);
+    let remote_refs = format!("refs/remotes/{remote}");
+    let mut args = vec![
+        "for-each-ref",
+        "--sort=-committerdate",
+        "--format=%(refname)",
+        "refs/heads",
+    ];
+    if !remote.is_empty() {
+        args.push(&remote_refs);
+    }
+    let out = git(dir, &args).unwrap_or_default();
+    let mut local = Vec::new();
+    let mut remote_only = Vec::new();
+    for line in out.lines() {
+        if let Some(name) = line.strip_prefix("refs/heads/") {
+            local.push(name.to_string());
+        } else if let Some(name) = line
+            .strip_prefix(remote_refs.as_str())
+            .and_then(|n| n.strip_prefix('/'))
+        {
+            if name != "HEAD" {
+                remote_only.push(name.to_string());
+            }
+        }
+    }
+    remote_only.retain(|r| !local.contains(r));
+    local
+        .into_iter()
+        .map(|n| (n, false))
+        .chain(remote_only.into_iter().map(|n| (n, true)))
+        .collect()
+}
+
+/// The folder `git clone` makes for `url`: its last path part without `.git`.
+pub fn clone_dir_name(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches(['/', '\\']);
+    let last = trimmed.rsplit(['/', '\\', ':']).next().unwrap_or(trimmed);
+    last.strip_suffix(".git").unwrap_or(last).to_string()
+}
+
+/// Clone `url` into `dest`, handing each progress line git prints to `progress`.
+pub fn clone(url: &str, dest: &Path, mut progress: impl FnMut(&str)) -> Result<(), String> {
+    use std::io::Read;
+    let occupied = std::fs::read_dir(dest).is_ok_and(|mut d| d.next().is_some());
+    if occupied || dest.is_file() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    let mut child = Command::new("git")
+        .arg("clone")
+        .arg("--progress")
+        .arg("--")
+        .arg(url.trim())
+        .arg(dest)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run git: {error}"))?;
+    // Progress lines end in \r while they update and \n once done.
+    let mut all = String::new();
+    let mut line = Vec::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            for &byte in &buf[..n] {
+                if byte != b'\r' && byte != b'\n' {
+                    line.push(byte);
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&line).trim().to_string();
+                if !text.is_empty() {
+                    progress(&text);
+                    all.push_str(&text);
+                    all.push('\n');
+                }
+                line.clear();
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("could not run git: {error}"))?;
+    if status.success() {
+        return Ok(());
+    }
+    all.push_str(String::from_utf8_lossy(&line).trim());
+    let errors: Vec<&str> = all
+        .lines()
+        .filter(|l| l.starts_with("fatal:") || l.starts_with("error:") || l.starts_with("ERROR"))
+        .collect();
+    let why = if errors.is_empty() {
+        all.lines()
+            .rfind(|l| !l.trim().is_empty())
+            .unwrap_or("git clone failed")
+            .to_string()
+    } else {
+        errors.join("\n")
+    };
+    Err(auth_hint(&why))
+}
+
 /// The remote to fetch from and push to: `origin`, else the first one, else empty.
 pub fn remote_name(dir: &str) -> String {
     let remotes = git(dir, &["remote"]).unwrap_or_default();
@@ -272,9 +428,29 @@ pub fn base_ref(dir: &str, base: &str) -> String {
     }
 }
 
+/// Whether the repository has a commit checked out; a fresh `git init` has none.
+pub fn has_commits(dir: &str) -> bool {
+    exists(dir, "HEAD")
+}
+
+/// Make an empty first commit, so branches and worktrees have somewhere to start.
+pub fn initial_commit(dir: &str) -> Result<(), String> {
+    git(
+        dir,
+        &["commit", "--allow-empty", "--quiet", "-m", "Initial commit"],
+    )
+    .map(|_| ())
+}
+
 /// Create the session worktree on a new (or existing) branch. A new branch starts at
 /// `start` (a commit-ish such as `origin/main`), or at HEAD when `None`.
 pub fn add_worktree(repo: &str, branch: &str, start: Option<&str>) -> Result<String, String> {
+    if !has_commits(repo) {
+        return Err(
+            "the repository has no commits yet. Make a first commit, then start the session again."
+                .into(),
+        );
+    }
     let dest = worktree_path(repo, branch);
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
@@ -290,6 +466,18 @@ pub fn add_worktree(repo: &str, branch: &str, start: Option<&str>) -> Result<Str
         git(repo, &args)?;
     }
     Ok(dest_str)
+}
+
+/// A new worktree on `branch` holding the folder as checkpoint `cp` saw it: the branch
+/// starts at the commit it was on, and uncommitted work comes along.
+pub fn fork_worktree(repo: &str, branch: &str, cp: &str) -> Result<String, String> {
+    let (head, _) = checkpoint_parts(repo, cp);
+    let dir = add_worktree(repo, branch, head.as_deref())?;
+    if let Err(error) = restore(&dir, cp, None) {
+        let _ = remove_worktree(repo, &dir);
+        return Err(error);
+    }
+    Ok(dir)
 }
 
 /// A worktree at `start` with no branch checked out, for a branch made inside it later
@@ -1305,7 +1493,8 @@ mod tests {
         sh(&repo, &["init", "-q"]);
         sh(&repo, &["config", "user.email", "t@t"]);
         sh(&repo, &["config", "user.name", "t"]);
-        repo
+        // Git reports real paths, and on a Mac the temporary folder is a symlink.
+        repo.canonicalize().unwrap()
     }
 
     #[test]
@@ -1347,6 +1536,42 @@ mod tests {
             .is_empty());
         assert!(patch_for_message(dir, 10_000).contains("draft.txt"));
         assert!(file_diff_context(dir, "a.txt", true, "HEAD").contains("+two"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn forks_carry_uncommitted_work_at_the_checkpoint() {
+        let repo = repo("fork");
+        let dir = repo.to_str().unwrap();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("gone.txt"), "x\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        std::fs::write(repo.join("draft.txt"), "draft\n").unwrap();
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        let cp = checkpoint(dir).unwrap();
+        // Later work in the original folder stays out of the fork.
+        std::fs::write(repo.join("a.txt"), "three\n").unwrap();
+        sh(&repo, &["commit", "-q", "-am", "later"]);
+        let fork = std::path::PathBuf::from(fork_worktree(dir, "runo/fork-test", &cp).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(fork.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fork.join("draft.txt")).unwrap(),
+            "draft\n"
+        );
+        assert!(!fork.join("gone.txt").exists());
+        let fork_dir = fork.to_str().unwrap();
+        assert_eq!(current_branch(fork_dir), "runo/fork-test");
+        assert_eq!(
+            git(fork_dir, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "init"
+        );
+        let _ = remove_worktree(dir, fork_dir);
+        let _ = std::fs::remove_dir_all(worktree_path(dir, "runo/fork-test"));
         let _ = std::fs::remove_dir_all(&repo);
     }
 
@@ -1472,6 +1697,23 @@ index 1..2 100644
         assert_eq!(found.len(), 1);
         assert_eq!((found[0].status.as_str(), found[0].added), ("A", 1));
         assert!(file_diff(dir, "first.txt").contains("+hello"));
+        // No worktree can branch from nothing; an empty first commit fixes that.
+        assert!(!has_commits(dir));
+        let error = add_worktree(dir, "runo/fresh", Some("HEAD")).unwrap_err();
+        assert!(error.contains("no commits"));
+        initial_commit(dir).unwrap();
+        assert!(has_commits(dir));
+        let tree = add_worktree(dir, "runo/fresh", Some("HEAD")).unwrap();
+        assert_eq!(current_branch(&tree), "runo/fresh");
+        // The work in progress stays in the project folder, uncommitted.
+        assert_eq!(changes(dir).len(), 1);
+        remove_worktree(dir, &tree).unwrap();
+        let _ = std::fs::remove_dir_all(
+            repo.parent()
+                .unwrap()
+                .join(".runo-worktrees")
+                .join(repo.file_name().unwrap()),
+        );
         let _ = std::fs::remove_dir_all(repo);
     }
 
@@ -1501,6 +1743,7 @@ index 1..2 100644
         let root = std::env::temp_dir().join(format!("runo-test-{}", std::process::id()));
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
         sh(&repo, &["init", "-q"]);
         sh(&repo, &["config", "user.email", "t@t"]);
         sh(&repo, &["config", "user.name", "t"]);
@@ -1930,6 +2173,65 @@ index 1..2 100644
         assert_eq!(grep(dir, "hello", 1), (hits[..1].to_vec(), true));
         assert!(grep(dir, "nothing-like-this", 10).0.is_empty());
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn branch_names_come_from_the_task() {
+        assert_eq!(
+            branch_slug("Fix the login redirect\nmore detail"),
+            "runo/fix-login-redirect"
+        );
+        assert_eq!(
+            branch_slug("\n  Please add a dark-mode toggle to the Settings page"),
+            "runo/add-dark-mode-toggle-settings"
+        );
+        assert_eq!(branch_slug("修复 bug"), "runo/bug");
+        assert_eq!(branch_slug("!!! ???"), "");
+        assert!(branch_slug(&"x".repeat(80)).len() <= "runo/".len() + 40);
+        let taken = ["runo/a", "runo/a-2"];
+        assert_eq!(unique_branch("runo/a", |b| taken.contains(&b)), "runo/a-3");
+        assert_eq!(unique_branch("runo/b", |b| taken.contains(&b)), "runo/b");
+    }
+
+    #[test]
+    fn clone_names_follow_the_url() {
+        assert_eq!(clone_dir_name("https://github.com/a/runo.git"), "runo");
+        assert_eq!(clone_dir_name("git@github.com:a/runo.git/"), "runo");
+        assert_eq!(clone_dir_name("git@host:runo"), "runo");
+        assert_eq!(clone_dir_name("/srv/repos/app"), "app");
+    }
+
+    #[test]
+    fn clones_list_their_branches() {
+        let origin = repo("clone-src");
+        std::fs::write(origin.join("a.txt"), "one\n").unwrap();
+        sh(&origin, &["add", "-A"]);
+        sh(&origin, &["commit", "-q", "-m", "init"]);
+        sh(&origin, &["branch", "feature"]);
+        let dest = std::env::temp_dir().join(format!("runo-git-clone-dst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        let mut lines = Vec::new();
+        clone(origin.to_str().unwrap(), &dest, |l| {
+            lines.push(l.to_string())
+        })
+        .unwrap();
+        assert!(dest.join("a.txt").exists());
+        assert!(!lines.is_empty());
+        // Cloning again into the same folder fails with a clear reason.
+        let again = clone(origin.to_str().unwrap(), &dest, |_| {}).unwrap_err();
+        assert!(again.contains("already exists"));
+        let d = dest.to_str().unwrap();
+        let listed = branches(d);
+        let current = current_branch(d);
+        assert_eq!(listed.first(), Some(&(current.clone(), false)));
+        assert!(listed.contains(&("feature".to_string(), true)));
+        assert!(!listed.iter().any(|(n, _)| n == "HEAD"));
+        assert!(has_branch(d, &current));
+        assert!(!has_branch(d, "feature"));
+        let missing = dest.with_extension("missing");
+        assert!(clone("/no/such/repo", &missing, |_| {}).is_err());
+        let _ = std::fs::remove_dir_all(&dest);
+        let _ = std::fs::remove_dir_all(&origin);
     }
 
     #[test]

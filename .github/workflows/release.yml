@@ -1,0 +1,101 @@
+# Builds Runo.app for Apple silicon and Intel Macs on a version tag (v1.2.3) and attaches
+# a zip and a disk image of each to the GitHub release. Runo's in-app updater downloads
+# these files. Signing and notarization run only when their secrets are set.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x86_64
+    env:
+      APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --locked
+
+      - name: Build Runo.app
+        working-directory: native/runo-app
+        run: cargo bundle --release --target ${{ matrix.target }}
+
+      - name: Find the app
+        id: app
+        run: |
+          app="target/${{ matrix.target }}/release/bundle/osx/Runo.app"
+          test -d "$app"
+          echo "path=$app" >> "$GITHUB_OUTPUT"
+          echo "name=Runo-${GITHUB_REF_NAME#v}-macos-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+
+      - name: Import the signing certificate
+        if: env.APPLE_CERT_P12 != '' && env.APPLE_CERT_PASSWORD != ''
+        run: |
+          keychain="$RUNNER_TEMP/runo.keychain-db"
+          echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p runo "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p runo "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k runo "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign the app
+        if: env.APPLE_CERT_P12 != '' && env.APPLE_CERT_PASSWORD != ''
+        run: |
+          identity=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          test -n "$identity"
+          codesign --force --deep --options runtime --timestamp --sign "$identity" "${{ steps.app.outputs.path }}"
+          codesign --verify --deep --strict "${{ steps.app.outputs.path }}"
+
+      - name: Notarize the app
+        if: env.APPLE_CERT_P12 != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          ditto -c -k --keepParent "${{ steps.app.outputs.path }}" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "${{ steps.app.outputs.path }}"
+
+      - name: Package a zip and a disk image
+        run: |
+          mkdir -p dist dmg
+          ditto -c -k --keepParent "${{ steps.app.outputs.path }}" "dist/${{ steps.app.outputs.name }}.zip"
+          cp -R "${{ steps.app.outputs.path }}" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname Runo -srcfolder dmg -ov -format UDZO "dist/${{ steps.app.outputs.name }}.dmg"
+
+      - name: Sign and notarize the disk image
+        if: env.APPLE_CERT_P12 != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          identity=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          codesign --force --timestamp --sign "$identity" "dist/${{ steps.app.outputs.name }}.dmg"
+          xcrun notarytool submit "dist/${{ steps.app.outputs.name }}.dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "dist/${{ steps.app.outputs.name }}.dmg"
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

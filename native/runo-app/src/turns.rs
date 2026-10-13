@@ -4,9 +4,19 @@
 use super::*;
 use crate::store::Queued;
 
+/// An entry of the composer's `/` menu.
+#[derive(Clone)]
+pub(crate) enum SlashPick {
+    Playbook(u64),
+    Command(agentcmds::Command),
+}
+
 /// Most recent conversation, written into follow-ups for CLIs that cannot resume.
 const CONTEXT_MESSAGES: usize = 8;
 const CONTEXT_CHARS: usize = 1500;
+/// Earlier requests summed up in one line each, before the recent conversation.
+const EARLIER_REQUESTS: usize = 10;
+const EARLIER_CHARS: usize = 120;
 
 impl RunoApp {
     /// Start one agent turn: snapshot the worktree, then launch the CLI.
@@ -54,6 +64,15 @@ impl RunoApp {
                 "This session is open in the CLI. The prompt is queued for when you switch back to Chat."
                     .into(),
             );
+            return;
+        }
+        // A spending limit or the cap on running agents holds the prompt in the queue.
+        if let Some(why) = self.hold_turn(id) {
+            if let Some(s) = self.state.session_mut(id) {
+                s.queue.insert(0, Queued::new(prompt, images));
+            }
+            self.save();
+            self.info = Some((why, std::time::Instant::now()));
             return;
         }
         let demo = self.demo;
@@ -110,7 +129,14 @@ impl RunoApp {
                     2,
                 );
                 let name = agent::provider(&provider).name;
-                format!("{}\n{recent}", handoff::digest(&session.messages, name))
+                let from = crate::chatctl::context_from(&session.messages);
+                let digest = handoff::digest(&session.messages[from..], name);
+                // After a compact, its summary stands in for what came before.
+                if from > 0 && !session.carried.is_empty() {
+                    format!("{}\n\n{digest}\n{recent}", session.carried)
+                } else {
+                    format!("{digest}\n{recent}")
+                }
             } else {
                 let recent =
                     context_prompt(&session.messages[session.conversation_start..], &prompt);
@@ -233,6 +259,13 @@ impl RunoApp {
             return;
         }
         let dir = session.dir.clone();
+        let asked = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.text.clone())
+            .unwrap_or_default();
         let taken: std::collections::HashSet<String> = self
             .state
             .sessions
@@ -248,7 +281,9 @@ impl RunoApp {
                     .map(|h| std::path::PathBuf::from(h).join(".copilot"))
             })
             .map(|p| p.join("session-state"));
-        if let Some(found) = root.and_then(|r| newest_copilot_session(&r, &dir, since, &taken)) {
+        if let Some(found) =
+            root.and_then(|r| newest_copilot_session(&r, &dir, &asked, since, &taken))
+        {
             if let Some(s) = self.state.session_mut(id) {
                 s.agent_session = found;
             }
@@ -268,6 +303,17 @@ impl RunoApp {
         // Servers Runo merged into the agent's project file go before the snapshot.
         if let Some(s) = self.state.session(id) {
             crate::mcp::clean_project(std::path::Path::new(&s.dir));
+            // Gemini resumes by the conversation's number in its list for the folder.
+            if s.provider == "gemini" && !s.agent_session.is_empty() && s.sandbox().is_none() {
+                crate::gemini::learn_sessions(
+                    crate::caps::binary(agent::provider("gemini")),
+                    s.dir.clone(),
+                );
+            }
+        }
+        // A pull request's state, and a review the agent wrote for it, show right away.
+        if self.state.session(id).is_some_and(|s| !s.pr_url.is_empty()) {
+            self.load_pr_status(id);
         }
         let checkpoint = self.state.session(id).and_then(|s| {
             s.messages
@@ -420,6 +466,7 @@ impl RunoApp {
         };
         // While the agent or its setup command runs, the prompt and its images wait.
         if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+            self.editing = None;
             if let Some(session) = self.state.session_mut(id) {
                 session.queue.push(Queued::new(text, images));
             }
@@ -434,12 +481,35 @@ impl RunoApp {
             .current()
             .map(|s| cx.global::<AppSettings>().agent(&s.provider))
             .unwrap_or_default();
+        // An edited message replaces the one it came from.
+        if let Some((_, index)) = self.editing.filter(|(e, _)| *e == id) {
+            self.editing = None;
+            self.resend_from(id, index, text, images, cx);
+            return;
+        }
+        if playbook.is_none() && images.is_empty() && self.run_chat_command(id, &text, &opts) {
+            return;
+        }
+        // `codex exec` takes prompts as written, so its saved prompts are expanded here.
+        let codex_prompt = self
+            .current()
+            .filter(|s| s.provider == "codex" && playbook.is_none())
+            .and_then(|_| agentcmds::expand_codex(&text, agentcmds::home().as_deref()))
+            .map(|expanded| (expanded, text.clone()));
+        let text = codex_prompt
+            .as_ref()
+            .map(|(expanded, _)| expanded.clone())
+            .unwrap_or(text);
         let before = self.current().map_or(0, |s| s.messages.len());
         self.start_turn(id, text, images, &opts);
         // Only when the turn really started; an open CLI queues it instead.
         let started = self.current().map_or(0, |s| s.messages.len()) > before;
         if let (Some((name, _)), true) = (playbook, started) {
             self.tag_playbook(id, &name, &typed);
+        }
+        if let (Some((_, typed)), true) = (codex_prompt, started) {
+            let (name, note) = typed.trim().split_once(' ').unwrap_or((typed.trim(), ""));
+            self.tag_playbook(id, name, note.trim());
         }
     }
 
@@ -747,10 +817,17 @@ impl RunoApp {
         let text = self.prompt.read(cx).value().to_string();
         self.mention = mention_query(&text);
         self.slash = slash_query(&text);
+        if self.slash.is_some() {
+            self.load_agent_commands();
+        } else {
+            // Read again next time, so new command files show up.
+            self.agent_commands = None;
+        }
     }
 
-    /// Playbooks matching the `/query`, best first.
-    pub(crate) fn slash_matches(&self) -> Vec<u64> {
+    /// Playbooks and the agent's own commands matching the `/query`, best first. A command
+    /// typed out in full goes first; otherwise playbooks lead.
+    pub(crate) fn slash_matches(&self) -> Vec<SlashPick> {
         let Some(query) = &self.slash else {
             return Vec::new();
         };
@@ -773,19 +850,68 @@ impl RunoApp {
             })
             .collect();
         hits.sort_by_key(|(rank, a)| (*rank, a.name.len()));
-        hits.into_iter().take(8).map(|(_, a)| a.id).collect()
+        let mut out: Vec<SlashPick> = hits
+            .into_iter()
+            .take(8)
+            .map(|(_, a)| SlashPick::Playbook(a.id))
+            .collect();
+        let commands = self
+            .agent_commands
+            .as_ref()
+            .filter(|(sid, _)| Some(*sid) == self.selected)
+            .map(|(_, c)| agentcmds::matching(c, &q))
+            .unwrap_or_default();
+        for c in commands.into_iter().take(12) {
+            let pick = SlashPick::Command(c.clone());
+            if c.name.to_lowercase() == q {
+                out.insert(0, pick);
+            } else {
+                out.push(pick);
+            }
+        }
+        out
     }
 
-    /// Use a playbook from the `/` menu: put its prompt in the box for this session, or
-    /// start it as its own session in this project.
+    /// Read the agent's commands for the selected session when the `/` menu opens.
+    fn load_agent_commands(&mut self) {
+        let Some((id, provider, dir)) = self
+            .current()
+            .map(|s| (s.id, s.provider.clone(), s.dir.clone()))
+        else {
+            return;
+        };
+        if self
+            .agent_commands
+            .as_ref()
+            .is_some_and(|(sid, _)| *sid == id)
+        {
+            return;
+        }
+        let home = agentcmds::home();
+        let found = agentcmds::discover(&provider, std::path::Path::new(&dir), home.as_deref());
+        self.agent_commands = Some((id, found));
+    }
+
+    /// Use an entry of the `/` menu. A playbook goes in the box for this session, or starts
+    /// as its own session in this project; an agent command is typed into the box.
     pub(crate) fn pick_slash(
         &mut self,
-        playbook: u64,
+        pick: SlashPick,
         new_session: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.slash = None;
+        let playbook = match pick {
+            SlashPick::Playbook(id) => id,
+            SlashPick::Command(command) => {
+                self.prompt.update(cx, |p, cx| {
+                    p.set_value(format!("/{} ", command.name), window, cx);
+                    p.focus(window, cx);
+                });
+                return;
+            }
+        };
         let Some(asks) = self
             .state
             .automations
@@ -1458,15 +1584,17 @@ impl RunoApp {
                 .last()
                 .is_some_and(|m| m.role == Role::System)
             && session.messages.iter().any(|m| m.role == Role::User);
+        let edit_bar = self.edit_bar(cx);
         if session.queue.is_empty()
             && attached.is_empty()
             && matches.is_empty()
             && playbooks.is_empty()
             && !retry
+            && edit_bar.is_none()
         {
             return None;
         }
-        let mut col = div().v_flex().gap_1();
+        let mut col = div().v_flex().gap_1().children(edit_bar);
         if retry {
             col = col.child(
                 div()
@@ -1505,6 +1633,9 @@ impl RunoApp {
                             })),
                     ),
             );
+        }
+        if let Some(line) = self.held_line(id, cx) {
+            col = col.child(line);
         }
         for (i, queued) in session.queue.iter().enumerate() {
             let images = queued.images.len();
@@ -1661,69 +1792,112 @@ impl RunoApp {
                 .border_1()
                 .border_color(rgb(c_border()))
                 .bg(rgb(c_raised()))
-                .shadow_lg()
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_size(px(11.))
-                        .text_color(rgb(c_muted()))
-                        .child(format!(
+                .shadow_lg();
+            let heading = |text: String| {
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_muted()))
+                    .child(text)
+            };
+            let mut section = None;
+            for (i, pick) in playbooks.into_iter().enumerate() {
+                let is_playbook = matches!(pick, SlashPick::Playbook(_));
+                if section != Some(is_playbook) {
+                    section = Some(is_playbook);
+                    list = list.child(heading(if is_playbook {
+                        format!(
                             "PLAYBOOKS · Enter adds it to this message · {}↵ starts a new session",
                             if cfg!(target_os = "macos") {
                                 "⌘"
                             } else {
                                 "Ctrl+"
                             }
-                        )),
-                );
-            for (i, id) in playbooks.into_iter().enumerate() {
-                let Some(a) = self.state.automations.iter().find(|a| a.id == id) else {
-                    continue;
-                };
-                list = list.child(
-                    div()
-                        .id(("slash", i))
-                        .min_h(px(30.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .when(i == 0, |el| el.bg(tint(c_active())))
-                        .hover(|el| el.bg(tint(c_active())))
-                        .text_size(px(12.5))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.pick_slash(id, false, window, cx);
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::BookOpen, 12., c_muted()))
-                        .child(div().flex_none().child(format!("/{}", a.slug())))
+                        )
+                    } else {
+                        format!(
+                            "{} COMMANDS · Enter puts it in the message",
+                            agent::provider(&session.provider).name.to_uppercase()
+                        )
+                    }));
+                }
+                let row = div()
+                    .id(("slash", i))
+                    .min_h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(i == 0, |el| el.bg(tint(c_active())))
+                    .hover(|el| el.bg(tint(c_active())))
+                    .text_size(px(12.5));
+                let picked = pick.clone();
+                let row = row.on_click(cx.listener(move |this, _, window, cx| {
+                    this.pick_slash(picked.clone(), false, window, cx);
+                    cx.notify();
+                }));
+                let entry = match pick {
+                    SlashPick::Playbook(id) => {
+                        let Some(a) = self.state.automations.iter().find(|a| a.id == id) else {
+                            continue;
+                        };
+                        row.child(icon(IconName::BookOpen, 12., c_muted()))
+                            .child(div().flex_none().child(format!("/{}", a.slug())))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(rgb(c_muted()))
+                                    .child(a.summary()),
+                            )
+                            .child(
+                                self.ghost_button_sized(
+                                    ("slash-run", i),
+                                    IconName::Play,
+                                    "Start as a new session",
+                                    22.,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.pick_slash(SlashPick::Playbook(id), true, window, cx);
+                                        cx.notify();
+                                    },
+                                )),
+                            )
+                    }
+                    SlashPick::Command(c) => row
+                        .child(icon(
+                            if c.source == agentcmds::Source::Skill {
+                                IconName::Sparkles
+                            } else {
+                                IconName::SquareSlash
+                            },
+                            12.,
+                            c_muted(),
+                        ))
+                        .child(div().flex_none().child(format!("/{}", c.name)))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .text_color(rgb(c_muted()))
-                                .child(a.summary()),
+                                .child(c.description.clone()),
                         )
                         .child(
-                            self.ghost_button_sized(
-                                ("slash-run", i),
-                                IconName::Play,
-                                "Start as a new session",
-                                22.,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.pick_slash(id, true, window, cx);
-                                    cx.notify();
-                                },
-                            )),
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(rgb(c_muted()))
+                                .child(c.source.label()),
                         ),
-                );
+                };
+                list = list.child(entry);
             }
             col = col.child(list);
         }
@@ -1815,6 +1989,29 @@ pub fn context_prompt_last(messages: &[Message], prompt: &str, keep: usize) -> S
         .collect();
     let start = recent.len().saturating_sub(keep);
     let mut out = String::from("Our conversation so far:\n");
+    // What fell out of the window still shows, as one line per earlier request.
+    let earlier: Vec<String> = recent[..start]
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| {
+            let line = m.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            let mut line: String = line.trim().chars().take(EARLIER_CHARS).collect();
+            if m.text.trim().chars().count() > line.chars().count() {
+                line.push('…');
+            }
+            line
+        })
+        .collect();
+    if !earlier.is_empty() {
+        let skipped = earlier.len().saturating_sub(EARLIER_REQUESTS);
+        out.push_str("\nEarlier, I asked you to:\n");
+        if skipped > 0 {
+            out.push_str(&format!("- ({skipped} more before these)\n"));
+        }
+        for line in &earlier[skipped..] {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
     for m in &recent[start..] {
         let who = if m.role == Role::User { "Me" } else { "You" };
         let mut text: String = m.text.chars().take(CONTEXT_CHARS).collect();
@@ -1854,7 +2051,7 @@ pub fn complete_mention(text: &str, path: &str) -> String {
     }
 }
 
-fn is_image(path: &std::path::Path) -> bool {
+pub(crate) fn is_image(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| {
@@ -1880,7 +2077,7 @@ fn attachments_dir(dir: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Add `/.runo/` to the repository's `info/exclude`, once.
-fn exclude_runo_folder(dir: &str) {
+pub(crate) fn exclude_runo_folder(dir: &str) {
     let Ok(out) = std::process::Command::new("git")
         .args(["-C", dir, "rev-parse", "--git-path", "info/exclude"])
         .stdin(std::process::Stdio::null())
@@ -1941,15 +2138,17 @@ fn copy_image(dir: &str, image: &std::path::Path) -> Option<String> {
 }
 
 /// The newest Copilot session written since `since` that ran in `dir` and no other
-/// session uses: a folder `<id>/` or a file `<id>.jsonl` under `root`.
+/// session uses: a folder `<id>/` or a file `<id>.jsonl` under `root`. Of several, the
+/// one that holds `prompt` wins.
 pub fn newest_copilot_session(
     root: &std::path::Path,
     dir: &str,
+    prompt: &str,
     since: std::time::SystemTime,
     taken: &std::collections::HashSet<String>,
 ) -> Option<String> {
     use std::io::Read;
-    let mentions_dir = |path: &std::path::Path| {
+    let head = |path: &std::path::Path| -> String {
         let files: Vec<std::path::PathBuf> = if path.is_dir() {
             std::fs::read_dir(path)
                 .into_iter()
@@ -1961,15 +2160,28 @@ pub fn newest_copilot_session(
         } else {
             vec![path.to_path_buf()]
         };
-        files.iter().any(|file| {
+        let mut text = String::new();
+        for file in files {
             let mut head = Vec::new();
-            std::fs::File::open(file)
+            if std::fs::File::open(&file)
                 .and_then(|f| f.take(256 * 1024).read_to_end(&mut head))
                 .is_ok()
-                && String::from_utf8_lossy(&head).contains(dir)
-        })
+            {
+                text.push_str(&String::from_utf8_lossy(&head));
+                text.push('\n');
+            }
+        }
+        text
     };
-    std::fs::read_dir(root)
+    // The prompt's first line as it appears in Copilot's JSON log.
+    let asked = prompt
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().chars().take(60).collect::<String>())
+        .and_then(|l| serde_json::to_string(&l).ok())
+        .map(|l| l.trim_matches('"').to_string())
+        .filter(|l| !l.is_empty());
+    let candidates: Vec<(std::time::SystemTime, String, String)> = std::fs::read_dir(root)
         .ok()?
         .flatten()
         .filter_map(|e| {
@@ -1984,9 +2196,37 @@ pub fn newest_copilot_session(
             };
             (modified >= since && !taken.contains(&id)).then_some((modified, id, path))
         })
-        .filter(|(_, _, path)| mentions_dir(path))
-        .max_by_key(|(modified, ..)| *modified)
-        .map(|(_, id, _)| id)
+        .map(|(modified, id, path)| (modified, id, head(&path)))
+        .filter(|(_, _, text)| mentions_folder(text, dir))
+        .collect();
+    // Two sessions working in one folder at once are told apart by what was asked.
+    let newest = |list: Vec<&(std::time::SystemTime, String, String)>| {
+        list.into_iter()
+            .max_by_key(|(modified, ..)| *modified)
+            .map(|(_, id, _)| id.clone())
+    };
+    asked
+        .and_then(|asked| newest(candidates.iter().filter(|c| c.2.contains(&asked)).collect()))
+        .or_else(|| newest(candidates.iter().collect()))
+}
+
+/// Whether `text` names the folder `dir` itself or a path inside it, not merely a folder
+/// whose name starts the same ("/work/s-1" is not in "/work/s-12").
+fn mentions_folder(text: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if dir.is_empty() {
+        return false;
+    }
+    // JSON doubles the backslashes of Windows paths.
+    let escaped = dir.replace('\\', "\\\\");
+    [dir.to_string(), escaped].iter().any(|dir| {
+        text.match_indices(dir.as_str()).any(|(at, _)| {
+            !text[at + dir.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -1994,6 +2234,48 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn copilot_sessions_match_their_own_folder_and_prompt() {
+        let root = std::env::temp_dir().join(format!("runo-copilot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |id: &str, cwd: &str, prompt: &str| {
+            let dir = root.join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("workspace.yaml"),
+                format!("id: {id}\ncwd: {cwd}\n"),
+            )
+            .unwrap();
+            let event = serde_json::json!({"type": "user.message", "data": {"content": prompt}});
+            std::fs::write(dir.join("events.jsonl"), format!("{event}\n")).unwrap();
+        };
+        write("a", "/work/s-12", "Add docs");
+        write("b", "/work/s-1", "Add docs");
+        write("c", "/work/s-1", "Fix the \"login\" test");
+        let since = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let none = std::collections::HashSet::new();
+        let find = |dir, prompt| newest_copilot_session(&root, dir, prompt, since, &none);
+        assert_eq!(find("/work/s-1", "Add docs").as_deref(), Some("b"));
+        assert_eq!(
+            find("/work/s-1", "Fix the \"login\" test").as_deref(),
+            Some("c")
+        );
+        assert_eq!(find("/work/s-12", "Add docs").as_deref(), Some("a"));
+        assert_eq!(find("/work/s", "Add docs"), None);
+        let taken = ["b".to_string()].into_iter().collect();
+        assert_eq!(
+            newest_copilot_session(&root, "/work/s-1", "Add docs", since, &taken).as_deref(),
+            Some("c")
+        );
+        assert!(mentions_folder("cwd: /work/s-1\n", "/work/s-1/"));
+        assert!(mentions_folder(
+            r#"{"path":"C:\\w\\s-1\\a.rs"}"#,
+            r"C:\w\s-1"
+        ));
+        assert!(!mentions_folder(r#"{"path":"C:\\w\\s-12"}"#, r"C:\w\s-1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn commit_messages_are_cleaned() {
@@ -2041,7 +2323,10 @@ mod tests {
         assert!(!prompt.contains("ignored"));
         assert!(prompt.ends_with("Now: Now document it"));
         let long = context_prompt(&messages, "x");
-        assert!(!long.contains("Add a flag"));
-        assert!(long.contains("turn 9"));
+        assert!(!long.contains("Me: Add a flag"));
+        assert!(long.contains("Me: turn 9"));
+        // Requests that fell out of the window are still listed, one line each.
+        assert!(long.contains("Earlier, I asked you to:\n- Add a flag\n- turn 0\n"));
+        assert!(!long.contains("Added --verbose."));
     }
 }

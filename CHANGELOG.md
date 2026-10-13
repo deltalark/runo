@@ -25,6 +25,22 @@ All notable changes to Runo are documented here.
 - Top bar: the project switcher handles empty projects, the Agents pill lists running agents to open or stop, spend shows today, the branch and breadcrumb are clickable, and Runs on shows the session's real connection and moves it.
 - Home follows the top-bar project with an All projects toggle and Add project. Reviews follows it too and badges only review requests and failed checks. A project whose folder is gone offers Relink or Remove.
 - App menu with Quit, and the window reopens from the Dock on macOS. Closing the last tab stays in Sessions, the tour starts in Sessions, existing users get a one-time What's new card, shortcut hints follow your keybindings, and blank session names are refused.
+- Local agent turns keep running when Runo closes or crashes; Runo follows them again on its next start instead of marking them Interrupted.
+- Limits in Settings → General: a card with Stop when an agent goes quiet for too long, spending limits per session and per day that hold new turns (with Send anyway), and a cap on agents running at once with a visible "Waiting for a slot".
+- A log file per launch and crash reports in `~/.runo/logs`, with a card on the next start to view or report a crash.
+- Runo checks GitHub for a newer release and offers to download it; nothing installs on its own. A release workflow builds signed and notarized macOS zips and disk images when the signing secrets are set.
+- Each session is saved in its own file under `~/.runo/sessions`, only when it changed and off the UI thread. The old `state.json` is split on first start and kept as `state.json.v1-backup`.
+- Chat context control: /compact (Claude Code's own, else a fresh conversation seeded with a summary) and /clear, also in the session's right-click menu. Fork a session from any turn, with the files as they were then, and edit and resend any sent message, which rewinds the files and conversation or sends it as a fork.
+- The / menu lists the agent's own commands besides playbooks: its built-ins, custom commands (.claude/commands, ~/.codex/prompts, .gemini/commands and the equivalents of other CLIs) and Claude Code skills.
+- Sessions page: search over titles, branches, projects and past conversations (matches show a snippet), filters for project, agent, status and archived, and sort by recent, created or name. Quick open lists archived sessions (marked) and sessions whose conversation mentions what you type.
+- New session: pick the base branch (local or remote) and get a branch named after the task, such as `runo/fix-login-redirect`, numbered when taken.
+- New project can clone a repository from a URL into a folder you choose, with git's progress and errors shown, then adds it.
+- Design mode: collect design references per project (pasted or picked images, captures of the preview) with notes, keep design notes in `docs/design.md`, see the app's dev server beside them, and start a session with the picked references attached.
+- Architecture mode: a map of the project's packages, dependencies and module imports read from its manifests and code, architecture notes and decisions kept in `docs/architecture.md` with a generated Mermaid diagram, and agent sessions that start with both attached.
+- Reviews refreshes every five minutes in the background, filters pull requests and issues by state, author and review request, loads past 30 with Load more, and lets you pick the agent for sessions started there.
+- Review this PR: the agent writes its review to `.runo/review.json`, and Post review shows it for confirmation, then posts it to GitHub with its line comments.
+- Playbook schedules can run at a time of day on chosen weekdays, or on a cron expression. Runs missed while Runo was closed catch up once on launch (Settings can turn this off).
+- On macOS, scheduled playbooks can run while Runo is closed, from a launchd job; their runs show up as sessions when Runo opens.
 
 ### Fixed
 
@@ -71,3 +87,13 @@ All notable changes to Runo are documented here.
 - Terminal: dim and strikethrough text are drawn (vt100 is now vendored with both attributes).
 - Cursor, Gemini CLI and Droid get Runo's memory server and shared MCP servers through their project config file, merged with yours, kept out of git and removed after each turn. Grok has no project-level MCP config, so it still gets none.
 - Settings → MCP adds and edits Runo's own servers in a form (name, command or URL, environment) instead of a JSON file.
+- The CLI view and terminals pass middle and right clicks, drags and the wheel to programs that turn on mouse reporting, at the cell under the pointer; Shift keeps local selection.
+
+- A repository with no commits no longer fails to start an isolated session: Runo's git init makes a first empty commit, and otherwise the session runs in the project folder with a note.
+- Quit (Cmd+Q, the menu and Cmd+K) warns about running agents, the same as closing the window.
+- Agents: OpenCode and Codex errors show their message instead of nothing or raw JSON, a turn that reports an error counts as failed, and expired OpenCode and signed-out Gemini sign-ins get the sign-in hint.
+- Gemini: the session's mode applies in new worktrees (Runo marks the folder trusted), and follow-ups resume by Gemini's session number.
+- Codex: commands, edits and reasoning show while they run, and reply text streams when the CLI sends updates.
+- Notifications are on by default, cover turns waiting for you, open the session when clicked, and work on Windows. Permission requests can wait indefinitely.
+- Agents that can't resume (such as Grok) keep a one-line summary of earlier requests; Copilot sessions no longer pick up each other's conversation.
+- Tests pass on macOS.

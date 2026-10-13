@@ -356,49 +356,56 @@ impl RunoApp {
     // ---------- Playbooks ----------
 
     /// Start every scheduled playbook whose time has come. Called on a timer. A playbook
-    /// whose last run is still working waits for the next time, and runs missed while
-    /// Runo was closed become one run that says so.
+    /// whose last run is still working waits for the next time. A run that came due
+    /// while Runo was closed (or asleep) runs once on launch and says what it covers,
+    /// unless Settings turns catching up off.
     pub(crate) fn run_due_automations(&mut self, cx: &mut Context<Self>) {
         if self.demo {
             return;
         }
+        self.import_headless_runs();
         let now = unix_now();
-        let due: Vec<(u64, u64)> = self
+        let due: Vec<(u64, u64, u64)> = self
             .state
             .automations
             .iter()
             .filter(|a| a.due(now))
-            .map(|a| (a.id, (now - a.last_run) / (a.every_minutes * 60).max(1)))
+            .map(|a| (a.id, a.runs_due(now), a.next_run().unwrap_or(now)))
             .collect();
-        for (id, intervals) in due {
+        for (id, runs, at) in due {
+            // Runo opened while the runner works on it; its result comes in shortly.
+            if crate::pbrunner::running(id) {
+                continue;
+            }
             let busy = self.state.sessions.iter().any(|s| {
                 s.playbook == id
                     && (s.status == Status::Working
                         || self.handles.contains_key(&Target::Session(s.id))
                         || self.pending_start.contains_key(&s.id))
             });
-            if busy {
+            // Due longer ago than the timer's own delay: Runo was not running then.
+            let late = now.saturating_sub(at) > LATE_SECS;
+            let skip = if busy {
+                Some("The last run was still working.")
+            } else if late && !settings::playbook_catch_up() {
+                Some("Missed while Runo was closed; catching up is off in Settings.")
+            } else {
+                None
+            };
+            if let Some(why) = skip {
                 if let Some(a) = self.state.automations.iter_mut().find(|a| a.id == id) {
                     a.last_run = now;
                     a.record(store::PlaybookRun {
                         at: now,
                         status: "skipped".into(),
-                        note: "The last run was still working.".into(),
+                        note: why.into(),
                         ..Default::default()
                     });
                 }
                 self.save();
                 continue;
             }
-            let note = (intervals >= 2).then(|| {
-                let missed = intervals - 1;
-                format!(
-                    "{missed} earlier run{} {} missed while Runo was closed; this one covers {}.",
-                    if missed == 1 { "" } else { "s" },
-                    if missed == 1 { "was" } else { "were" },
-                    if missed == 1 { "it" } else { "them" }
-                )
-            });
+            let note = missed_note(runs, late.then_some(at));
             // On a timer nobody is there to fill in inputs; their defaults are used.
             self.start_playbook(id, None, None, note, cx);
             self.prune_playbook_runs(id);
@@ -407,7 +414,7 @@ impl RunoApp {
 
     /// Delete the oldest runs of a scheduled playbook past the number Settings keeps.
     /// Pinned, unread and working runs stay.
-    fn prune_playbook_runs(&mut self, playbook: u64) {
+    pub(crate) fn prune_playbook_runs(&mut self, playbook: u64) {
         let keep = settings::playbook_keep_runs();
         if keep == 0 {
             return;
@@ -817,7 +824,12 @@ impl RunoApp {
                     },
                 );
                 if auto.scheduled() {
-                    notify(&auto.name, "The scheduled playbook could not start");
+                    crate::desktop_notify::send(
+                        cx,
+                        None,
+                        &auto.name,
+                        "The scheduled playbook could not start",
+                    );
                 }
             }
         }
@@ -834,6 +846,28 @@ pub(crate) const PLAYBOOK_TEMPLATES: [(&str, &str); 6] = [
     ("Review my changes", "Review the uncommitted and unpushed changes in this repository as a careful reviewer would: correctness, naming, missing tests and anything risky. Don't change any files."),
     ("Upgrade dependencies", "Check this project's dependencies for newer versions. Upgrade the safe ones (patch and minor), run the build and tests, and list major upgrades that need a decision."),
 ];
+
+/// How late a scheduled run may start before it counts as missed while Runo was closed.
+const LATE_SECS: u64 = 5 * 60;
+
+/// What a scheduled run says about runs missed while Runo was closed: `runs` came due
+/// since the last one, the first at `late` when it is starting late.
+pub(crate) fn missed_note(runs: u64, late: Option<u64>) -> Option<String> {
+    if runs >= 2 {
+        let missed = runs - 1;
+        return Some(format!(
+            "{missed} earlier run{} {} missed while Runo was closed; this one covers {}.",
+            if missed == 1 { "" } else { "s" },
+            if missed == 1 { "was" } else { "were" },
+            if missed == 1 { "it" } else { "them" }
+        ));
+    }
+    let at = late?;
+    let when = chrono::DateTime::from_timestamp(at as i64, 0)?
+        .with_timezone(&chrono::Local)
+        .format("%a %-I:%M %p");
+    Some(format!("It was due {when}, while Runo was closed."))
+}
 
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -983,7 +1017,7 @@ pub(crate) fn playbook_limits(
 
 #[cfg(test)]
 mod tests {
-    use super::{held_options, playbook_limits, unheld_limits};
+    use super::{held_options, missed_note, playbook_limits, unheld_limits};
     use crate::{settings, store};
 
     fn may(list: &[&str]) -> Vec<String> {
@@ -1042,5 +1076,20 @@ mod tests {
             session.opts["mode"], "edit",
             "full access would reach the network"
         );
+    }
+
+    #[test]
+    fn late_runs_say_what_they_cover() {
+        assert_eq!(missed_note(1, None), None);
+        assert_eq!(
+            missed_note(2, None).unwrap(),
+            "1 earlier run was missed while Runo was closed; this one covers it."
+        );
+        assert!(missed_note(4, Some(0))
+            .unwrap()
+            .starts_with("3 earlier runs were"));
+        assert!(missed_note(1, Some(1_700_000_000))
+            .unwrap()
+            .ends_with("while Runo was closed."));
     }
 }

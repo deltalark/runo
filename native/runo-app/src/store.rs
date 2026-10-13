@@ -1,4 +1,4 @@
-//! Persistent projects and sessions, stored as JSON under `~/.runo/state.json`.
+//! Persistent projects and sessions, stored as JSON under `~/.runo` (see `persist`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -450,7 +450,7 @@ pub fn notes_prompt(notes: &[Note]) -> String {
     out
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct State {
     pub next_id: u64,
     pub projects: Vec<Project>,
@@ -512,6 +512,10 @@ pub struct Automation {
     pub description: String,
     /// Minutes between scheduled runs; 0 runs it only when started by hand.
     pub every_minutes: u64,
+    /// A cron expression it runs on instead, in local time; a time of day on chosen
+    /// weekdays is stored this way too. Empty uses `every_minutes`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cron: String,
     /// Unix seconds of the last run; 0 if it never ran.
     #[serde(default)]
     pub last_run: u64,
@@ -681,12 +685,43 @@ impl Automation {
 
     /// Whether the automation should run now.
     pub fn due(&self, now: u64) -> bool {
-        self.scheduled() && self.enabled && now >= self.last_run + self.every_minutes * 60
+        self.enabled && self.next_run().is_some_and(|at| now >= at)
+    }
+
+    /// When the schedule next runs (Unix seconds), counting from the last run.
+    pub fn next_run(&self) -> Option<u64> {
+        if !self.scheduled() {
+            None
+        } else if self.cron.is_empty() {
+            Some(self.last_run + self.every_minutes * 60)
+        } else {
+            crate::schedule::next_local(&self.cron, self.last_run)
+        }
+    }
+
+    /// How many scheduled runs fell between the last run and `now`, up to 1000.
+    pub fn runs_due(&self, now: u64) -> u64 {
+        if !self.scheduled() || now <= self.last_run {
+            0
+        } else if self.cron.is_empty() {
+            (now - self.last_run) / (self.every_minutes * 60).max(1)
+        } else {
+            crate::schedule::runs_between(&self.cron, self.last_run, now, 1000)
+        }
+    }
+
+    /// "Hourly", "Weekdays at 09:00", "Cron 0 */2 * * *".
+    pub fn schedule_label(&self) -> String {
+        if self.cron.is_empty() {
+            crate::playbooks::every_label(self.every_minutes)
+        } else {
+            crate::schedule::describe(&self.cron)
+        }
     }
 
     /// Runs on a timer as well as by hand. A schedule needs a project to run in.
     pub fn scheduled(&self) -> bool {
-        self.every_minutes > 0 && self.project_id != 0
+        (self.every_minutes > 0 || !self.cron.is_empty()) && self.project_id != 0
     }
 }
 
@@ -841,20 +876,25 @@ pub fn read_json_or_backup<T: Default + serde::de::DeserializeOwned>(path: &Path
     match serde_json::from_str(&text) {
         Ok(value) => value,
         Err(error) => {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let backup = path.with_extension(format!("json.corrupt-{stamp}"));
-            let _ = std::fs::rename(path, &backup);
-            eprintln!(
-                "runo: could not read {} ({error}); moved it to {}",
-                path.display(),
-                backup.display()
-            );
+            move_aside(path, &error.to_string());
             T::default()
         }
     }
+}
+
+/// Move a file Runo can't read out of the way, keeping it next to where it was.
+pub fn move_aside(path: &Path, error: &str) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = path.with_extension(format!("json.corrupt-{stamp}"));
+    let _ = std::fs::rename(path, &backup);
+    eprintln!(
+        "runo: could not read {} ({error}); moved it to {}",
+        path.display(),
+        backup.display()
+    );
 }
 
 /// Write JSON atomically: to a temporary file first, then rename over the target.
@@ -891,12 +931,30 @@ impl State {
         Self::load_from(&state_path())
     }
 
+    /// Load the state whose index is at `path`, splitting a single-file state from
+    /// before into one file per session (the old file is kept as a backup).
     pub fn load_from(path: &Path) -> Self {
-        let mut state: State = read_json_or_backup(path);
-        // A process cannot survive an app restart; do not show it as running.
-        // A turn on a connection keeps going there; Runo picks it up again on start.
+        let root = path.parent().unwrap_or(Path::new("."));
+        let mut state = match crate::persist::read(path) {
+            Ok((mut state, mut written, old)) => {
+                if old {
+                    crate::persist::migrate(path, &mut state, &mut written);
+                }
+                crate::persist::seed(root, written);
+                state
+            }
+            Err(error) => {
+                move_aside(path, &error);
+                State::default()
+            }
+        };
+        // A turn on a connection keeps going there, and a local turn runs detached from
+        // Runo; both are picked up again on start. Anything else could not survive.
         for session in &mut state.sessions {
-            if session.status == Status::Working && !session.remote_turn {
+            if session.status == Status::Working
+                && !session.remote_turn
+                && crate::detach::left_behind(root, session.id).is_none()
+            {
                 session.status = Status::Failed;
                 session.messages.push(Message::new(
                     Role::System,
@@ -907,8 +965,23 @@ impl State {
         state
     }
 
+    /// Read the saved state without changing anything, for other processes such as
+    /// Runo's MCP server.
+    pub fn peek() -> Self {
+        crate::persist::read(&state_path())
+            .map(|(state, ..)| state)
+            .unwrap_or_default()
+    }
+
+    /// Save in the background: the files are written a moment later, and only those
+    /// that changed.
     pub fn save(&self) {
-        write_json(&state_path(), self);
+        crate::persist::queue(&data_dir(), self.clone());
+    }
+
+    /// Write what is still waiting to be saved; for quitting.
+    pub fn flush() {
+        crate::persist::flush(std::time::Duration::from_secs(5));
     }
 
     pub fn next_id(&mut self) -> u64 {
@@ -1043,6 +1116,31 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schedules_say_when_they_run_next() {
+        let mut a = Automation {
+            project_id: 1,
+            every_minutes: 60,
+            last_run: 1_000_000,
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(a.next_run(), Some(1_003_600));
+        assert!(!a.due(1_003_599) && a.due(1_003_600));
+        assert_eq!(a.runs_due(1_000_000 + 3 * 3600 + 5), 3);
+        // A cron schedule wins over the minutes; this one runs every minute.
+        a.cron = "* * * * *".into();
+        let start = 1_000_020;
+        a.last_run = start;
+        assert_eq!(a.next_run(), Some(1_000_080));
+        assert_eq!(a.runs_due(start + 600), 10);
+        assert_eq!(a.schedule_label(), "Cron * * * * *");
+        a.cron = "30 9 * * 1,2,3,4,5".into();
+        assert_eq!(a.schedule_label(), "Weekdays at 09:30");
+        a.project_id = 0;
+        assert!(!a.scheduled() && a.next_run().is_none());
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("runo-store-{name}-{}", std::process::id()));

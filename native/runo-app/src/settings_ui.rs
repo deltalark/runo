@@ -491,7 +491,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 },
             ]),
             section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
-                switch_row("Notifications", "Show a desktop notification when an agent finishes or fails (macOS and Linux).", st.notifications, |s, v| s.notifications = v),
+                switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
             ]),
             section("Behavior", "Motion and safety around destructive actions.", vec![
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
@@ -499,6 +499,16 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Remove worktree with session", "Also delete the session's git worktree when the session is deleted. Uncommitted changes in it are lost.", st.remove_worktree_on_delete, |s, v| s.remove_worktree_on_delete = v),
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
                 switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
+            ]),
+            section("Limits", "Keep agents from running away with time or money.", vec![
+                row("Flag a quiet agent after", "An agent that prints nothing for this long gets a card with Stop. A long build or test run can be quiet too.", Ctl::Dropdown(options(&[("5", "5 minutes"), ("10", "10 minutes"), ("20", "20 minutes"), ("60", "1 hour"), ("0", "Never")]), st.stuck_after_mins.to_string(), Rc::new(|s, v| s.stuck_after_mins = v.parse().unwrap_or(10)))),
+                row("Spending limit per session", "Counts the cost agents report. Once a session reaches it, new turns wait until you raise the limit or send anyway.", Ctl::Dropdown(options(&[("0", "No limit"), ("1", "$1"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100")]), st.session_limit_usd.to_string(), Rc::new(|s, v| s.session_limit_usd = v.parse().unwrap_or(0)))),
+                row("Spending limit per day", "Across every session. New turns wait once today's reported cost reaches it.", Ctl::Dropdown(options(&[("0", "No limit"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100"), ("250", "$250")]), st.daily_limit_usd.to_string(), Rc::new(|s, v| s.daily_limit_usd = v.parse().unwrap_or(0)))),
+                row("Agents running at once", "Turns past this many wait for a free slot, shown as Waiting for a slot, and start in order.", Ctl::Dropdown(options(&[("0", "No cap"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("6", "6"), ("8", "8")]), st.max_running.to_string(), Rc::new(|s, v| s.max_running = v.parse().unwrap_or(0)))),
+            ]),
+            section("Updates", "Runo looks for a newer release on GitHub and offers to download it. Nothing installs without you.", vec![
+                switch_row("Check for Runo updates", "Checks at start and every few hours.", st.check_runo_updates, |s, v| s.check_runo_updates = v),
+                row("Logs and crash reports", "Each launch writes a log, and crashes leave a report, in ~/.runo/logs.", Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
             ]),
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
@@ -593,7 +603,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Memory", "Runo keeps a summary of each session in .runo/memory.md inside its folder, kept out of git.", vec![
                 switch_row("Runo tools for agents", "Give Claude Code and Codex Runo's tools: read the session memory, search earlier sessions, save notes, and use playbooks (as /mcp__runo__… commands in Claude Code).", st.memory_server, |s, v| s.memory_server = v),
-                row("Wait for permission answers", "With Runo tools on, Claude Code asks you mid-turn before using a tool it isn't allowed, and waits this long for Allow or Deny before carrying on without it. Turns on servers keep waiting while Runo is closed, so you can answer when it reconnects.", Ctl::Dropdown(options(&[("2", "2 minutes"), ("5", "5 minutes"), ("15", "15 minutes"), ("60", "1 hour"), ("480", "8 hours")]), st.approval_wait_mins.to_string(), Rc::new(|s, v| s.approval_wait_mins = v.parse().unwrap_or(5)))),
+                row("Wait for permission answers", "With Runo tools on, Claude Code asks you mid-turn before using a tool it isn't allowed, and waits this long for Allow or Deny before carrying on without it. Turns on servers keep waiting while Runo is closed, so you can answer when it reconnects.", Ctl::Dropdown(options(&[("2", "2 minutes"), ("5", "5 minutes"), ("15", "15 minutes"), ("60", "1 hour"), ("480", "8 hours"), ("0", "Wait indefinitely")]), st.approval_wait_mins.to_string(), Rc::new(|s, v| s.approval_wait_mins = v.parse().unwrap_or(5)))),
             ]),
             section("New sessions", "What a session starts with before you change it in the composer.", vec![
                 row("Default view", "How new sessions open. CLI shows the agent's own command line on the same conversation (Claude Code and Codex); switch any time from the session header at no token cost.", Ctl::Segment(vec![("chat".into(), "Chat".into()), ("cli".into(), "CLI".into())], st.default_view.clone(), Rc::new(|s, v| s.default_view = v))),
@@ -603,7 +613,10 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("Playbooks", "Saved tasks that run as their own sessions, by hand, on a schedule or when an agent asks.", vec![
                 switch_row("Ask before agents start playbooks", "When an agent asks Runo to start a playbook, show what it may do and wait for you. Off starts it right away.", st.confirm_agent_playbooks, |s, v| s.confirm_agent_playbooks = v),
                 row("Scheduled runs to keep", "Older runs of each scheduled playbook are deleted, with their worktrees. Pinned and unread runs stay.", Ctl::Dropdown(options(&[("5", "5"), ("10", "10"), ("20", "20"), ("50", "50"), ("0", "All")]), st.playbook_keep_runs.to_string(), Rc::new(|s, v| s.playbook_keep_runs = v.parse().unwrap_or(10)))),
-            ]),
+                switch_row("Catch up on missed runs", "When a scheduled playbook came due while Runo was closed, run it once when Runo opens. Off skips it until its next time.", st.playbook_catch_up, |s, v| s.playbook_catch_up = v),
+            ].into_iter().chain(cfg!(target_os = "macos").then(|| {
+                switch_row("Run while Runo is closed", "A background job (launchd) checks every 5 minutes and runs due playbooks in their own worktree with the agent's one-shot command. The runs show up as sessions when Runo opens. Playbooks on a connection still wait for Runo.", st.playbooks_while_closed, |s, v| s.playbooks_while_closed = v)
+            })).collect()),
         ],
         SettingsPage::Providers => {
             let _ = &data.provider_paths;
@@ -898,7 +911,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::Connections => connection_sections(st),
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
             row("Worktree folder", "Created next to each repository as .runo-worktrees/<repo>/<branch>.", Ctl::Chip(".runo-worktrees".into(), 3)),
-            row("Runo data", "Projects and sessions are saved here. Settings live next to it in settings.json.", Ctl::Chip("~/.runo/state.json".into(), 3)),
+            row("Runo data", "Projects are saved in state.json and each session in its own file under sessions. Settings live next to them in settings.json.", Ctl::Chip("~/.runo".into(), 3)),
         ])],
     }
 }

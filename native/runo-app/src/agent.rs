@@ -106,11 +106,12 @@ pub fn resumes(provider: &str) -> bool {
     )
 }
 
-/// CLIs that take a conversation id chosen by Runo on the first run. Copilot does
-/// since it gained `--session-id`.
+/// CLIs that take a conversation id chosen by Runo on the first run. Copilot and Gemini
+/// do once their help lists `--session-id`; otherwise the id comes from their output.
 pub fn names_conversation(provider: &str) -> bool {
     match provider {
-        "claude" | "gemini" | "qwen" => true,
+        "claude" | "qwen" => true,
+        "gemini" => crate::caps::mentions("gemini", "--session-id"),
         "copilot" => crate::caps::mentions("copilot", "--session-id"),
         _ => false,
     }
@@ -479,14 +480,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             for dir in list(&opts.add_dirs) {
                 args.extend([s("--include-directories"), dir]);
             }
-            if !spec.session_id.is_empty() {
-                let flag = if spec.resume {
-                    "--resume"
-                } else {
-                    "--session-id"
-                };
-                args.extend([s(flag), spec.session_id.to_string()]);
-            }
+            args.extend(conversation_args(spec));
             if qwen && knows("--mcp-config") {
                 let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
                     .into_iter()
@@ -734,6 +728,29 @@ pub fn imports_cli_turns(provider: &str) -> bool {
     matches!(provider, "claude" | "codex")
 }
 
+/// Gemini's and Qwen Code's conversation flags: `--resume` to continue, or a new
+/// conversation's id up front. Gemini resumes by its number for the session (or
+/// "latest"), and names a new one only when it has `--session-id`.
+fn conversation_args(spec: &RunSpec) -> Vec<String> {
+    let id = spec.session_id;
+    if id.is_empty() {
+        return Vec::new();
+    }
+    let gemini = spec.provider == "gemini";
+    if spec.resume {
+        let to = if gemini {
+            crate::gemini::resume_arg(id)
+        } else {
+            id.to_string()
+        };
+        vec!["--resume".into(), to]
+    } else if !gemini || names_conversation("gemini") {
+        vec!["--session-id".into(), id.to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Arguments that open the agent's interactive CLI on this session's conversation, with
 /// the same model, mode and tools as the chat. `spec.resume` picks up the conversation
 /// in `spec.session_id`; otherwise a new one starts (named up front for Claude Code).
@@ -756,15 +773,8 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
     let resume = spec.resume && !id.is_empty();
     match spec.provider {
         "gemini" | "qwen" => {
-            let flag = if spec.resume {
-                "--resume"
-            } else {
-                "--session-id"
-            };
             let mut args = with_model(Vec::new(), "-m");
-            if !id.is_empty() {
-                args.extend([s(flag), id]);
-            }
+            args.extend(conversation_args(spec));
             return args;
         }
         "cursor" | "copilot" | "droid" => {
@@ -1139,6 +1149,12 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
         "status 401",
         "(401)",
         "code 401",
+        // OpenCode, when its saved sign-in has expired.
+        "token refresh failed",
+        "providerautherror",
+        // Gemini, signed out.
+        "set an auth method",
+        "must specify the gemini_api_key",
     ];
     if !signs.iter().any(|s| lower.contains(s)) {
         return None;
@@ -1213,11 +1229,20 @@ pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Comman
 /// A running process, which leads its own process group so stopping it also stops what
 /// it started (dev servers, test runs, the ssh or cove process of a connection run).
 /// `runner` marks Runo's own connection runner.
-pub struct Handle(Arc<Mutex<Child>>, bool);
+pub struct Handle(Option<Arc<Mutex<Child>>>, bool, Option<u32>);
 
 impl Handle {
+    /// A local turn running detached from Runo in process group `group`.
+    pub(crate) fn detached(group: u32) -> Self {
+        Self(None, false, Some(group))
+    }
+
     pub fn kill(&self) {
-        if let Ok(mut child) = self.0.lock() {
+        if let Some(group) = self.2 {
+            crate::detach::stop(group);
+            return;
+        }
+        if let Some(Ok(mut child)) = self.0.as_ref().map(|c| c.lock()) {
             // A connection runner stops the turn on the connection and brings back what
             // it did, then exits on its own.
             if self.1 && cfg!(unix) {
@@ -1249,9 +1274,10 @@ impl Handle {
         }
     }
 
-    /// Runo's connection runner, whose turn keeps going on the connection when Runo quits.
+    /// A turn that keeps going when Runo quits: Runo's connection runner, or a local turn
+    /// running detached.
     pub fn runner(&self) -> bool {
-        self.1
+        self.1 || self.2.is_some()
     }
 }
 
@@ -1278,6 +1304,10 @@ pub fn run_agent(
             }
         }
     }
+    // Gemini holds to the session's mode only in a folder it trusts.
+    if spec.provider == "gemini" && spec.local && sandbox.is_none() {
+        crate::gemini::trust(dir, &spec.opts.env);
+    }
     if crate::mcp::project_file(spec.provider).is_some() {
         crate::mcp::write_project(
             std::path::Path::new(dir),
@@ -1287,6 +1317,11 @@ pub fn run_agent(
     }
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
+    } else if let (Target::Session(id), Some(root)) = (target, crate::detach::root()) {
+        // Local turns outlive Runo, so closing or a crash doesn't stop them.
+        if crate::updater::resolve(bin).is_some() {
+            return crate::detach::spawn(root, id, command, dir, tx);
+        }
     }
     spawn(target, command, dir, tx)
 }
@@ -1373,7 +1408,7 @@ pub(crate) fn spawn(
         }
         std::thread::sleep(Duration::from_millis(100));
     });
-    Ok(Handle(child, runner))
+    Ok(Handle(Some(child), runner, None))
 }
 
 #[cfg(test)]
@@ -1904,8 +1939,8 @@ mod arg_tests {
                 .windows(2)
                 .any(|w| w == pair)
         };
-        assert!(has("gemini", false, ["--session-id", "id-1"]));
-        assert!(has("gemini", true, ["--resume", "id-1"]));
+        // Gemini resumes by number, or the folder's latest while the number is unknown.
+        assert!(has("gemini", true, ["--resume", "latest"]));
         assert!(has("qwen", true, ["--resume", "id-1"]));
         assert!(has("cursor", true, ["--resume", "id-1"]));
         assert!(has("copilot", true, ["--resume", "id-1"]));
@@ -2097,6 +2132,23 @@ mod arg_tests {
     }
 
     #[test]
+    fn gemini_names_a_conversation_once_its_help_lists_the_flag() {
+        crate::caps::set(
+            "gemini",
+            crate::caps::Caps {
+                help: "--session-id  Start a session with this id".into(),
+                ..Default::default()
+            },
+        );
+        assert!(names_conversation("gemini"));
+        let fresh = run_args("gemini", "edit", false, &[]);
+        assert!(fresh.windows(2).any(|w| w == ["--session-id", "id-1"]));
+        let resumed = run_args("gemini", "edit", true, &[]);
+        assert!(resumed.windows(2).any(|w| w == ["--resume", "latest"]));
+        assert!(!resumed.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
     fn copilot_uses_newer_flags_once_its_help_lists_them() {
         crate::caps::set(
             "copilot",
@@ -2126,6 +2178,14 @@ mod arg_tests {
         assert!(hint.contains("codex login"));
         assert!(sign_in_hint("claude", "Invalid API key · Please run /login").is_some());
         assert!(sign_in_hint("claude", "error: model not found").is_none());
+        assert!(sign_in_hint("opencode", "Error: Token refresh failed: 401")
+            .unwrap()
+            .contains("opencode auth login"));
+        assert!(sign_in_hint(
+            "gemini",
+            "Please set an Auth method in your /Users/me/.gemini/settings.json or specify one of the following environment variables before running: GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA"
+        )
+        .is_some());
         assert!(waits_for_sign_in(
             "No API key found. Starting login flow..."
         ));

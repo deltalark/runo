@@ -1,19 +1,28 @@
 mod agent;
+mod agentcmds;
 mod alerts;
+mod applog;
 mod approvals;
+mod architecture;
 mod browser;
 mod browser_engine;
 mod caps;
+mod chatctl;
 mod cliview;
 mod connections;
 mod connections_ui;
 mod cove;
 mod ctxmenu;
+mod design;
+mod desktop_notify;
+mod detach;
 mod files;
 mod fileview;
+mod gemini;
 mod git;
 mod github;
 mod handoff;
+mod health;
 mod history;
 mod inbox;
 mod install;
@@ -23,10 +32,14 @@ mod memory_mcp;
 mod models;
 mod notes;
 mod pbfile;
+mod pbrunner;
 mod pbshare;
+mod persist;
 mod playbooks;
 mod projects;
 mod pty;
+mod schedule;
+mod sessions;
 mod settings;
 mod settings_ui;
 mod shell;
@@ -182,6 +195,8 @@ struct RunoApp {
     project_name: Entity<InputState>,
     /// The project form's worktree setup command.
     project_setup: Entity<InputState>,
+    /// The project form's repository URL, when cloning.
+    clone_url: Entity<InputState>,
     /// A freshly installed CLI found off PATH, to save as the agent's binary.
     pending_binary: Option<(&'static str, String)>,
     cli_focus: FocusHandle,
@@ -277,6 +292,12 @@ struct RunoApp {
     race_mode: bool,
     /// The New session dialog lists every agent, not just the main ones.
     new_more_agents: bool,
+    /// The branch a new isolated session starts from; None for the default branch.
+    new_base: Option<String>,
+    /// The New session form's project and its branches, for the base branch menu.
+    new_branches: Option<sessions::Branches>,
+    /// Search, filters and sort of the Sessions page, and matches in conversations.
+    finder: sessions::Finder,
     /// Newer releases of installed agents, from the last update check.
     updates: Vec<alerts::AgentUpdate>,
     /// Agent updates and installs running now, just finished, or failed.
@@ -375,10 +396,19 @@ struct RunoApp {
     stopping: std::collections::HashSet<u64>,
     /// Runs stopped because their CLI waited for a browser sign-in.
     signed_out: std::collections::HashSet<u64>,
+    /// Sessions whose agent reported an error in its output this turn.
+    stream_failed: std::collections::HashSet<u64>,
     /// Files changed by each session's latest turn, once it finished (for Undo / Keep).
     turn_files: HashMap<u64, usize>,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
+    /// Images that go with a new session's first prompt.
+    launch_images: HashMap<u64, Vec<String>>,
+    /// Context from Design or Architecture for the session the New session dialog starts.
+    new_context: Option<shell::StartContext>,
+    /// The Design and Architecture pages.
+    design: design::DesignPage,
+    arch: architecture::ArchPage,
     /// Each session's unsent prompt while another session is on screen, and the session
     /// whose text the composer holds now.
     drafts: HashMap<u64, String>,
@@ -393,6 +423,10 @@ struct RunoApp {
     mention: Option<String>,
     /// The `/query` typed at the start of the prompt, which lists playbooks.
     slash: Option<String>,
+    /// The agent's own commands for the `/` menu, read for one session when the menu opens.
+    agent_commands: Option<(u64, Vec<agentcmds::Command>)>,
+    /// A sent message being edited in the composer: (session, message index).
+    editing: Option<(u64, usize)>,
     /// A commit message written by the agent, waiting to be put in the commit box.
     commit_suggestion: Option<String>,
     writing_commit: bool,
@@ -474,6 +508,8 @@ struct RunoApp {
     files_open: std::collections::HashSet<String>,
     /// Holds off system sleep while agents run.
     awake: Option<std::process::Child>,
+    /// Saving, quiet agents, limits, slots, crash reports and Runo updates.
+    health: health::Health,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1119,6 +1155,8 @@ impl RunoApp {
                 cx.notify();
             }
         });
+        let (design, design_subs) = design::DesignPage::new(window, cx);
+        let (arch, arch_subs) = architecture::ArchPage::new(window, cx);
         let notes_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Write anything worth remembering about this project…")
@@ -1227,6 +1265,9 @@ impl RunoApp {
             project_name,
             project_setup: cx
                 .new(|cx| InputState::new(window, cx).placeholder("npm install (optional)")),
+            clone_url: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("https://github.com/owner/repo.git")
+            }),
             pending_binary: None,
             cli_focus: cx.focus_handle(),
             focus_cli: 0,
@@ -1282,7 +1323,9 @@ impl RunoApp {
                 TextareaState::new(window, cx)
                     .placeholder("Describe what you want the agent to work on…")
             }),
-            branch: cx.new(|cx| InputState::new(window, cx).placeholder("branch (optional)")),
+            branch: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Branch (optional, named after the task)")
+            }),
             term_input,
             address,
             browser_recent: Vec::new(),
@@ -1302,6 +1345,9 @@ impl RunoApp {
             new_isolated: true,
             new_connection: 0,
             new_more_agents: false,
+            new_base: None,
+            new_branches: None,
+            finder: sessions::Finder::new(window, cx),
             updates: Vec::new(),
             update_runs: HashMap::new(),
             update_checked: None,
@@ -1342,8 +1388,13 @@ impl RunoApp {
             started: HashMap::new(),
             stopping: Default::default(),
             signed_out: Default::default(),
+            stream_failed: Default::default(),
             turn_files: HashMap::new(),
             attachments: HashMap::new(),
+            launch_images: HashMap::new(),
+            new_context: None,
+            design,
+            arch,
             drafts: HashMap::new(),
             draft_for: None,
             question_picks: HashMap::new(),
@@ -1351,9 +1402,12 @@ impl RunoApp {
             pending_mentions: Vec::new(),
             mention: None,
             slash: None,
+            agent_commands: None,
+            editing: None,
             commit_suggestion: None,
             writing_commit: false,
             awake: None,
+            health: Default::default(),
             notes_input: notes_input.clone(),
             notes_project: None,
             loading_notes: false,
@@ -1489,7 +1543,19 @@ impl RunoApp {
         );
         let pb_source_sub = cx.subscribe_in(&app.pb_source, window, repaint);
         let notes_query_sub = cx.subscribe_in(&app.notes_query, window, repaint);
+        let finder_sub = cx.subscribe_in(
+            &app.finder.query.clone(),
+            window,
+            |this, input, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let query = input.read(cx).value().to_string();
+                    this.search_transcripts(query, sessions::HitsFor::List);
+                    cx.notify();
+                }
+            },
+        );
         let remove_name_sub = cx.subscribe_in(&app.remove_name, window, repaint);
+        let clone_url_sub = cx.subscribe_in(&app.clone_url, window, repaint);
         let auto_name_sub = cx.subscribe_in(&app.auto_name, window, repaint);
         let auto_prompt_sub = cx.subscribe_in(
             &app.auto_prompt,
@@ -1512,7 +1578,9 @@ impl RunoApp {
             file_query_sub,
             pb_source_sub,
             notes_query_sub,
+            finder_sub,
             remove_name_sub,
+            clone_url_sub,
             auto_name_sub,
             auto_prompt_sub,
         ]);
@@ -1524,6 +1592,10 @@ impl RunoApp {
             }
         });
         app._subscriptions.push(activation_sub);
+        app._subscriptions.extend(design_subs);
+        app._subscriptions.extend(arch_subs);
+        cx.set_global(MainApp(cx.entity().downgrade()));
+        app.init_github(window, cx);
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
         cx.spawn(async move |this, cx| loop {
@@ -1563,11 +1635,21 @@ impl RunoApp {
         window.on_window_should_close(cx, move |_, cx| {
             app_entity
                 .update(cx, |this, cx| {
-                    this.save();
+                    this.save_now();
                     this.may_close(cx)
                 })
                 .unwrap_or(true)
         });
+        // Saves, turns waiting for a slot, crash reports and Runo updates.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            if this.update(cx, |this, cx| this.health_tick(cx)).is_err() {
+                return;
+            }
+        })
+        .detach();
         // Agents asking for permission mid-turn are shown within half a second.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -1609,6 +1691,7 @@ impl RunoApp {
             app.tabs.push(id);
         }
         app.resume_remote_turns();
+        app.resume_local_turns();
         app.send_waiting_queues(cx);
         app.refresh();
         app.chat_scroll.scroll_to_bottom();
@@ -1618,10 +1701,10 @@ impl RunoApp {
 
     // ---------- state & events ----------
 
+    /// Mark the state changed; it is saved within half a second, off the UI thread.
     fn save(&mut self) {
         if !self.demo {
-            self.store_layout();
-            self.state.save();
+            self.health.save_due = true;
         }
     }
 
@@ -1777,6 +1860,7 @@ impl RunoApp {
     }
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        self.health.saw(&event);
         match event {
             Event::Line(Target::Session(id), line) => {
                 if agent::waits_for_sign_in(&line) {
@@ -1822,6 +1906,7 @@ impl RunoApp {
                                 }
                             }
                             stream::Update::Error(error) => {
+                                self.stream_failed.insert(id);
                                 session.messages.push(Message::new(Role::System, error))
                             }
                             stream::Update::Usage(usage) => m.usage = usage,
@@ -1886,6 +1971,8 @@ impl RunoApp {
                     .filter(|l| !l.starts_with(connections::WARNING))
                     .collect();
                 let signed_out = self.signed_out.remove(&id);
+                // Some CLIs report a failed turn in their output and still exit cleanly.
+                let reported = self.stream_failed.remove(&id);
                 let mut hold = false;
                 let sync_warning = self.sync_warning(id);
                 if let Some(session) = self.state.session_mut(id) {
@@ -1902,32 +1989,57 @@ impl RunoApp {
                         .chain(all.iter().map(String::as_str))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let sign_in = if (silent || !ok || signed_out) && !stopped {
+                    let sign_in = if (silent || !ok || signed_out || reported) && !stopped {
                         agent::sign_in_hint(&session.provider, &errors)
                     } else {
                         None
                     };
-                    let ok = ok && sign_in.is_none();
+                    let ok = ok && sign_in.is_none() && !reported;
+                    // A reply that never started is dropped, leaving the error.
+                    if reported {
+                        let at = session
+                            .messages
+                            .iter()
+                            .rposition(|m| m.role != Role::System);
+                        if let Some(at) = at.filter(|&at| {
+                            let m = &session.messages[at];
+                            m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
+                        }) {
+                            session.messages.remove(at);
+                        }
+                    }
                     session.status = if ok { Status::Done } else { Status::Failed };
                     session.remote_turn = false;
                     session.unread = !on_screen;
                     if silent {
                         if ok {
+                            let compacted = session
+                                .messages
+                                .iter()
+                                .rev()
+                                .find(|m| m.role == Role::User)
+                                .is_some_and(|m| m.text.starts_with("/compact"));
                             if let Some(m) = session.messages.last_mut() {
-                                m.text = "(The agent finished without any output.)".into();
+                                m.text = if compacted {
+                                    "Compacted the conversation.".into()
+                                } else {
+                                    "(The agent finished without any output.)".into()
+                                };
                             }
                         } else {
                             session.messages.pop();
                         }
                     }
-                    notify(
-                        &session.title,
-                        if ok {
-                            "Agent finished"
-                        } else {
-                            "Agent stopped or failed"
-                        },
-                    );
+                    let body = if alerts::waiting_on(session).is_some() {
+                        "The agent needs your answer"
+                    } else if ok {
+                        "Agent finished"
+                    } else if stopped {
+                        "Agent stopped"
+                    } else {
+                        "Agent failed"
+                    };
+                    desktop_notify::send(cx, Some(id), &session.title, body);
                     if let Some(warning) = sync_warning {
                         session.messages.push(warning);
                     }
@@ -1935,28 +2047,36 @@ impl RunoApp {
                         hold = true;
                         session.messages.push(Message::new(Role::System, hint));
                     } else if !ok {
-                        let mut errors: Vec<String> = Vec::new();
+                        let mut lines: Vec<String> = Vec::new();
                         for line in all.iter().filter(|l| {
                             l.starts_with("ERROR:")
                                 || l.starts_with("Error:")
                                 || l.starts_with("error:")
                         }) {
-                            if !errors.contains(line) {
-                                errors.push(line.clone());
+                            let line = stream::readable_error(line);
+                            if !lines.contains(&line) {
+                                lines.push(line);
                             }
                         }
-                        let tail: Vec<String> = if errors.is_empty() {
+                        let tail: Vec<String> = if lines.is_empty() {
                             all.iter().rev().take(12).rev().cloned().collect()
                         } else {
-                            errors
+                            lines
                         };
-                        let log = tail.join("\n");
+                        // The agent's own error is already shown above; only a tip is added.
+                        let log = if reported {
+                            errors.clone()
+                        } else {
+                            tail.join("\n")
+                        };
                         let mut text = String::from(if stopped {
                             "Stopped."
+                        } else if reported {
+                            ""
                         } else {
                             "The agent stopped with an error."
                         });
-                        if !log.trim().is_empty() && !stopped {
+                        if !log.trim().is_empty() && !stopped && !reported {
                             text.push_str(&format!(
                                 "\n```text\n{}\n```",
                                 log.replace("```", "'''")
@@ -1969,7 +2089,10 @@ impl RunoApp {
                         {
                             text.push_str("\nTip: choose another model from the model menu, or set one under Settings for this agent.");
                         }
-                        session.messages.push(Message::new(Role::System, text));
+                        let text = text.trim_start().to_string();
+                        if !text.is_empty() {
+                            session.messages.push(Message::new(Role::System, text));
+                        }
                     }
                 }
                 let ok = self
@@ -2047,7 +2170,8 @@ impl RunoApp {
     }
 
     fn start_agent(&mut self, id: u64, prompt: String, opts: &AgentOptions) {
-        self.start_turn(id, prompt, Vec::new(), opts);
+        let images = self.launch_images.remove(&id).unwrap_or_default();
+        self.start_turn(id, prompt, images, opts);
     }
 
     /// Demo projects are not real folders, so ask for a real repository instead.
@@ -2100,7 +2224,7 @@ impl RunoApp {
         }
         self.close_armed = Some(std::time::Instant::now());
         self.notice = Some(format!(
-            "{running} agent{} still running. Closing Runo stops {}. Close again to quit anyway.",
+            "{running} agent{} still running. Quitting Runo stops {}. Close or quit again to quit anyway.",
             if running == 1 { " is" } else { "s are" },
             if running == 1 { "it" } else { "them" }
         ));
@@ -2115,7 +2239,8 @@ impl RunoApp {
         for handle in self.handles.values().filter(|h| !h.runner()) {
             handle.kill();
         }
-        self.save();
+        self.save_now();
+        State::flush();
     }
 
     /// Stop a session's agent, and everything it started.
@@ -2170,6 +2295,7 @@ impl RunoApp {
         let state = cx.new(|cx| CommandState::new(window, cx));
         state.update(cx, |s, cx| s.focus(window, cx));
         self.palette = Some(state);
+        self.finder.palette_hits.found.clear();
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2283,7 +2409,7 @@ impl RunoApp {
             CommandItem::new()
                 .label("Add a project folder…")
                 .icon(IconName::FolderPlus)
-                .keywords(["new project", "open folder"]),
+                .keywords(["new project", "open folder", "clone repository"]),
         );
         command_jumps.push(Jump::AddProject);
         commands = commands.item(
@@ -2333,25 +2459,7 @@ impl RunoApp {
         }
         groups.push((projects, project_jumps));
 
-        let mut sessions = CommandGroup::new().label("Sessions");
-        let mut session_jumps = Vec::new();
-        for session in self.state.sessions.iter().filter(|s| !s.archived) {
-            let project = self
-                .state
-                .projects
-                .iter()
-                .find(|p| p.id == session.project_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            sessions = sessions.item(
-                CommandItem::new()
-                    .label(format!("{}  ·  {project}", session.title))
-                    .icon(IconName::MessageSquare)
-                    .keywords([session.branch.clone(), session.provider.clone()]),
-            );
-            session_jumps.push(Jump::Session(session.id));
-        }
-        groups.push((sessions, session_jumps));
+        groups.extend(self.palette_sessions());
 
         let mut pages = CommandGroup::new().label("Settings");
         let mut page_jumps = Vec::new();
@@ -2391,6 +2499,7 @@ impl RunoApp {
 
         let this = cx.entity().downgrade();
         let cancel = this.clone();
+        let searcher = this.clone();
         div()
             .id("palette-backdrop")
             .absolute()
@@ -2421,6 +2530,13 @@ impl RunoApp {
                             .bordered(false)
                             .max_h(px(440.))
                             .placeholder("Jump to a session, project, file, setting or command…")
+                            .on_query(move |query, _, cx| {
+                                let query = query.to_string();
+                                let _ = searcher.update(cx, |this, cx| {
+                                    this.search_transcripts(query, sessions::HitsFor::Palette);
+                                    cx.notify();
+                                });
+                            })
                             .on_confirm(move |ix, window, cx| {
                                 let _ = this.update(cx, |this, cx| {
                                     let jump = this
@@ -2680,18 +2796,33 @@ impl RunoApp {
         };
         let mut created = Vec::new();
         let race_base = if typed.is_empty() {
-            format!("runo/race-{}", self.state.next_id + 1)
+            Some(git::branch_slug(&task))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("runo/race-{}", self.state.next_id + 1))
         } else {
             typed.clone()
         };
+        let base = self.new_base.clone();
         for provider in providers {
+            let isolated = (self.new_isolated || racing) && is_git;
+            // An untyped name comes from the task, made unique among branches and sessions.
             let branch = if racing {
-                format!("{race_base}-{}", agent::PROVIDERS[provider].id)
+                let wanted = format!("{race_base}-{}", agent::PROVIDERS[provider].id);
+                self.task_branch(&project, "", wanted, |n| git::has_branch(&project.path, n))
             } else {
                 typed.clone()
             };
-            let isolated = (self.new_isolated || racing) && is_git;
-            match self.spawn_session(&project, provider, &branch, isolated, is_git, &task, cx) {
+            match self.spawn_session_from(
+                &project,
+                provider,
+                &branch,
+                isolated,
+                is_git,
+                &task,
+                base.clone(),
+                None,
+                cx,
+            ) {
                 Ok(id) => {
                     if self.new_connection != connections::LOCAL
                         && connections::get(self.new_connection).is_some()
@@ -2719,9 +2850,15 @@ impl RunoApp {
             }
             self.save();
         }
+        if let Some(context) = self.new_context.take() {
+            for &id in &created {
+                self.apply_context(id, &context);
+            }
+        }
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
         self.branch.update(cx, |b, cx| b.set_value("", window, cx));
+        self.new_branches = None;
         if !self.expanded.contains(&project.id) {
             self.expanded.push(project.id);
         }
@@ -2776,17 +2913,50 @@ impl RunoApp {
         pr: Option<u64>,
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
+        self.spawn_session_from(
+            project,
+            provider,
+            typed_branch,
+            isolated,
+            is_git,
+            task,
+            None,
+            pr,
+            cx,
+        )
+    }
+
+    /// `spawn_session_for`, starting the branch from `base` instead of the default branch.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_session_from(
+        &mut self,
+        project: &Project,
+        provider: usize,
+        typed_branch: &str,
+        isolated: bool,
+        is_git: bool,
+        task: &str,
+        base: Option<String>,
+        pr: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Result<u64, String> {
+        // A repository with no commits has nothing to branch from: run in the folder itself.
+        let unborn = isolated && is_git && !self.demo && !git::has_commits(&project.path);
+        let isolated = isolated && !unborn;
         let id = self.state.next_id();
-        let base = if is_git {
-            git::default_branch(&project.path)
-        } else {
-            String::new()
+        let base = match base {
+            Some(base) if is_git => base,
+            _ if is_git => git::default_branch(&project.path),
+            _ => String::new(),
         };
         let (branch, dir) = if !is_git {
             ("local folder".to_string(), project.path.clone())
         } else if isolated {
+            // Named after the task when no name was given, such as runo/fix-login-redirect.
             let branch = if typed_branch.is_empty() {
-                format!("runo/session-{id}")
+                self.task_branch(project, task, format!("runo/session-{id}"), |n| {
+                    git::has_branch(&project.path, n)
+                })
             } else {
                 typed_branch.to_string()
             };
@@ -2834,6 +3004,14 @@ impl RunoApp {
             base,
             ..Default::default()
         });
+        if unborn {
+            if let Some(session) = self.state.session_mut(id) {
+                session.messages.push(Message::new(
+                    Role::System,
+                    "This repository has no commits yet, so the session runs in the project folder instead of its own worktree. Make a first commit to isolate the next one.",
+                ));
+            }
+        }
         if isolated && is_git && !self.demo {
             self.make_worktree(id, project.path.clone(), branch, pr);
         }
@@ -2884,9 +3062,16 @@ impl RunoApp {
                 .session(id)
                 .is_some_and(|s| cliview::cli_blocker(s).is_none())
         {
+            // Context a session was started with goes ahead of the task here too.
+            let mut task = task;
             if let Some(s) = self.state.session_mut(id) {
                 s.cli = true;
                 s.status = Status::Done;
+                let brief = std::mem::take(&mut s.handoff);
+                if !brief.is_empty() {
+                    task = format!("{brief}\n\n## Your next instruction\n{task}");
+                }
+                self.launch_images.remove(&id);
             }
             self.view_changed = Some((id, std::time::Instant::now()));
             self.open_cli(id, &task, cx);
@@ -4164,6 +4349,25 @@ impl RunoApp {
                                     )),
                                 )
                             })
+                            .when(!working, |el| {
+                                el.child(
+                                    self.ghost_button_sized(
+                                        ("edit-msg", index),
+                                        IconName::Pencil,
+                                        "Edit and send again",
+                                        24.,
+                                    )
+                                    .mt(px(6.))
+                                    .opacity(0.)
+                                    .group_hover("user-msg", |el| el.opacity(1.))
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.start_edit(sid, index, window, cx);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            })
                             .child(if message.playbook.is_empty() {
                                 div()
                                     .max_w(px(560.))
@@ -4187,6 +4391,7 @@ impl RunoApp {
             .then(|| {
                 self.switch_divider(index, &message.meta)
                     .or_else(|| self.cli_divider(index, &message.meta))
+                    .or_else(|| self.context_divider(index, &message.meta))
             })
             .flatten()
         {
@@ -4390,6 +4595,25 @@ impl RunoApp {
                             })
                             .when(!message.usage.is_empty(), |el| {
                                 el.child("·").child(usage_label(&message.usage))
+                            })
+                            .when(!live, |el| {
+                                let sid = self.selected.unwrap_or(0);
+                                el.child(
+                                    self.ghost_button_sized(
+                                        ("fork", index),
+                                        IconName::GitFork,
+                                        "Fork from here: a new session with this conversation and the files as they were",
+                                        22.,
+                                    )
+                                    .opacity(0.)
+                                    .group_hover("message", |el| el.opacity(1.))
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.fork_from(sid, index, cx);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
                             })
                             .child(
                                 self.ghost_button_sized(
@@ -5555,6 +5779,7 @@ impl RunoApp {
         if self.view == View::NewSession {
             self.view = self.new_back;
         }
+        self.new_context = None;
     }
 
     /// New session as a dialog over the current view, on a dimmed backdrop.
@@ -5808,20 +6033,31 @@ impl RunoApp {
         let racing = self.racing() && is_git;
         let isolated = (self.new_isolated || racing) && is_git;
         let typed = git::sanitize_branch(&self.branch.read(cx).value());
+        let task_text = self.new_task.read(cx).value().to_string();
         let branch = if racing {
             format!(
                 "{}-*",
                 if typed.is_empty() {
-                    format!("runo/race-{}", self.state.next_id + 1)
+                    Some(git::branch_slug(&task_text))
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| format!("runo/race-{}", self.state.next_id + 1))
                 } else {
                     typed
                 }
             )
         } else if typed.is_empty() {
-            format!("runo/session-{}", self.state.next_id + 1)
+            let fallback = format!("runo/session-{}", self.state.next_id + 1);
+            match project {
+                Some(p) => self.task_branch(p, &task_text, fallback, |n| self.listed_branch(n)),
+                None => fallback,
+            }
         } else {
             typed
         };
+        let from = self
+            .new_base
+            .clone()
+            .unwrap_or_else(|| self.listed_default().to_string());
         let where_to = match project {
             None => "Add a project to start.".to_string(),
             Some(_) if racing => format!(
@@ -5831,6 +6067,10 @@ impl RunoApp {
                     .map(|i| branch.replace('*', agent::PROVIDERS[*i].id))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            Some(p) if isolated && !from.is_empty() => format!(
+                "Creates branch {branch} from {from} in {}",
+                git::worktree_path(&p.path, &branch).display()
             ),
             Some(p) if isolated => format!(
                 "Creates branch {branch} in {}",
@@ -6034,7 +6274,14 @@ impl RunoApp {
                             .into_any_element()
                     })
                     .when(isolated, |el| {
-                        el.child(Input::new(&self.branch).bordered(true).h(px(36.)))
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().min_w_0().child(Input::new(&self.branch).bordered(true).h(px(36.))))
+                                .when(!self.demo, |el| el.child(self.base_picker(cx))),
+                        )
                     })
                     .when(project.is_some() && (cove_ready || !conns.is_empty()), |el| {
                         let mut choices = div().flex().flex_wrap().gap_2().child(
@@ -6106,6 +6353,7 @@ impl RunoApp {
                     )
                     .child(label("TASK"))
                     .child(Textarea::new(&self.new_task).bordered(true).h(px(110.)))
+                    .children(self.context_chip(cx))
                     .child(
                         div()
                             .flex()
@@ -6143,14 +6391,14 @@ impl RunoApp {
 
     fn list_view(&self, kind: View, cx: &mut Context<Self>) -> AnyElement {
         let worktrees_only = kind == View::Worktrees;
-        let mut sessions: Vec<&Session> = self
-            .state
-            .sessions
-            .iter()
-            .filter(|s| kind != View::Worktrees || s.isolated)
-            .collect();
-        // Live sessions first, archived ones last.
-        sessions.sort_by_key(|s| (s.archived, !s.pinned));
+        let query = self.finder.query.read(cx).value().trim().to_string();
+        let sessions = sessions::filtered(
+            &self.state,
+            &self.finder.filter,
+            &query,
+            &self.finder.list_hits,
+            worktrees_only,
+        );
         let mut rows = div().v_flex().gap_2();
         let mut archived_header = false;
         for (i, session) in sessions.iter().enumerate() {
@@ -6225,7 +6473,9 @@ impl RunoApp {
                                     ),
                             )
                             .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
-                                if worktrees_only && !self.demo {
+                                if let Some(said) = self.finder.list_hits.snippet(&query, id) {
+                                    format!("{project}  ·  “{said}”")
+                                } else if worktrees_only && !self.demo {
                                     session.dir.clone()
                                 } else {
                                     format!("{project}  ·  {}", session.branch)
@@ -6293,7 +6543,15 @@ impl RunoApp {
                 i,
             ));
         }
-        if sessions.is_empty() {
+        let narrowed = !query.is_empty() || self.finder.filter != Default::default();
+        if sessions.is_empty() && narrowed {
+            rows = rows.child(empty_hint(
+                "list-none",
+                IconName::Search,
+                "No sessions match",
+                "Try other words, or clear the filters.",
+            ));
+        } else if sessions.is_empty() {
             rows = rows.child(
                 div()
                     .py_10()
@@ -6320,7 +6578,13 @@ impl RunoApp {
                 View::Worktrees => "Isolated sessions",
                 _ => "Sessions",
             },
-            rows,
+            div()
+                .v_flex()
+                .gap_4()
+                .when(!self.state.sessions.is_empty(), |el| {
+                    el.child(self.list_toolbar(worktrees_only, cx))
+                })
+                .child(rows),
         )
     }
 
@@ -7508,6 +7772,7 @@ impl Render for RunoApp {
         self.measure_cell(window, cx);
         self.tour_rects = self.anchors.take();
         self.sync_project_form(window, cx);
+        self.sync_new_branches();
         if let Some((id, path)) = self.pending_binary.take() {
             settings::update(cx, |s| {
                 let mut options = s.agent(id);
@@ -7528,8 +7793,17 @@ impl Render for RunoApp {
         if self.right_tab == RightTab::Browser && !st.browser_enabled {
             self.right_tab = RightTab::Changes;
         }
-        if self.right_tab == RightTab::Browser {
+        if self.right_tab == RightTab::Browser || self.design_page_key().is_some() {
             self.sync_browser_address(window, cx);
+        }
+        // Design and Architecture follow the project in the top bar.
+        match self.view {
+            View::Design => self.prepare_design(window, cx),
+            View::Architecture => self.prepare_architecture(window, cx),
+            _ => {
+                self.design.shown = false;
+                self.arch.shown = false;
+            }
         }
         // A new shell takes focus once its element has been drawn.
         if let Some(id) = self.selected.filter(|_| self.view == View::Session) {
@@ -7611,8 +7885,8 @@ impl Render for RunoApp {
         let still = self.settings_switching();
         let center = match shown {
             View::Home => self.home_view(cx),
-            View::Design => self.mode_page(Mode::Design, cx),
-            View::Architecture => self.mode_page(Mode::Architecture, cx),
+            View::Design => self.design_view(window, cx),
+            View::Architecture => self.architecture_view(cx),
             View::Session | View::NewSession => self.session_view(window, cx),
             View::Inbox => self.inbox_view(cx),
             View::AllSessions => self.list_view(View::AllSessions, cx),
@@ -8233,6 +8507,11 @@ fn main() {
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."));
         return;
     }
+    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed (launchd).
+    if args.get(1).map(String::as_str) == Some("--run-due-playbooks") {
+        shellenv::init();
+        std::process::exit(pbrunner::run_due());
+    }
     // `runo --connection-run <file>`: one agent turn on a remote connection, and
     // `--connection-shell <file>`: a terminal there.
     if let Some(mode @ ("--connection-run" | "--connection-shell")) =
@@ -8248,6 +8527,8 @@ fn main() {
     }
     // Before any thread starts: find agents and Node.js where the person's terminal would.
     shellenv::init();
+    applog::init();
+    detach::enable(store::data_dir());
     let app = application().with_assets(assets::AllAssets);
     // Clicking the Dock icon with the window closed (macOS keeps Runo running) opens it again.
     app.on_reopen(|cx| {
@@ -8265,10 +8546,48 @@ fn main() {
         set_dock_icon();
         cx.set_global(settings);
         bind_keys(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(quit);
+        desktop_notify::install(cx);
         cx.set_menus(app_menus());
         open_main_window(cx);
     });
+}
+
+/// The open main window's app, so quitting can warn about running agents first.
+struct MainApp(WeakEntity<RunoApp>);
+
+impl Global for MainApp {}
+
+/// Quit from the shortcut, the menu or the command palette. With agents running in the
+/// window, this warns first, the same as closing the window.
+fn quit(_: &Quit, cx: &mut App) {
+    let app = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade());
+    let go = app.is_none_or(|app| {
+        app.update(cx, |this, cx| {
+            this.save();
+            this.may_close(cx)
+        })
+    });
+    if go {
+        cx.quit();
+    }
+}
+
+/// A clicked notification: bring the window forward on its session.
+fn open_session_from_notification(id: u64, cx: &mut App) {
+    let Some(app) = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade()) else {
+        open_main_window(cx);
+        return;
+    };
+    app.update(cx, |this, cx| {
+        if this.state.session(id).is_some() {
+            this.select(id);
+            cx.notify();
+        }
+    });
+    for window in cx.windows() {
+        let _ = window.update(cx, |_, window, _| window.activate_window());
+    }
 }
 
 /// The menu bar: the app menu with Settings and Quit, and the main commands with their
