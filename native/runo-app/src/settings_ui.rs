@@ -50,6 +50,13 @@ impl SettingsPage {
         ),
     ];
 
+    /// The pages in the Settings sidebar, in order.
+    pub(crate) fn pages() -> impl Iterator<Item = SettingsPage> {
+        Self::GROUPS
+            .iter()
+            .flat_map(|(_, pages)| pages.iter().copied())
+    }
+
     /// Every page, including each agent's, for searching.
     fn all() -> impl Iterator<Item = SettingsPage> {
         Self::GROUPS
@@ -58,7 +65,7 @@ impl SettingsPage {
             .chain(agent::PROVIDERS.iter().map(|p| SettingsPage::Agent(p.id)))
     }
 
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
@@ -80,7 +87,7 @@ impl SettingsPage {
             Self::General => "Alerts, the built-in browser, motion and how deleting works.",
             Self::Appearance => "Theme, glass, fonts and how wide conversations run.",
             Self::Terminal => "Text size, font, scrolling and mouse behavior in the terminal panel and agent CLIs.",
-            Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere.",
+            Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere. Inside a terminal on Linux and Windows, add Shift (Ctrl+Shift+K), or press Esc twice to leave it.",
             Self::Chat => "How the composer behaves and what new sessions start with.",
             Self::Providers => "The agent CLIs on this machine. Pick one to change its settings, or install another.",
             Self::Agent("claude") => "Everything Runo can pass to the claude CLI, plus what it detected.",
@@ -102,7 +109,7 @@ impl SettingsPage {
         }
     }
 
-    fn icon(self) -> IconName {
+    pub(crate) fn icon(self) -> IconName {
         match self {
             Self::General => IconName::Settings,
             Self::Appearance => IconName::Palette,
@@ -399,7 +406,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Confirm before deleting", "Ask for a second click before deleting a session.", st.confirm_delete, |s, v| s.confirm_delete = v),
                 switch_row("Remove worktree with session", "Also delete the session's git worktree when the session is deleted. Uncommitted changes in it are lost.", st.remove_worktree_on_delete, |s, v| s.remove_worktree_on_delete = v),
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
-                switch_row("Group sidebar by status", "Show Pinned, Working, Needs review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
+                switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
             ]),
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),

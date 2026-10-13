@@ -19,6 +19,8 @@ pub(crate) enum CtxTarget {
     Playbooks(u64),
     /// The Runs on button in a session's header.
     RunsOn(u64),
+    /// The branch chip in the top bar, for a session.
+    Branch(u64),
 }
 
 #[derive(Clone)]
@@ -56,6 +58,9 @@ enum Act {
     TermPaste,
     TermClear,
     TermClose,
+    /// Show a session's changes in the right panel.
+    Changes(u64),
+    Worktrees,
 }
 
 struct Item {
@@ -95,6 +100,7 @@ impl RunoApp {
             let (pos, target) = (ev.position, target.clone());
             let _ = this.update(cx, |this, cx| {
                 this.ctx_menu = Some((pos, target));
+                this.ctx_index = None;
                 cx.notify();
             });
             cx.stop_propagation();
@@ -305,6 +311,30 @@ impl RunoApp {
                         ),
                     ])
                     .collect()
+            }
+            CtxTarget::Branch(sid) => {
+                let Some(s) = self.state.session(*sid) else {
+                    return Vec::new();
+                };
+                vec![
+                    item("Show changes", IconName::GitCompare, Act::Changes(*sid)),
+                    item(
+                        "Copy branch name",
+                        IconName::Copy,
+                        Act::Copy(s.branch.clone(), "branch name"),
+                    ),
+                    item(
+                        "Open terminal here",
+                        IconName::SquareTerminal,
+                        Act::Shell(*sid),
+                    ),
+                    None,
+                    item(
+                        "Isolated sessions and worktrees",
+                        IconName::GitBranch,
+                        Act::Worktrees,
+                    ),
+                ]
             }
             CtxTarget::Change(path) | CtxTarget::File(path) => {
                 let full = current_dir.join(path);
@@ -531,8 +561,68 @@ impl RunoApp {
                     self.close_shell(id, cx);
                 }
             }
+            Act::Changes(id) => {
+                if self.selected != Some(id) || self.view != View::Session {
+                    self.select(id);
+                }
+                self.show_panel = true;
+                self.panel_auto_hidden = false;
+                self.right_tab = RightTab::Changes;
+                self.save();
+            }
+            Act::Worktrees => self.view = View::Worktrees,
         }
         cx.notify();
+    }
+
+    /// Arrow keys and Enter in an open right-click menu. Returns whether the key was used.
+    pub(crate) fn ctx_key(
+        &mut self,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((_, target)) = self.ctx_menu.clone() else {
+            return false;
+        };
+        let items = self.ctx_items(&target);
+        let entries: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        let at = self
+            .ctx_index
+            .and_then(|i| entries.iter().position(|e| *e == i));
+        match key {
+            "up" | "down" => {
+                let step: isize = if key == "up" { -1 } else { 1 };
+                let next = match at {
+                    None if step < 0 => entries.len().checked_sub(1),
+                    None => (!entries.is_empty()).then_some(0),
+                    Some(i) => {
+                        Some((i as isize + step).rem_euclid(entries.len() as isize) as usize)
+                    }
+                };
+                self.ctx_index = next.map(|n| entries[n]);
+                cx.notify();
+                true
+            }
+            "enter" | "space" => {
+                let act = self
+                    .ctx_index
+                    .and_then(|i| items.into_iter().nth(i).flatten())
+                    .map(|e| e.act);
+                self.ctx_index = None;
+                match act {
+                    Some(act) => self.run_ctx(act, window, cx),
+                    None => self.ctx_menu = None,
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The open right-click menu, drawn at the pointer and kept inside the window.
@@ -550,6 +640,7 @@ impl RunoApp {
             };
             let color = if entry.danger { c_red() } else { c_text() };
             let act = entry.act.clone();
+            let picked = self.ctx_index == Some(i);
             list =
                 list.child(
                     div()
@@ -563,6 +654,7 @@ impl RunoApp {
                         .cursor_pointer()
                         .text_size(px(13.))
                         .text_color(rgb(color))
+                        .when(picked, |el| el.bg(rgb(c_active())))
                         .hover(|el| {
                             el.bg(rgb(if entry.danger {
                                 settings::mix(c_red(), c_raised(), 0.14)
@@ -592,6 +684,7 @@ impl RunoApp {
             .occlude()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.ctx_menu = None;
+                this.ctx_index = None;
                 cx.notify();
             }))
             .child(list);

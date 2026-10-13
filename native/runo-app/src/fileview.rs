@@ -265,7 +265,10 @@ impl RunoApp {
                     "file-empty",
                     IconName::FileCode,
                     "No file open",
-                    "Pick a file above to view it, or edit and save with Ctrl+S.",
+                    &format!(
+                        "Pick a file above to view it, or edit and save with {}.",
+                        keymap::label(cx, "save-file")
+                    ),
                 ))
                 .into_any_element();
         };

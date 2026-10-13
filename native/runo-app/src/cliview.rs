@@ -458,7 +458,10 @@ impl RunoApp {
             .when(!supported, |el| el.opacity(0.5))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(match &blocker {
-                    None => format!("Same conversation, two views. Switching is free: nothing is sent to {name}. Ctrl+Shift+M"),
+                    None => format!(
+                        "Same conversation, two views. Switching is free: nothing is sent to {name}. {}",
+                        keymap::label(cx, "toggle-view")
+                    ),
                     Some(reason) => reason.clone(),
                 })
                 .build(window, cx)

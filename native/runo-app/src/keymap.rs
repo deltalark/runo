@@ -12,7 +12,7 @@ pub(crate) struct Shortcut {
     pub default: &'static [&'static str],
 }
 
-pub(crate) const SHORTCUTS: [Shortcut; 14] = [
+pub(crate) const SHORTCUTS: [Shortcut; 22] = [
     Shortcut {
         id: "quick-open",
         title: "Quick open",
@@ -97,6 +97,54 @@ pub(crate) const SHORTCUTS: [Shortcut; 14] = [
         desc: "Go to Reviews on the mode rail.",
         default: &["secondary-6"],
     },
+    Shortcut {
+        id: "go-inbox",
+        title: "Inbox",
+        desc: "Go to the Inbox: everything waiting on you.",
+        default: &["secondary-shift-i"],
+    },
+    Shortcut {
+        id: "close-tab",
+        title: "Close tab",
+        desc: "Close the session tab that is open.",
+        default: &["secondary-w"],
+    },
+    Shortcut {
+        id: "next-tab",
+        title: "Next tab",
+        desc: "Open the tab to the right.",
+        default: &["ctrl-tab", "secondary-alt-right"],
+    },
+    Shortcut {
+        id: "prev-tab",
+        title: "Previous tab",
+        desc: "Open the tab to the left.",
+        default: &["ctrl-shift-tab", "secondary-alt-left"],
+    },
+    Shortcut {
+        id: "split",
+        title: "Split view",
+        desc: "Open another session beside this one, or close the split.",
+        default: &["secondary-shift-d"],
+    },
+    Shortcut {
+        id: "focus-composer",
+        title: "Focus the message box",
+        desc: "Put the cursor in the message box of the open session.",
+        default: &["secondary-l"],
+    },
+    Shortcut {
+        id: "archive",
+        title: "Archive session",
+        desc: "Archive the highlighted or open session.",
+        default: &["secondary-shift-backspace"],
+    },
+    Shortcut {
+        id: "context-menu",
+        title: "Context menu",
+        desc: "Open the right-click menu of the highlighted or open session.",
+        default: &["shift-f10"],
+    },
 ];
 
 /// Shortcuts the text boxes and the system already use.
@@ -114,7 +162,11 @@ const RESERVED: [(&str, &str); 7] = [
 static BASE: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 fn binding(id: &str, keys: &str) -> Option<KeyBinding> {
-    let context = Some("Runo");
+    binding_in(id, keys, "Runo")
+}
+
+fn binding_in(id: &str, keys: &str, context: &str) -> Option<KeyBinding> {
+    let context = Some(context);
     Some(match id {
         "quick-open" => KeyBinding::new(keys, QuickOpen, context),
         "new-session" => KeyBinding::new(keys, NewSession, context),
@@ -130,6 +182,14 @@ fn binding(id: &str, keys: &str) -> Option<KeyBinding> {
         "go-architecture" => KeyBinding::new(keys, GoArchitecture, context),
         "go-playbooks" => KeyBinding::new(keys, GoPlaybooks, context),
         "go-reviews" => KeyBinding::new(keys, GoReviews, context),
+        "go-inbox" => KeyBinding::new(keys, GoInbox, context),
+        "close-tab" => KeyBinding::new(keys, CloseTab, context),
+        "next-tab" => KeyBinding::new(keys, NextTab, context),
+        "prev-tab" => KeyBinding::new(keys, PrevTab, context),
+        "split" => KeyBinding::new(keys, ToggleSplit, context),
+        "focus-composer" => KeyBinding::new(keys, FocusComposer, context),
+        "archive" => KeyBinding::new(keys, ArchiveSession, context),
+        "context-menu" => KeyBinding::new(keys, ContextMenu, context),
         _ => return None,
     })
 }
@@ -309,22 +369,41 @@ pub(crate) fn install(cx: &mut App) {
         for keys in keys_for(&custom, s.id) {
             if let Some(b) = binding(s.id, &keys) {
                 bindings.push(b);
-                used.push(keys);
+                used.push((s.id, keys));
             }
         }
     }
     bindings.push(KeyBinding::new("escape", Dismiss, Some("Runo")));
+    bindings.push(KeyBinding::new("secondary-q", Quit, None));
     // Inside a shell, keys belong to the shell: Ctrl-P is history, Escape is vi.
     // Keys typed into the Browser tab's page go to the page.
     bindings.push(KeyBinding::new("escape", NoAction {}, Some("RunoBrowser")));
     bindings.push(KeyBinding::new("escape", NoAction {}, Some("RunoTerminal")));
-    for keys in used {
-        let n = normalize(&keys);
+    let taken: Vec<String> = used.iter().map(|(_, k)| normalize(k)).collect();
+    for (id, keys) in &used {
+        let n = normalize(keys);
         if n.split('-').any(|p| p == "ctrl") {
-            bindings.push(KeyBinding::new(&keys, NoAction {}, Some("RunoTerminal")));
+            bindings.push(KeyBinding::new(keys, NoAction {}, Some("RunoTerminal")));
+            // The same shortcut with Shift still reaches Runo from inside the shell.
+            if let Some(shifted) = terminal_variant(keys).filter(|v| !taken.contains(v)) {
+                if let Some(b) = binding_in(id, &shifted, "RunoTerminal") {
+                    bindings.push(b);
+                }
+            }
         }
     }
     cx.bind_keys(bindings);
+}
+
+/// The Shift variant of a Ctrl shortcut, which a terminal leaves to Runo: `ctrl-k` gives
+/// `ctrl-shift-k`. None when the keys have no Ctrl or already use Shift.
+pub(crate) fn terminal_variant(keys: &str) -> Option<String> {
+    let n = normalize(keys);
+    let parts: Vec<&str> = n.split('-').collect();
+    if !parts.contains(&"ctrl") || parts.contains(&"shift") {
+        return None;
+    }
+    Some(normalize(&format!("shift-{n}")))
 }
 
 impl RunoApp {
@@ -456,6 +535,24 @@ mod tests {
         custom.insert("quick-open".into(), "secondary-shift-o".into());
         assert!(conflict(&custom, "new-session", "secondary-k").is_none());
         assert!(conflict(&custom, "quick-open", "secondary-shift-o").is_none());
+    }
+
+    #[test]
+    fn terminal_shortcuts_gain_shift() {
+        assert_eq!(terminal_variant("ctrl-k").as_deref(), Some("ctrl-shift-k"));
+        assert_eq!(terminal_variant("ctrl-shift-m"), None);
+        assert_eq!(terminal_variant("alt-k"), None);
+        assert_eq!(terminal_variant("ctrl-1").as_deref(), Some("ctrl-shift-1"));
+    }
+
+    #[test]
+    fn default_shortcuts_do_not_clash() {
+        let custom = HashMap::new();
+        for s in SHORTCUTS.iter() {
+            for keys in s.default {
+                assert!(conflict(&custom, s.id, keys).is_none(), "{} {keys}", s.id);
+            }
+        }
     }
 
     #[test]
