@@ -49,7 +49,7 @@ Coding agents are good at working on their own, but juggling several of them acr
 
 - **Live, structured output.** Each tool step (read, edit, run, search) streams in as it happens and folds into a tidy "Worked · N steps" summary.
 - **A composer that knows the CLI.** Mention files with `@`, attach images, and pick model, effort, permission mode and more from options detected from the agent itself. Type your next message while the agent works and it is queued.
-- **Approve from anywhere.** Permission requests, questions and plans from any session pop up in the corner, so you can answer without leaving what you're doing.
+- **Approve from anywhere.** Permission requests, questions and plans from any session pop up in the corner, so you can answer without leaving what you're doing. Claude Code's permission requests arrive while the turn runs and it carries on as soon as you answer.
 - **Undo, Keep or Review each turn.** Runo checkpoints the worktree before every turn, so you can roll back a turn that went wrong with one click.
 - **Usage at a glance.** Tokens, cost and context use per turn and per session.
 
@@ -202,7 +202,7 @@ On a Cove server or an SSH server, the agent runs **detached** from your compute
 - **Dropped connections** are handled the same way: Runo reconnects and carries on from the last line it showed, while the agent keeps going.
 - **Stop** still stops it: Runo ends the agent's processes there, then brings back what it did so far.
 - **Your keys** reach that machine in a script only its owner can read, and the script deletes itself as soon as it starts.
-- **Approvals.** Nobody is there to answer a permission prompt mid-turn, so a detached Claude Code turn stops at the first command it isn't allowed to run, and the permission card offers to allow it and retry. Turn this off in Settings → Connections to let the agent carry on without it. (Answering prompts mid-turn would need a permission-prompt tool over the MCP relay; that's not built yet.)
+- **Approvals.** Claude Code asks for permission mid-turn through Runo's MCP relay, and the turn waits while you answer in the corner card or the Inbox: **Allow once**, **Always allow** or **Deny**. While Runo is closed or this machine is asleep, the request waits on the server until Runo reconnects and shows it, or until the wait in Settings → Chat runs out (5 minutes by default). Unanswered, the turn stops at that command and the permission card offers to allow it and retry; turn that off in Settings → Connections to let the agent carry on without it.
 - **A turn that never starts**, because the machine rebooted before it ran, ends after a few minutes with a message instead of waiting forever.
 
 Runo also stops keeping your computer awake while only remote turns are running. Cove on this machine runs alongside your computer, so it pauses when the computer does; use a Cove server or an SSH server for work that should go on without it.

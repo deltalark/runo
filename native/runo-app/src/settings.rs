@@ -107,6 +107,8 @@ pub struct AppSettings {
     pub sync_backup_untracked: bool,
     /// End a turn on a connection at the first command it isn't allowed to run.
     pub stop_on_denial: bool,
+    /// Minutes an agent waits for an answer when it asks for permission mid-turn.
+    pub approval_wait_mins: u32,
     /// Runs of each scheduled playbook to keep; 0 keeps them all.
     pub playbook_keep_runs: u32,
     /// Ask before a playbook an agent asked for starts.
@@ -172,6 +174,7 @@ impl Default for AppSettings {
             sync_backup: false,
             sync_backup_untracked: false,
             stop_on_denial: true,
+            approval_wait_mins: 5,
             playbook_keep_runs: 10,
             confirm_agent_playbooks: true,
             cove_tools: true,

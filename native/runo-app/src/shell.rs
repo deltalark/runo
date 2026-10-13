@@ -274,6 +274,14 @@ impl RunoApp {
     }
 
     pub(crate) fn need(&self, s: &Session) -> Option<Need> {
+        // A running agent paused on a permission request needs the person now.
+        if !s.archived
+            && self
+                .approval_for(s.id)
+                .is_some_and(|r| !self.alerts_hidden.contains(&format!("a:{}", r.id)))
+        {
+            return Some(Need::Blocked);
+        }
         need_of(s, self.is_running(s), &self.alerts_hidden)
     }
 

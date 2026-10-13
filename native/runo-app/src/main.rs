@@ -1,5 +1,6 @@
 mod agent;
 mod alerts;
+mod approvals;
 mod browser;
 mod browser_engine;
 mod caps;
@@ -270,6 +271,13 @@ struct RunoApp {
     /// Popups the person hid ("s:<session>:<message>" or "u:<agent>:<version>").
     alerts_hidden: std::collections::HashSet<String>,
     alerts_expanded: bool,
+    /// Permission requests agents are waiting on mid-turn.
+    approvals: Vec<approvals::Request>,
+    /// Tools the person always allowed for a session, answered without asking again.
+    always_allowed: std::collections::HashSet<(u64, String)>,
+    /// Tools the person refused during a session's turn; they don't come back as
+    /// "Allow" cards when the turn ends.
+    refused: HashMap<u64, Vec<String>>,
     /// Switching agents, waiting for the person to confirm.
     switch_plan: Option<handoff::SwitchPlan>,
     switch_preview: bool,
@@ -1172,6 +1180,9 @@ impl RunoApp {
             update_checked: None,
             alerts_hidden: Default::default(),
             alerts_expanded: false,
+            approvals: Vec::new(),
+            always_allowed: Default::default(),
+            refused: HashMap::new(),
             switch_plan: None,
             switch_preview: false,
             ctx_menu: None,
@@ -1429,6 +1440,16 @@ impl RunoApp {
                 })
                 .unwrap_or(true)
         });
+        // Agents asking for permission mid-turn are shown within half a second.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            if this.update(cx, |this, cx| this.poll_approvals(cx)).is_err() {
+                return;
+            }
+        })
+        .detach();
         // Playbooks agents asked for start within a couple of seconds; scheduled ones are
         // checked twice a minute.
         cx.spawn(async move |this, cx| loop {
@@ -1638,6 +1659,7 @@ impl RunoApp {
                     None => vec![stream::Update::Text(line)],
                 };
                 let plain = !self.streams.contains_key(&id);
+                let refused = self.refused.get(&id).cloned().unwrap_or_default();
                 if let Some(session) = self.state.session_mut(id) {
                     for update in updates {
                         if !matches!(session.messages.last(), Some(m) if m.role == Role::Agent) {
@@ -1659,7 +1681,10 @@ impl RunoApp {
                                 session.messages.push(Message::new(Role::System, error))
                             }
                             stream::Update::Usage(usage) => m.usage = usage,
-                            stream::Update::Denied(tools) => m.denied = tools,
+                            stream::Update::Denied(tools) => {
+                                m.denied =
+                                    tools.into_iter().filter(|t| !refused.contains(t)).collect()
+                            }
                             stream::Update::Plan(plan) => m.plan = plan,
                             stream::Update::Questions(questions) => m.questions = questions,
                             stream::Update::Conversation(conversation) => {
@@ -1699,6 +1724,7 @@ impl RunoApp {
                 let stopped = self.stopping.remove(&id);
                 self.handles.remove(&Target::Session(id));
                 self.streams.remove(&id);
+                self.end_approvals(id);
                 if let Some(start) = self.started.remove(&id) {
                     let since =
                         std::time::SystemTime::now() - start.elapsed() - Duration::from_secs(2);

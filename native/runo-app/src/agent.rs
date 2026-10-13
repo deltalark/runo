@@ -666,6 +666,16 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 let config = serde_json::json!({ "mcpServers": servers });
                 args.extend([s("--mcp-config"), config.to_string()]);
             }
+            // A tool it isn't allowed is asked about in Runo while the turn waits, instead
+            // of being refused and shown only once the turn has ended.
+            if spec.memory.is_some()
+                && !matches!(permission, "bypassPermissions" | "plan" | "dontAsk")
+            {
+                args.extend([
+                    s("--permission-prompt-tool"),
+                    format!("mcp__{MEMORY_SERVER}__{}", crate::approvals::TOOL),
+                ]);
+            }
             if !allowed.is_empty() {
                 args.extend([s("--allowed-tools"), allowed.join(",")]);
             }
@@ -800,21 +810,24 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             out
         }
         _ => {
-            // Drop print mode, streaming output and the prompt; keep everything else.
+            // Drop print mode, streaming output, Runo's permission prompts (the CLI asks
+            // itself) and the prompt; keep everything else.
             let end = args.iter().rposition(|a| a == "--").unwrap_or(args.len());
-            let mut out: Vec<String> = args[..end]
-                .iter()
-                .filter(|a| {
-                    !matches!(
-                        a.as_str(),
-                        "-p" | "--output-format"
-                            | "stream-json"
-                            | "--verbose"
-                            | "--include-partial-messages"
-                    )
-                })
-                .cloned()
-                .collect();
+            let mut out: Vec<String> = Vec::new();
+            let mut iter = args[..end].iter();
+            while let Some(a) = iter.next() {
+                match a.as_str() {
+                    "-p"
+                    | "--output-format"
+                    | "stream-json"
+                    | "--verbose"
+                    | "--include-partial-messages" => {}
+                    "--permission-prompt-tool" => {
+                        iter.next();
+                    }
+                    _ => out.push(a.clone()),
+                }
+            }
             // A first prompt, typed into the CLI as it opens.
             if !spec.prompt.is_empty() {
                 out.extend(["--".to_string(), spec.prompt.to_string()]);
@@ -2024,6 +2037,13 @@ mod arg_tests {
         let claude = provider_args(&spec("claude"));
         let config = claude[claude.iter().position(|a| a == "--mcp-config").unwrap() + 1].clone();
         assert!(config.contains("\"--mcp-memory\""));
+        // Permission prompts go to Runo mid-turn; the interactive CLI asks for itself.
+        assert!(claude
+            .windows(2)
+            .any(|w| w == ["--permission-prompt-tool", "mcp__runo__permission_prompt"]));
+        assert!(!interactive_args(&spec("claude"))
+            .iter()
+            .any(|a| a.contains("permission-prompt")));
         let codex = provider_args(&spec("codex"));
         assert!(codex.contains(&"mcp_servers.runo.command=\"/bin/runo\"".to_string()));
         let amp = provider_args(&spec("amp"));

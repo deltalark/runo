@@ -591,6 +591,14 @@ pub(crate) fn waiting_on(session: &Session) -> Option<(usize, Waiting)> {
     }
 }
 
+/// What a permission request card says: what the agent wants, and that it waits.
+pub(crate) fn approval_text(agent: &str, request: &approvals::Request) -> String {
+    format!(
+        "{agent} wants to {} and is waiting for your answer.",
+        approvals::describe(&request.tool, &request.input)
+    )
+}
+
 /// Join names as "A", "A and B", "A, B and C".
 pub(crate) fn and_list(items: &[String]) -> String {
     match items {
@@ -984,6 +992,206 @@ impl RunoApp {
         self.start_turn(id, prompt, Vec::new(), &opts);
     }
 
+    /// The session a permission request comes from: the one working in its folder,
+    /// a running one first when sessions share the folder.
+    pub(crate) fn approval_session(&self, request: &approvals::Request) -> Option<u64> {
+        let here = |s: &&Session| !s.archived && s.dir == request.dir;
+        self.state
+            .sessions
+            .iter()
+            .filter(here)
+            .find(|s| self.is_running(s))
+            .or_else(|| self.state.sessions.iter().find(here))
+            .map(|s| s.id)
+    }
+
+    /// The permission request a session is waiting on now, if any.
+    pub(crate) fn approval_for(&self, id: u64) -> Option<&approvals::Request> {
+        self.approvals
+            .iter()
+            .find(|r| self.approval_session(r) == Some(id))
+    }
+
+    /// Pick up the permission requests agents wait on, answering at once the tools the
+    /// person always allowed for that session, and drop ones nobody waits for any more.
+    pub(crate) fn poll_approvals(&mut self, cx: &mut Context<Self>) {
+        if self.demo {
+            return;
+        }
+        let base = approvals::folder();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut live = Vec::new();
+        for request in approvals::pending(&base) {
+            if request.expired(now) {
+                approvals::withdraw(&base, &request.id);
+                continue;
+            }
+            let Some(id) = self.approval_session(&request) else {
+                continue;
+            };
+            if self.always_allowed.contains(&(id, request.tool.clone())) {
+                let allow = approvals::Answer::Allow {
+                    updated_input: request.input.clone(),
+                };
+                let _ = approvals::answer(&base, &request.id, &allow);
+                continue;
+            }
+            live.push(request);
+        }
+        if live == self.approvals {
+            return;
+        }
+        for request in live
+            .iter()
+            .filter(|r| !self.approvals.iter().any(|a| a.id == r.id))
+        {
+            if let Some(session) = self
+                .approval_session(request)
+                .and_then(|id| self.state.session(id))
+            {
+                let name = agent::provider(&session.provider).name;
+                settings::notify(
+                    "Permission needed",
+                    &format!(
+                        "{name} wants to {}",
+                        approvals::describe(&request.tool, &request.input)
+                    ),
+                );
+            }
+        }
+        self.approvals = live;
+        cx.notify();
+    }
+
+    /// A session's turn ended: its requests are withdrawn and its refusals forgotten.
+    pub(crate) fn end_approvals(&mut self, id: u64) {
+        self.refused.remove(&id);
+        let base = approvals::folder();
+        let ended: Vec<String> = self
+            .approvals
+            .iter()
+            .filter(|r| self.approval_session(r) == Some(id))
+            .map(|r| r.id.clone())
+            .collect();
+        for request in &ended {
+            approvals::withdraw(&base, request);
+        }
+        self.approvals.retain(|r| !ended.contains(&r.id));
+    }
+
+    /// Answer a permission request: allow it once, always for this session (and this
+    /// agent, as Always allow does after a turn), or refuse it.
+    pub(crate) fn answer_approval(
+        &mut self,
+        request: &approvals::Request,
+        allow: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
+        let answer = match allow {
+            Some(_) => approvals::Answer::Allow {
+                updated_input: request.input.clone(),
+            },
+            None => approvals::Answer::Deny {
+                message:
+                    "The person denied this in Runo. Carry on without it, or ask them about it."
+                        .into(),
+            },
+        };
+        let what = approvals::describe(&request.tool, &request.input);
+        let session = self.approval_session(request);
+        self.approvals.retain(|r| r.id != request.id);
+        if approvals::answer(&approvals::folder(), &request.id, &answer).is_err() {
+            self.notice = Some(
+                "The agent stopped waiting for that answer: it timed out or its turn ended.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        if let Some(id) = session {
+            match allow {
+                Some(true) => {
+                    self.always_allowed.insert((id, request.tool.clone()));
+                    if let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) {
+                        self.allow_tools_for(&provider, std::slice::from_ref(&request.tool), cx);
+                    }
+                }
+                Some(false) => {}
+                None => self
+                    .refused
+                    .entry(id)
+                    .or_default()
+                    .push(request.tool.clone()),
+            }
+            self.state.log(
+                id,
+                format!(
+                    "{} the agent to {what}",
+                    if allow.is_some() {
+                        "Allowed"
+                    } else {
+                        "Did not allow"
+                    }
+                ),
+            );
+        }
+        cx.notify();
+    }
+
+    /// Allow once, Always allow and Deny for a permission request.
+    pub(crate) fn approval_actions(
+        &self,
+        prefix: &str,
+        n: usize,
+        request: &approvals::Request,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (once, always, deny) = (request.clone(), request.clone(), request.clone());
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                self.button(
+                    SharedString::from(format!("{prefix}-ap-once-{n}")),
+                    "Allow once",
+                    false,
+                )
+                .h(px(26.))
+                .child(icon(IconName::Check, 12., c_secondary()))
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.answer_approval(&once, Some(false), cx)),
+                ),
+            )
+            .child(
+                self.button(
+                    SharedString::from(format!("{prefix}-ap-always-{n}")),
+                    "Always allow",
+                    true,
+                )
+                .h(px(26.))
+                .child(icon(IconName::ShieldCheck, 12., c_canvas()))
+                .on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.answer_approval(&always, Some(true), cx)
+                    }),
+                ),
+            )
+            .child(
+                self.button(
+                    SharedString::from(format!("{prefix}-ap-deny-{n}")),
+                    "Deny",
+                    false,
+                )
+                .h(px(26.))
+                .child(icon(IconName::X, 12., c_secondary()))
+                .on_click(cx.listener(move |this, _, _, cx| this.answer_approval(&deny, None, cx))),
+            )
+    }
+
     /// Sessions waiting on the person, except the one already on screen.
     fn waiting_sessions(&self) -> Vec<(u64, usize, Waiting)> {
         let on_screen = (self.view == View::Session)
@@ -1005,6 +1213,33 @@ impl RunoApp {
             return None;
         }
         let mut cards: Vec<AnyElement> = Vec::new();
+        // Agents waiting mid-turn come first: their turn is paused on the answer.
+        for (n, request) in self.approvals.iter().enumerate() {
+            let key = format!("a:{}", request.id);
+            if self.alerts_hidden.contains(&key) {
+                continue;
+            }
+            let Some(session) = self
+                .approval_session(request)
+                .and_then(|id| self.state.session(id))
+            else {
+                continue;
+            };
+            let provider = agent::provider(&session.provider);
+            cards.push(self.alert_card(
+                SharedString::from(format!("alert-{key}")),
+                c_amber(),
+                IconName::ShieldAlert,
+                "Permission needed",
+                Some(session.title.clone()),
+                Some(self.provider_badge(provider, 18.)),
+                approval_text(provider.name, request),
+                self.approval_actions("al", n, request, cx),
+                key,
+                Some(session.id),
+                cx,
+            ));
+        }
         for (n, (id, index, waiting)) in self.waiting_sessions().into_iter().enumerate() {
             let Some(session) = self.state.session(id) else {
                 continue;

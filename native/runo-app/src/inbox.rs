@@ -100,6 +100,9 @@ impl RunoApp {
 
     /// Clear a session from the Inbox without opening it.
     fn dismiss_need(&mut self, id: u64) {
+        if let Some(request) = self.approval_for(id) {
+            self.alerts_hidden.insert(format!("a:{}", request.id));
+        }
         if let Some((index, _)) = self.state.session(id).and_then(alerts::waiting_on) {
             self.alerts_hidden.insert(format!("s:{id}:{index}"));
         }
@@ -125,10 +128,19 @@ impl RunoApp {
             .find(|p| p.id == session.project_id)
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        let waiting = (need == Need::Blocked)
+        let live = (need == Need::Blocked)
+            .then(|| self.approval_for(id))
+            .flatten();
+        let waiting = (need == Need::Blocked && live.is_none())
             .then(|| alerts::waiting_on(session))
             .flatten();
         let (glyph, color, what) = match waiting.as_ref().map(|(_, w)| w) {
+            _ if live.is_some() => (
+                IconName::ShieldAlert,
+                c_amber(),
+                live.map(|r| alerts::approval_text(provider.name, r))
+                    .unwrap_or_default(),
+            ),
             Some(Waiting::Denied(tools)) => (
                 IconName::ShieldAlert,
                 c_amber(),
@@ -158,9 +170,10 @@ impl RunoApp {
                 "Finished while you were away".to_string(),
             ),
         };
-        let mut actions = match waiting {
-            Some((index, w)) => self.waiting_actions(n, id, index, w, cx),
-            None => div().flex().items_center().gap_2(),
+        let mut actions = match (live, waiting) {
+            (Some(request), _) => self.approval_actions("inbox", n, request, cx),
+            (None, Some((index, w))) => self.waiting_actions(n, id, index, w, cx),
+            (None, None) => div().flex().items_center().gap_2(),
         };
         actions = actions
             .child(

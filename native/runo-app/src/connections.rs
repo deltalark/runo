@@ -1517,6 +1517,59 @@ impl Remote {
         format!("{}.runo", self.remote_dir)
     }
 
+    /// An agent's arguments for the connection: Runo's MCP server reaches it through a
+    /// relay in the job folder (which must exist), and secrets stay off its command line.
+    fn agent_args(
+        &self,
+        args: &[String],
+        env: &mut Vec<(String, String)>,
+    ) -> Result<Vec<String>, String> {
+        let job = self.job_dir();
+        let exe = runo_exe();
+        let args = if !exe.is_empty() && args.iter().any(|a| a.contains(&exe)) {
+            self.conn.write_file(
+                &self.vm,
+                &format!("{job}/mcp-relay.sh"),
+                MCP_RELAY.as_bytes(),
+            )?;
+            self.conn.run(
+                &self.vm,
+                &format!(
+                    "d={}; mkdir -p \"$d/in\" \"$d/out\" && touch \"$d/alive\"",
+                    quote(&self.mailbox())
+                ),
+                None,
+            )?;
+            let relay = vec![
+                "bash".to_string(),
+                "-c".into(),
+                format!(
+                    "exec bash \"$HOME/{job}/mcp-relay.sh\" \"$HOME/{job}/mcp\" {}",
+                    relay_wait()
+                ),
+            ];
+            bridge_mcp(args, env, &exe, &relay)
+        } else {
+            bridge_mcp(args, env, "\u{0}", &["bash".into()])
+        };
+        let base = Path::new(&self.remote_dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let config = format!("{job}/mcp.json");
+        hide_mcp_secrets(
+            &args,
+            env,
+            &format!("../{base}.runo/mcp.json"),
+            &mut |text| {
+                self.conn.write_file(&self.vm, &config, text.as_bytes())?;
+                self.conn
+                    .run(&self.vm, &format!("chmod 600 {}", quote(&config)), None)
+                    .map(|_| ())
+            },
+        )
+    }
+
     /// Start the agent detached on the connection, so it keeps going when this machine
     /// sleeps, shuts down or loses the network. Its output goes to a log there.
     fn start_job(
@@ -1535,49 +1588,8 @@ impl Remote {
             ),
             None,
         )?;
-        // Runo's MCP server reaches the agent through a relay, and secrets stay off its
-        // command line.
-        let exe = runo_exe();
         let mut env = env.to_vec();
-        let args = if !exe.is_empty() && args.iter().any(|a| a.contains(&exe)) {
-            self.conn.write_file(
-                &self.vm,
-                &format!("{job}/mcp-relay.sh"),
-                MCP_RELAY.as_bytes(),
-            )?;
-            self.conn.run(
-                &self.vm,
-                &format!(
-                    "d={}; mkdir -p \"$d/in\" \"$d/out\" && touch \"$d/alive\"",
-                    quote(&self.mailbox())
-                ),
-                None,
-            )?;
-            let relay = vec![
-                "bash".to_string(),
-                "-c".into(),
-                format!("exec bash \"$HOME/{job}/mcp-relay.sh\" \"$HOME/{job}/mcp\""),
-            ];
-            bridge_mcp(args, &mut env, &exe, &relay)
-        } else {
-            bridge_mcp(args, &mut env, "\u{0}", &["bash".into()])
-        };
-        let base = Path::new(&self.remote_dir)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let config = format!("{job}/mcp.json");
-        let args = hide_mcp_secrets(
-            &args,
-            &mut env,
-            &format!("../{base}.runo/mcp.json"),
-            &mut |text| {
-                self.conn.write_file(&self.vm, &config, text.as_bytes())?;
-                self.conn
-                    .run(&self.vm, &format!("chmod 600 {}", quote(&config)), None)
-                    .map(|_| ())
-            },
-        )?;
+        let args = self.agent_args(args, &mut env)?;
         let mut script = String::from("cd \"$HOME\"\n");
         // A turn stopped before it got going never starts.
         script.push_str(&format!(
@@ -1811,7 +1823,10 @@ impl DenialWatch {
                         .join(" "),
                     _ => String::new(),
                 };
-                if !(text.contains("requested permissions") || text.contains("haven't granted")) {
+                if !(text.contains("requested permissions")
+                    || text.contains("haven't granted")
+                    || text.contains("hasn't granted"))
+                {
                     return None;
                 }
                 let tool = b["tool_use_id"]
@@ -2028,6 +2043,9 @@ pub fn connection_run(path: &str) -> i32 {
     let pumping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let exe = runo_exe();
     if file.resume || (!exe.is_empty() && file.args.iter().any(|a| a.contains(&exe))) {
+        if file.resume {
+            r.reclaim_mcp();
+        }
         let r = r.clone();
         let flag = pumping.clone();
         std::thread::spawn(move || {
@@ -2258,27 +2276,41 @@ fn conversation_id(line: &str) -> Option<String> {
 /// (a VM, a server, another OS). Each request becomes a file in the mailbox folder given
 /// as `$1`; Runo answers from this machine, where the session's memory and playbooks are.
 /// When Runo hasn't looked for a minute (it is closed, or this machine is asleep), calls
-/// fail fast instead of hanging the agent.
-const MCP_RELAY: &str = r#"d="$1"; mkdir -p "$d/in" "$d/out"; n=0
+/// fail fast instead of hanging the agent. Permission requests are the exception: they
+/// wait up to `$2` seconds, so a Runo that reconnects in time can still answer, and are
+/// refused when nobody did.
+const MCP_RELAY: &str = r#"d="$1"; w="${2:-300}"; mkdir -p "$d/in" "$d/out"; n=0
+m="The person hasn't granted this: nobody answered in Runo in time. Carry on without it if you can, or end your turn and say what you need allowed."
 while IFS= read -r line || [ -n "$line" ]; do
   [ -n "$line" ] || continue
   n=$((n+1)); f="$$-$n"
   printf '%s\n' "$line" > "$d/in/.$f" && mv "$d/in/.$f" "$d/in/$f"
   case "$line" in *'"id":'*) ;; *) continue ;; esac
+  case "$line" in *'"permission_prompt"'*) ask=1; limit=$((w*4)) ;; *) ask=; limit=1200 ;; esac
   i=0
   while [ ! -f "$d/out/$f" ]; do
-    if [ $i -ge 8 ] && [ -z "$(find "$d" -maxdepth 1 -name alive -mmin -1 2>/dev/null)" ]; then break; fi
-    [ $i -ge 1200 ] && break
+    if [ -z "$ask" ] && [ $i -ge 8 ] && [ -z "$(find "$d" -maxdepth 1 -name alive -mmin -1 2>/dev/null)" ]; then break; fi
+    [ $i -ge $limit ] && break
     sleep 0.25; i=$((i+1))
   done
   if [ -f "$d/out/$f" ]; then
     cat "$d/out/$f"; rm -f "$d/out/$f"
   else
-    rm -f "$d/in/$f"
+    rm -f "$d/in/$f" "$d/in/.held-$f"
     id="$(printf '%s' "$line" | sed -nE 's/.*"id"[[:space:]]*:[[:space:]]*("[^"]*"|[0-9]+).*/\1/p')"
-    printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"Runo is not connected right now, so its tools are unavailable until it is."}}\n' "${id:-null}"
+    if [ -n "$ask" ]; then
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"{\\"behavior\\":\\"deny\\",\\"message\\":\\"%s\\"}"}]}}\n' "${id:-null}" "$m"
+    else
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32000,"message":"Runo is not connected right now, so its tools are unavailable until it is."}}\n' "${id:-null}"
+    fi
   fi
 done"#;
+
+/// How long the relay holds a permission request: the time the person has to answer,
+/// and a little more so Runo's own answer (even a refusal) gets there first.
+pub fn relay_wait() -> String {
+    (crate::approvals::wait().as_secs() + 30).to_string()
+}
 
 /// Whether an agent run in `sandbox` (None: this machine) can reach Runo's MCP server.
 /// Agent argument builders give it the usual `<runo> --mcp-memory <folder>` server; on a
@@ -2523,13 +2555,17 @@ impl Remote {
     }
 
     /// Answer the requests waiting in the relay's mailbox. Returns how many there were.
+    /// Permission requests wait for the person on their own threads; they stay in the
+    /// mailbox, set aside, until answered, so a runner after this one can take them up.
     fn pump_mcp(&self) -> Result<usize, String> {
         let d = quote(&self.mailbox());
         let out = self.conn.run(
             &self.vm,
             &format!(
                 "d={d}; [ -d \"$d/in\" ] || exit 0; touch \"$d/alive\"; \
-                 for f in \"$d\"/in/*; do [ -f \"$f\" ] || continue; printf '%s\\t' \"${{f##*/}}\"; cat \"$f\"; rm -f \"$f\"; done"
+                 for f in \"$d\"/in/*; do [ -f \"$f\" ] || continue; n=\"${{f##*/}}\"; printf '%s\\t' \"$n\"; cat \"$f\"; \
+                 case \"$(cat \"$f\")\" in *'\"{tool}\"'*) mv \"$f\" \"$d/in/.held-$n\" ;; *) rm -f \"$f\" ;; esac; done",
+                tool = crate::approvals::TOOL
             ),
             None,
         )?;
@@ -2541,11 +2577,19 @@ impl Remote {
                 continue;
             };
             n += 1;
+            if crate::approvals::is_ask(request) {
+                let (r, name, request) = (self.clone(), name.to_string(), request.to_string());
+                std::thread::spawn(move || {
+                    if let Some(reply) = answer_mcp(&r.local_dir, &request) {
+                        let script =
+                            format!("d={}\n{}", quote(&r.mailbox()), reply_script(&name, &reply));
+                        let _ = r.conn.run(&r.vm, &script, None);
+                    }
+                });
+                continue;
+            }
             if let Some(reply) = answer_mcp(&self.local_dir, request) {
-                let name = quote(name);
-                script.push_str(&format!(
-                    "cat > \"$d/out/.\"{name} <<'RUNO_EOF'\n{reply}\nRUNO_EOF\nmv \"$d/out/.\"{name} \"$d/out/\"{name}\n"
-                ));
+                script.push_str(&reply_script(name, &reply));
             }
         }
         if script.contains("RUNO_EOF") {
@@ -2553,6 +2597,26 @@ impl Remote {
         }
         Ok(n)
     }
+
+    /// Put permission requests a runner before this one set aside back in the mailbox.
+    fn reclaim_mcp(&self) {
+        let _ = self.conn.run(
+            &self.vm,
+            &format!(
+                "d={}; for f in \"$d\"/in/.held-*; do [ -f \"$f\" ] && mv \"$f\" \"$d/in/${{f##*/.held-}}\"; done; true",
+                quote(&self.mailbox())
+            ),
+            None,
+        );
+    }
+}
+
+/// The lines of a mailbox script (with `$d` set) that leave `reply` for request `name`.
+fn reply_script(name: &str, reply: &str) -> String {
+    let name = quote(name);
+    format!(
+        "cat > \"$d/out/.\"{name} <<'RUNO_EOF'\n{reply}\nRUNO_EOF\nmv \"$d/out/.\"{name} \"$d/out/\"{name}\nrm -f \"$d/in/.held-\"{name}\n"
+    )
 }
 
 /// Local Cove VMs share the session folder, so their relay's mailbox lives in it and a
@@ -2590,6 +2654,7 @@ pub fn serve_cove_mailbox(dir: &str) -> Option<Vec<String>> {
         "bash".into(),
         base.join("mcp-relay.sh").to_string_lossy().into_owned(),
         mailbox.to_string_lossy().into_owned(),
+        relay_wait(),
     ])
 }
 
@@ -2607,11 +2672,21 @@ fn pump_folder(dir: &str) {
         }
         let request = std::fs::read_to_string(entry.path()).unwrap_or_default();
         let _ = std::fs::remove_file(entry.path());
-        if let Some(reply) = answer_mcp(dir, &request) {
-            let tmp = mailbox.join("out").join(format!(".{name}"));
-            if std::fs::write(&tmp, format!("{reply}\n")).is_ok() {
-                let _ = std::fs::rename(&tmp, mailbox.join("out").join(&name));
+        let ask = crate::approvals::is_ask(&request);
+        let (dir, out) = (dir.to_string(), mailbox.join("out"));
+        let reply = move || {
+            if let Some(reply) = answer_mcp(&dir, &request) {
+                let tmp = out.join(format!(".{name}"));
+                if std::fs::write(&tmp, format!("{reply}\n")).is_ok() {
+                    let _ = std::fs::rename(&tmp, out.join(&name));
+                }
             }
+        };
+        // A permission request waits for the person without holding up the others.
+        if ask {
+            std::thread::spawn(reply);
+        } else {
+            reply();
         }
     }
 }
@@ -3457,6 +3532,45 @@ mod tests {
             .is_some_and(|t| !t.is_empty()));
     }
 
+    /// A permission request nobody answers is refused in the shape Claude Code reads,
+    /// with words that end a detached turn, and requests set aside are taken up again.
+    #[test]
+    fn an_unanswered_permission_request_is_refused() {
+        let (_, far, remote) = setup("ask");
+        let mailbox = far.join(remote.mailbox());
+        std::fs::create_dir_all(mailbox.join("in")).unwrap();
+        let script = far.join("relay.sh");
+        std::fs::write(&script, MCP_RELAY).unwrap();
+        let mut child = Command::new("bash")
+            .arg(&script)
+            .arg(&mailbox)
+            .arg("1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(
+            child.stdin.take().unwrap(),
+            r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"permission_prompt","arguments":{{"tool_name":"Bash","input":{{}}}}}}}}"#
+        )
+        .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let reply: serde_json::Value =
+            serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+        assert_eq!(reply["id"], 4);
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        let answer: crate::approvals::Answer = serde_json::from_str(text).unwrap();
+        assert!(
+            matches!(&answer, crate::approvals::Answer::Deny { message } if message.contains("hasn't granted"))
+        );
+        assert_eq!(std::fs::read_dir(mailbox.join("in")).unwrap().count(), 0);
+
+        std::fs::write(mailbox.join("in/.held-9-1"), "{}\n").unwrap();
+        remote.reclaim_mcp();
+        assert!(mailbox.join("in/9-1").is_file());
+        assert!(!mailbox.join("in/.held-9-1").exists());
+    }
+
     #[test]
     fn a_turn_that_never_starts_is_noticed() {
         let (_, far, remote) = setup("unstarted");
@@ -3487,6 +3601,16 @@ mod tests {
         let failed = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"exit code 1"}]}}"#;
         assert_eq!(watch.denied(failed), None);
         assert_eq!(watch.denied("not json"), None);
+        // Asked in Runo mid-turn: an unanswered request ends the turn, a refusal doesn't.
+        let timed_out = format!(
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":{}}}]}}}}"#,
+            serde_json::Value::String(crate::approvals::timed_out(std::time::Duration::from_secs(
+                300
+            )))
+        );
+        assert_eq!(watch.denied(&timed_out), Some("Bash".into()));
+        let refused = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"The person denied this in Runo."}]}}"#;
+        assert_eq!(watch.denied(refused), None);
     }
 
     #[test]

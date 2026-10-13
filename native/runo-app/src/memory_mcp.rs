@@ -123,6 +123,19 @@ fn tools() -> Value {
             }
         },
         {
+            "name": crate::approvals::TOOL,
+            "description": "Used by Claude Code to ask the person, in Runo, for permission to use a tool. Don't call it yourself.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tool_name": { "type": "string" },
+                    "input": { "type": "object" },
+                    "tool_use_id": { "type": "string" }
+                },
+                "required": ["tool_name", "input"]
+            }
+        },
+        {
             "name": "save_note",
             "description": "Save a short, durable note (a decision, a gotcha, what is left to do) to this session's memory, so the next agent or session sees it.",
             "inputSchema": {
@@ -193,6 +206,12 @@ fn call(dir: &str, name: &str, args: &Value) -> Value {
         "list_playbooks" | "get_playbook" | "run_playbook" => {
             playbook_call(&load_state(), dir, name, args, &crate::store::inbox_dir())
         }
+        crate::approvals::TOOL => crate::approvals::call(
+            &crate::approvals::folder(),
+            dir,
+            args,
+            crate::approvals::wait(),
+        ),
         other => failure(format!("Unknown tool {other}")),
     }
 }
@@ -493,7 +512,7 @@ mod tests {
         )
         .is_none());
         let list = handle(d, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 8);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 9);
         let call = |name: &str, args: Value| {
             handle(d, &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap()["result"]["content"][0]["text"]
                 .as_str()

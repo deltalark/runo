@@ -501,6 +501,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Memory", "Runo keeps a summary of each session in .runo/memory.md inside its folder, kept out of git.", vec![
                 switch_row("Runo tools for agents", "Give Claude Code and Codex Runo's tools: read the session memory, search earlier sessions, save notes, and use playbooks (as /mcp__runo__… commands in Claude Code).", st.memory_server, |s, v| s.memory_server = v),
+                row("Wait for permission answers", "With Runo tools on, Claude Code asks you mid-turn before using a tool it isn't allowed, and waits this long for Allow or Deny before carrying on without it. Turns on servers keep waiting while Runo is closed, so you can answer when it reconnects.", Ctl::Dropdown(options(&[("2", "2 minutes"), ("5", "5 minutes"), ("15", "15 minutes"), ("60", "1 hour"), ("480", "8 hours")]), st.approval_wait_mins.to_string(), Rc::new(|s, v| s.approval_wait_mins = v.parse().unwrap_or(5)))),
             ]),
             section("New sessions", "What a session starts with before you change it in the composer.", vec![
                 row("Default view", "How new sessions open. CLI shows the agent's own command line on the same conversation (Claude Code and Codex); switch any time from the session header at no token cost.", Ctl::Segment(vec![("chat".into(), "Chat".into()), ("cli".into(), "CLI".into())], st.default_view.clone(), Rc::new(|s, v| s.default_view = v))),
@@ -1076,7 +1077,7 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
     }
     cove_rows.push(switch_row(
         "Stop at the first blocked command",
-        "A turn on a server or Cove can't ask you mid-turn. When the agent tries something it isn't allowed to (Claude Code), the turn stops there and shows Allow and retry, instead of carrying on without it for hours.",
+        "When the agent tries something it isn't allowed to (Claude Code) and nobody answers its permission request in time, or Runo's tools are off, the turn stops there and shows Allow and retry, instead of carrying on without it for hours.",
         st.stop_on_denial,
         |s, v| s.stop_on_denial = v,
     ));
