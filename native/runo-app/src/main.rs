@@ -23,6 +23,7 @@ mod memory_mcp;
 mod models;
 mod notes;
 mod pbfile;
+mod pbrunner;
 mod pbshare;
 mod playbooks;
 mod projects;
@@ -8234,6 +8235,11 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--mcp-memory") {
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."));
         return;
+    }
+    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed (launchd).
+    if args.get(1).map(String::as_str) == Some("--run-due-playbooks") {
+        shellenv::init();
+        std::process::exit(pbrunner::run_due());
     }
     // `runo --connection-run <file>`: one agent turn on a remote connection, and
     // `--connection-shell <file>`: a terminal there.

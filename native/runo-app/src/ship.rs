@@ -159,7 +159,7 @@ pub(crate) fn scan(req: ScanRequest) -> Scan {
 /// Make a session's worktree: fetch, branch from the up-to-date base, check out a pull
 /// request when asked, and copy `.worktreeinclude` files. Returns the folder, the branch
 /// and lines for the session's Terminal.
-fn prepare_worktree(
+pub(crate) fn prepare_worktree(
     repo: &str,
     branch: &str,
     base: &str,

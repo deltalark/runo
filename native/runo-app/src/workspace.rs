@@ -363,6 +363,7 @@ impl RunoApp {
         if self.demo {
             return;
         }
+        self.import_headless_runs();
         let now = unix_now();
         let due: Vec<(u64, u64, u64)> = self
             .state
@@ -372,6 +373,10 @@ impl RunoApp {
             .map(|a| (a.id, a.runs_due(now), a.next_run().unwrap_or(now)))
             .collect();
         for (id, runs, at) in due {
+            // Runo opened while the runner works on it; its result comes in shortly.
+            if crate::pbrunner::running(id) {
+                continue;
+            }
             let busy = self.state.sessions.iter().any(|s| {
                 s.playbook == id
                     && (s.status == Status::Working
@@ -409,7 +414,7 @@ impl RunoApp {
 
     /// Delete the oldest runs of a scheduled playbook past the number Settings keeps.
     /// Pinned, unread and working runs stay.
-    fn prune_playbook_runs(&mut self, playbook: u64) {
+    pub(crate) fn prune_playbook_runs(&mut self, playbook: u64) {
         let keep = settings::playbook_keep_runs();
         if keep == 0 {
             return;
@@ -842,7 +847,7 @@ const LATE_SECS: u64 = 5 * 60;
 
 /// What a scheduled run says about runs missed while Runo was closed: `runs` came due
 /// since the last one, the first at `late` when it is starting late.
-fn missed_note(runs: u64, late: Option<u64>) -> Option<String> {
+pub(crate) fn missed_note(runs: u64, late: Option<u64>) -> Option<String> {
     if runs >= 2 {
         let missed = runs - 1;
         return Some(format!(
