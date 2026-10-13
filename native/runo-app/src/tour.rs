@@ -466,14 +466,16 @@ impl RunoApp {
         for (glyph, text) in points {
             list = list.child(
                 div()
+                    .w_full()
                     .flex()
                     .items_start()
                     .gap_2()
                     .text_size(px(13.))
                     .line_height(px(19.))
                     .text_color(rgb(c_secondary()))
-                    .child(div().pt(px(2.)).child(icon(glyph, 14., c_blue())))
-                    .child(div().flex_1().child(text)),
+                    .child(div().flex_none().pt(px(2.)).child(icon(glyph, 14., c_blue())))
+                    // min_w_0 lets the text shrink to the card and wrap instead of spilling out.
+                    .child(div().flex_1().min_w_0().child(text)),
             );
         }
         let close = |tour: bool| {
