@@ -632,13 +632,18 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 let pid = p.id;
                 if caps.installed {
                     let path = install::agent_path(p);
-                    let desc = match &path {
+                    let mut desc = match &path {
                         Some(path) => match crate::shellenv::found_via(path) {
                             Some(via) => format!("{} · via {via}", tilde(path)),
                             None => tilde(path),
                         },
                         None => String::new(),
                     };
+                    match crate::signin::get(p.id) {
+                        Some(true) => desc.push_str(" · Signed in"),
+                        Some(false) => desc.push_str(&format!(" · {}", agent::sign_in_help(p.id))),
+                        None => {}
+                    }
                     let mut r = row(p.name, &desc, Ctl::Open(caps.version.clone()));
                     r.open = Some(SettingsPage::Agent(p.id));
                     installed.push(r);

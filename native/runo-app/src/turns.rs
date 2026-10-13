@@ -178,6 +178,13 @@ impl RunoApp {
         let sel = session.selections();
         let agent_session = session.agent_session.clone();
         let sandbox = session.sandbox();
+        // A signed-out agent says so before its turn fails, not after.
+        if sandbox.is_none() && !demo && crate::signin::get(&provider) == Some(false) {
+            let mut hint = Message::new(Role::System, agent::sign_in_help(&provider));
+            hint.meta = "warning".into();
+            let at = session.messages.len() - 1;
+            session.messages.insert(at, hint);
+        }
         crate::connections::prepare_run(
             Some((provider.clone(), agent_session.clone())),
             crate::settings::sync_backup(),

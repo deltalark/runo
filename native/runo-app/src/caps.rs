@@ -103,6 +103,11 @@ pub fn get(provider: &str) -> Caps {
         .unwrap_or_default()
 }
 
+/// Ask the UI to repaint, as when discovery finished.
+pub fn mark_updated() {
+    UPDATED.store(true, Ordering::Relaxed);
+}
+
 /// True once after discovery finished, so the UI can repaint.
 pub fn take_updated() -> bool {
     UPDATED.swap(false, Ordering::Relaxed)
@@ -125,6 +130,7 @@ pub fn refresh() {
             }
             UPDATED.store(true, Ordering::Relaxed);
         }
+        crate::signin::refresh(true);
     });
 }
 

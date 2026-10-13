@@ -45,6 +45,7 @@ mod settings_ui;
 mod shell;
 mod shellenv;
 mod ship;
+mod signin;
 mod split;
 mod store;
 mod stream;
@@ -2061,9 +2062,24 @@ impl RunoApp {
                     if let Some(warning) = sync_warning {
                         session.messages.push(warning);
                     }
+                    if !stopped && !session.elsewhere() {
+                        if sign_in.is_some() {
+                            signin::set(&session.provider, false);
+                        } else if ok {
+                            signin::set(&session.provider, true);
+                        }
+                    }
                     if let Some(hint) = sign_in {
                         hold = true;
-                        session.messages.push(Message::new(Role::System, hint));
+                        let turn = session
+                            .messages
+                            .iter()
+                            .rposition(|m| m.role == Role::User)
+                            .unwrap_or(0);
+                        // Said already before the turn started.
+                        if !session.messages[turn..].iter().any(|m| m.text == hint) {
+                            session.messages.push(Message::new(Role::System, hint));
+                        }
                     } else if !ok {
                         let mut lines: Vec<String> = Vec::new();
                         for line in all.iter().filter(|l| {
@@ -2207,6 +2223,7 @@ impl RunoApp {
 
     pub(crate) fn open_settings(&mut self) {
         self.view = View::Settings;
+        signin::refresh(false);
         let dir = self.current().filter(|_| !self.demo).map(|s| s.dir.clone());
         self.discovered = Some(settings::discover(dir.as_deref()));
     }
@@ -5764,6 +5781,7 @@ impl RunoApp {
     }
 
     fn open_new_session(&mut self) {
+        signin::refresh(false);
         if self.view != View::NewSession {
             self.new_back = if self.view == View::Settings {
                 View::Session
@@ -5933,8 +5951,11 @@ impl RunoApp {
             }
             let caps = caps::get(p.id);
             let installed = installed_all[i];
+            let signed_out = installed && signin::get(p.id) == Some(false);
             let detail = if !installed {
                 "Not installed".to_string()
+            } else if signed_out {
+                "Not signed in".to_string()
             } else if caps.version.is_empty() {
                 "Installed".to_string()
             } else {
@@ -5989,7 +6010,13 @@ impl RunoApp {
                                 div()
                                     .truncate()
                                     .text_xs()
-                                    .text_color(rgb(if installed { c_muted() } else { c_red() }))
+                                    .text_color(rgb(if !installed {
+                                        c_red()
+                                    } else if signed_out {
+                                        c_amber()
+                                    } else {
+                                        c_muted()
+                                    }))
                                     .child(detail),
                             ),
                     )

@@ -1167,6 +1167,11 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
     if !signs.iter().any(|s| lower.contains(s)) {
         return None;
     }
+    Some(sign_in_help(provider))
+}
+
+/// How to sign an agent in, as "Codex isn't signed in. Open a terminal and run …".
+pub fn sign_in_help(provider: &str) -> String {
     let name = self::provider(provider).name;
     let how = match provider {
         "claude" => "Open a terminal, run `claude` and type `/login`, or set ANTHROPIC_API_KEY under Settings > Claude Code > Environment.",
@@ -1181,7 +1186,7 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
         "grok" => "Set GROK_API_KEY under Settings > Grok > Environment.",
         _ => "Sign in to it in a terminal, then try again.",
     };
-    Some(format!("{name} isn't signed in. {how}"))
+    format!("{name} isn't signed in. {how}")
 }
 
 /// Where to pick another model, when the CLI's errors say the model can't be used.
