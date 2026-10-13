@@ -11,6 +11,7 @@ mod chatctl;
 mod cliview;
 mod connections;
 mod connections_ui;
+mod copies;
 mod cove;
 mod ctxmenu;
 mod design;
@@ -29,6 +30,7 @@ mod install;
 mod keymap;
 mod mcp;
 mod memory_mcp;
+mod modelcheck;
 mod models;
 mod notes;
 mod pbfile;
@@ -2116,7 +2118,7 @@ impl RunoApp {
                                 log.replace("```", "'''")
                             ));
                         }
-                        if let Some(tip) = agent::model_hint(&session.provider, &log) {
+                        if let Some(tip) = modelcheck::tip(&session.provider, &log) {
                             text.push_str(&format!("\n{tip}"));
                         }
                         let text = text.trim_start().to_string();

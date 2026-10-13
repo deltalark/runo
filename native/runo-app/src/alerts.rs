@@ -569,7 +569,7 @@ pub(crate) fn npm_package(provider: &str) -> Option<&'static str> {
 }
 
 /// The numeric parts of a version such as "v2.1.296 (Claude Code)" or "codex-cli 0.50.1".
-fn version_parts(v: &str) -> Vec<u64> {
+pub(crate) fn version_parts(v: &str) -> Vec<u64> {
     let start = v.find(|c: char| c.is_ascii_digit()).unwrap_or(v.len());
     v[start..]
         .split(|c: char| !c.is_ascii_digit() && c != '.')
