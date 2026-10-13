@@ -225,6 +225,16 @@ impl AppSettings {
         self.agents.get(id).cloned().unwrap_or_default()
     }
 
+    /// The worktree setup command for a project: its own, else the one in Settings.
+    pub fn setup_for(&self, project_setup: &str) -> String {
+        let own = project_setup.trim();
+        if own.is_empty() {
+            self.worktree_setup.trim().to_string()
+        } else {
+            own.to_string()
+        }
+    }
+
     pub fn load() -> Self {
         crate::store::read_json_or_backup(&settings_path())
     }
@@ -1071,6 +1081,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_project_setup_command_comes_first() {
+        let s = AppSettings {
+            worktree_setup: " npm ci ".into(),
+            ..Default::default()
+        };
+        assert_eq!(s.setup_for("cargo fetch"), "cargo fetch");
+        assert_eq!(s.setup_for("  "), "npm ci");
+        assert_eq!(AppSettings::default().setup_for(""), "");
     }
 
     #[test]

@@ -785,21 +785,9 @@ impl RunoApp {
                 if from.is_none() {
                     self.select(id);
                 }
-                // The worktree setup command runs first, as for any new session.
-                let setup = cx.global::<AppSettings>().worktree_setup.trim().to_string();
-                let isolated = self.state.session(id).is_some_and(|s| s.isolated);
-                let mut started = false;
-                if isolated && !setup.is_empty() {
-                    self.pending_start.insert(id, auto.prompt.clone());
-                    started = self.run_setup_in(id, &setup, cx);
-                    if !started {
-                        self.pending_start.remove(&id);
-                    }
-                }
-                if !started {
-                    let opts = cx.global::<AppSettings>().agent(&auto.provider);
-                    self.start_agent(id, auto.prompt.clone(), &opts);
-                }
+                // As for any new session: after the worktree is ready and its setup
+                // command has run.
+                self.launch(id, auto.prompt.clone(), cx);
                 self.tag_playbook(id, &auto.name, "");
                 self.measure(id);
                 if let Some(agent) = from {

@@ -3021,7 +3021,7 @@ impl RunoApp {
 
     /// Start a new session's agent, after the worktree setup command when there is one.
     /// The session must be selected, since setup runs in its Terminal.
-    fn launch(&mut self, id: u64, task: String, cx: &mut Context<Self>) {
+    pub(crate) fn launch(&mut self, id: u64, task: String, cx: &mut Context<Self>) {
         let Some(session) = self.state.session(id) else {
             return;
         };
@@ -3032,11 +3032,11 @@ impl RunoApp {
             return;
         }
         // The project's own setup command, else the one in Settings.
-        let setup = self
+        let own = self
             .project_of(session)
-            .map(|p| p.setup.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| cx.global::<AppSettings>().worktree_setup.trim().to_string());
+            .map(|p| p.setup.clone())
+            .unwrap_or_default();
+        let setup = cx.global::<AppSettings>().setup_for(&own);
         if isolated && !setup.is_empty() && !self.demo {
             self.pending_start.insert(id, task);
             if self.run_setup_in(id, &setup, cx) {
@@ -3055,13 +3055,14 @@ impl RunoApp {
             return;
         }
         // CLI-first people get the agent's own CLI, with the task as its first prompt.
-        // Only CLIs known to take a first prompt on the command line open this way.
+        // Only CLIs known to take a first prompt on the command line open this way, and
+        // playbook runs stay in Chat, where their limits hold.
         if cx.global::<AppSettings>().default_view == "cli"
             && agent::imports_cli_turns(&provider)
             && self
                 .state
                 .session(id)
-                .is_some_and(|s| cliview::cli_blocker(s).is_none())
+                .is_some_and(|s| s.playbook == 0 && cliview::cli_blocker(s).is_none())
         {
             // Context a session was started with goes ahead of the task here too.
             let mut task = task;

@@ -82,6 +82,13 @@ impl RunoApp {
             .session(id)
             .filter(|s| !s.has_conversation())
             .and_then(|s| self.shared_notes(s.project_id));
+        // A playbook's own session names it on its first message, however late that starts.
+        let playbook = self
+            .state
+            .session(id)
+            .filter(|s| s.playbook != 0 && !s.messages.iter().any(|m| m.role == Role::User))
+            .and_then(|s| self.state.automations.iter().find(|a| a.id == s.playbook))
+            .map(|a| a.name.clone());
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
@@ -162,6 +169,7 @@ impl RunoApp {
         };
         let mut user = Message::now(Role::User, prompt.clone());
         user.images = images.clone();
+        user.playbook = playbook.unwrap_or_default();
         if in_git {
             user.checkpoint = git::checkpoint(&dir).unwrap_or_default();
         }
