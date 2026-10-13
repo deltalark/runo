@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["native/runo-app"]
-exclude = ["vendor/portable-pty", "vendor/gpui-pre-apple"]
+exclude = ["vendor/portable-pty", "vendor/gpui-pre-apple", "vendor/vt100"]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,8 +25,9 @@ opt-level = 3
 panic = "abort"
 strip = "symbols"
 
-# vt100 0.15 subtracts with wrap-around when the view is scrolled back more than a
-# screen; release builds rely on that, so debug builds must not trap on it.
+# vt100 0.15 (vendored in vendor/vt100) subtracts with wrap-around when the view
+# is scrolled back more than a screen; release builds rely on that, so debug
+# builds must not trap on it.
 [profile.dev.package.vt100]
 overflow-checks = false
 

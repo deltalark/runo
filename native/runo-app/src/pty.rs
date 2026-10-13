@@ -791,4 +791,22 @@ mod tests {
         assert_eq!(shell.selection_text().as_deref(), Some("line-1\nline-2"));
         shell.kill();
     }
+
+    #[test]
+    fn dim_and_strikethrough_reach_the_cells() {
+        let mut p = vt100::Parser::new(2, 20, 0);
+        p.process(b"\x1b[1;2ma\x1b[22mb\x1b[9mc\x1b[29md");
+        let s = p.screen();
+        let cell = |col| s.cell(0, col).unwrap();
+        assert!(cell(0).dim() && cell(0).bold());
+        assert!(!cell(1).dim() && !cell(1).bold());
+        assert!(cell(2).strikethrough());
+        assert!(!cell(3).strikethrough());
+        // The formatted copy keeps both, so a restored screen looks the same.
+        let mut copy = vt100::Parser::new(2, 20, 0);
+        copy.process(&s.contents_formatted());
+        assert!(copy.screen().cell(0, 0).unwrap().dim());
+        assert!(copy.screen().cell(0, 2).unwrap().strikethrough());
+        assert!(!copy.screen().cell(0, 3).unwrap().strikethrough());
+    }
 }

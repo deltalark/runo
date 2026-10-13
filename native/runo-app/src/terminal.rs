@@ -397,10 +397,10 @@ impl RunoApp {
                 let mut line = div().h(px(term_line())).flex().whitespace_nowrap();
                 // Runs of cells that share a style become one text span.
                 let mut run = String::new();
-                type Style = (Rgba, Option<Rgba>, bool, bool, bool, bool);
+                type Style = (Rgba, Option<Rgba>, bool, bool, bool, bool, bool);
                 let mut style: Option<Style> = None;
                 let flush = |line: Div, run: &mut String, style: Option<Style>| {
-                    let Some((fg, bg, bold, italic, underline, cursor)) = style else {
+                    let Some((fg, bg, bold, italic, underline, strike, cursor)) = style else {
                         return line;
                     };
                     if run.is_empty() {
@@ -415,6 +415,7 @@ impl RunoApp {
                             .when(bold, |el| el.font_weight(FontWeight::SEMIBOLD))
                             .when(italic, |el| el.italic())
                             .when(underline, |el| el.underline())
+                            .when(strike, |el| el.line_through())
                             .when(cursor && !focused, |el| {
                                 el.border_1().border_color(rgb(c_secondary()))
                             })
@@ -451,6 +452,9 @@ impl RunoApp {
                         .find_hit
                         .is_some_and(|(b, s, e)| b == back && (s..e).contains(&c));
                     let mut fg = rgb(fg);
+                    if cell.dim() {
+                        fg = fg.alpha(0.6);
+                    }
                     let mut bg = bg.map(rgb);
                     if current {
                         bg = Some(rgb(c_amber()));
@@ -467,6 +471,7 @@ impl RunoApp {
                         cell.bold(),
                         cell.italic(),
                         cell.underline() || link,
+                        cell.strikethrough(),
                         cursor,
                     ));
                     if next != style || cursor {
