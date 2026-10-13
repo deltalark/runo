@@ -638,13 +638,13 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 .count();
             sections.push(section(
                 "Use across agents",
-                "Each agent loads its own servers. Turn on Use in Runo to hand a server from any app to Claude Code and Codex sessions too.",
+                "Each agent loads its own servers. Turn on Use in Runo to hand a server from any app to the other agents' sessions too. Grok takes none.",
                 vec![row(
                     "Shared servers",
                     if shared == 0 {
                         "None yet. Switch one on below."
                     } else {
-                        "Passed to every new run of Claude Code and Codex that doesn't already have them."
+                        "Passed to every new run of an agent that doesn't already have them."
                     },
                     Ctl::Chip(format!("{shared} shared"), if shared == 0 { 3 } else { 0 }),
                 )],
@@ -687,7 +687,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ));
             sections.push(section(
                 "Runo's servers",
-                &format!("Given to every Claude Code and Codex session, on this computer and on connections. Kept in {}.", tilde(&own_path)),
+                &format!("Given to every agent's sessions except Grok's, on this computer and on connections. Kept in {}.", tilde(&own_path)),
                 own,
             ));
             let mut providers: Vec<&'static str> = Vec::new();

@@ -116,6 +116,19 @@ pub fn exclude(dir: &str, pattern: &str) {
     let _ = std::fs::write(&file, format!("{current}{sep}{pattern}\n"));
 }
 
+/// Whether git tracks `path` (relative to `dir`).
+pub fn is_tracked(dir: &str, path: &str) -> bool {
+    git(dir, &["ls-files", "--error-unmatch", "--", path]).is_ok()
+}
+
+/// Keep one file in `dir` (given relative to it) out of `git status`.
+pub fn exclude_path(dir: &str, path: &str) {
+    let Ok(prefix) = git(dir, &["rev-parse", "--show-prefix"]) else {
+        return;
+    };
+    exclude(dir, &format!("/{}{path}", prefix.trim()));
+}
+
 /// The last `n` commits, one line each.
 pub fn recent_commits(dir: &str, n: usize) -> String {
     git(
