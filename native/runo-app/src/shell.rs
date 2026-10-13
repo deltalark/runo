@@ -16,9 +16,12 @@ pub(crate) enum Mode {
     Sessions,
     Design,
     Architecture,
+    Review,
+    GitHub,
     Playbooks,
-    Reviews,
+    History,
     Inbox,
+    Notes,
     Settings,
 }
 
@@ -27,11 +30,14 @@ impl Mode {
     pub(crate) const MAIN: [Mode; 6] = [
         Mode::Home,
         Mode::Sessions,
-        Mode::Design,
-        Mode::Architecture,
+        Mode::Review,
+        Mode::GitHub,
         Mode::Playbooks,
-        Mode::Reviews,
+        Mode::History,
     ];
+
+    /// The modes for deciding what to build, below the main ones; ⌘7 and ⌘8.
+    pub(crate) const PLAN: [Mode; 2] = [Mode::Design, Mode::Architecture];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -39,9 +45,12 @@ impl Mode {
             Mode::Sessions => "Sessions",
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
+            Mode::Review => "Review",
+            Mode::GitHub => "GitHub",
             Mode::Playbooks => "Playbooks",
-            Mode::Reviews => "Reviews",
+            Mode::History => "History",
             Mode::Inbox => "Inbox",
+            Mode::Notes => "Notes",
             Mode::Settings => "Settings",
         }
     }
@@ -53,9 +62,13 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
+            Mode::Review => "go-review",
+            // Kept under its old name so shortcuts people changed still apply.
+            Mode::GitHub => "go-reviews",
             Mode::Playbooks => "go-playbooks",
-            Mode::Reviews => "go-reviews",
+            Mode::History => "go-history",
             Mode::Inbox => "go-inbox",
+            Mode::Notes => "go-notes",
             Mode::Settings => "settings",
         }
     }
@@ -66,9 +79,12 @@ impl Mode {
             Mode::Sessions => IconName::CodeXml,
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
+            Mode::Review => IconName::GitCompare,
+            Mode::GitHub => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
-            Mode::Reviews => IconName::GitPullRequest,
+            Mode::History => IconName::RotateCcwClock,
             Mode::Inbox => IconName::Inbox,
+            Mode::Notes => IconName::NotebookPen,
             Mode::Settings => IconName::Settings,
         }
     }
@@ -80,15 +96,16 @@ impl Mode {
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
-            View::GitHub => Mode::Reviews,
+            View::Review => Mode::Review,
+            View::GitHub => Mode::GitHub,
+            View::History => Mode::History,
             View::Inbox => Mode::Inbox,
+            View::Notes => Mode::Notes,
             View::Settings => Mode::Settings,
             View::Session
             | View::NewSession
             | View::AllSessions
-            | View::History
             | View::Worktrees
-            | View::Notes
             | View::Activity
             | View::Editor => Mode::Sessions,
         }
@@ -257,9 +274,12 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
+            Mode::Review => self.open_review(),
+            Mode::GitHub => self.load_github(),
             Mode::Playbooks => self.view = View::Automations,
-            Mode::Reviews => self.load_github(),
+            Mode::History => self.open_history(cx),
             Mode::Inbox => self.view = View::Inbox,
+            Mode::Notes => self.open_notes(window, cx),
             Mode::Settings => self.open_settings(),
         }
         self.save();
@@ -546,7 +566,6 @@ impl RunoApp {
 
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let counts = self.counts();
-        let inbox = counts.needs_you + self.gh.needs_you();
         let mut top = div()
             .v_flex()
             .items_center()
@@ -554,15 +573,22 @@ impl RunoApp {
             .relative()
             .child(tour::anchor(&self.anchors, "nav"));
         for mode in Mode::MAIN {
-            // Amber: something there needs you. Blue: agents are working.
+            // Amber: something there needs you. Blue: agents are working, or work waits
+            // to be reviewed.
             let badge = match mode {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
-                Mode::Reviews if self.gh.needs_you() > 0 => Some(c_amber()),
+                Mode::Review if counts.review > 0 => Some(c_blue()),
+                Mode::GitHub if self.gh.needs_you() > 0 => Some(c_amber()),
                 _ => None,
             };
             top = top.child(self.rail_item(mode, badge, cx));
         }
+        top = top.child(div().my_1().w(px(22.)).h(px(1.)).bg(divider()));
+        for mode in Mode::PLAN {
+            top = top.child(self.rail_item(mode, None, cx));
+        }
+        // The Inbox opens from the bell in the top bar, so the rail doesn't repeat it.
         div()
             .w(px(RAIL_WIDTH))
             .flex_none()
@@ -580,7 +606,7 @@ impl RunoApp {
                     .v_flex()
                     .items_center()
                     .gap_1()
-                    .child(self.rail_item(Mode::Inbox, (inbox > 0).then_some(c_amber()), cx))
+                    .child(self.rail_item(Mode::Notes, None, cx))
                     .child(
                         div()
                             .relative()
@@ -752,7 +778,7 @@ impl RunoApp {
             .map(|s| s.id)
             .max();
         match (self.mode(), latest) {
-            (Mode::Reviews, _) => self.load_github(),
+            (Mode::GitHub, _) => self.load_github(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
                 self.view = View::Home;
@@ -1566,7 +1592,16 @@ impl RunoApp {
                 self.on_context(ctxmenu::CtxTarget::Session(id), cx),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.select(id);
+                // Work waiting for review opens on Review, where it can be shipped.
+                let waiting = this
+                    .state
+                    .session(id)
+                    .is_some_and(|s| this.bucket(s) == Some(Bucket::Review));
+                if waiting {
+                    this.review(id);
+                } else {
+                    this.select(id);
+                }
                 cx.notify();
             }))
             .child(self.provider_mark(provider, 14.))
@@ -1647,7 +1682,7 @@ impl RunoApp {
     }
 
     /// A small bordered button with an icon, for Home's actions.
-    fn home_button(
+    pub(crate) fn home_button(
         &self,
         id: &'static str,
         glyph: IconName,
@@ -2183,6 +2218,34 @@ mod tests {
     use super::*;
     use std::prelude::v1::test;
     use store::Message;
+
+    #[test]
+    fn every_rail_place_owns_its_views() {
+        // Each place on the rail opens a view that lights that same place up again.
+        for (view, mode) in [
+            (View::Review, Mode::Review),
+            (View::GitHub, Mode::GitHub),
+            (View::History, Mode::History),
+            (View::Notes, Mode::Notes),
+            (View::Automations, Mode::Playbooks),
+            (View::Session, Mode::Sessions),
+        ] {
+            assert_eq!(Mode::of(view), mode);
+        }
+        let rail: Vec<Mode> = Mode::MAIN
+            .iter()
+            .chain(Mode::PLAN.iter())
+            .copied()
+            .collect();
+        for mode in &rail {
+            assert_eq!(rail.iter().filter(|m| *m == mode).count(), 1);
+            assert!(
+                keymap::SHORTCUTS.iter().any(|s| s.id == mode.shortcut()),
+                "{} has no shortcut",
+                mode.label()
+            );
+        }
+    }
 
     #[test]
     fn one_rule_for_needs_you() {

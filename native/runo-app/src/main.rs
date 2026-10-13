@@ -42,6 +42,7 @@ mod phone;
 mod playbooks;
 mod projects;
 mod pty;
+mod review;
 mod schedule;
 mod sessions;
 mod settings;
@@ -117,6 +118,9 @@ actions!(
         GoArchitecture,
         GoPlaybooks,
         GoReviews,
+        GoReview,
+        GoHistory,
+        GoNotes,
         GoInbox,
         CloseTab,
         NextTab,
@@ -153,6 +157,8 @@ enum View {
     Automations,
     GitHub,
     Editor,
+    /// Changes waiting to be reviewed and shipped, one session at a time.
+    Review,
 }
 
 /// What a quick-open entry does when chosen.
@@ -2364,6 +2370,7 @@ impl RunoApp {
                 View::History => self.open_history(cx),
                 View::Notes => self.open_notes(window, cx),
                 View::GitHub => self.load_github(),
+                View::Review => self.open_review(),
                 _ => self.view = view,
             },
             Jump::Session(id) => self.select(id),
@@ -2443,7 +2450,8 @@ impl RunoApp {
                 IconName::RotateCcwClock,
                 View::History,
             ),
-            ("Go to Reviews", IconName::GitPullRequest, View::GitHub),
+            ("Go to Review", IconName::GitCompare, View::Review),
+            ("Go to GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
             ("Go to Design", IconName::PanelsTopLeft, View::Design),
@@ -7221,7 +7229,12 @@ impl RunoApp {
             .flex_1()
             .min_h_0()
             .v_flex()
-            .child(div().p_3().child(self.ship_bar(cx)))
+            // Shipping happens on Review; a session's panel only points there.
+            .child(div().p_3().child(if self.view == View::Review {
+                self.ship_bar(cx).into_any_element()
+            } else {
+                self.review_strip(cx)
+            }))
             .child(
                 div()
                     .h(px(28.))
@@ -7954,6 +7967,7 @@ impl Render for RunoApp {
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
             View::GitHub => self.github_view(cx),
+            View::Review => self.review_view(cx),
             View::Editor => div()
                 .flex_1()
                 .min_w_0()
@@ -8086,7 +8100,19 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoReviews, window, cx| {
-                this.go(Mode::Reviews, window, cx);
+                this.go(Mode::GitHub, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoReview, window, cx| {
+                this.go(Mode::Review, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoHistory, window, cx| {
+                this.go(Mode::History, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoNotes, window, cx| {
+                this.go(Mode::Notes, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NewSession, _, cx| {
@@ -8684,8 +8710,11 @@ fn app_menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
+            MenuItem::action("Review", GoReview),
+            MenuItem::action("GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
-            MenuItem::action("Reviews", GoReviews),
+            MenuItem::action("History", GoHistory),
+            MenuItem::action("Notes", GoNotes),
             MenuItem::action("Inbox", GoInbox),
             MenuItem::separator(),
             MenuItem::action("Toggle sidebar", ToggleSidebar),

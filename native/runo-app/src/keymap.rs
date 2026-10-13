@@ -12,7 +12,7 @@ pub(crate) struct Shortcut {
     pub default: &'static [&'static str],
 }
 
-pub(crate) const SHORTCUTS: [Shortcut; 22] = [
+pub(crate) const SHORTCUTS: [Shortcut; 25] = [
     Shortcut {
         id: "quick-open",
         title: "Quick open",
@@ -74,15 +74,15 @@ pub(crate) const SHORTCUTS: [Shortcut; 22] = [
         default: &["secondary-2"],
     },
     Shortcut {
-        id: "go-design",
-        title: "Design",
-        desc: "Go to Design on the mode rail.",
+        id: "go-review",
+        title: "Review",
+        desc: "Go to Review: check and ship the work agents finished.",
         default: &["secondary-3"],
     },
     Shortcut {
-        id: "go-architecture",
-        title: "Architecture",
-        desc: "Go to Architecture on the mode rail.",
+        id: "go-reviews",
+        title: "GitHub",
+        desc: "Go to GitHub: pull requests, issues and Actions.",
         default: &["secondary-4"],
     },
     Shortcut {
@@ -92,10 +92,28 @@ pub(crate) const SHORTCUTS: [Shortcut; 22] = [
         default: &["secondary-5"],
     },
     Shortcut {
-        id: "go-reviews",
-        title: "Reviews",
-        desc: "Go to Reviews on the mode rail.",
+        id: "go-history",
+        title: "History",
+        desc: "Go to History: past conversations, including ones started in a CLI.",
         default: &["secondary-6"],
+    },
+    Shortcut {
+        id: "go-design",
+        title: "Design",
+        desc: "Go to Design on the mode rail.",
+        default: &["secondary-7"],
+    },
+    Shortcut {
+        id: "go-architecture",
+        title: "Architecture",
+        desc: "Go to Architecture on the mode rail.",
+        default: &["secondary-8"],
+    },
+    Shortcut {
+        id: "go-notes",
+        title: "Notes",
+        desc: "Open the project's notes.",
+        default: &[],
     },
     Shortcut {
         id: "go-inbox",
@@ -182,6 +200,9 @@ fn binding_in(id: &str, keys: &str, context: &str) -> Option<KeyBinding> {
         "go-architecture" => KeyBinding::new(keys, GoArchitecture, context),
         "go-playbooks" => KeyBinding::new(keys, GoPlaybooks, context),
         "go-reviews" => KeyBinding::new(keys, GoReviews, context),
+        "go-review" => KeyBinding::new(keys, GoReview, context),
+        "go-history" => KeyBinding::new(keys, GoHistory, context),
+        "go-notes" => KeyBinding::new(keys, GoNotes, context),
         "go-inbox" => KeyBinding::new(keys, GoInbox, context),
         "close-tab" => KeyBinding::new(keys, CloseTab, context),
         "next-tab" => KeyBinding::new(keys, NextTab, context),

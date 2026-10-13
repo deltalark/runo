@@ -46,7 +46,7 @@ const STEPS: &[Step] = &[
         side: Side::Right,
         glyph: IconName::Layers,
         title: "Everything in one place",
-        body: "The rail on the left switches between Home, Sessions, Design, Architecture, Playbooks and Reviews, with the Inbox and Settings at the bottom. Press {go-home} to {go-reviews} to jump between them, and {go-inbox} for the Inbox.",
+        body: "The rail on the left switches between Home, Sessions, Review, GitHub, Playbooks and History, then Design and Architecture, with Notes and Settings at the bottom. Press {go-home} to {go-history} to jump between them. The bell in the top bar opens the Inbox ({go-inbox}).",
     },
     Step {
         anchor: Some("projects"),
