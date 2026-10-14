@@ -202,11 +202,16 @@ pub fn serve(address: Option<&str>) -> i32 {
     println!("Away from home, use a private network such as Tailscale and pair with this");
     println!("computer's Tailscale address instead of {host}. Keep Runo open: prompts and");
     println!("Stop are carried out by the app.");
+    accept(listener, &base, &token);
+    0
+}
+
+/// Answer connections until the listener fails, each on its own thread.
+fn accept(listener: TcpListener, base: &Path, token: &str) {
     for stream in listener.incoming().flatten() {
-        let (base, token) = (base.clone(), token.clone());
+        let (base, token) = (base.to_path_buf(), token.to_string());
         std::thread::spawn(move || handle(stream, &base, &token));
     }
-    0
 }
 
 /// The link the mobile app pairs with.
@@ -871,6 +876,45 @@ mod tests {
         assert!(String::from_utf8(again)
             .unwrap()
             .starts_with("HTTP/1.1 304"));
+    }
+
+    #[test]
+    fn serves_over_a_real_socket() {
+        let base = temp("socket");
+        seed(&base);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = base.clone();
+        std::thread::spawn(move || accept(listener, &served, "secret-token"));
+        let ask = |request: String| {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut out = String::new();
+            stream.read_to_string(&mut out).unwrap();
+            out
+        };
+        let list =
+            ask("GET /v1/sessions HTTP/1.1\r\nAuthorization: Bearer secret-token\r\n\r\n".into());
+        assert!(list.starts_with("HTTP/1.1 200 OK"), "{list}");
+        assert!(list.contains("\"Fix the sidebar\""));
+        let tag = list
+            .lines()
+            .find_map(|l| l.strip_prefix("ETag: "))
+            .unwrap()
+            .to_string();
+        let again = ask(format!(
+            "GET /v1/sessions HTTP/1.1\r\nAuthorization: Bearer secret-token\r\nIf-None-Match: {tag}\r\n\r\n"
+        ));
+        assert!(again.starts_with("HTTP/1.1 304"), "{again}");
+        let body = r#"{"text":"Go left"}"#;
+        let sent = ask(format!(
+            "POST /v1/sessions/7/prompt HTTP/1.1\r\nAuthorization: Bearer secret-token\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ));
+        assert!(sent.starts_with("HTTP/1.1 202"), "{sent}");
+        assert_eq!(take(&base).len(), 1);
+        let refused = ask("GET /v1/sessions HTTP/1.1\r\n\r\n".into());
+        assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
     }
 
     #[test]
