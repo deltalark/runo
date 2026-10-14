@@ -1035,6 +1035,16 @@ impl RunoApp {
                     if check && !this.demo {
                         this.maybe_check_updates();
                     }
+                    // Every ~5s, look for dev servers so the header's Browser button
+                    // appears once the app is being served, and goes when it stops.
+                    if ticks % 100 == 50
+                        && !this.demo
+                        && this.view == View::Session
+                        && this.selected.is_some()
+                        && cx.global::<AppSettings>().browser_enabled
+                    {
+                        this.scan_ports();
+                    }
                     let watching = this.view == View::Session
                         && this
                             .selected
@@ -4980,35 +4990,39 @@ impl RunoApp {
                     .child(icon(IconName::Play, 11., c_secondary()))
                     .child("Playbooks"),
             )
-            .when(cx.global::<AppSettings>().browser_enabled, |el| {
-                el.child(
-                    div()
-                        .id("hdr-browser")
-                        .h(px(26.))
-                        .px_2()
-                        .mr_2()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(5.))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_size(px(12.))
-                        .text_color(rgb(c_secondary()))
-                        .hover(|el| el.bg(tint(c_subtle())))
-                        .tooltip(|window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(
-                                "Open your app in a Browser tab",
-                            )
-                            .build(window, cx)
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_browser();
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::Globe, 13., c_secondary())),
-                )
-            })
+            // Only offered once something is being served for this session.
+            .when(
+                cx.global::<AppSettings>().browser_enabled && self.app_serving(session),
+                |el| {
+                    el.child(
+                        div()
+                            .id("hdr-browser")
+                            .h(px(26.))
+                            .px_2()
+                            .mr_2()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(5.))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_secondary()))
+                            .hover(|el| el.bg(tint(c_subtle())))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Open your app in a Browser tab",
+                                )
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_browser();
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::Globe, 13., c_secondary())),
+                    )
+                },
+            )
             .children(self.runs_on_badge(session, cx))
             .child(self.view_toggle(session, cx))
             .when(!working, |el| {

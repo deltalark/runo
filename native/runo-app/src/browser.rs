@@ -227,6 +227,29 @@ impl RunoApp {
         });
     }
 
+    /// Whether something looks served for this session: a dev server listening where it
+    /// runs, a browser page already open, or a local URL printed in its terminals.
+    pub(crate) fn app_serving(&self, session: &Session) -> bool {
+        if self.browser_open || !self.browser_view.pages.is_empty() {
+            return true;
+        }
+        let listening = if session.sandbox().is_some() {
+            matches!(self.remote_ports.get(&session.id), Some(Ok(ports)) if !ports.is_empty())
+        } else {
+            !self.browser_ports.is_empty()
+        };
+        if listening {
+            return true;
+        }
+        let mut printed: Vec<String> = self.terminal.get(&session.id).cloned().unwrap_or_default();
+        for shell in self.session_shells(session.id) {
+            printed.extend(shell.text().lines().map(str::to_string));
+        }
+        urls_in(&printed).iter().any(|url| {
+            url.contains("localhost") || url.contains("127.0.0.1") || url.contains("0.0.0.0")
+        })
+    }
+
     pub(crate) fn remember_url(&mut self, url: &str) {
         self.browser_recent.retain(|u| u != url);
         self.browser_recent.insert(0, url.to_string());
