@@ -276,7 +276,7 @@ struct RunoApp {
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
     chat_scroll: ScrollHandle,
-    /// Second session shown beside the selected one.
+    /// Recent error output of each session's run, for failure messages and the log.
     stderr: HashMap<u64, Vec<String>>,
     /// Parsers for runs that print JSON rather than plain text.
     streams: HashMap<u64, stream::Parser>,
