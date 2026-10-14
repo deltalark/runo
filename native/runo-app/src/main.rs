@@ -8382,8 +8382,13 @@ impl Render for RunoApp {
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
                 if this.resizing_panel {
                     if e.pressed_button == Some(MouseButton::Left) {
-                        let x = f32::from(window.viewport_size().width) - f32::from(e.position.x);
-                        this.panel_width = x.clamp(PANEL_MIN, PANEL_MAX);
+                        let total = f32::from(window.viewport_size().width);
+                        let x = total - f32::from(e.position.x);
+                        // Leave the chat room for its header and composer.
+                        let sidebar = if this.show_sidebar { this.sidebar_width } else { 0. };
+                        let max = (total - shell::RAIL_WIDTH - sidebar - CHAT_MIN)
+                            .clamp(PANEL_MIN, PANEL_MAX);
+                        this.panel_width = x.clamp(PANEL_MIN, max);
                     } else {
                         this.resizing_panel = false;
                         this.save();
@@ -8755,6 +8760,8 @@ const SIDEBAR_MAX: f32 = 400.;
 const PANEL_WIDTH: f32 = 460.;
 const PANEL_MIN: f32 = 320.;
 const PANEL_MAX: f32 = 900.;
+/// Narrowest the chat gets when the right panel is dragged wider.
+const CHAT_MIN: f32 = 600.;
 
 fn main() {
     // `runo --mcp-memory <folder>`: serve the memory tools to an agent, without a window.
