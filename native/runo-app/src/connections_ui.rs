@@ -32,7 +32,7 @@ impl RunoApp {
             .iter()
             .any(|s| s.connection == id && self.handles.contains_key(&Target::Session(s.id)));
         if busy {
-            self.notice = Some(format!(
+            self.fail("connection", format!(
                 "An agent is still working on {}. Let it finish or stop it, then remove the connection.",
                 connections::name(id)
             ));
@@ -127,7 +127,7 @@ impl RunoApp {
         let target = connections::get(to);
         // Remote copies are kept in step with git; a plain folder has no way there.
         if target.as_ref().is_some_and(|c| c.remote()) && !self.demo && !git::is_repo(&s.dir) {
-            self.notice = Some(format!(
+            self.fail("connection", format!(
                 "{} can't run this session: its folder isn't a git repository, and Runo syncs files to {} with git. Run `git init` in the project (or start a session in a repository), then move it.",
                 connections::name(to),
                 connections::name(to)
@@ -216,7 +216,10 @@ impl RunoApp {
     /// Put a kept version of the files back, from the warning card that named it.
     pub(crate) fn restore_kept(&mut self, id: u64, index: usize, kept: &str) {
         if self.handles.contains_key(&Target::Session(id)) {
-            self.notice = Some("Wait for the agent to finish, then restore the kept files.".into());
+            self.fail(
+                "connection",
+                "Wait for the agent to finish, then restore the kept files.".into(),
+            );
             return;
         }
         let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
@@ -240,7 +243,10 @@ impl RunoApp {
                 self.measure(id);
                 self.refresh();
             }
-            Err(e) => self.notice = Some(format!("Couldn't restore the kept files: {e}")),
+            Err(e) => self.fail(
+                "connection",
+                format!("Couldn't restore the kept files: {e}"),
+            ),
         }
     }
 
@@ -415,6 +421,13 @@ impl RunoApp {
                     picked += 1;
                 }
                 Err(e) => {
+                    crate::applog::warn(
+                        "connection",
+                        format!(
+                            "session #{id} ({}): couldn't pick up the turn left running: {e}",
+                            session.provider
+                        ),
+                    );
                     session.status = Status::Failed;
                     session.remote_turn = false;
                     session.messages.push(Message::new(

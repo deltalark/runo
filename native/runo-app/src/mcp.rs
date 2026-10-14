@@ -301,7 +301,16 @@ pub fn write_project(dir: &Path, provider: &str, servers: &[(String, McpSpec)]) 
         Some(_) if crate::git::is_tracked(&folder, rel) => return false,
         Some(text) => match serde_json::from_str::<Value>(text) {
             Ok(value) if value.is_object() => value,
-            _ => return false,
+            _ => {
+                crate::applog::warn_once(
+                    "mcp",
+                    format!(
+                        "{} isn't plain JSON, so shared MCP servers were not added to it",
+                        path.display()
+                    ),
+                );
+                return false;
+            }
         },
         None => Value::Object(Map::new()),
     };
@@ -327,11 +336,13 @@ pub fn write_project(dir: &Path, provider: &str, servers: &[(String, McpSpec)]) 
     let created_dir = path.parent().filter(|p| !p.exists()).map(Path::to_path_buf);
     let written = serde_json::to_string_pretty(&value).unwrap_or_default() + "\n";
     if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            crate::applog::warn("mcp", format!("could not create {}: {e}", parent.display()));
             return false;
         }
     }
-    if std::fs::write(&path, &written).is_err() {
+    if let Err(e) = std::fs::write(&path, &written) {
+        crate::applog::warn("mcp", format!("could not write {}: {e}", path.display()));
         return false;
     }
     if original.is_none() {

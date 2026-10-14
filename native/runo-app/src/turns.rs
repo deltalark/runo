@@ -60,7 +60,7 @@ impl RunoApp {
             if let Some(s) = self.state.session_mut(id) {
                 s.queue.insert(0, Queued::new(prompt, images));
             }
-            self.notice = Some(
+            self.fail("turn", 
                 "This session is open in the CLI. The prompt is queued for when you switch back to Chat."
                     .into(),
             );
@@ -101,6 +101,13 @@ impl RunoApp {
             .cloned()
             .unwrap_or_default();
         if let Some(error) = agent::mode_error(&session.provider, &mode) {
+            crate::applog::warn(
+                "turn",
+                format!(
+                    "session #{id} ({}): not started, mode {mode:?}: {error}",
+                    session.provider
+                ),
+            );
             session.status = Status::Failed;
             session.messages.push(Message::new(Role::System, error));
             self.save();
@@ -237,10 +244,30 @@ impl RunoApp {
                 self.handles.insert(Target::Session(id), handle);
                 self.started.insert(id, std::time::Instant::now());
                 self.turn_files.remove(&id);
+                crate::applog::info(
+                    "turn",
+                    format!(
+                        "session #{id} ({provider}): turn started{}{}",
+                        match &sandbox {
+                            None => "",
+                            Some(crate::connections::Sandbox::Remote(_)) => ", on a connection",
+                            Some(_) => ", in a sandbox",
+                        },
+                        if native {
+                            ", resuming its conversation"
+                        } else {
+                            ""
+                        }
+                    ),
+                );
                 let first = prompt.lines().next().unwrap_or("").to_string();
                 self.state.log(id, format!("Started: {first}"));
             }
             Err(error) => {
+                crate::applog::error(
+                    "turn",
+                    format!("session #{id} ({provider}): could not start the agent: {error}"),
+                );
                 session.status = Status::Failed;
                 session.messages.pop();
                 session.messages.push(Message::new(Role::System, error));
@@ -544,7 +571,7 @@ impl RunoApp {
     /// redoable, and files changed after the agent's last turn are left alone.
     pub(crate) fn undo_to(&mut self, id: u64, index: usize) {
         if self.handles.contains_key(&Target::Session(id)) {
-            self.notice = Some("Stop the agent before undoing its changes.".into());
+            self.fail("turn", "Stop the agent before undoing its changes.".into());
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -575,7 +602,7 @@ impl RunoApp {
                 this.git_busy.remove(&id);
                 match result {
                     Ok((redo, done, after)) => this.undone(id, index, redo, done, after),
-                    Err(error) => this.notice = Some(format!("Could not undo: {error}")),
+                    Err(error) => this.fail("turn", format!("Could not undo: {error}")),
                 }
             },
         );
@@ -647,7 +674,7 @@ impl RunoApp {
                 let (done, after) = match result {
                     Ok(r) => r,
                     Err(error) => {
-                        this.notice = Some(format!("Could not redo: {error}"));
+                        this.fail("turn", format!("Could not redo: {error}"));
                         return;
                     }
                 };
@@ -796,14 +823,17 @@ impl RunoApp {
         for path in paths {
             if is_image(path) {
                 if !agent::takes_images(&provider) {
-                    self.notice = Some(format!(
-                        "{} can't read images, so the image wasn't attached.",
-                        agent::provider(&provider).name
-                    ));
+                    self.fail(
+                        "turn",
+                        format!(
+                            "{} can't read images, so the image wasn't attached.",
+                            agent::provider(&provider).name
+                        ),
+                    );
                     continue;
                 }
                 let Some(p) = copy_image(&dir, path) else {
-                    self.notice = Some(format!("Could not attach {}.", path.display()));
+                    self.fail("turn", format!("Could not attach {}.", path.display()));
                     continue;
                 };
                 let list = self.attachments.entry(id).or_default();
@@ -998,7 +1028,7 @@ impl RunoApp {
         }
         let patch = git::patch_for_message(&session.dir, 24_000);
         if patch.trim().is_empty() {
-            self.notice = Some("There are no changes to describe.".into());
+            self.fail("turn", "There are no changes to describe.".into());
             return;
         }
         let prompt = format!(
@@ -1030,14 +1060,14 @@ impl RunoApp {
                         .unwrap_or("")
                         .to_string();
                     if text.is_empty() {
-                        self.notice = Some("The agent did not write a commit message.".into());
+                        self.fail("turn", "The agent did not write a commit message.".into());
                     } else {
                         self.commit_suggestion = Some(text);
                     }
                 }
                 Err(error) => {
                     let first = error.lines().next().unwrap_or("").to_string();
-                    self.notice = Some(format!("Could not write a commit message: {first}"));
+                    self.fail("turn", format!("Could not write a commit message: {first}"));
                 }
             }
         } else if self.handle_recap(&key, result.clone())

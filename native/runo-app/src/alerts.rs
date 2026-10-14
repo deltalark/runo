@@ -129,6 +129,10 @@ impl UpdateRun {
 
     /// A card that waits on the person instead of running anything.
     pub(crate) fn blocked(install: bool, failure: updater::Failure) -> Self {
+        crate::applog::warn(
+            if install { "install" } else { "update" },
+            format!("held back: {}", failure.why),
+        );
         let mut run = UpdateRun::new(install, String::new());
         run.failed = Some(failure);
         run
@@ -795,6 +799,7 @@ impl RunoApp {
                 let mut run = UpdateRun::new(false, format!("Running {shown}…"));
                 run.command = shown;
                 run.installs_to = installs_to;
+                crate::applog::info("update", format!("{provider}: running `{}`", run.command));
                 self.update_runs.insert(provider, run);
                 run_streaming(format!("update:{provider}"), cmd, self.tx.clone());
             }
@@ -922,6 +927,10 @@ impl RunoApp {
                     .then(|| package.map(|p| format!("npm install -g {p}@latest")))
                     .flatten();
                 let own_copy = (lagging && package.is_some()).then(|| latest.clone());
+                crate::applog::warn(
+                    "update",
+                    format!("updating {name} to {latest}: Runo still runs {found} ({runs})"),
+                );
                 run.failed = Some(updater::Failure {
                     why,
                     command,
@@ -933,6 +942,7 @@ impl RunoApp {
             } else {
                 // The card turns into a success badge, then hides itself.
                 run.finished = Some(std::time::Instant::now());
+                crate::applog::info("update", format!("updated {name} to {latest}"));
                 self.state.log(0, format!("Updated {name} to {latest}"));
                 caps::refresh();
             }
@@ -971,6 +981,14 @@ impl RunoApp {
                     .map(|r| r.command.clone())
                     .unwrap_or_default();
                 let failure = run_failure(&error, &command);
+                crate::applog::warn(
+                    "update",
+                    format!(
+                        "updating {name} with `{command}` failed: {} ({})",
+                        failure.why,
+                        crate::applog::gist(&error)
+                    ),
+                );
                 self.state
                     .log(0, format!("Updating {name} failed: {}", failure.why));
                 if let Some(run) = self.update_runs.get_mut(provider) {
@@ -1121,7 +1139,8 @@ impl RunoApp {
         let session = self.approval_session(request);
         self.approvals.retain(|r| r.id != request.id);
         if approvals::answer(&approvals::folder(), &request.id, &answer).is_err() {
-            self.notice = Some(
+            self.fail(
+                "alerts",
                 "The agent stopped waiting for that answer: it timed out or its turn ended.".into(),
             );
             cx.notify();
@@ -1688,6 +1707,7 @@ impl RunoApp {
         run.command = shown;
         run.installs_to = Some(installs_to);
         run.adopt = true;
+        crate::applog::info("update", format!("{provider}: running `{}`", run.command));
         self.update_runs.insert(provider, run);
         run_streaming(format!("update:{provider}"), cmd, self.tx.clone());
         let _ = cx;

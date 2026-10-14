@@ -936,7 +936,7 @@ fn with_images(spec: &RunSpec) -> String {
     prompt
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     Session(u64),
     Terminal(u64),
@@ -1464,6 +1464,11 @@ pub(crate) fn spawn(
     if let Some(err) = child.stderr.take() {
         pump(err, target, true, tx.clone());
     }
+    // Only the program's file name: its arguments carry the prompt.
+    let program = std::path::Path::new(command.get_program())
+        .file_name()
+        .unwrap_or(command.get_program())
+        .to_owned();
     let child = Arc::new(Mutex::new(child));
     let waiter = child.clone();
     std::thread::spawn(move || loop {
@@ -1474,6 +1479,19 @@ pub(crate) fn spawn(
         if let Some(status) = finished {
             // Let the reader threads flush the final lines first.
             std::thread::sleep(Duration::from_millis(150));
+            if !status.success() {
+                let program = program.to_string_lossy();
+                crate::applog::warn(
+                    "agent",
+                    format!(
+                        "{target:?}: {program} exited with {}",
+                        match status.code() {
+                            Some(code) => format!("code {code}"),
+                            None => "no code (stopped by a signal)".into(),
+                        }
+                    ),
+                );
+            }
             let _ = tx.send(Event::Done(target, status.success()));
             break;
         }

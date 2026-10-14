@@ -137,7 +137,7 @@ impl RunoApp {
     /// Start a fresh agent conversation in the same session and folder.
     pub(crate) fn clear_context(&mut self, id: u64) {
         if let Some(why) = self.context_blocked(id) {
-            self.notice = Some(why.into());
+            self.fail("session", why.into());
             return;
         }
         let Some(session) = self.state.session_mut(id) else {
@@ -164,7 +164,7 @@ impl RunoApp {
     /// fresh conversation that opens with a summary of this one.
     pub(crate) fn compact_context(&mut self, id: u64, extra: &str, opts: &AgentOptions) {
         if let Some(why) = self.context_blocked(id) {
-            self.notice = Some(why.into());
+            self.fail("session", why.into());
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -225,7 +225,7 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(why) = self.context_blocked(id) {
-            self.notice = Some(why.into());
+            self.fail("session", why.into());
             return;
         }
         let Some(m) = self
@@ -275,7 +275,7 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(why) = self.context_blocked(id) {
-            self.notice = Some(why.into());
+            self.fail("session", why.into());
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -289,7 +289,7 @@ impl RunoApp {
             return;
         }
         if self.git_busy.contains_key(&id) {
-            self.notice = Some("Wait for the git step to finish.".into());
+            self.fail("session", "Wait for the git step to finish.".into());
             return;
         }
         let dir = session.dir.clone();
@@ -304,7 +304,7 @@ impl RunoApp {
                 this.git_busy.remove(&id);
                 match result {
                     Ok(after) => this.rewound(id, index, Some(after), text, images, cx),
-                    Err(error) => this.notice = Some(format!("Could not rewind: {error}")),
+                    Err(error) => this.fail("session", format!("Could not rewind: {error}")),
                 }
             },
         );
@@ -387,7 +387,10 @@ impl RunoApp {
             return;
         };
         if src.elsewhere() {
-            self.notice = Some("Forking works for sessions on this machine.".into());
+            self.fail(
+                "session",
+                "Forking works for sessions on this machine.".into(),
+            );
             return;
         }
         if cut >= src.messages.len() && self.turn_running(id) {

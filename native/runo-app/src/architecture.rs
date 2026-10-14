@@ -1368,7 +1368,11 @@ impl RunoApp {
                 self.arch.saved = Some(std::time::Instant::now());
                 self.arch.error = None;
             }
-            Err(e) => self.arch.error = Some(format!("Couldn't save {}: {e}", file.display())),
+            Err(e) => {
+                let why = format!("Couldn't save {}: {e}", file.display());
+                crate::applog::error("save", &why);
+                self.arch.error = Some(why)
+            }
         }
     }
 

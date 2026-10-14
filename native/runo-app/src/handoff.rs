@@ -378,7 +378,8 @@ impl RunoApp {
             return;
         }
         if self.handles.contains_key(&Target::Session(id)) {
-            self.notice = Some(
+            self.fail(
+                "handoff",
                 "The agent is still working. Stop it or let it finish before switching agents."
                     .into(),
             );
