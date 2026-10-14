@@ -93,6 +93,7 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("tour", include_str!("../../../docs/guide/tour.md")),
     ("usage", include_str!("../../../docs/guide/usage.md")),
+    ("phone", include_str!("../../../docs/guide/phone.md")),
     (
         "assistant",
         include_str!("../../../docs/guide/assistant.md"),
