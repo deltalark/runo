@@ -2212,9 +2212,9 @@ impl RunoApp {
                     }
                     if !stopped && !session.elsewhere() {
                         if sign_in.is_some() {
-                            signin::set(&session.provider, false);
+                            signin::turn_showed(&session.provider, false);
                         } else if ok {
-                            signin::set(&session.provider, true);
+                            signin::turn_showed(&session.provider, true);
                         }
                     }
                     if let Some(hint) = sign_in {
