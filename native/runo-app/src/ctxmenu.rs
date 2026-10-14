@@ -26,7 +26,6 @@ pub(crate) enum CtxTarget {
 #[derive(Clone)]
 enum Act {
     Open(u64),
-    Split(u64),
     Rename(u64),
     Pin(u64),
     Unread(u64),
@@ -145,13 +144,6 @@ impl RunoApp {
                     v.push(None);
                 } else {
                     v.push(item("Open", IconName::ArrowRight, Act::Open(id)));
-                }
-                if self.selected.is_some_and(|sel| sel != id) {
-                    v.push(item(
-                        "Open beside current",
-                        IconName::Columns2,
-                        Act::Split(id),
-                    ));
                 }
                 v.push(item(
                     "Open terminal here",
@@ -461,11 +453,6 @@ impl RunoApp {
         self.ctx_menu = None;
         match act {
             Act::Open(id) => self.select(id),
-            Act::Split(id) => {
-                self.split = Some(id);
-                self.view = View::Session;
-                self.split_scroll.scroll_to_bottom();
-            }
             Act::Rename(id) => {
                 self.select(id);
                 self.start_rename(window, cx);
@@ -499,7 +486,6 @@ impl RunoApp {
             Act::Archive(id) => self.toggle_archive(id),
             Act::Delete(id) => {
                 if confirm_delete() {
-                    self.select(id);
                     self.confirm_delete = Some(id);
                 } else {
                     self.delete_session(id);
