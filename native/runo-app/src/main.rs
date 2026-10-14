@@ -4946,18 +4946,22 @@ impl RunoApp {
                     .into_any_element()
             })
             .child(
+                // The branch gives way first when the chat is narrow, so the buttons
+                // on the right stay in view.
                 div()
                     .flex()
-                    .flex_none()
+                    .min_w_0()
+                    .flex_shrink(2.)
                     .items_center()
                     .gap(px(6.))
                     .text_size(px(12.))
                     .text_color(rgb(c_muted()))
-                    .child(icon(IconName::GitBranch, 12., c_muted()))
-                    .child(session.branch.clone())
+                    .child(icon(IconName::GitBranch, 12., c_muted()).flex_none())
+                    .child(div().min_w_0().truncate().child(session.branch.clone()))
                     .when(isolated, |el| {
                         el.child(
                             div()
+                                .flex_none()
                                 .px(px(6.))
                                 .py(px(1.))
                                 .rounded_sm()
