@@ -202,6 +202,14 @@ fn exit_code(turn: &Path) -> Option<i32> {
         .ok()
 }
 
+/// How a turn's process ended, for the log.
+fn exit_text(code: Option<i32>) -> String {
+    match code {
+        Some(code) => format!("the agent exited with code {code}"),
+        None => "the agent ended without an exit code (killed, or Runo lost track of it)".into(),
+    }
+}
+
 fn follow(target: Target, turn: PathBuf, pid: u32, mut child: Option<Child>, tx: Sender<Event>) {
     std::thread::spawn(move || {
         let (mut out, mut err) = (0u64, 0u64);
@@ -240,7 +248,11 @@ fn follow(target: Target, turn: PathBuf, pid: u32, mut child: Option<Child>, tx:
                 if !watched || exit_code(&turn).is_none() {
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                let _ = tx.send(Event::Done(target, exit_code(&turn) == Some(0)));
+                let code = exit_code(&turn);
+                if code != Some(0) {
+                    crate::applog::warn("agent", format!("{target:?}: {}", exit_text(code)));
+                }
+                let _ = tx.send(Event::Done(target, code == Some(0)));
                 return;
             }
             std::thread::sleep(Duration::from_millis(100));

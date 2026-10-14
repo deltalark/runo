@@ -716,6 +716,14 @@ impl RunoApp {
             },
             Err(error) => {
                 let first = error.lines().next().unwrap_or("").to_string();
+                // Lists refresh every few minutes; the same failure is written once.
+                crate::applog::warn_once(
+                    "gh",
+                    format!(
+                        "project #{project}: gh {list} list failed: {}",
+                        crate::applog::gist(&error)
+                    ),
+                );
                 // These stop every list; anything else stays with its own list.
                 let whole = GhBlock::from_error(&first);
                 match whole {
@@ -770,7 +778,7 @@ impl RunoApp {
                 self.launch(id, task, cx);
                 self.save();
             }
-            Err(error) => self.notice = Some(error),
+            Err(error) => self.fail("gh", error),
         }
     }
 
@@ -855,7 +863,7 @@ impl RunoApp {
                         this.save();
                     }
                     Err(error) => {
-                        this.notice = Some(format!(
+                        this.fail("gh", format!(
                             "Could not post the review: {}",
                             error.lines().next().unwrap_or("")
                         ))
@@ -1275,7 +1283,8 @@ impl RunoApp {
                                         .current_dir(&project.path)
                                         .output();
                                     if !done.is_ok_and(|o| o.status.success()) {
-                                        this.notice = Some(
+                                        this.fail(
+                                            "gh",
                                             "Runo couldn't run git init in this folder.".into(),
                                         );
                                     }

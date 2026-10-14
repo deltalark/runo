@@ -117,7 +117,10 @@ impl RunoApp {
             match sandbox.pty_command(&command, &dir, None) {
                 Ok(wrapped) => command = wrapped,
                 Err(error) => {
-                    self.notice = Some(format!("The setup command could not start: {error}"));
+                    self.fail(
+                        "setup",
+                        format!("The setup command could not start: {error}"),
+                    );
                     return false;
                 }
             }
@@ -150,7 +153,7 @@ impl RunoApp {
                 true
             }
             Err(e) => {
-                self.notice = Some(format!("The setup command could not start: {e}"));
+                self.fail("setup", format!("The setup command could not start: {e}"));
                 false
             }
         }

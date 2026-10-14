@@ -96,7 +96,7 @@ impl RunoApp {
                 caps::refresh();
                 self.info = Some((format!("Removed {path}."), std::time::Instant::now()));
             }
-            Err(e) => self.notice = Some(e),
+            Err(e) => self.fail("fixes", e),
         }
         cx.notify();
     }
@@ -141,7 +141,7 @@ impl RunoApp {
                         std::time::Instant::now(),
                     ))
                 }
-                Err(e) => self.notice = Some(e),
+                Err(e) => self.fail("fixes", e),
             }
         } else {
             self.info = Some((shown, std::time::Instant::now()));
@@ -160,7 +160,7 @@ impl RunoApp {
             .map(|m| m.choice.value.clone())
             .collect();
         if models.is_empty() {
-            self.notice = Some(format!("{} listed no models to test.", p.name));
+            self.fail("fixes", format!("{} listed no models to test.", p.name));
             return;
         }
         let env = cx.global::<AppSettings>().agent(provider).env;
@@ -239,7 +239,7 @@ impl RunoApp {
                 ));
             }
             Err(e) => {
-                self.notice = Some(format!("Couldn't start `{line}`: {e}"));
+                self.fail("fixes", format!("Couldn't start `{line}`: {e}"));
             }
         }
         cx.notify();

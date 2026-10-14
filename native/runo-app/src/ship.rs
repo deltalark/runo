@@ -384,7 +384,7 @@ impl RunoApp {
     /// whether it may start.
     pub(crate) fn begin(&mut self, id: u64, label: &str) -> bool {
         if let Some(running) = self.git_busy.get(&id) {
-            self.notice = Some(format!("{running} Wait for it to finish."));
+            self.fail("git", format!("{running} Wait for it to finish."));
             return false;
         }
         self.git_busy.insert(id, label.to_string());
@@ -468,6 +468,14 @@ impl RunoApp {
             }
             Err(error) => {
                 self.pending_start.remove(&id);
+                crate::applog::warn(
+                    "git",
+                    format!(
+                        "{}: could not create the worktree: {}",
+                        self.session_label(id),
+                        crate::applog::gist(&error)
+                    ),
+                );
                 if let Some(s) = self.state.session_mut(id) {
                     s.status = Status::Failed;
                     s.messages.push(Message::new(
@@ -496,7 +504,7 @@ impl RunoApp {
             },
             |this, result, _| {
                 if let Err(error) = result {
-                    this.notice = Some(format!("Could not change staging: {error}"));
+                    this.fail("git", format!("Could not change staging: {error}"));
                 }
                 this.refresh();
             },
@@ -553,7 +561,7 @@ impl RunoApp {
                         this.save();
                     }
                     Err(error) => {
-                        this.notice = Some(format!("Commit failed: {error}"));
+                        this.fail("git", format!("Commit failed: {error}"));
                         // Put the message back so it isn't lost.
                         if !typed.is_empty() {
                             this.commit_suggestion = Some(typed);
@@ -582,7 +590,7 @@ impl RunoApp {
             return;
         };
         if self.on_base_branch(session) {
-            self.notice = Some(format!(
+            self.fail("git", format!(
                 "This session works on {} itself. Use Create PR to move the work to a branch of its own first.",
                 session.branch
             ));
@@ -591,7 +599,7 @@ impl RunoApp {
         let (id, dir) = (session.id, session.dir.clone());
         let remote = self.sync.remote.clone();
         if remote.is_empty() {
-            self.notice = Some("This repository has no remote to push to.".into());
+            self.fail("git", "This repository has no remote to push to.".into());
             return;
         }
         if !self.begin(id, "Pushing.") {
@@ -607,7 +615,7 @@ impl RunoApp {
                         this.info = Some(("Pushed.".into(), std::time::Instant::now()));
                         this.save();
                     }
-                    Err(error) => this.notice = Some(format!("Push failed: {error}")),
+                    Err(error) => this.fail("git", format!("Push failed: {error}")),
                 }
                 this.refresh();
             },
@@ -727,6 +735,14 @@ impl RunoApp {
                         this.load_pr_status(id);
                     }
                     Err(error) => {
+                        crate::applog::warn(
+                            "gh",
+                            format!(
+                                "{}: gh pr create failed: {}",
+                                this.session_label(id),
+                                crate::applog::gist(&error)
+                            ),
+                        );
                         if let Some(form) = this.pr_form.as_mut() {
                             form.running = false;
                             form.error = Some(error);
@@ -855,7 +871,7 @@ impl RunoApp {
                         this.save();
                     }
                     Err(error) => {
-                        this.notice = Some(format!("Could not merge the pull request: {error}"))
+                        this.fail("git", format!("Could not merge the pull request: {error}"))
                     }
                 }
                 this.load_pr_status(id);
@@ -924,7 +940,10 @@ impl RunoApp {
         };
         let (id, dir) = (session.id, session.dir.clone());
         if self.turn_running(id) {
-            self.notice = Some("Wait for the agent to finish its turn before updating.".into());
+            self.fail(
+                "git",
+                "Wait for the agent to finish its turn before updating.".into(),
+            );
             return;
         }
         let base = self.branch_info.base.clone();
@@ -959,13 +978,13 @@ impl RunoApp {
                     }
                     Ok(git::Update::Conflicts(files)) => {
                         this.state.log(id, format!("Update from {onto} stopped on conflicts"));
-                        this.notice = Some(format!(
+                        this.fail("git", format!(
                             "Updating stopped on conflicts in {} file{}. Resolve them, or send them to the agent.",
                             files.len(),
                             if files.len() == 1 { "" } else { "s" }
                         ));
                     }
-                    Err(error) => this.notice = Some(format!("Could not update: {error}")),
+                    Err(error) => this.fail("git", format!("Could not update: {error}")),
                 }
                 this.save();
                 this.measure(id);
@@ -1006,7 +1025,7 @@ impl RunoApp {
                 this.git_busy.remove(&id);
                 match result {
                     Ok(git::Update::Conflicts(files)) => {
-                        this.notice = Some(format!("Still conflicted: {}", files.join(", ")))
+                        this.fail("git", format!("Still conflicted: {}", files.join(", ")))
                     }
                     Ok(_) => {
                         this.info = Some((
@@ -1018,7 +1037,7 @@ impl RunoApp {
                             std::time::Instant::now(),
                         ))
                     }
-                    Err(error) => this.notice = Some(error),
+                    Err(error) => this.fail("git", error),
                 }
                 this.refresh();
             },
@@ -1041,12 +1060,15 @@ impl RunoApp {
             session.base.clone()
         };
         if self.turn_running(id) {
-            self.notice = Some("Wait for the agent to finish its turn before merging.".into());
+            self.fail(
+                "git",
+                "Wait for the agent to finish its turn before merging.".into(),
+            );
             return;
         }
         let pending = self.stats.get(&id).map_or(0, |s| s.0);
         if pending > 0 {
-            self.notice = Some(format!(
+            self.fail("git", format!(
                 "Commit or discard the {pending} uncommitted change{} first; only commits are merged.",
                 if pending == 1 { "" } else { "s" }
             ));
@@ -1072,7 +1094,7 @@ impl RunoApp {
                         }
                         this.save();
                     }
-                    Err(error) => this.notice = Some(format!("Could not merge: {error}")),
+                    Err(error) => this.fail("git", format!("Could not merge: {error}")),
                 }
                 this.refresh();
             },
@@ -1147,9 +1169,10 @@ impl RunoApp {
                     ))
                 }
                 Ok(None) => {}
-                Err(error) => {
-                    this.notice = Some(format!("Session removed; worktree cleanup failed: {error}"))
-                }
+                Err(error) => this.fail(
+                    "git",
+                    format!("Session removed; worktree cleanup failed: {error}"),
+                ),
             },
         );
     }
@@ -1160,7 +1183,7 @@ impl RunoApp {
             return;
         };
         if self.turn_running(id) {
-            self.notice = Some("Stop the agent first.".into());
+            self.fail("git", "Stop the agent first.".into());
             return;
         }
         let merged = self

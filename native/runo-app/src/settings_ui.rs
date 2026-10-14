@@ -21,6 +21,7 @@ pub enum SettingsPage {
     Hooks,
     Worktrees,
     Connections,
+    Phone,
 }
 
 impl SettingsPage {
@@ -46,7 +47,11 @@ impl SettingsPage {
         ),
         (
             "Workspace",
-            &[SettingsPage::Connections, SettingsPage::Worktrees],
+            &[
+                SettingsPage::Connections,
+                SettingsPage::Phone,
+                SettingsPage::Worktrees,
+            ],
         ),
     ];
 
@@ -79,6 +84,7 @@ impl SettingsPage {
             Self::Hooks => "Hooks",
             Self::Worktrees => "Worktrees",
             Self::Connections => "Connections",
+            Self::Phone => "Phone",
         }
     }
 
@@ -99,6 +105,7 @@ impl SettingsPage {
             Self::Hooks => "Commands Claude Code runs on agent events, and the config files behind them.",
             Self::Worktrees => "Where isolated sessions and Runo's data live.",
             Self::Connections => "Places sessions can run besides this machine: Cove VMs and your own servers. Sessions can move between them at any time.",
+            Self::Phone => "Follow every session from the Runo mobile app and answer it: permission requests, plans, questions, follow-ups and Stop.",
         }
     }
 
@@ -122,6 +129,7 @@ impl SettingsPage {
             Self::Hooks => IconName::Webhook,
             Self::Worktrees => IconName::GitBranch,
             Self::Connections => IconName::Server,
+            Self::Phone => IconName::Smartphone,
             _ => IconName::Bot,
         }
     }
@@ -167,6 +175,8 @@ enum Ctl {
         value: String,
         placeholder: String,
     },
+    /// This text as a QR code, for a phone's camera.
+    Qr(String),
 }
 
 /// The form for adding or editing one of Runo's MCP servers.
@@ -956,7 +966,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                             ("Edit".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| this.open_mcp_form(Some(draft.clone()))) as Action),
                             ("Remove".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
                                 if let Err(e) = crate::mcp::remove_own(&path, &name) {
-                                    this.notice = Some(format!("Couldn't remove {name}: {e}"));
+                                    this.fail("mcp", format!("Couldn't remove {name}: {e}"));
                                 }
                                 this.open_settings();
                             }) as Action),
@@ -1032,8 +1042,8 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     Ctl::Buttons(vec![("New skill…".into(), Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
                         match settings::skills_home().map(|dir| settings::new_skill(&dir)) {
                             Some(Ok(file)) => this.edit_path(&file),
-                            Some(Err(e)) => this.notice = Some(format!("Couldn't create a skill: {e}")),
-                            None => this.notice = Some("Couldn't find your home folder.".into()),
+                            Some(Err(e)) => this.fail("settings", format!("Couldn't create a skill: {e}")),
+                            None => this.fail("settings", "Couldn't find your home folder.".into()),
                         }
                     }) as Action)]),
                 )],
@@ -1091,6 +1101,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             sections
         }
         SettingsPage::Connections => connection_sections(st),
+        SettingsPage::Phone => phone_sections(st),
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
             row("Worktree folder", "Created next to each repository as .runo-worktrees/<repo>/<branch>.", Ctl::Chip(".runo-worktrees".into(), 3)),
             row("Runo data", "Projects are saved in state.json and each session in its own file under sessions. Settings live next to them in settings.json.", Ctl::Chip("~/.runo".into(), 3)),
@@ -1416,6 +1427,161 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
     out
 }
 
+fn phone_sections(st: &AppSettings) -> Vec<Section> {
+    let base = store::data_dir();
+    let phones = phone::phones(&base);
+    let listening = match phone::bridge() {
+        phone::Bridge::On { bound, .. } if bound.ip().is_loopback() => row(
+            "Listening on",
+            "Only this computer can reach it: no Tailscale address was found. Start Tailscale, then turn the bridge off and on, or choose Local network.",
+            Ctl::Chip(bound.to_string(), 2),
+        ),
+        phone::Bridge::On { bound, .. } if bound.ip().is_unspecified() => row(
+            "Listening on",
+            "Every network this computer is on, unencrypted.",
+            Ctl::Chip(bound.to_string(), 2),
+        ),
+        phone::Bridge::On { bound, .. } => row(
+            "Listening on",
+            "This computer's Tailscale address, which only devices signed in to your tailnet reach.",
+            Ctl::Chip(bound.to_string(), 0),
+        ),
+        phone::Bridge::Failed(error) => {
+            row("Listening on", &error, Ctl::Chip("Not running".into(), 1))
+        }
+        phone::Bridge::Off => row(
+            "Listening on",
+            "Nothing while the bridge is off.",
+            Ctl::Chip("Off".into(), 3),
+        ),
+    };
+    let mut out = vec![section(
+        "Phone bridge",
+        "Runs inside Runo while it is open, the same API as runo --phone. Actions from the phone are carried out here as if you typed them.",
+        vec![
+            switch_row(
+                "Phone bridge",
+                "Lets paired phones reach this computer. Stays on across launches.",
+                st.phone_bridge,
+                |s, v| s.phone_bridge = v,
+            ),
+            row(
+                "Reachable from",
+                "Tailscale keeps the connection private and encrypted; without it only this computer can reach the bridge. Local network listens on every network over plain HTTP, where anyone on the same Wi-Fi can read a phone's key.",
+                Ctl::Segment(
+                    options(&[
+                        ("tailscale", "Tailscale"),
+                        ("everywhere", "Local network (unencrypted)"),
+                    ]),
+                    if st.phone_everywhere { "everywhere" } else { "tailscale" }.into(),
+                    Rc::new(|s, v| s.phone_everywhere = v == "everywhere"),
+                ),
+            ),
+            listening,
+        ],
+    )];
+
+    let mut pairing = Vec::new();
+    if let Some(shown) = phone::shown(&phones) {
+        let title = format!("Pairing link for {}", shown.name);
+        let hide: Action = Rc::new(|_, _| phone::show(None));
+        match phone::link_for(&shown) {
+            Some(link) => {
+                let copied = link.clone();
+                pairing.push(row(
+                    &title,
+                    &link,
+                    Ctl::Buttons(vec![
+                        ("Hide".into(), hide),
+                        (
+                            "Copy".into(),
+                            Rc::new(move |this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
+                                this.notice = Some("Copied the pairing link.".into());
+                            }) as Action,
+                        ),
+                    ]),
+                ));
+                pairing.push(row(
+                    "Scan it with the Runo app",
+                    "Or open the link on the phone. Anyone with it can use this bridge as you, so remove the phone below if it leaks.",
+                    Ctl::Qr(link),
+                ));
+            }
+            None => pairing.push(row(
+                &title,
+                "Turn the bridge on to see it: the link carries the address the bridge listens on.",
+                Ctl::Buttons(vec![("Hide".into(), hide)]),
+            )),
+        }
+    }
+    pairing.push(row(
+        "Pair a new phone",
+        "Makes a link with a key of its own, so each phone can be removed without unpairing the others.",
+        Ctl::Button(
+            "Pair a new phone".into(),
+            Rc::new(|_, _| {
+                let phone = phone::pair(&store::data_dir());
+                phone::show(Some(phone.token));
+            }),
+        ),
+    ));
+    out.push(section(
+        "Pair a phone",
+        "Scan the code or open the link with the Runo mobile app.",
+        pairing,
+    ));
+
+    let mut paired: Vec<Row> = phones
+        .iter()
+        .map(|p| {
+            let (show, gone, name) = (p.token.clone(), p.token.clone(), p.name.clone());
+            let when = p.paired_on();
+            let desc = if when.is_empty() {
+                "Paired before each phone had its own key.".to_string()
+            } else {
+                format!("Paired {when}")
+            };
+            row(
+                &p.name,
+                &desc,
+                Ctl::Buttons(vec![
+                    (
+                        "Remove".into(),
+                        Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                            phone::unpair(&store::data_dir(), &gone);
+                            this.notice =
+                                Some(format!("Removed {name}. Its link no longer works."));
+                        }) as Action,
+                    ),
+                    (
+                        "Show link".into(),
+                        Rc::new(move |_: &mut RunoApp, _: &mut Context<RunoApp>| {
+                            phone::show(Some(show.clone()))
+                        }) as Action,
+                    ),
+                ]),
+            )
+        })
+        .collect();
+    if paired.is_empty() {
+        paired.push(row(
+            "No phones paired",
+            "Pair one above.",
+            Ctl::Chip("0".into(), 3),
+        ));
+    }
+    out.push(section(
+        "Paired phones",
+        &format!(
+            "Removing a phone revokes only its key; its next request is refused. Kept in {}.",
+            tilde(&base.join("phone.json"))
+        ),
+        paired,
+    ));
+    out
+}
+
 impl RunoApp {
     fn ensure_input(
         &mut self,
@@ -1526,6 +1692,13 @@ impl RunoApp {
                 self.open_settings();
             }
             Err(error) => {
+                // The bad line may hold a secret value, so it isn't repeated.
+                let shown = if error.contains("KEY=value") {
+                    "an environment line isn't KEY=value"
+                } else {
+                    error.as_str()
+                };
+                crate::applog::warn("mcp", format!("could not save the MCP server: {shown}"));
                 form.draft = draft;
                 form.error = Some(error);
             }
@@ -2056,6 +2229,38 @@ impl RunoApp {
                 })
                 .child(icon(IconName::ChevronRight, 14., c_muted()))
                 .into_any_element(),
+            Ctl::Qr(text) => {
+                let Ok(code) = qrcode::QrCode::new(text.as_bytes()) else {
+                    return div().into_any_element();
+                };
+                // Black on white with a quiet zone, whatever the theme, so cameras read it.
+                let module = 4.;
+                let mut grid = div()
+                    .v_flex()
+                    .p(px(module * 3.))
+                    .rounded_md()
+                    .bg(rgb(0xffffff));
+                for line in code.to_colors().chunks(code.width().max(1)) {
+                    let mut runs: Vec<(bool, usize)> = Vec::new();
+                    for dark in line.iter().map(|c| *c == qrcode::Color::Dark) {
+                        match runs.last_mut() {
+                            Some((d, n)) if *d == dark => *n += 1,
+                            _ => runs.push((dark, 1)),
+                        }
+                    }
+                    let mut strip = div().flex().h(px(module));
+                    for (dark, n) in runs {
+                        strip = strip.child(
+                            div()
+                                .w(px(module * n as f32))
+                                .h_full()
+                                .when(dark, |el| el.bg(rgb(0x000000))),
+                        );
+                    }
+                    grid = grid.child(strip);
+                }
+                grid.into_any_element()
+            }
             Ctl::Edit(path) => {
                 let exists = path.exists();
                 let edit = path.clone();

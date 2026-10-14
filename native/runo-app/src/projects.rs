@@ -257,11 +257,14 @@ impl RunoApp {
         if failed.is_empty() {
             self.info = Some((message, std::time::Instant::now()));
         } else {
-            self.notice = Some(format!(
-                "Removed {} from Runo, but some files could not be deleted: {}",
-                project.name,
-                failed.join("; ")
-            ));
+            self.fail(
+                "project",
+                format!(
+                    "Removed {} from Runo, but some files could not be deleted: {}",
+                    project.name,
+                    failed.join("; ")
+                ),
+            );
         }
         self.remove_project = None;
         self.save();
@@ -599,7 +602,7 @@ impl RunoApp {
                     .iter()
                     .any(|p| p.path == new && p.id != pid)
                 {
-                    this.notice = Some("That folder is already a project.".into());
+                    this.fail("project", "That folder is already a project.".into());
                     cx.notify();
                     return;
                 }
@@ -719,14 +722,18 @@ impl RunoApp {
                             std::time::Instant::now(),
                         ))
                     }
-                    Err(why) => self.notice = Some(why),
+                    Err(why) => self.fail("project", why),
                 }
             }
             (Err(why), Some(form)) => {
+                crate::applog::warn(
+                    "git",
+                    format!("git clone failed: {}", crate::applog::gist(&why)),
+                );
                 form.cloning = None;
                 form.error = Some(format!("Could not clone: {why}"));
             }
-            (Err(why), None) => self.notice = Some(format!("Could not clone: {why}")),
+            (Err(why), None) => self.fail("project", format!("Could not clone: {why}")),
         }
         cx.notify();
     }
@@ -834,6 +841,10 @@ impl RunoApp {
                 Err(e) => Some(e.to_string()),
             };
             if let Some(why) = failed {
+                crate::applog::warn(
+                    "git",
+                    format!("git init failed: {}", crate::applog::gist(&why)),
+                );
                 if let Some(form) = self.project_form.as_mut() {
                     form.error = Some(format!("git init failed: {why}"));
                 }
@@ -853,6 +864,7 @@ impl RunoApp {
                 self.save();
             }
             Err(why) => {
+                crate::applog::warn("project", format!("could not add the project: {why}"));
                 if let Some(form) = self.project_form.as_mut() {
                     form.error = Some(why);
                 }
@@ -873,6 +885,7 @@ impl RunoApp {
     ) {
         let slug = folder_name(&name);
         let fail = |this: &mut Self, why: String, cx: &mut Context<Self>| {
+            crate::applog::warn("project", format!("could not create the project: {why}"));
             if let Some(form) = this.project_form.as_mut() {
                 form.error = Some(why);
             }

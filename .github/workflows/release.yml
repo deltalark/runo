@@ -29,6 +29,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check the tag matches the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
+            exit 1
+          fi
+
       - name: Install Rust
         run: |
           rustup update stable
@@ -70,6 +78,12 @@ jobs:
           test -n "$identity"
           codesign --force --deep --options runtime --timestamp --sign "$identity" "${{ steps.app.outputs.path }}"
           codesign --verify --deep --strict "${{ steps.app.outputs.path }}"
+
+      - name: Sign the app without a certificate
+        if: env.APPLE_CERT_P12 == '' || env.APPLE_CERT_PASSWORD == ''
+        run: |
+          echo "::warning::No signing certificate is set, so this build is signed ad hoc and macOS will ask before opening it."
+          codesign --force --deep --sign - "${{ steps.app.outputs.path }}"
 
       - name: Notarize the app
         if: env.APPLE_CERT_P12 != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''

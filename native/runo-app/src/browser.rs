@@ -393,10 +393,12 @@ impl RunoApp {
         }
         self.browser_view.pages.clear();
         let Some(path) = browser_engine::find_chromium() else {
+            crate::applog::warn_once("browser", "no Chromium or Chrome was found");
             self.browser_view.error = Some(browser_engine::not_found_message().into());
             return None;
         };
         let profile = store::data_dir().join("browser").join("profile");
+        let shown = path.display().to_string();
         match Engine::start(path, &profile) {
             Ok(engine) => {
                 self.browser_view.error = None;
@@ -404,6 +406,7 @@ impl RunoApp {
                 self.browser.clone()
             }
             Err(e) => {
+                crate::applog::warn("browser", format!("could not start {shown}: {e}"));
                 self.browser_view.error = Some(e);
                 None
             }
@@ -520,7 +523,10 @@ impl RunoApp {
             Some(url) if open && panel => self.open_in_panel(url, cx),
             Some(url) => self.open_in_browser(url, cx),
             None if raw.trim().is_empty() => {}
-            None => self.notice = Some("Enter a URL such as localhost:3000 or example.com.".into()),
+            None => self.fail(
+                "browser",
+                "Enter a URL such as localhost:3000 or example.com.".into(),
+            ),
         }
         cx.notify();
     }

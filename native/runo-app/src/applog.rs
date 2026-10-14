@@ -43,6 +43,254 @@ fn prune(dir: &Path, prefix: &str, keep: usize) {
     }
 }
 
+/// How much a log line matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Info,
+    Warn,
+    Error,
+}
+
+impl Level {
+    fn tag(self) -> &'static str {
+        match self {
+            Level::Info => "INFO",
+            Level::Warn => "WARN",
+            Level::Error => "ERROR",
+        }
+    }
+}
+
+/// Longest message kept on one line; the rest is cut.
+const LINE_LIMIT: usize = 1000;
+
+/// Something worth knowing later, such as a turn starting or ending.
+pub fn info(area: &str, message: impl AsRef<str>) {
+    write(Level::Info, area, message.as_ref());
+}
+
+/// Something went wrong that the person can work around, such as a failed git command.
+pub fn warn(area: &str, message: impl AsRef<str>) {
+    write(Level::Warn, area, message.as_ref());
+}
+
+/// Something went wrong that stops a piece of Runo working, such as a save that failed.
+pub fn error(area: &str, message: impl AsRef<str>) {
+    write(Level::Error, area, message.as_ref());
+}
+
+/// Like `warn`, but a message repeated by a background retry is written once per launch.
+pub fn warn_once(area: &str, message: impl AsRef<str>) {
+    once(Level::Warn, area, message.as_ref());
+}
+
+/// Like `error`, but a message repeated by a background retry is written once per launch.
+pub fn error_once(area: &str, message: impl AsRef<str>) {
+    once(Level::Error, area, message.as_ref());
+}
+
+fn once(level: Level, area: &str, message: &str) {
+    static SEEN: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (area, message).hash(&mut hasher);
+    let key = hasher.finish();
+    let fresh = SEEN.lock().map_or(true, |mut seen| {
+        if seen.contains(&key) {
+            false
+        } else {
+            // Bounded, so a flood of distinct messages can't grow it forever.
+            if seen.len() >= 512 {
+                seen.clear();
+            }
+            seen.push(key);
+            true
+        }
+    });
+    if fresh {
+        write(level, area, message);
+    }
+}
+
+/// Write one line to the log (stderr, which `init` sends to the log file). Writing never
+/// panics: a log that can't be written is skipped.
+fn write(level: Level, area: &str, message: &str) {
+    let time = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S%.3f")
+        .to_string();
+    let line = format_line(&time, level, area, message);
+    let _ = std::io::stderr().lock().write_all(line.as_bytes());
+}
+
+/// `<time> <LEVEL> [area] message`, on one line with secrets masked.
+pub fn format_line(time: &str, level: Level, area: &str, message: &str) -> String {
+    let mut text = String::with_capacity(message.len().min(LINE_LIMIT) + 48);
+    for (i, line) in message
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .enumerate()
+    {
+        if i > 0 {
+            text.push_str(" | ");
+        }
+        text.push_str(line);
+    }
+    let mut text = redact(&text);
+    if text.chars().count() > LINE_LIMIT {
+        text = text.chars().take(LINE_LIMIT).collect::<String>() + "…";
+    }
+    format!("{time} {:<5} [{area}] {text}\n", level.tag())
+}
+
+/// The line of a command's output that says what went wrong: the first that reads like an
+/// error, else the first that isn't blank. Cut to a sensible length.
+pub fn gist(output: &str) -> String {
+    const WORDS: [&str; 6] = ["error", "fatal", "denied", "failed", "not found", "cannot"];
+    let lines = || output.lines().map(str::trim).filter(|l| !l.is_empty());
+    let line = lines()
+        .find(|l| {
+            let lower = l.to_lowercase();
+            WORDS.iter().any(|w| lower.contains(w))
+        })
+        .or_else(|| lines().next())
+        .unwrap_or("");
+    if line.chars().count() > 300 {
+        line.chars().take(300).collect::<String>() + "…"
+    } else {
+        line.to_string()
+    }
+}
+
+/// Prefixes of well-known API keys and tokens.
+const TOKEN_PREFIXES: [&str; 14] = [
+    "github_pat_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "glpat-",
+    "sk-",
+    "xoxb-",
+    "xoxp-",
+    "xapp-",
+    "AKIA",
+    "AIza",
+    "npm_",
+];
+
+/// Names whose value is a secret, in `name=value` or `name: value`.
+const SECRET_NAMES: [&str; 9] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "api-key",
+    "authorization",
+    "credential",
+];
+
+const MASK: &str = "***";
+
+fn secret_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    SECRET_NAMES.iter().any(|s| name.contains(s))
+}
+
+fn token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '+' | '=')
+}
+
+/// Mask tokens, API keys, passwords in URLs and `secret=value` pairs, so text can be
+/// logged. Errors from git, gh and agent CLIs sometimes echo them.
+pub fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    // The next word is a secret: after `Bearer`, or after `Authorization:` and the like.
+    let mut mask_next = false;
+    for piece in text.split_inclusive(char::is_whitespace) {
+        let word = piece.trim_end_matches(char::is_whitespace);
+        let space = &piece[word.len()..];
+        if word.is_empty() {
+            out.push_str(space);
+            continue;
+        }
+        let lower = word.to_ascii_lowercase();
+        // An auth scheme: the credential follows it.
+        let scheme =
+            matches!(lower.as_str(), "bearer" | "basic") || (mask_next && lower == "token");
+        if scheme {
+            out.push_str(word);
+            mask_next = true;
+        } else if mask_next {
+            out.push_str(MASK);
+            mask_next = false;
+        } else if (word.ends_with(':') || word.ends_with('='))
+            && secret_name(word.trim_end_matches([':', '=']))
+        {
+            out.push_str(word);
+            mask_next = true;
+        } else {
+            out.push_str(&redact_word(word));
+        }
+        out.push_str(space);
+    }
+    out
+}
+
+/// One word without spaces: `name=secret`, `"name":"secret"`, a URL with a password, or a
+/// known token.
+fn redact_word(word: &str) -> String {
+    // name=value or "name": "value" in one word.
+    for sep in ['=', ':'] {
+        if let Some((name, value)) = word.split_once(sep) {
+            let value_body = value.trim_matches(|c: char| c == '"' || c == '\'');
+            if !value_body.is_empty()
+                && !value_body.starts_with("//")
+                && secret_name(name.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+            {
+                // Keep the quotes and brackets around the value.
+                let punct = |c: char| matches!(c, '"' | '\'' | '}' | ']' | ')' | ',' | ';');
+                let open = &value[..value.len() - value.trim_start_matches(punct).len()];
+                let rest = &value[open.len()..];
+                let close = &rest[rest.trim_end_matches(punct).len()..];
+                return format!("{name}{sep}{open}{MASK}{close}");
+            }
+        }
+    }
+    let mut word = word.to_string();
+    // scheme://user:password@host
+    if let Some(start) = word.find("://").map(|i| i + 3) {
+        let rest = &word[start..];
+        let host_end = rest.find('/').unwrap_or(rest.len());
+        if let Some(at) = rest[..host_end].rfind('@') {
+            word = format!("{}{MASK}{}", &word[..start], &rest[at..]);
+        }
+    }
+    for prefix in TOKEN_PREFIXES {
+        let mut from = 0;
+        while let Some(found) = word[from..].find(prefix).map(|i| i + from) {
+            let boundary = word[..found]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_ascii_alphanumeric());
+            let body_start = found + prefix.len();
+            let body_len = word[body_start..]
+                .find(|c: char| !token_char(c))
+                .unwrap_or(word.len() - body_start);
+            if boundary && body_len >= 12 {
+                word.replace_range(body_start..body_start + body_len, MASK);
+                from = body_start + MASK.len();
+            } else {
+                from = body_start;
+            }
+        }
+    }
+    word
+}
+
 /// Start this launch's log file and send stderr to it (and still to the terminal, when
 /// Runo was started from one), then install the crash reporter.
 pub fn init() {
@@ -291,12 +539,51 @@ pub fn check_release() -> Option<Release> {
             &format!("https://api.github.com/repos/{REPO}/releases/latest"),
         ])
         .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    newer_release(
-        &String::from_utf8_lossy(&out.stdout),
-        env!("CARGO_PKG_VERSION"),
-    )
+        .output();
+    let out = match out {
+        Ok(out) => out,
+        Err(e) => {
+            warn(
+                "app-update",
+                format!("could not run curl to check for updates: {e}"),
+            );
+            return None;
+        }
+    };
+    let current = env!("CARGO_PKG_VERSION");
+    let body = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        warn(
+            "app-update",
+            format!(
+                "the update check failed: curl exited with {}",
+                out.status
+                    .code()
+                    .map_or("no code".to_string(), |c| format!("code {c}"))
+            ),
+        );
+        return None;
+    }
+    let found = newer_release(&body, current);
+    match &found {
+        Some(release) => info(
+            "app-update",
+            format!("Runo {} is out (running {current})", release.version),
+        ),
+        None if serde_json::from_str::<serde_json::Value>(&body)
+            .is_ok_and(|v| v["tag_name"].is_string()) =>
+        {
+            info("app-update", format!("checked: {current} is the latest"))
+        }
+        None => warn(
+            "app-update",
+            format!(
+                "the update check got no release from GitHub: {}",
+                gist(&body)
+            ),
+        ),
+    }
+    found
 }
 
 /// The Downloads folder, or the home folder without one.
@@ -326,17 +613,40 @@ pub fn download(name: &str, url: &str, dir: &Path) -> Result<PathBuf, String> {
         .arg(url)
         .stdin(std::process::Stdio::null())
         .output()
-        .map_err(|e| format!("Could not run curl: {e}"))?;
+        .map_err(|e| {
+            error(
+                "app-update",
+                format!("could not run curl to download {url}: {e}"),
+            );
+            format!("Could not run curl: {e}")
+        })?;
     if !out.status.success() {
         let _ = std::fs::remove_file(&partial);
         let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        warn(
+            "app-update",
+            format!(
+                "downloading {url} failed: curl exited with {}: {}",
+                out.status
+                    .code()
+                    .map_or("no code".to_string(), |c| format!("code {c}")),
+                gist(&why)
+            ),
+        );
         return Err(if why.is_empty() {
             "The download failed.".into()
         } else {
             format!("The download failed: {why}")
         });
     }
-    std::fs::rename(&partial, &path).map_err(|e| e.to_string())?;
+    std::fs::rename(&partial, &path).map_err(|e| {
+        error(
+            "app-update",
+            format!("could not save {}: {e}", path.display()),
+        );
+        e.to_string()
+    })?;
+    info("app-update", format!("downloaded {}", path.display()));
     Ok(path)
 }
 
@@ -349,6 +659,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn log_lines_carry_time_level_and_area_on_one_line() {
+        let line = format_line(
+            "2026-10-14 09:30:00.123",
+            Level::Warn,
+            "git",
+            "Push failed\n  remote: rejected\n\n",
+        );
+        assert_eq!(
+            line,
+            "2026-10-14 09:30:00.123 WARN  [git] Push failed | remote: rejected\n"
+        );
+        assert!(format_line("t", Level::Error, "save", "x").starts_with("t ERROR [save] x"));
+        assert!(format_line("t", Level::Info, "turn", "x").starts_with("t INFO  [turn] x"));
+        let long = format_line("t", Level::Info, "a", &"y".repeat(5000));
+        assert!(long.chars().count() < LINE_LIMIT + 40);
+        assert!(long.ends_with("…\n"));
+        // Writing never panics, whatever is in the message.
+        warn("test", "a line from the tests");
+        warn_once("test", "only once");
+        warn_once("test", "only once");
+    }
+
+    #[test]
+    fn secrets_are_masked() {
+        let cases = [
+            (
+                "remote: https://x-access-token:ghp_abcdefghijklmnop1234@github.com/o/r.git",
+                "remote: https://***@github.com/o/r.git",
+            ),
+            ("using ghp_abcdefghijklmnop1234 now", "using ghp_*** now"),
+            (
+                "key github_pat_11ABCDEFG0123456789_abcdefghijk",
+                "key github_pat_***",
+            ),
+            (
+                "ANTHROPIC_API_KEY=sk-ant-api03-abcdefghijklmnop",
+                "ANTHROPIC_API_KEY=***",
+            ),
+            (
+                "Invalid key sk-proj-abcdefghijklmnopqrstu",
+                "Invalid key sk-***",
+            ),
+            (
+                "Authorization: Bearer abc.def.ghi",
+                "Authorization: Bearer ***",
+            ),
+            ("authorization: token abcdef123", "authorization: token ***"),
+            ("--token=s3cret --verbose", "--token=*** --verbose"),
+            (r#"{"api_key":"abc123"}"#, r#"{"api_key":"***"}"#),
+            ("password: hunter2", "password: ***"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(redact(input), want, "{input}");
+        }
+        // Ordinary errors pass through untouched.
+        for plain in [
+            "fatal: not a git repository (or any of the parent directories): .git",
+            "error: failed to push some refs to 'https://github.com/o/r.git'",
+            "the task-list is skipped",
+            "could not start \"claude\": No such file or directory (os error 2)",
+        ] {
+            assert_eq!(redact(plain), plain);
+        }
+        // And the log line masks too.
+        let line = format_line(
+            "t",
+            Level::Warn,
+            "gh",
+            "token=abcdef ghp_abcdefghijklmnop1234",
+        );
+        assert!(
+            !line.contains("abcdef ") && !line.contains("1234"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn the_gist_is_the_line_that_says_what_failed() {
+        assert_eq!(
+            gist("Cloning into 'x'...\nfatal: repository not found\nmore"),
+            "fatal: repository not found"
+        );
+        assert_eq!(gist("\n  just output\nsecond"), "just output");
+        assert_eq!(gist(""), "");
+        assert!(gist(&"e".repeat(500)).chars().count() <= 301);
     }
 
     #[test]

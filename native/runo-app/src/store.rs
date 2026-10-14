@@ -890,10 +890,13 @@ pub fn move_aside(path: &Path, error: &str) {
         .unwrap_or(0);
     let backup = path.with_extension(format!("json.corrupt-{stamp}"));
     let _ = std::fs::rename(path, &backup);
-    eprintln!(
-        "runo: could not read {} ({error}); moved it to {}",
-        path.display(),
-        backup.display()
+    crate::applog::error(
+        "load",
+        format!(
+            "could not read {} ({error}); moved it to {}",
+            path.display(),
+            backup.display()
+        ),
     );
 }
 
@@ -902,11 +905,16 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(text) = serde_json::to_string_pretty(value) {
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(tmp, path);
-        }
+    let written = serde_json::to_string_pretty(value)
+        .map_err(|e| e.to_string())
+        .and_then(|text| {
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, text)
+                .and_then(|_| std::fs::rename(tmp, path))
+                .map_err(|e| e.to_string())
+        });
+    if let Err(e) = written {
+        crate::applog::error_once("save", format!("could not save {}: {e}", path.display()));
     }
 }
 

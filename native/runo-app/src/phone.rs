@@ -1,23 +1,27 @@
 //! The phone bridge: a small HTTP API that Runo's mobile app talks to.
 //!
-//! `runo --phone [address]` serves it without a window. Reads come straight from the
-//! saved state (`State::peek`) and the live approvals folder, so the phone sees what the
-//! desktop app sees. Permission requests are answered right away, the same way the
-//! corner card answers them. Everything that starts or stops an agent (a follow-up, a
-//! plan approval, answers to questions, Stop) is left in `~/.runo/phone-inbox`, and the
-//! running app picks it up within a couple of seconds and runs it as if it were typed.
+//! It runs inside the app when it is turned on in Settings > Phone, or without a window
+//! from `runo --phone [address]`. Reads come straight from the saved state
+//! (`State::peek`) and the live approvals folder, so the phone sees what the desktop app
+//! sees. Permission requests are answered right away, the same way the corner card
+//! answers them. Everything that starts or stops an agent (a follow-up, a plan approval,
+//! answers to questions, Stop) is left in `~/.runo/phone-inbox`, and the running app
+//! picks it up within a couple of seconds and runs it as if it were typed.
 //!
-//! Every request needs `Authorization: Bearer <token>`. The token is made on first run
-//! and kept in `~/.runo/phone.json`; the pairing link printed at start carries it. The
-//! bridge speaks plain HTTP, so reach it over a private network such as Tailscale or
-//! your home Wi-Fi, never straight from the internet.
+//! Every request needs `Authorization: Bearer <token>`. Each paired phone has its own
+//! token, kept in `~/.runo/phone.json` with its name, and its pairing link carries it;
+//! removing a phone revokes only its token. The bridge speaks plain HTTP, so by default
+//! it listens only on this computer's Tailscale address, or on this computer alone when
+//! there is none. Listening on every network takes an explicit choice.
 
 use super::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// The port the bridge listens on unless an address is given.
@@ -112,31 +116,134 @@ pub fn take(base: &Path) -> Vec<Request> {
         .collect()
 }
 
+/// One paired phone. Each has its own token, so removing one leaves the others paired.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Phone {
+    pub name: String,
+    pub token: String,
+    /// When it was paired, in seconds since 1970; 0 for the phone of an older config.
+    #[serde(default)]
+    pub created: u64,
+}
+
+impl Phone {
+    /// When it was paired, as a date to show, or "" when that isn't known.
+    pub fn paired_on(&self) -> String {
+        i64::try_from(self.created)
+            .ok()
+            .filter(|s| *s > 0)
+            .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
+            .map(|t| {
+                t.with_timezone(&chrono::Local)
+                    .format("%-d %b %Y, %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Config {
+    phones: Vec<Phone>,
+    /// The one token older versions shared between every phone; read as a phone named
+    /// "Phone" and not written again.
+    #[serde(skip_serializing_if = "String::is_empty")]
     token: String,
 }
 
-/// The bridge's token, made on first use.
-pub fn token(base: &Path) -> String {
-    let path = base.join("phone.json");
-    let config: Config = store::read_json_or_backup(&path);
-    if config.token.len() >= 32 {
-        return config.token;
+fn config_path(base: &Path) -> PathBuf {
+    base.join("phone.json")
+}
+
+/// The bridge's config. A config from before per-phone tokens becomes one phone named
+/// "Phone", so a phone paired then stays paired, and is saved in the new shape.
+fn load(base: &Path) -> Config {
+    let mut config: Config = store::read_json_or_backup(&config_path(base));
+    let old = std::mem::take(&mut config.token);
+    config.phones.retain(|p| p.token.len() >= 32);
+    if old.len() >= 32 {
+        if !config.phones.iter().any(|p| p.token == old) {
+            config.phones.insert(
+                0,
+                Phone {
+                    name: "Phone".into(),
+                    token: old,
+                    created: 0,
+                },
+            );
+        }
+        save(base, &config);
     }
-    let token = new_token();
-    store::write_json(
-        &path,
-        &Config {
-            token: token.clone(),
-        },
-    );
+    config
+}
+
+/// Write the config readable only by you, from the moment the file exists.
+fn save(base: &Path, config: &Config) {
+    // Request threads may migrate an old config at the same moment; one writes at a time.
+    static WRITING: Mutex<()> = Mutex::new(());
+    let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let path = config_path(base);
+    let _ = std::fs::create_dir_all(base);
+    let Ok(text) = serde_json::to_string_pretty(config) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    token
+    if options
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .is_ok()
+    {
+        let _ = std::fs::rename(tmp, path);
+    }
+}
+
+/// Every paired phone, oldest first.
+pub fn phones(base: &Path) -> Vec<Phone> {
+    load(base).phones
+}
+
+/// Pair a new phone: a token of its own, named "Phone", "Phone 2"… after the ones there.
+pub fn pair(base: &Path) -> Phone {
+    let mut config = load(base);
+    let name = (1..)
+        .map(|n| match n {
+            1 => "Phone".to_string(),
+            n => format!("Phone {n}"),
+        })
+        .find(|name| !config.phones.iter().any(|p| p.name == *name))
+        .unwrap_or_default();
+    let phone = Phone {
+        name,
+        token: new_token(),
+        created: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    };
+    config.phones.push(phone.clone());
+    save(base, &config);
+    phone
+}
+
+/// Unpair the phone with this token. Its next request is refused; the others carry on.
+pub fn unpair(base: &Path, token: &str) {
+    let mut config = load(base);
+    config.phones.retain(|p| p.token != token);
+    save(base, &config);
+}
+
+/// The tokens of every paired phone.
+fn tokens(base: &Path) -> Vec<String> {
+    load(base).phones.into_iter().map(|p| p.token).collect()
 }
 
 /// 256 random bits as hex. Each `RandomState` is keyed from the OS's random source, so
@@ -167,13 +274,101 @@ fn same(a: &str, b: &str) -> bool {
             == 0
 }
 
+/// Whether `given` is one of the paired tokens. Every token is compared in full, with no
+/// early return, so timing says nothing about which one matched.
+fn allowed(given: &str, tokens: &[String]) -> bool {
+    tokens.iter().fold(false, |ok, t| same(given, t) | ok)
+}
+
+/// Whether this is a Tailscale address (100.64.0.0/10), which only devices signed in to
+/// your tailnet can reach, over WireGuard.
+pub fn is_tailscale(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            a == 100 && b & 0xc0 == 64
+        }
+        IpAddr::V6(_) => false,
+    }
+}
+
+/// Where the bridge listens when no address is given. The bridge speaks plain HTTP, so it
+/// never listens on a shared network unless asked: this computer's Tailscale address when
+/// it has one, else this computer only.
+pub fn default_host(addresses: &[IpAddr]) -> IpAddr {
+    addresses
+        .iter()
+        .copied()
+        .find(is_tailscale)
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+}
+
+/// The address to listen on: the one given (a bare IP gets the usual port), else every
+/// network when `everywhere` was chosen, else `default_host`.
+pub fn bind_address(given: Option<&str>, everywhere: bool, addresses: &[IpAddr]) -> String {
+    match given.map(str::trim).filter(|g| !g.is_empty()) {
+        Some(given) => match given.parse::<IpAddr>() {
+            Ok(ip) => SocketAddr::new(ip, PORT).to_string(),
+            Err(_) => given.to_string(),
+        },
+        None if everywhere => format!("0.0.0.0:{PORT}"),
+        None => SocketAddr::new(default_host(addresses), PORT).to_string(),
+    }
+}
+
+/// This computer's IPv4 addresses, on every interface.
+#[cfg(unix)]
+fn addresses() -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `list` with a linked list we only read, then free once.
+    unsafe {
+        if libc::getifaddrs(&mut list) != 0 {
+            return out;
+        }
+        let mut cur = list;
+        while !cur.is_null() {
+            let addr = (*cur).ifa_addr;
+            if !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
+                let sin = &*(addr as *const libc::sockaddr_in);
+                out.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                    sin.sin_addr.s_addr,
+                ))));
+            }
+            cur = (*cur).ifa_next;
+        }
+        libc::freeifaddrs(list);
+    }
+    out
+}
+
+/// This computer's address on the route to Tailscale's own DNS server, which goes through
+/// Tailscale when it is up. Nothing is sent: connecting a UDP socket only picks the route.
+#[cfg(not(unix))]
+fn addresses() -> Vec<IpAddr> {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("100.100.100.100:53")?;
+            s.local_addr()
+        })
+        .map(|a| vec![a.ip()])
+        .unwrap_or_default()
+}
+
+/// The address a phone uses to reach a bridge listening on `bound`.
+fn reachable(bound: SocketAddr) -> String {
+    let ip = if bound.ip().is_unspecified() {
+        local_ip().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    } else {
+        bound.ip()
+    };
+    format!("http://{}", SocketAddr::new(ip, bound.port()))
+}
+
 /// `runo --phone [address]`: serve the bridge until stopped.
 pub fn serve(address: Option<&str>) -> i32 {
     let base = store::data_dir();
-    let token = token(&base);
-    let address = address
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("0.0.0.0:{PORT}"));
+    let address = bind_address(address, false, &addresses());
     let listener = match TcpListener::bind(&address) {
         Ok(l) => l,
         Err(e) => {
@@ -181,17 +376,22 @@ pub fn serve(address: Option<&str>) -> i32 {
             return 1;
         }
     };
-    let bound = listener.local_addr().ok();
-    let port = bound.map(|a| a.port()).unwrap_or(PORT);
-    let host = match bound.map(|a| a.ip()) {
-        Some(ip) if !ip.is_unspecified() => ip.to_string(),
-        _ => local_ip().unwrap_or_else(|| "this-computer".into()),
+    let Ok(bound) = listener.local_addr() else {
+        eprintln!("runo: could not listen on {address}");
+        return 1;
     };
-    let url = format!("http://{host}:{port}");
-    println!("Runo phone bridge on {address}");
+    let phone = match phones(&base).pop() {
+        Some(phone) => phone,
+        None => pair(&base),
+    };
+    let url = reachable(bound);
+    println!("Runo phone bridge on {bound}");
     println!();
-    let link = pair_link(&url, &token);
-    println!("Scan this with the Runo mobile app, or copy the link below to your phone:");
+    let link = pair_link(&url, &phone.token);
+    println!(
+        "Scan this with the Runo mobile app, or copy the link below to your phone ({}):",
+        phone.name
+    );
     println!();
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() {
@@ -199,19 +399,137 @@ pub fn serve(address: Option<&str>) -> i32 {
     }
     println!("  {link}");
     println!();
-    println!("Away from home, use a private network such as Tailscale and pair with this");
-    println!("computer's Tailscale address instead of {host}. Keep Runo open: prompts and");
-    println!("Stop are carried out by the app.");
-    accept(listener, &base, &token);
+    if bound.ip().is_loopback() {
+        println!("Only this computer can reach it. Install Tailscale and run this again to");
+        println!("reach it from your phone, or run `runo --phone 0.0.0.0` to listen on every");
+        println!("network, unencrypted: anyone on the same Wi-Fi could read the token.");
+    } else if bound.ip().is_unspecified() {
+        println!("Listening on every network over plain HTTP: anyone on the same Wi-Fi could");
+        println!("read the token. Prefer Tailscale away from a network you trust.");
+    }
+    println!("Pair more phones, each with its own link, in Runo's Settings > Phone. Keep");
+    println!("Runo open: prompts and Stop are carried out by the app.");
+    accept(listener, &base, &AtomicBool::new(false));
     0
 }
 
-/// Answer connections until the listener fails, each on its own thread.
-fn accept(listener: TcpListener, base: &Path, token: &str) {
-    for stream in listener.incoming().flatten() {
-        let (base, token) = (base.to_path_buf(), token.to_string());
-        std::thread::spawn(move || handle(stream, &base, &token));
+/// Answer connections, each on its own thread, until `stop` is set or the listener fails.
+/// It checks `stop` a few times a second, so the port is free soon after.
+fn accept(listener: TcpListener, base: &Path, stop: &AtomicBool) {
+    if listener.set_nonblocking(true).is_err() {
+        return;
     }
+    while !stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // Some systems pass the listener's non-blocking mode on to the connection.
+                let _ = stream.set_nonblocking(false);
+                let base = base.to_path_buf();
+                std::thread::spawn(move || handle(stream, &base));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+}
+
+/// The bridge running inside the app, started from Settings.
+#[derive(Clone, Debug, Default)]
+pub enum Bridge {
+    #[default]
+    Off,
+    On {
+        bound: SocketAddr,
+        everywhere: bool,
+        stop: Arc<AtomicBool>,
+    },
+    Failed(String),
+}
+
+static BRIDGE: Mutex<Option<(Bridge, Option<std::thread::JoinHandle<()>>)>> = Mutex::new(None);
+
+/// The in-app bridge as it is now.
+pub fn bridge() -> Bridge {
+    BRIDGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|(b, _)| b.clone())
+        .unwrap_or_default()
+}
+
+/// Start or stop the in-app bridge to match Settings. Requests are handled on background
+/// threads; the app carries out what lands in the inbox, as it does for `runo --phone`.
+pub fn sync(on: bool, everywhere: bool) {
+    let mut slot = BRIDGE.lock().unwrap_or_else(|e| e.into_inner());
+    let (current, thread) = slot.take().unwrap_or_default();
+    if let Bridge::On {
+        everywhere: e,
+        ref stop,
+        ..
+    } = current
+    {
+        if on && e == everywhere {
+            *slot = Some((current, thread));
+            return;
+        }
+        stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = thread {
+            let _ = thread.join();
+        }
+    }
+    if !on {
+        return;
+    }
+    let base = store::data_dir();
+    let address = bind_address(None, everywhere, &addresses());
+    let started = TcpListener::bind(&address).and_then(|l| Ok((l.local_addr()?, l)));
+    *slot = Some(match started {
+        Ok((bound, listener)) => {
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            let thread = std::thread::Builder::new()
+                .name("phone-bridge".into())
+                .spawn(move || accept(listener, &base, &flag))
+                .ok();
+            (
+                Bridge::On {
+                    bound,
+                    everywhere,
+                    stop,
+                },
+                thread,
+            )
+        }
+        Err(e) => (
+            Bridge::Failed(format!("Couldn't listen on {address}: {e}")),
+            None,
+        ),
+    });
+}
+
+/// The pairing link for this phone, when the in-app bridge is on.
+pub fn link_for(phone: &Phone) -> Option<String> {
+    match bridge() {
+        Bridge::On { bound, .. } => Some(pair_link(&reachable(bound), &phone.token)),
+        _ => None,
+    }
+}
+
+/// The token of the phone whose link Settings shows, after Pair a new phone or Show link.
+static SHOWN: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn show(token: Option<String>) {
+    *SHOWN.lock().unwrap_or_else(|e| e.into_inner()) = token;
+}
+
+/// The phone whose link Settings shows, if it is still paired.
+pub fn shown(phones: &[Phone]) -> Option<Phone> {
+    let token = SHOWN.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    phones.iter().find(|p| p.token == token).cloned()
 }
 
 /// The link the mobile app pairs with.
@@ -247,10 +565,10 @@ fn encode(s: &str) -> String {
 
 /// This computer's address on the network it reaches the internet through. Nothing is
 /// sent: connecting a UDP socket only picks the route.
-fn local_ip() -> Option<String> {
+fn local_ip() -> Option<IpAddr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:9").ok()?;
-    Some(socket.local_addr().ok()?.ip().to_string())
+    Some(socket.local_addr().ok()?.ip())
 }
 
 /// One parsed HTTP request.
@@ -308,13 +626,15 @@ fn read_request(stream: &mut impl Read) -> Option<Http> {
 /// A response: status code and JSON body.
 type Reply = (u16, Value);
 
-fn handle(mut stream: TcpStream, base: &Path, token: &str) {
+fn handle(mut stream: TcpStream, base: &Path) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let Some(http) = read_request(&mut stream) else {
         let _ = write_reply(&mut stream, (400, json!({ "error": "bad request" })), "");
         return;
     };
-    let (status, body) = respond(&http, base, token);
+    // Read for every request, so a phone removed in Settings is refused straight away,
+    // by this process or a `runo --phone` running beside it.
+    let (status, body) = respond(&http, base, &tokens(base));
     let _ = write_reply(&mut stream, (status, body), &http.if_none_match);
 }
 
@@ -354,13 +674,14 @@ fn fnv(data: &[u8]) -> u64 {
     })
 }
 
-/// Route one request. Separate from the socket so tests can call it directly.
-fn respond(http: &Http, base: &Path, token: &str) -> Reply {
+/// Route one request, from a phone holding one of `tokens`. Separate from the socket so
+/// tests can call it directly.
+fn respond(http: &Http, base: &Path, tokens: &[String]) -> Reply {
     let given = http.auth.strip_prefix("Bearer ").unwrap_or("");
-    if !same(given, token) {
+    if !allowed(given, tokens) {
         return (
             401,
-            json!({ "error": "This phone isn't paired. Pair it again with the link from `runo --phone`." }),
+            json!({ "error": "This phone isn't paired. Pair it again from Runo's Settings > Phone." }),
         );
     }
     let path = http.path.split('?').next().unwrap_or("");
@@ -696,7 +1017,17 @@ mod tests {
             },
             ..Default::default()
         };
-        respond(&http, base, "secret-token")
+        respond(&http, base, &["secret-token".to_string()])
+    }
+
+    fn hello(base: &Path, token: &str) -> u16 {
+        let http = Http {
+            method: "GET".into(),
+            path: "/v1/hello".into(),
+            auth: format!("Bearer {token}"),
+            ..Default::default()
+        };
+        respond(&http, base, &tokens(base)).0
     }
 
     fn seed(base: &Path) {
@@ -737,8 +1068,120 @@ mod tests {
             auth: "Bearer wrong".into(),
             ..Default::default()
         };
-        assert_eq!(respond(&http, &base, "secret-token").0, 401);
+        assert_eq!(respond(&http, &base, &["secret-token".into()]).0, 401);
+        assert_eq!(respond(&http, &base, &[]).0, 401);
         assert_eq!(call(&base, "GET", "/v1/hello", Value::Null).0, 200);
+    }
+
+    #[test]
+    fn accepts_any_paired_phone_and_refuses_removed_ones() {
+        let base = temp("phones");
+        let first = pair(&base);
+        let second = pair(&base);
+        assert_eq!(
+            (first.name.as_str(), second.name.as_str()),
+            ("Phone", "Phone 2")
+        );
+        assert_ne!(first.token, second.token);
+        assert!(first.created > 0 && !first.paired_on().is_empty());
+        assert_eq!(hello(&base, &first.token), 200);
+        assert_eq!(hello(&base, &second.token), 200);
+        assert_eq!(hello(&base, ""), 401);
+        assert_eq!(hello(&base, &first.token[..63]), 401);
+
+        unpair(&base, &first.token);
+        assert_eq!(hello(&base, &first.token), 401);
+        assert_eq!(hello(&base, &second.token), 200);
+        assert_eq!(phones(&base), vec![second.clone()]);
+        // A freed name is used again.
+        assert_eq!(pair(&base).name, "Phone");
+        assert!(allowed("abc", &["xyz".into(), "abc".into()]));
+        assert!(!allowed("abc", &["xyz".into(), "abd".into()]));
+    }
+
+    #[test]
+    fn reads_the_old_shared_token_as_one_phone() {
+        let base = temp("migrate");
+        let old = "ab".repeat(32);
+        std::fs::write(
+            base.join("phone.json"),
+            format!(r#"{{ "token": "{old}" }}"#),
+        )
+        .unwrap();
+        let listed = phones(&base);
+        assert_eq!(
+            listed,
+            vec![Phone {
+                name: "Phone".into(),
+                token: old.clone(),
+                created: 0,
+            }]
+        );
+        assert_eq!(listed[0].paired_on(), "");
+        assert_eq!(hello(&base, &old), 200);
+        // Saved in the new shape, once.
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(base.join("phone.json")).unwrap()).unwrap();
+        assert!(saved.get("token").is_none());
+        assert_eq!(saved["phones"][0]["token"], old.as_str());
+        assert_eq!(phones(&base).len(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(base.join("phone.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(pair(&base).name, "Phone 2");
+        // A short token was never valid and isn't carried over.
+        let short = temp("migrate-short");
+        std::fs::write(short.join("phone.json"), r#"{ "token": "abc" }"#).unwrap();
+        assert!(phones(&short).is_empty());
+    }
+
+    #[test]
+    fn listens_on_tailscale_or_this_computer_unless_told() {
+        let lan: IpAddr = "192.168.1.20".parse().unwrap();
+        let tailnet: IpAddr = "100.101.102.103".parse().unwrap();
+        let cgnat_edge: IpAddr = "100.128.0.1".parse().unwrap();
+        assert!(is_tailscale(&tailnet));
+        assert!(is_tailscale(&"100.64.0.1".parse().unwrap()));
+        assert!(is_tailscale(&"100.127.255.254".parse().unwrap()));
+        assert!(!is_tailscale(&"100.63.255.255".parse().unwrap()));
+        assert!(!is_tailscale(&cgnat_edge));
+        assert!(!is_tailscale(&lan));
+        assert!(!is_tailscale(&"::1".parse().unwrap()));
+
+        assert_eq!(default_host(&[lan, tailnet]), tailnet);
+        assert_eq!(
+            default_host(&[lan, cgnat_edge]),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(default_host(&[]), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+        assert_eq!(
+            bind_address(None, false, &[lan, tailnet]),
+            "100.101.102.103:7631"
+        );
+        assert_eq!(bind_address(None, false, &[lan]), "127.0.0.1:7631");
+        assert_eq!(bind_address(None, true, &[lan, tailnet]), "0.0.0.0:7631");
+        // `runo --phone <address>` still listens exactly where it is told.
+        assert_eq!(
+            bind_address(Some("0.0.0.0:7631"), false, &[]),
+            "0.0.0.0:7631"
+        );
+        assert_eq!(bind_address(Some("0.0.0.0"), false, &[]), "0.0.0.0:7631");
+        assert_eq!(
+            bind_address(Some("192.168.1.20:9000"), false, &[tailnet]),
+            "192.168.1.20:9000"
+        );
+        assert_eq!(bind_address(Some("::"), false, &[]), "[::]:7631");
+        assert_eq!(bind_address(Some(" "), false, &[]), "127.0.0.1:7631");
+
+        let bound: SocketAddr = "100.101.102.103:7631".parse().unwrap();
+        assert_eq!(reachable(bound), "http://100.101.102.103:7631");
     }
 
     #[test]
@@ -882,10 +1325,13 @@ mod tests {
     fn serves_over_a_real_socket() {
         let base = temp("socket");
         seed(&base);
+        let token = pair(&base).token;
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let served = base.clone();
-        std::thread::spawn(move || accept(listener, &served, "secret-token"));
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let server = std::thread::spawn(move || accept(listener, &served, &flag));
         let ask = |request: String| {
             let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
             stream.write_all(request.as_bytes()).unwrap();
@@ -893,8 +1339,9 @@ mod tests {
             stream.read_to_string(&mut out).unwrap();
             out
         };
-        let list =
-            ask("GET /v1/sessions HTTP/1.1\r\nAuthorization: Bearer secret-token\r\n\r\n".into());
+        let list = ask(format!(
+            "GET /v1/sessions HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ));
         assert!(list.starts_with("HTTP/1.1 200 OK"), "{list}");
         assert!(list.contains("\"Fix the sidebar\""));
         let tag = list
@@ -903,18 +1350,36 @@ mod tests {
             .unwrap()
             .to_string();
         let again = ask(format!(
-            "GET /v1/sessions HTTP/1.1\r\nAuthorization: Bearer secret-token\r\nIf-None-Match: {tag}\r\n\r\n"
+            "GET /v1/sessions HTTP/1.1\r\nAuthorization: Bearer {token}\r\nIf-None-Match: {tag}\r\n\r\n"
         ));
         assert!(again.starts_with("HTTP/1.1 304"), "{again}");
         let body = r#"{"text":"Go left"}"#;
         let sent = ask(format!(
-            "POST /v1/sessions/7/prompt HTTP/1.1\r\nAuthorization: Bearer secret-token\r\nContent-Length: {}\r\n\r\n{body}",
+            "POST /v1/sessions/7/prompt HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         ));
         assert!(sent.starts_with("HTTP/1.1 202"), "{sent}");
         assert_eq!(take(&base).len(), 1);
         let refused = ask("GET /v1/sessions HTTP/1.1\r\n\r\n".into());
         assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+        // Removing the phone refuses its next request.
+        unpair(&base, &token);
+        let removed = ask(format!(
+            "GET /v1/hello HTTP/1.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        ));
+        assert!(removed.starts_with("HTTP/1.1 401"), "{removed}");
+        // Turning the bridge off frees the port.
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+        // The last request's handler can hold its socket for a moment after the
+        // listener closes (macOS refuses the bind until it does).
+        let freed = (0..50).any(|_| {
+            TcpListener::bind(("127.0.0.1", port)).is_ok() || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            }
+        });
+        assert!(freed, "the port is still taken after stopping");
     }
 
     #[test]

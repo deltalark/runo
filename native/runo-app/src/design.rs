@@ -336,14 +336,17 @@ impl RunoApp {
         let text = self.design.notes.read(cx).value().to_string();
         match architecture::save_notes(&file, &text) {
             Ok(()) => self.design.saved = Some(std::time::Instant::now()),
-            Err(e) => self.notice = Some(format!("Couldn't save {}: {e}", file.display())),
+            Err(e) => self.fail("design", format!("Couldn't save {}: {e}", file.display())),
         }
     }
 
     fn save_refs(&mut self) {
         if let Some((_, _, root)) = self.design_root() {
             if let Err(e) = save(&root, &self.design.refs) {
-                self.notice = Some(format!("Couldn't save the design references: {e}"));
+                self.fail(
+                    "design",
+                    format!("Couldn't save the design references: {e}"),
+                );
             }
         }
     }
@@ -418,15 +421,18 @@ impl RunoApp {
         let mut added = Vec::new();
         for path in paths {
             if !turns::is_image(path) {
-                self.notice = Some(format!(
-                    "{} is not an image. References are PNG, JPEG, GIF, WebP or BMP.",
-                    path.display()
-                ));
+                self.fail(
+                    "design",
+                    format!(
+                        "{} is not an image. References are PNG, JPEG, GIF, WebP or BMP.",
+                        path.display()
+                    ),
+                );
                 continue;
             }
             match add_file(&root, path) {
                 Some(r) => added.push(r),
-                None => self.notice = Some(format!("Couldn't add {}.", path.display())),
+                None => self.fail("design", format!("Couldn't add {}.", path.display())),
             }
         }
         self.push_refs(added);
@@ -456,7 +462,7 @@ impl RunoApp {
                 match added {
                     Some(r) if this.design.project == Some(pid) => this.push_refs(vec![r]),
                     Some(_) => {}
-                    None => this.notice = Some("Couldn't capture the page.".into()),
+                    None => this.fail("design", "Couldn't capture the page.".into()),
                 }
                 cx.notify();
             },

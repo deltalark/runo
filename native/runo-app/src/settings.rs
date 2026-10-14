@@ -151,6 +151,11 @@ pub struct AppSettings {
     pub max_running: u32,
     /// Look for a newer Runo on GitHub now and then.
     pub check_runo_updates: bool,
+    /// Serve the phone bridge from the app while it is open.
+    pub phone_bridge: bool,
+    /// Let the phone bridge listen on every network, over plain HTTP, instead of only
+    /// Tailscale or this computer.
+    pub phone_everywhere: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -222,6 +227,8 @@ impl Default for AppSettings {
             daily_limit_usd: 0,
             max_running: 0,
             check_runo_updates: true,
+            phone_bridge: false,
+            phone_everywhere: false,
         }
     }
 }
@@ -309,6 +316,7 @@ impl AppSettings {
         MAX_RUNNING.store(self.max_running, Ordering::Relaxed);
         CATCH_UP.store(self.playbook_catch_up, Ordering::Relaxed);
         crate::pbrunner::sync_launch_agent(self.playbooks_while_closed);
+        crate::phone::sync(self.phone_bridge, self.phone_everywhere);
         crate::terminal::configure(
             self.term_font_size,
             match self.term_scroll.as_str() {

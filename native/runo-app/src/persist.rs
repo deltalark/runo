@@ -49,7 +49,14 @@ fn write_text(path: &Path, text: &str) -> bool {
         let _ = std::fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).is_ok() && std::fs::rename(tmp, path).is_ok()
+    match std::fs::write(&tmp, text).and_then(|_| std::fs::rename(tmp, path)) {
+        Ok(()) => true,
+        Err(e) => {
+            // Saves are retried every half second; the same failure is written once.
+            crate::applog::error_once("save", format!("could not save {}: {e}", path.display()));
+            false
+        }
+    }
 }
 
 /// What was last written for one data folder: a digest per session file, and the index's.
@@ -166,9 +173,12 @@ pub fn read(index: &Path) -> Result<(State, Written, bool), String> {
 pub fn migrate(index: &Path, state: &mut State, written: &mut Written) {
     let backup = backup_path(index);
     if !backup.exists() && std::fs::copy(index, &backup).is_err() {
-        eprintln!(
-            "runo: could not back up {} before splitting it; keeping the single file",
-            index.display()
+        crate::applog::warn(
+            "save",
+            format!(
+                "could not back up {} before splitting it; keeping the single file",
+                index.display()
+            ),
         );
         return;
     }

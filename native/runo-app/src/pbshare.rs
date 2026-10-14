@@ -183,7 +183,16 @@ impl RunoApp {
                                 .collect();
                             install.fetched = Some(fetched);
                         }
-                        Err(e) => install.error = Some(e),
+                        Err(e) => {
+                            crate::applog::warn(
+                                "playbook",
+                                format!(
+                                    "could not fetch shared playbooks: {}",
+                                    crate::applog::gist(&e)
+                                ),
+                            );
+                            install.error = Some(e)
+                        }
                     }
                 }
                 cx.notify();
@@ -388,7 +397,7 @@ impl RunoApp {
                                 std::time::Instant::now(),
                             ))
                         }
-                        Err(e) => this.notice = Some(format!("Couldn't export it: {e}")),
+                        Err(e) => this.fail("playbook", format!("Couldn't export it: {e}")),
                     }
                     cx.notify();
                 });
