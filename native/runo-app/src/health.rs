@@ -162,6 +162,10 @@ impl RunoApp {
     /// Local turns that were running when Runo last closed kept going. Follow them again:
     /// their output replays from the start and they end as usual.
     pub(crate) fn resume_local_turns(&mut self) {
+        // The sample workspace's running session is a picture; there is nothing to follow.
+        if self.demo {
+            return;
+        }
         let Some(root) = crate::detach::root() else {
             return;
         };
