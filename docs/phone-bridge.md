@@ -1,23 +1,52 @@
 # Phone bridge
 
-`runo --phone` is the API Runo's mobile app talks to. It runs from the Runo binary itself,
-without a window, and lets a phone follow every session and answer it.
+The phone bridge is the API Runo's mobile app talks to. It lets a phone follow every
+session and answer it. Turn it on in Runo under **Settings > Phone**, or run it without a
+window with `runo --phone`.
 
 ```
-phone ──HTTP──▶ runo --phone (on your computer) ──▶ ~/.runo state, approvals
+phone ──HTTP──▶ the bridge (on your computer) ──▶ ~/.runo state, approvals
                          │
                          └──▶ ~/.runo/phone-inbox ──▶ the Runo app runs it
 ```
 
-## Running it
+## Turning it on
+
+In **Settings > Phone**, switch on **Phone bridge**. It runs inside the app, on a background
+thread, while Runo is open, and stays on across launches. The page shows the address it
+listens on.
+
+Then press **Pair a new phone**. Runo makes a new key for that phone and shows its pairing
+link, `runo://pair?url=…&token=…`, as a QR code to scan with the Runo mobile app, with a
+**Copy** button. Each paired phone is listed with the date it was paired; **Show link**
+shows its link again and **Remove** unpairs it.
+
+## Where it listens
+
+The bridge speaks plain HTTP, so by default it never listens on a shared network:
+
+- If this computer has a [Tailscale](https://tailscale.com) address (in `100.64.0.0/10`),
+  the bridge listens only there. Only devices signed in to your tailnet can reach it, and
+  Tailscale encrypts the connection.
+- Otherwise it listens on `127.0.0.1`, which only this computer can reach. Start
+  Tailscale, then turn the bridge off and on again to pick up its address.
+
+To listen on every network instead, choose **Local network (unencrypted)** under
+**Reachable from**, or give `runo --phone` an address. Anyone on the same Wi-Fi can then
+read a phone's key as it is sent, so only do this on a network you trust.
+
+## Running it without a window
 
 ```sh
-runo --phone                     # listens on 0.0.0.0:7631
-runo --phone 100.x.y.z:7631      # or only on one address, such as your Tailscale one
+runo --phone                     # your Tailscale address, else 127.0.0.1, port 7631
+runo --phone 0.0.0.0             # every network, unencrypted
+runo --phone 192.168.1.20:9000   # one address and port
 ```
 
-From source, use `cargo run -p runo -- --phone`. It prints a QR code and a pairing link,
-`runo://pair?url=…&token=…`, that the phone app reads.
+From source, use `cargo run -p runo -- --phone`. It prints a QR code and the pairing link
+of the most recently paired phone, pairing one first if there are none. Pair more phones,
+each with its own link, in Settings > Phone. Settings and `runo --phone` share the same
+list of phones, and both use port 7631, so run one or the other.
 
 ## How it works
 
@@ -25,18 +54,27 @@ From source, use `cargo run -p runo -- --phone`. It prints a QR code and a pairi
   approvals folder, so the phone sees what the desktop app sees.
 - **Permission requests** are answered by the bridge directly, the same way the corner card
   answers them, so an agent waiting on one carries on as soon as you tap Allow.
-- **Follow-ups, Stop, plan approvals and answers** are left in `~/.runo/phone-inbox`. The
-  open Runo app picks them up within a couple of seconds and runs them as if they were
-  typed, so queues, limits and per-agent settings still apply. Keep Runo open for these.
+- **Follow-ups, Stop, plan approvals and answers** are left in `~/.runo/phone-inbox`,
+  whether the bridge runs in the app or from `runo --phone`. The open Runo app picks them
+  up within a couple of seconds and runs them as if they were typed, so queues, limits and
+  per-agent settings still apply. Keep Runo open for these.
 - Turns on SSH and Cove connections keep running with your laptop asleep; the phone sees
   them whenever the computer running the bridge is awake.
 
 ## Security
 
-Every request needs `Authorization: Bearer <token>`. The 256-bit token is made on first run
-and kept in `~/.runo/phone.json` (readable only by you). The bridge speaks plain HTTP: use it
-over your home Wi-Fi or a private network such as [Tailscale](https://tailscale.com), never
-open to the internet. To revoke a phone, delete `~/.runo/phone.json` and restart the bridge.
+Every request needs `Authorization: Bearer <token>`. Each paired phone has its own 256-bit
+token, kept with its name and pairing date in `~/.runo/phone.json` (readable only by you).
+A request is accepted when its token matches any paired phone's; tokens are compared in
+constant time. Removing a phone in Settings revokes only its token: its next request gets
+`401`, and the other phones carry on, with no restart needed.
+
+A `phone.json` from before per-phone tokens, with a single `token`, is read as one phone
+named "Phone", so a phone paired then stays paired.
+
+The bridge speaks plain HTTP. Keep it on Tailscale or this computer, which is the
+default; listen on a local network only if you trust everyone on it, and never open it to
+the internet.
 
 ## API
 
