@@ -51,6 +51,8 @@ libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
+# The pairing code `runo --phone` prints in the terminal.
+qrcode = { version = "0.14", default-features = false }
 
 [build-dependencies]
 embed-resource = "3.0.11"
