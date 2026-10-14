@@ -47,6 +47,13 @@ All notable changes to Runo are documented here.
 - A turn that fails because the agent is signed out, the model isn't available, or the CLI is too old for the model offers the fix under it: Sign in (runs the agent's login in the terminal panel and checks again), Retry with a model that works, Pick a model, Use the newer copy, Update or Install for Runo, and make the working model the default for the project or every session. Playbook runs get the same card.
 - The composer's model menu marks models that need a newer CLI or are being retired, and a session on a retiring model offers a one-click switch to its replacement.
 
+### Changed
+
+- Deleting a session asks in a popup first, from the session header or its menu, instead of swapping the header buttons.
+- Stop moved from the session header into the message box: the send button becomes Stop while the agent works.
+- "Working" and how long the turn has run now show at the bottom of the chat instead of in the header.
+- Split view is gone; it broke the session layout. Tabs remain for moving between sessions.
+
 ### Fixed
 
 - Agents: permission modes now match what each CLI can do. Plan is read-only everywhere it is offered, Grok runs in full access only, and Amp, Copilot and Cursor respect Edit vs Full.

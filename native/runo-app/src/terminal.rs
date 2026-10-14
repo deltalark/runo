@@ -190,7 +190,7 @@ impl RunoApp {
     /// Rows and columns that fit the terminal body.
     pub(crate) fn term_grid(&self) -> (u16, u16) {
         let height = self.term_height() - 32. - 16.;
-        let width = 460. - 24.;
+        let width = self.panel_width - 24.;
         let rows = (height / term_line()).floor().max(2.) as u16;
         let cols = (width / self.cell_w).floor().max(10.) as u16;
         (rows, cols)

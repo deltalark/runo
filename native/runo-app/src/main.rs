@@ -51,7 +51,6 @@ mod shell;
 mod shellenv;
 mod ship;
 mod signin;
-mod split;
 mod store;
 mod stream;
 mod terminal;
@@ -125,7 +124,6 @@ actions!(
         CloseTab,
         NextTab,
         PrevTab,
-        ToggleSplit,
         FocusComposer,
         ArchiveSession,
         ContextMenu,
@@ -275,10 +273,6 @@ struct RunoApp {
     tx: Sender<Event>,
     chat_scroll: ScrollHandle,
     /// Second session shown beside the selected one.
-    split: Option<u64>,
-    split_menu: bool,
-    split_input: Entity<InputState>,
-    split_scroll: ScrollHandle,
     stderr: HashMap<u64, Vec<String>>,
     /// Parsers for runs that print JSON rather than plain text.
     streams: HashMap<u64, stream::Parser>,
@@ -362,6 +356,9 @@ struct RunoApp {
     sidebar_width: f32,
     /// The sidebar's edge is being dragged.
     resizing_sidebar: bool,
+    /// Width of the right panel (Changes, Files, terminal), dragged from its left edge.
+    panel_width: f32,
+    resizing_panel: bool,
     /// The panel was hidden because the window got narrow, not by the person.
     panel_auto_hidden: bool,
     /// Home lists every project instead of the one in the top bar.
@@ -834,7 +831,7 @@ fn stagger<E: IntoElement + Styled + 'static>(
 }
 
 /// "Working" row: spinning loader, label and three dots that pulse in sequence.
-fn working_indicator() -> impl IntoElement {
+fn working_indicator(label: impl Into<SharedString>) -> impl IntoElement {
     let mut dots = div().flex().items_center().gap(px(3.));
     for i in 0..3usize {
         dots = dots.child(
@@ -863,7 +860,7 @@ fn working_indicator() -> impl IntoElement {
             Animation::new(Duration::from_millis(900)).repeat(),
             |i, d| i.rotate(percentage(d)),
         ))
-        .child("Working")
+        .child(label.into())
         .child(dots)
 }
 
@@ -1121,16 +1118,6 @@ impl RunoApp {
                 this.run_terminal(line, cx);
             }
         });
-        let split_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Reply to this session…"));
-        let split_sub = cx.subscribe_in(&split_input, window, |this, input, event, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                let text = input.read(cx).value().to_string();
-                input.update(cx, |input, cx| input.set_value("", window, cx));
-                this.send_split(text, cx);
-                cx.notify();
-            }
-        });
         let file_editor = Self::new_file_editor(window, cx);
         let file_sub = cx.subscribe_in(&file_editor, window, |this, _, event, _, cx| {
             if matches!(event, InputEvent::Change) {
@@ -1258,6 +1245,8 @@ impl RunoApp {
             ctx_index: None,
             sidebar_width: SIDEBAR_WIDTH,
             resizing_sidebar: false,
+            panel_width: PANEL_WIDTH,
+            resizing_panel: false,
             panel_auto_hidden: false,
             home_all: false,
             window_place: None,
@@ -1335,10 +1324,6 @@ impl RunoApp {
             handles: HashMap::new(),
             tx,
             chat_scroll: ScrollHandle::new(),
-            split: None,
-            split_menu: false,
-            split_input,
-            split_scroll: ScrollHandle::new(),
             stderr: HashMap::new(),
             streams: HashMap::new(),
             search,
@@ -1594,7 +1579,6 @@ impl RunoApp {
             branch_sub,
             task_sub,
             notes_sub,
-            split_sub,
             file_sub,
             address_sub,
             keys_sub,
@@ -1826,9 +1810,6 @@ impl RunoApp {
             return;
         };
         self.tabs.remove(pos);
-        if self.split == Some(id) {
-            self.split = None;
-        }
         self.save();
         if self.selected == Some(id) {
             match self.tabs.get(pos).or(self.tabs.last()).copied() {
@@ -1969,9 +1950,6 @@ impl RunoApp {
                 }
                 if self.selected == Some(id) && autoscroll() {
                     self.chat_scroll.scroll_to_bottom();
-                }
-                if self.split == Some(id) && autoscroll() {
-                    self.split_scroll.scroll_to_bottom();
                 }
             }
             Event::Err(Target::Session(id), line) => {
@@ -2160,9 +2138,6 @@ impl RunoApp {
                 self.playbook_turn_done(id, ok);
                 self.write_memory(id);
                 self.save();
-                if self.split == Some(id) {
-                    self.split_scroll.scroll_to_bottom();
-                }
                 if self.selected == Some(id) {
                     self.refresh();
                     if autoscroll() {
@@ -2401,7 +2376,7 @@ impl RunoApp {
         let mut groups: Vec<(CommandGroup, Vec<Jump>)> = Vec::new();
         let mut commands = CommandGroup::new().label("Commands");
         let mut command_jumps = Vec::new();
-        let actions: [(&str, IconName, Box<dyn Action>); 10] = [
+        let actions: [(&str, IconName, Box<dyn Action>); 9] = [
             ("New session", IconName::Plus, Box::new(NewSession)),
             ("Open settings", IconName::Settings, Box::new(OpenSettings)),
             (
@@ -2423,11 +2398,6 @@ impl RunoApp {
                 "Stop the running agent",
                 IconName::CircleStop,
                 Box::new(StopAgent),
-            ),
-            (
-                "Split view: open a session beside this one",
-                IconName::Columns2,
-                Box::new(ToggleSplit),
             ),
             ("Close tab", IconName::X, Box::new(CloseTab)),
             (
@@ -3428,9 +3398,6 @@ impl RunoApp {
         self.remove_session_files(&session, false);
         self.terminal.remove(&id);
         self.confirm_delete = None;
-        if self.split == Some(id) {
-            self.split = None;
-        }
         // Deleting another session from its menu keeps the open one open.
         if self.selected == Some(id) {
             self.selected = self
@@ -4585,18 +4552,14 @@ impl RunoApp {
                 .when(n > 0, |el| {
                     el.child(summary).when(open, |el| el.child(steps))
                 })
-                .when(!message.text.is_empty() || live, |el| {
+                .when(!message.text.is_empty(), |el| {
                     el.child(
                         div()
                             .w_full()
                             .whitespace_normal()
                             .text_size(px(13.5))
                             .text_color(rgb(c_text()))
-                            .child(if message.text.is_empty() {
-                                working_indicator().into_any_element()
-                            } else {
-                                markdown(message.text.clone()).into_any_element()
-                            }),
+                            .child(markdown(message.text.clone())),
                     )
                 })
                 .when(!message.plan.is_empty(), |el| {
@@ -4835,7 +4798,6 @@ impl RunoApp {
         let provider = agent::provider(&session.provider);
         let working = self.handles.contains_key(&Target::Session(session.id));
         let id = session.id;
-        let confirming = self.confirm_delete == Some(id);
         let isolated = session.isolated;
         let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
         let mut list = div()
@@ -4917,10 +4879,14 @@ impl RunoApp {
                     ),
             );
         }
-        let status = match self.started.get(&id).filter(|_| working) {
-            Some(start) => format!("Working · {}", elapsed(start.elapsed())),
-            None => Self::status_label(session.status).to_string(),
-        };
+        // While the agent works, the chat ends with what it is doing and for how long.
+        if working && !self.pending_start.contains_key(&id) {
+            let label = match self.started.get(&id) {
+                Some(start) => format!("Working · {}", elapsed(start.elapsed())),
+                None => "Working".to_string(),
+            };
+            list = list.child(div().text_size(px(13.)).child(working_indicator(label)));
+        }
         let header = div()
             .h(px(44.))
             .flex_none()
@@ -5045,78 +5011,30 @@ impl RunoApp {
             })
             .children(self.runs_on_badge(session, cx))
             .child(self.view_toggle(session, cx))
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .child(self.status_dot(session.status, "hdr-dot", 6.))
-                    .child(status),
-            )
-            .when(working, |el| {
+            .when(!working, |el| {
                 el.child(
-                    self.button("stop", "Stop", false)
-                        .h(px(26.))
-                        .text_color(rgb(c_red()))
-                        .child(icon(IconName::CircleStop, 13., c_red()))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.stop();
-                            cx.notify();
-                        })),
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .child(self.status_dot(session.status, "hdr-dot", 6.))
+                        .child(Self::status_label(session.status)),
                 )
             })
-            .when(confirming, |el| {
-                el.child(
-                    self.button("cancel-delete", "Cancel", false)
-                        .child(icon(IconName::X, 12., c_secondary()))
-                        .h(px(26.))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.confirm_delete = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.button(
-                        "delete",
-                        if isolated && !self.demo && remove_worktree() {
-                            "Delete session & worktree"
-                        } else {
-                            "Delete session"
-                        },
-                        false,
-                    )
-                    .h(px(26.))
-                    .border_color(rgb(c_red()))
-                    .text_color(rgb(c_red()))
+            .child(
+                self.ghost_button("delete", IconName::Trash, "Delete session")
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.delete_session(id);
+                        if confirm_delete() {
+                            this.confirm_delete = Some(id);
+                        } else {
+                            this.delete_session(id);
+                        }
                         cx.notify();
                     })),
-                )
-            })
-            .when(!confirming, |el| {
-                el.child(
-                    self.ghost_button("split", IconName::PanelRightOpen, "Split view")
-                        .when(self.split_session().is_some(), |el| {
-                            el.bg(tint(c_active())).text_color(rgb(c_text()))
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_split(cx))),
-                )
-                .child(
-                    self.ghost_button("delete", IconName::Trash, "Delete session")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if confirm_delete() {
-                                this.confirm_delete = Some(id);
-                            } else {
-                                this.delete_session(id);
-                            }
-                            cx.notify();
-                        })),
-                )
-            });
+            );
         // Chat and CLI are two views of one conversation; the swap crossfades.
         let cli = session.cli;
         let body = if cli {
@@ -5153,7 +5071,6 @@ impl RunoApp {
             .h_full()
             .flex()
             .child(main)
-            .children(self.split_pane(cx))
             .into_any_element()
     }
 
@@ -5638,45 +5555,68 @@ impl RunoApp {
                             .gap_3()
                             .child(div().flex_1().min_w_0().child(chips))
                             .children(attach)
-                            .child(
-                                div()
-                                    .id("send")
-                                    .size(px(28.))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .cursor_pointer()
-                                    .bg(rgb(if ready { c_text() } else { c_active() }))
-                                    .when(ready, |el| el.hover(|el| el.opacity(0.85)))
-                                    .tooltip(move |window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(if working {
-                                            "Queue: sent when the agent finishes"
-                                        } else {
-                                            "Send"
+                            // While the agent works the send button becomes Stop; a
+                            // typed message still goes out (queued) from its own button.
+                            .when(working, |el| {
+                                el.child(
+                                    div()
+                                        .id("composer-stop")
+                                        .size(px(28.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .cursor_pointer()
+                                        .bg(rgb(c_text()))
+                                        .hover(|el| el.opacity(0.85))
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                "Stop the agent",
+                                            )
+                                            .build(window, cx)
                                         })
-                                        .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.send_message(window, cx);
-                                        cx.notify();
-                                    }))
-                                    .child(if working && !ready {
-                                        icon(IconName::Loader, 14., c_secondary()).animated(
-                                            "spin",
-                                            Animation::new(Duration::from_millis(900)).repeat(),
-                                            |i, d| i.rotate(percentage(d)),
-                                        )
-                                    } else {
-                                        icon(
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.stop();
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div().size(px(10.)).rounded(px(2.)).bg(rgb(c_canvas())),
+                                        ),
+                                )
+                            })
+                            .when(!working || ready, |el| {
+                                el.child(
+                                    div()
+                                        .id("send")
+                                        .size(px(28.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .cursor_pointer()
+                                        .bg(rgb(if ready { c_text() } else { c_active() }))
+                                        .when(ready, |el| el.hover(|el| el.opacity(0.85)))
+                                        .tooltip(move |window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(if working {
+                                                "Queue: sent when the agent finishes"
+                                            } else {
+                                                "Send"
+                                            })
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.send_message(window, cx);
+                                            cx.notify();
+                                        }))
+                                        .child(icon(
                                             IconName::ArrowUp,
                                             15.,
                                             if ready { c_canvas() } else { c_muted() },
-                                        )
-                                        .into_any_element()
-                                    }),
-                            ),
+                                        )),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -5877,6 +5817,133 @@ impl RunoApp {
             self.view = self.new_back;
         }
         self.new_context = None;
+    }
+
+    /// "Delete this session?" over the current view, on a dimmed backdrop.
+    fn delete_session_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = self.confirm_delete?;
+        let session = self.state.session(id)?;
+        let running = self.handles.contains_key(&Target::Session(id));
+        let worktree = session.isolated && !self.demo && remove_worktree();
+        let backdrop = if is_dark() {
+            hsla(0., 0., 0., 0.55)
+        } else {
+            hsla(0., 0., 0., 0.3)
+        };
+        let mut what = vec!["Its conversation is removed from Runo."];
+        if running {
+            what.push("The running agent stops.");
+        }
+        what.push(if worktree {
+            "Its worktree is deleted, with any uncommitted work in it."
+        } else {
+            "Files in the project folder stay as they are."
+        });
+        let card = div()
+            .id("delete-session-card")
+            .w(px(440.))
+            .max_w(relative(0.94))
+            .p_6()
+            .v_flex()
+            .gap_4()
+            .rounded_2xl()
+            .border_1()
+            .border_color(float_edge())
+            .bg(float(c_canvas()))
+            .shadow_2xl()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(36.))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .bg(rgb(settings::mix(c_red(), c_canvas(), 0.12)))
+                            .child(icon(IconName::Trash, 18., c_red())),
+                    )
+                    .child(
+                        div()
+                            .v_flex()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Delete this session?"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .truncate()
+                                    .text_color(rgb(c_muted()))
+                                    .child(session.title.clone()),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(c_secondary()))
+                    .child(what.join(" ")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        self.button("delete-cancel", "Cancel", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_delete = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.button(
+                            "delete-go",
+                            if worktree {
+                                "Delete session & worktree"
+                            } else {
+                                "Delete session"
+                            },
+                            false,
+                        )
+                        .border_color(rgb(c_red()))
+                        .text_color(rgb(c_red()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.delete_session(id);
+                            cx.notify();
+                        })),
+                    ),
+            );
+        Some(
+            fade(
+                div()
+                    .id("delete-session-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(backdrop)
+                    .occlude()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.confirm_delete = None;
+                        cx.notify();
+                    }))
+                    .child(rise(card, "delete-session-rise", 300)),
+                "delete-session-fade",
+                200,
+            )
+            .into_any_element(),
+        )
     }
 
     /// New session as a dialog over the current view, on a dimmed backdrop.
@@ -7753,11 +7820,32 @@ impl RunoApp {
 
     fn right_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .w(px(460.))
+            .w(px(self.panel_width))
             .flex_none()
             .h_full()
             .relative()
             .child(tour::anchor(&self.anchors, "right-pane"))
+            .child(
+                // Drag the edge to make the panel narrower or wider.
+                div()
+                    .id("panel-edge")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(5.))
+                    .cursor_col_resize()
+                    .when(self.resizing_panel, |el| el.bg(rgb(c_blue())))
+                    .hover(|el| el.bg(tint(c_active())))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.resizing_panel = true;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            )
             .v_flex()
             .border_l_1()
             .border_color(divider())
@@ -8066,9 +8154,14 @@ impl Render for RunoApp {
             || self.sidebar(cx).into_any_element(),
         )
         .map(|el| page_fade(el, "sidebar-page"));
-        let right = panel_slide("right-slide", right_motion, show_right, 460., false, || {
-            self.right_pane(window, cx).into_any_element()
-        })
+        let right = panel_slide(
+            "right-slide",
+            right_motion,
+            show_right,
+            self.panel_width,
+            false,
+            || self.right_pane(window, cx).into_any_element(),
+        )
         .map(|el| page_fade(el, "right-page"));
         if self
             .info
@@ -8252,14 +8345,6 @@ impl Render for RunoApp {
                 this.step_tab(-1);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleSplit, _, cx| {
-                if this.current().is_some() {
-                    this.view = View::Session;
-                    this.toggle_split(cx);
-                    this.save();
-                }
-                cx.notify();
-            }))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 this.focus_composer(window, cx);
                 cx.notify();
@@ -8280,7 +8365,17 @@ impl Render for RunoApp {
                     cx.notify();
                 }
             }))
-            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+                if this.resizing_panel {
+                    if e.pressed_button == Some(MouseButton::Left) {
+                        let x = f32::from(window.viewport_size().width) - f32::from(e.position.x);
+                        this.panel_width = x.clamp(PANEL_MIN, PANEL_MAX);
+                    } else {
+                        this.resizing_panel = false;
+                        this.save();
+                    }
+                    cx.notify();
+                }
                 if this.resizing_sidebar {
                     if e.pressed_button == Some(MouseButton::Left) {
                         let x = f32::from(e.position.x) - shell::RAIL_WIDTH;
@@ -8295,8 +8390,9 @@ impl Render for RunoApp {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.resizing_sidebar {
+                    if this.resizing_sidebar || this.resizing_panel {
                         this.resizing_sidebar = false;
+                        this.resizing_panel = false;
                         this.save();
                         cx.notify();
                     }
@@ -8512,6 +8608,7 @@ impl Render for RunoApp {
             .children(self.remove_copy_modal(cx))
             .children(self.project_modal(cx))
             .children(self.remove_project_modal(cx))
+            .children(self.delete_session_modal(cx))
             .children(self.playbook_run_form(cx))
             .children(self.playbook_ask_modal(cx))
             .children(self.tour_view(window, cx))
@@ -8641,6 +8738,9 @@ const SIDEBAR_WIDTH: f32 = 264.;
 /// How narrow and wide the sidebar can be dragged.
 const SIDEBAR_MIN: f32 = 200.;
 const SIDEBAR_MAX: f32 = 400.;
+const PANEL_WIDTH: f32 = 460.;
+const PANEL_MIN: f32 = 320.;
+const PANEL_MAX: f32 = 900.;
 
 fn main() {
     // `runo --mcp-memory <folder>`: serve the memory tools to an agent, without a window.
@@ -8766,7 +8866,6 @@ fn app_menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Toggle sidebar", ToggleSidebar),
             MenuItem::action("Toggle Changes panel", TogglePanel),
-            MenuItem::action("Split view", ToggleSplit),
             MenuItem::action("Chat or CLI", ToggleView),
         ]),
         Menu::new("Session").items([

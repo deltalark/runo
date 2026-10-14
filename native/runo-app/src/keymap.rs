@@ -12,7 +12,7 @@ pub(crate) struct Shortcut {
     pub default: &'static [&'static str],
 }
 
-pub(crate) const SHORTCUTS: [Shortcut; 25] = [
+pub(crate) const SHORTCUTS: [Shortcut; 24] = [
     Shortcut {
         id: "quick-open",
         title: "Quick open",
@@ -140,12 +140,6 @@ pub(crate) const SHORTCUTS: [Shortcut; 25] = [
         default: &["ctrl-shift-tab", "secondary-alt-left"],
     },
     Shortcut {
-        id: "split",
-        title: "Split view",
-        desc: "Open another session beside this one, or close the split.",
-        default: &["secondary-shift-d"],
-    },
-    Shortcut {
         id: "focus-composer",
         title: "Focus the message box",
         desc: "Put the cursor in the message box of the open session.",
@@ -207,7 +201,6 @@ fn binding_in(id: &str, keys: &str, context: &str) -> Option<KeyBinding> {
         "close-tab" => KeyBinding::new(keys, CloseTab, context),
         "next-tab" => KeyBinding::new(keys, NextTab, context),
         "prev-tab" => KeyBinding::new(keys, PrevTab, context),
-        "split" => KeyBinding::new(keys, ToggleSplit, context),
         "focus-composer" => KeyBinding::new(keys, FocusComposer, context),
         "archive" => KeyBinding::new(keys, ArchiveSession, context),
         "context-menu" => KeyBinding::new(keys, ContextMenu, context),

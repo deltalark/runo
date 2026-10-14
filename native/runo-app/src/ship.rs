@@ -1212,9 +1212,6 @@ impl RunoApp {
             self.tabs.retain(|t| *t != id);
             self.stats.remove(&id);
             self.terminal.remove(&id);
-            if self.split == Some(id) {
-                self.split = None;
-            }
         }
         self.prune_shells();
         if let Some(s) = self.state.session_mut(keep) {
