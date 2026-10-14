@@ -227,16 +227,19 @@ impl RunoApp {
         });
     }
 
-    /// Whether something looks served for this session: a dev server listening where it
-    /// runs, a browser page already open, or a local URL printed in its terminals.
+    /// Whether something looks served for this session: a dev server on a usual port
+    /// where it runs, a browser page already open, or a local URL printed in its terminals.
     pub(crate) fn app_serving(&self, session: &Session) -> bool {
         if self.browser_open || !self.browser_view.pages.is_empty() {
             return true;
         }
+        // Only the usual dev server ports count: plenty of other apps listen on this
+        // machine, and on macOS AirPlay holds 5000.
+        let dev = |p: &u16| DEV_PORTS.contains(p) && !(cfg!(target_os = "macos") && *p == 5000);
         let listening = if session.sandbox().is_some() {
-            matches!(self.remote_ports.get(&session.id), Some(Ok(ports)) if !ports.is_empty())
+            matches!(self.remote_ports.get(&session.id), Some(Ok(ports)) if ports.iter().any(dev))
         } else {
-            !self.browser_ports.is_empty()
+            self.browser_ports.iter().any(dev)
         };
         if listening {
             return true;

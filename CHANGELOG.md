@@ -54,7 +54,7 @@ All notable changes to Runo are documented here.
 - "Working" and how long the turn has run now show at the bottom of the chat instead of in the header.
 - Split view is gone; it broke the session layout. Tabs remain for moving between sessions.
 - The right panel (Changes, Files, terminal) resizes by dragging its left edge, and keeps its width after a restart.
-- The Browser button in the session header only shows once something is served for the session: a dev server listening, or a local URL printed in its terminal.
+- The Browser button in the session header only shows once something is served for the session: a dev server on a usual port (3000, 5173, 8080 and the like), or a local URL printed in its terminal.
 
 ### Fixed
 
