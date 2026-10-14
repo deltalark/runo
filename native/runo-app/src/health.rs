@@ -198,6 +198,13 @@ impl RunoApp {
                     picked += 1;
                 }
                 Err(e) => {
+                    crate::applog::warn(
+                        "turn",
+                        format!(
+                            "session #{id} ({}): couldn't pick up the turn left running: {e}",
+                            session.provider
+                        ),
+                    );
                     session.status = Status::Failed;
                     session.messages.push(Message::new(
                         Role::System,

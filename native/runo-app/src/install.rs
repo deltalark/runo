@@ -300,10 +300,10 @@ impl RunoApp {
     /// Ask before installing: the confirm card shows the exact command.
     pub(crate) fn ask_install(&mut self, provider: &'static str) {
         if self.update_runs.get(provider).is_some_and(|r| r.running()) {
-            self.notice = Some(format!(
-                "{} is already installing.",
-                agent::provider(provider).name
-            ));
+            self.fail(
+                "install",
+                format!("{} is already installing.", agent::provider(provider).name),
+            );
             return;
         }
         self.install_confirm = Some(provider);
@@ -314,7 +314,7 @@ impl RunoApp {
         let plan = match install_plan(provider, agent::installed("npm"), cfg!(windows)) {
             Ok(plan) => plan,
             Err(why) => {
-                self.notice = Some(why);
+                self.fail("install", why);
                 cx.notify();
                 return;
             }
@@ -323,6 +323,7 @@ impl RunoApp {
         cmd.args(&plan.program[1..]);
         let mut run = alerts::UpdateRun::new(true, format!("Running {}…", plan.shown));
         run.command = plan.shown.clone();
+        crate::applog::info("install", format!("{provider}: running `{}`", plan.shown));
         self.update_runs.insert(provider, run);
         alerts::run_streaming(format!("install:{provider}"), cmd, self.tx.clone());
         cx.notify();
@@ -336,7 +337,18 @@ impl RunoApp {
         if let Err(error) = result {
             // The install card stays and says what went wrong, with the log and a retry.
             if let Some(run) = self.update_runs.get_mut(p.id) {
-                run.failed = Some(alerts::run_failure(&error, &run.command));
+                let failure = alerts::run_failure(&error, &run.command);
+                crate::applog::warn(
+                    "install",
+                    format!(
+                        "installing {} with `{}` failed: {} ({})",
+                        p.name,
+                        run.command,
+                        failure.why,
+                        crate::applog::gist(&error)
+                    ),
+                );
+                run.failed = Some(failure);
             }
             return;
         }
@@ -352,6 +364,17 @@ impl RunoApp {
         }
         caps::refresh();
         let installed = found.is_some() || agent::installed(p.bin);
+        if installed {
+            crate::applog::info("install", format!("installed {}", p.name));
+        } else {
+            crate::applog::warn(
+                "install",
+                format!(
+                    "the {} installer finished, but `{}` wasn't found",
+                    p.name, p.bin
+                ),
+            );
+        }
         if let Some(run) = self.update_runs.get_mut(p.id) {
             if installed {
                 run.finished = Some(std::time::Instant::now());

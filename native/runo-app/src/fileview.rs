@@ -376,7 +376,8 @@ impl RunoApp {
                 self.refresh();
             }
             Err(e) => {
-                self.notice = Some(format!("Could not save {}: {e}", file.path));
+                let why = format!("Could not save {}: {e}", file.path);
+                self.fail("files", why);
             }
         }
         cx.notify();

@@ -400,6 +400,8 @@ struct RunoApp {
     commit_msg: Entity<InputState>,
     sync: git::Sync,
     notice: Option<String>,
+    /// The last notice written to the log, so each is written once.
+    logged_notice: Option<String>,
     /// A short confirmation (not an error) shown in the status bar.
     info: Option<(String, std::time::Instant)>,
     mono_font: SharedString,
@@ -1404,6 +1406,7 @@ impl RunoApp {
             commit_msg: commit_msg.clone(),
             sync: git::Sync::default(),
             notice: None,
+            logged_notice: None,
             info: None,
             mono_font: cx.theme().mono_font_family.clone(),
             show_panel: true,
@@ -1735,6 +1738,106 @@ impl RunoApp {
         }
     }
 
+    /// Show an error in the status bar and write it to the log, tagged with `area` and
+    /// what was on screen.
+    pub(crate) fn fail(&mut self, area: &str, text: String) {
+        applog::warn(area, format!("{text} ({})", self.log_context()));
+        self.logged_notice = Some(text.clone());
+        self.notice = Some(text);
+    }
+
+    /// Which session and project were on screen, for a log line. Never the chat itself.
+    pub(crate) fn log_context(&self) -> String {
+        let project = self
+            .current_project()
+            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
+            .map(|p| format!("project {:?}", p.name));
+        let session = self.current().map(|s| self.session_label(s.id));
+        match (session, project) {
+            (Some(s), Some(p)) => format!("{s}, {p}"),
+            (Some(s), None) => s,
+            (None, Some(p)) => p,
+            (None, None) => "no session open".into(),
+        }
+    }
+
+    /// `session #7 (claude, on a connection)`, for a log line.
+    pub(crate) fn session_label(&self, id: u64) -> String {
+        match self.state.session(id) {
+            Some(s) => format!(
+                "session #{id} ({}{})",
+                s.provider,
+                if s.elsewhere() {
+                    ", on a connection"
+                } else {
+                    ""
+                }
+            ),
+            None => format!("session #{id}"),
+        }
+    }
+
+    /// One log line for a turn that ended: how, after how long, and on failure the line
+    /// of the agent's error output that says why.
+    fn log_turn_end(
+        &self,
+        id: u64,
+        ok: bool,
+        stopped: bool,
+        signed_out: bool,
+        took: Option<Duration>,
+        stderr: &[String],
+    ) {
+        let outcome = if ok {
+            "finished"
+        } else if stopped {
+            "stopped"
+        } else {
+            "failed"
+        };
+        let mut line = format!("{}: turn {outcome}", self.session_label(id));
+        if let Some(took) = took {
+            line.push_str(&format!(" after {:.1}s", took.as_secs_f64()));
+        }
+        if ok || stopped {
+            applog::info("turn", line);
+            return;
+        }
+        if signed_out {
+            line.push_str(", the agent isn't signed in");
+        }
+        // The agent's error output, else the error Runo showed for it.
+        let mut why = applog::gist(&stderr.join("\n"));
+        if why.is_empty() {
+            why = self
+                .state
+                .session(id)
+                .and_then(|s| {
+                    s.messages
+                        .iter()
+                        .rev()
+                        .take_while(|m| m.role != Role::User)
+                        .find(|m| m.role == Role::System)
+                })
+                .map(|m| applog::gist(&m.text.replace("```text", "").replace("```", "")))
+                .unwrap_or_default();
+        }
+        if !why.is_empty() {
+            line.push_str(&format!(": {why}"));
+        }
+        applog::warn("turn", line);
+    }
+
+    /// Notices set without `fail` are written to the log once they are shown.
+    fn log_notice(&mut self) {
+        if self.notice != self.logged_notice {
+            if let Some(text) = &self.notice {
+                applog::warn("notice", format!("{text} ({})", self.log_context()));
+            }
+            self.logged_notice = self.notice.clone();
+        }
+    }
+
     fn current(&self) -> Option<&Session> {
         self.selected.and_then(|id| self.state.session(id))
     }
@@ -1934,6 +2037,14 @@ impl RunoApp {
                                 }
                             }
                             stream::Update::Error(error) => {
+                                applog::warn(
+                                    "agent",
+                                    format!(
+                                        "session #{id} ({}): the agent reported an error: {}",
+                                        session.provider,
+                                        applog::gist(&error)
+                                    ),
+                                );
                                 self.stream_failed.insert(id);
                                 session.messages.push(Message::new(Role::System, error))
                             }
@@ -1947,6 +2058,14 @@ impl RunoApp {
                                     .iter()
                                     .any(|m| m.meta == "warning" && m.text == text);
                                 if !seen {
+                                    applog::warn(
+                                        "agent",
+                                        format!(
+                                            "session #{id} ({}): {}",
+                                            session.provider,
+                                            applog::gist(&text)
+                                        ),
+                                    );
                                     // Ahead of the reply, which carries on below it.
                                     let mut warning = Message::new(Role::System, text);
                                     warning.meta = "warning".into();
@@ -1996,6 +2115,7 @@ impl RunoApp {
                 // Taken here so a stopped run that still exits cleanly doesn't leave the
                 // flag behind for the next real failure.
                 let stopped = self.stopping.remove(&id);
+                let took = self.started.get(&id).map(|start| start.elapsed());
                 self.handles.remove(&Target::Session(id));
                 self.streams.remove(&id);
                 self.end_approvals(id);
@@ -2156,6 +2276,7 @@ impl RunoApp {
                     .state
                     .session(id)
                     .is_some_and(|s| s.status == Status::Done);
+                self.log_turn_end(id, ok, stopped, hold, took, &all);
                 self.finish_turn(id, ok, stopped, hold, cx);
                 self.playbook_turn_done(id, ok);
                 self.write_memory(id);
@@ -2282,7 +2403,7 @@ impl RunoApp {
             return true;
         }
         self.close_armed = Some(std::time::Instant::now());
-        self.notice = Some(format!(
+        self.fail("session", format!(
             "{running} agent{} still running. Quitting Runo stops {}. Close or quit again to quit anyway.",
             if running == 1 { " is" } else { "s are" },
             if running == 1 { "it" } else { "them" }
@@ -2742,7 +2863,7 @@ impl RunoApp {
                 }
                 self.refresh();
             }
-            Err(error) => self.notice = Some(format!("Could not discard {path}: {error}")),
+            Err(error) => self.fail("session", format!("Could not discard {path}: {error}")),
         }
     }
 
@@ -2767,7 +2888,10 @@ impl RunoApp {
         }
         let (dir, sandbox) = (session.dir.clone(), session.sandbox());
         if self.handles.contains_key(&Target::Terminal(id)) {
-            self.notice = Some("A command is already running in this terminal.".into());
+            self.fail(
+                "session",
+                "A command is already running in this terminal.".into(),
+            );
             return;
         }
         self.terminal
@@ -2847,11 +2971,11 @@ impl RunoApp {
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
             .cloned()
         else {
-            self.notice = Some("Add a project first.".into());
+            self.fail("session", "Add a project first.".into());
             return;
         };
         if task.is_empty() {
-            self.notice = Some("Describe the task first.".into());
+            self.fail("session", "Describe the task first.".into());
             return;
         }
         let typed = git::sanitize_branch(&self.branch.read(cx).value());
@@ -2902,7 +3026,7 @@ impl RunoApp {
                     created.push(id)
                 }
                 Err(error) => {
-                    self.notice = Some(error);
+                    self.fail("session", error);
                     break;
                 }
             }
@@ -3080,6 +3204,19 @@ impl RunoApp {
                 ));
             }
         }
+        applog::info(
+            "session",
+            format!(
+                "{} created in project {:?}{}",
+                self.session_label(id),
+                project.name,
+                if isolated {
+                    ", in its own worktree"
+                } else {
+                    ""
+                }
+            ),
+        );
         if isolated && is_git && !self.demo {
             self.make_worktree(id, project.path.clone(), branch, pr);
         }
@@ -3188,7 +3325,7 @@ impl RunoApp {
     /// Open a past CLI conversation as a Runo session; the next message resumes it.
     fn resume_past(&mut self, past: history::Past, cx: &mut Context<Self>) {
         if !std::path::Path::new(&past.cwd).is_dir() {
-            self.notice = Some(format!("{} no longer exists.", past.cwd));
+            self.fail("session", format!("{} no longer exists.", past.cwd));
             return;
         }
         if let Some(existing) = self
@@ -8077,6 +8214,7 @@ impl Render for RunoApp {
         {
             self.info = None;
         }
+        self.log_notice();
         let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
             (notice.clone(), c_red(), Some(IconName::CircleAlert))
         } else if let Some((info, _)) = &self.info {

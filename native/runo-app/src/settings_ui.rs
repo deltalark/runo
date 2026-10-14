@@ -956,7 +956,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                             ("Edit".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| this.open_mcp_form(Some(draft.clone()))) as Action),
                             ("Remove".into(), Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
                                 if let Err(e) = crate::mcp::remove_own(&path, &name) {
-                                    this.notice = Some(format!("Couldn't remove {name}: {e}"));
+                                    this.fail("mcp", format!("Couldn't remove {name}: {e}"));
                                 }
                                 this.open_settings();
                             }) as Action),
@@ -1032,8 +1032,8 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     Ctl::Buttons(vec![("New skill…".into(), Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
                         match settings::skills_home().map(|dir| settings::new_skill(&dir)) {
                             Some(Ok(file)) => this.edit_path(&file),
-                            Some(Err(e)) => this.notice = Some(format!("Couldn't create a skill: {e}")),
-                            None => this.notice = Some("Couldn't find your home folder.".into()),
+                            Some(Err(e)) => this.fail("settings", format!("Couldn't create a skill: {e}")),
+                            None => this.fail("settings", "Couldn't find your home folder.".into()),
                         }
                     }) as Action)]),
                 )],
@@ -1526,6 +1526,13 @@ impl RunoApp {
                 self.open_settings();
             }
             Err(error) => {
+                // The bad line may hold a secret value, so it isn't repeated.
+                let shown = if error.contains("KEY=value") {
+                    "an environment line isn't KEY=value"
+                } else {
+                    error.as_str()
+                };
+                crate::applog::warn("mcp", format!("could not save the MCP server: {shown}"));
                 form.draft = draft;
                 form.error = Some(error);
             }

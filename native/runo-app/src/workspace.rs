@@ -512,7 +512,7 @@ impl RunoApp {
                         || (!s.limits.is_empty() && !s.limits.iter().any(|p| p == "edit"))
                 });
             if planning && (auto.may("edit") || auto.may("shell")) {
-                self.notice = Some(format!(
+                self.fail("playbook", format!(
                     "{} is only planning, so it can't start “{}”, which may edit files or run commands.",
                     request.from, auto.name
                 ));
@@ -720,10 +720,10 @@ impl RunoApp {
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
             .cloned()
         else {
-            self.notice = Some(format!(
-                "Playbook “{}”: add a project to run it in.",
-                auto.name
-            ));
+            self.fail(
+                "playbook",
+                format!("Playbook “{}”: add a project to run it in.", auto.name),
+            );
             record(
                 self,
                 store::PlaybookRun {
@@ -801,7 +801,10 @@ impl RunoApp {
                 }
             }
             Err(error) => {
-                self.notice = Some(format!("Playbook “{}” could not start: {error}", auto.name));
+                self.fail(
+                    "playbook",
+                    format!("Playbook “{}” could not start: {error}", auto.name),
+                );
                 record(
                     self,
                     store::PlaybookRun {

@@ -111,7 +111,7 @@ impl RunoApp {
         }
         if cli {
             if let Some(reason) = cli_blocker(session) {
-                self.notice = Some(reason);
+                self.fail("cli", reason);
                 return;
             }
             if self.handles.contains_key(&Target::Session(id)) {
@@ -181,7 +181,7 @@ impl RunoApp {
             if let Some(s) = self.state.session_mut(id) {
                 s.cli = false;
             }
-            self.notice = Some(format!(
+            self.fail("cli", format!(
                 "{}'s saved conversation for this session wasn't found, so the CLI can't reopen it. Staying in Chat.",
                 agent::provider(&provider).name
             ));
@@ -256,7 +256,7 @@ impl RunoApp {
                     if let Some(s) = self.state.session_mut(id) {
                         s.cli = false;
                     }
-                    self.notice = Some(format!("Could not start the CLI: {e}"));
+                    self.fail("cli", format!("Could not start the CLI: {e}"));
                     return;
                 }
             }
@@ -296,7 +296,7 @@ impl RunoApp {
                 if let Some(s) = self.state.session_mut(id) {
                     s.cli = false;
                 }
-                self.notice = Some(format!("Could not start the CLI: {e}"));
+                self.fail("cli", format!("Could not start the CLI: {e}"));
             }
         }
     }
