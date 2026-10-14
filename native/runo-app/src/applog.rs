@@ -579,7 +579,7 @@ pub fn check_release() -> Option<Release> {
         None if serde_json::from_str::<serde_json::Value>(&body)
             .is_ok_and(|v| v["message"] == "Not Found") =>
         {
-            info("app-update", "checked: no release published yet".to_string())
+            info("app-update", "checked: no release published yet")
         }
         None => warn(
             "app-update",
