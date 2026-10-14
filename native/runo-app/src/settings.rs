@@ -90,6 +90,8 @@ pub struct AppSettings {
     pub glass_cards: bool,
     /// Interface font: "bundled" (Runo's own, tuned for sharp small text) or "system".
     pub font: String,
+    /// The status bar's Usage popover shows every limit window, not just the closest one.
+    pub usage_detailed: bool,
     /// macOS font smoothing, which thickens text strokes. Off keeps text crisp and light.
     pub font_smoothing: bool,
     /// Pass Runo's memory MCP server to agents that accept one per run.
@@ -169,6 +171,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             agents: HashMap::new(),
+            usage_detailed: false,
             theme: "dark".into(),
             accent: "indigo".into(),
             diff_colors: "default".into(),
