@@ -6,7 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
-- `runo --phone`: a token-protected API for a phone app (coming next) to see every session and what it needs, allow or deny permission requests, approve plans, answer questions, send follow-ups and stop runs.
+- Phone bridge: a token-protected API for a phone app (coming next) to see every session and what it needs, allow or deny permission requests, approve plans, answer questions, send follow-ups and stop runs. Turn it on in Settings → Phone or run `runo --phone`. Each paired phone has its own key and can be removed on its own. It listens on your Tailscale address, or only on this computer, unless you choose your local network.
 - Connections: run sessions on this machine, in a Cove VM (local or on a server) or on any SSH server, and move a session between them from its header. Files, uncommitted changes and the agent's conversation are synced over the connection before and after every turn, and terminals open there.
 - Turns on a Cove server or SSH server keep running when your computer sleeps, shuts down, loses the network or closes Runo. Runo follows the agent's output there, reconnects after drops, and picks the turn back up on its next start: the reply replays and the work and conversation come back.
 - Settings → Connections with Test, VM size, network and idle stop for Cove, forwarded keys, optional GitHub access, and a list of this machine's Cove VMs.
