@@ -53,6 +53,13 @@ serde_json.workspace = true
 toml = "0.8"
 # The pairing code `runo --phone` prints in the terminal.
 qrcode = { version = "0.14", default-features = false }
+# Sealing phone messages that go through a relay.
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+getrandom = "0.2"
+
+[dev-dependencies]
+runo-relay = { path = "../runo-relay" }
 
 [build-dependencies]
 embed-resource = "3.0.11"

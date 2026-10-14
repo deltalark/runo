@@ -1,0 +1,13 @@
+[package]
+name = "runo-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Passes Runo's encrypted phone messages between a phone and a computer"
+
+[[bin]]
+name = "runo-relay"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"

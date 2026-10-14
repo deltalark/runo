@@ -15,6 +15,7 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -139,23 +140,15 @@ pub fn token(base: &Path) -> String {
     token
 }
 
-/// 256 random bits as hex. Each `RandomState` is keyed from the OS's random source, so
-/// hashing with fresh ones gives unpredictable words without another dependency.
+/// 256 random bits from the OS, as hex.
 fn new_token() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    (0..4)
-        .map(|i| {
-            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-            h.write_u64(i);
-            h.write_u128(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
-            );
-            format!("{:016x}", h.finish())
-        })
-        .collect()
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).expect("the OS has no random source");
+    hex(&bytes)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Compare without stopping at the first difference, so timing says nothing about the token.
@@ -167,13 +160,19 @@ fn same(a: &str, b: &str) -> bool {
             == 0
 }
 
-/// `runo --phone [address]`: serve the bridge until stopped.
-pub fn serve(address: Option<&str>) -> i32 {
+/// `runo --phone [address] [--relay URL]`: serve the bridge until stopped.
+pub fn serve(args: &[String]) -> i32 {
+    let mut address = format!("0.0.0.0:{PORT}");
+    let mut relay = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--relay" => relay = rest.next().map(|u| u.trim_end_matches('/').to_string()),
+            _ => address = arg.clone(),
+        }
+    }
     let base = store::data_dir();
     let token = token(&base);
-    let address = address
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("0.0.0.0:{PORT}"));
     let listener = match TcpListener::bind(&address) {
         Ok(l) => l,
         Err(e) => {
@@ -189,8 +188,11 @@ pub fn serve(address: Option<&str>) -> i32 {
     };
     let url = format!("http://{host}:{port}");
     println!("Runo phone bridge on {address}");
+    if let Some(relay) = &relay {
+        println!("Away from home the phone goes through the relay at {relay}.");
+    }
     println!();
-    let link = pair_link(&url, &token);
+    let link = pair_link(&url, &token, relay.as_deref());
     println!("Scan this with the Runo mobile app, or copy the link below to your phone:");
     println!();
     use std::io::IsTerminal;
@@ -199,9 +201,15 @@ pub fn serve(address: Option<&str>) -> i32 {
     }
     println!("  {link}");
     println!();
-    println!("Away from home, use a private network such as Tailscale and pair with this");
-    println!("computer's Tailscale address instead of {host}. Keep Runo open: prompts and");
-    println!("Stop are carried out by the app.");
+    if relay.is_none() {
+        println!("This works on the same network. To reach this computer from anywhere, run");
+        println!("runo-relay on a server and add --relay https://<that server>.");
+    }
+    println!("Keep Runo open: prompts and Stop are carried out by the app.");
+    if let Some(relay) = relay {
+        let (base, token) = (base.clone(), token.clone());
+        std::thread::spawn(move || relay_loop(&relay, &base, &token));
+    }
     accept(listener, &base, &token);
     0
 }
@@ -214,9 +222,14 @@ fn accept(listener: TcpListener, base: &Path, token: &str) {
     }
 }
 
-/// The link the mobile app pairs with.
-pub fn pair_link(url: &str, token: &str) -> String {
-    format!("runo://pair?url={}&token={token}", encode(url))
+/// The link the mobile app pairs with: this computer's address, the token, and the relay
+/// to fall back on away from home.
+pub fn pair_link(url: &str, token: &str, relay: Option<&str>) -> String {
+    let mut link = format!("runo://pair?url={}&token={token}", encode(url));
+    if let Some(relay) = relay {
+        link.push_str(&format!("&relay={}", encode(relay)));
+    }
+    link
 }
 
 /// The link as a QR code drawn with half-block characters, two rows per line, in black on
@@ -323,13 +336,7 @@ fn write_reply(
     (status, body): Reply,
     if_none_match: &str,
 ) -> std::io::Result<()> {
-    let text = body.to_string();
-    let tag = format!("\"{:016x}\"", fnv(text.as_bytes()));
-    let (status, text) = if status == 200 && if_none_match == tag {
-        (304, String::new())
-    } else {
-        (status, text)
-    };
+    let (status, text, tag) = finish(status, &body, if_none_match);
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
@@ -346,6 +353,17 @@ fn write_reply(
         text.len()
     )?;
     stream.flush()
+}
+
+/// The body as sent, its ETag, and 304 with no body when the phone already has it.
+fn finish(status: u16, body: &Value, if_none_match: &str) -> (u16, String, String) {
+    let text = body.to_string();
+    let tag = format!("\"{:016x}\"", fnv(text.as_bytes()));
+    if status == 200 && if_none_match == tag {
+        (304, String::new(), tag)
+    } else {
+        (status, text, tag)
+    }
 }
 
 fn fnv(data: &[u8]) -> u64 {
@@ -596,6 +614,220 @@ fn session(base: &Path, id: u64) -> Option<Value> {
             "asked": r.asked,
         })).collect::<Vec<_>>(),
     }))
+}
+
+// ---------- the relay ----------
+//
+// Away from home the phone reaches this computer through `runo-relay`. Both sides only
+// connect out to it. Each message is sealed with ChaCha20-Poly1305 under a key made from
+// the pairing token, so the relay passes along text it can't read or forge. The room
+// the two meet in is named by another hash of the token.
+
+const KEY_LABEL: &str = "runo-phone-key-v1:";
+const ROOM_LABEL: &str = "runo-phone-room-v1:";
+const ASK_AAD: &[u8] = b"runo-ask";
+const REPLY_AAD: &[u8] = b"runo-reply";
+/// How far a sealed request's clock may be from this one's, in seconds.
+const SKEW: u64 = 120;
+
+fn derive(label: &str, token: &str) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(format!("{label}{token}").as_bytes()).into()
+}
+
+/// The relay room for a token.
+pub fn room(token: &str) -> String {
+    hex(&derive(ROOM_LABEL, token))
+}
+
+/// Seal `plain` as base64 of nonce then ciphertext. Returns the nonce too.
+fn seal(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> (String, [u8; 12]) {
+    use base64::Engine;
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    let mut nonce = [0u8; 12];
+    getrandom::getrandom(&mut nonce).expect("the OS has no random source");
+    let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.into());
+    let sealed = cipher
+        .encrypt(&nonce.into(), Payload { msg: plain, aad })
+        .expect("sealing never fails");
+    let mut out = nonce.to_vec();
+    out.extend(sealed);
+    (base64::engine::general_purpose::STANDARD.encode(out), nonce)
+}
+
+/// Open what `seal` made with the same key and `aad`; `None` if it was made otherwise.
+fn open(key: &[u8; 32], aad: &[u8], sealed: &str) -> Option<(Vec<u8>, [u8; 12])> {
+    use base64::Engine;
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(sealed.trim())
+        .ok()?;
+    if raw.len() < 12 + 16 {
+        return None;
+    }
+    let nonce: [u8; 12] = raw[..12].try_into().ok()?;
+    let cipher = chacha20poly1305::ChaCha20Poly1305::new(key.into());
+    let plain = cipher
+        .decrypt(
+            &nonce.into(),
+            Payload {
+                msg: &raw[12..],
+                aad,
+            },
+        )
+        .ok()?;
+    Some((plain, nonce))
+}
+
+/// What the phone asks, inside the seal: the request it would send directly.
+#[derive(Debug, Serialize, Deserialize)]
+struct Ask {
+    method: String,
+    path: String,
+    #[serde(default)]
+    if_none_match: String,
+    #[serde(default)]
+    body: Value,
+    /// When it was sealed, in seconds since 1970.
+    time: u64,
+}
+
+/// The answer, inside the seal.
+#[derive(Debug, Serialize, Deserialize)]
+struct Answer {
+    status: u16,
+    etag: String,
+    body: Value,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Requests already answered, by nonce, so a copy sent again is ignored.
+#[derive(Default)]
+struct Seen(HashMap<[u8; 12], u64>);
+
+impl Seen {
+    fn first(&mut self, nonce: [u8; 12], now: u64) -> bool {
+        self.0.retain(|_, at| now.saturating_sub(*at) <= 2 * SKEW);
+        self.0.insert(nonce, now).is_none()
+    }
+}
+
+/// Open a request from the relay, answer it like a direct one, and seal the answer.
+/// Anything not sealed with this token, too old, or seen before gets no answer.
+fn answer_sealed(sealed: &str, base: &Path, token: &str, seen: &mut Seen) -> Option<String> {
+    let key = derive(KEY_LABEL, token);
+    let (plain, nonce) = open(&key, ASK_AAD, sealed)?;
+    let ask: Ask = serde_json::from_slice(&plain).ok()?;
+    let now = now_secs();
+    if ask.time.abs_diff(now) > SKEW || !seen.first(nonce, now) {
+        return None;
+    }
+    let http = Http {
+        method: ask.method,
+        path: ask.path,
+        auth: format!("Bearer {token}"),
+        if_none_match: ask.if_none_match.clone(),
+        body: if ask.body.is_null() {
+            Vec::new()
+        } else {
+            ask.body.to_string().into_bytes()
+        },
+    };
+    let (status, body) = respond(&http, base, token);
+    let (status, _, etag) = finish(status, &body, &ask.if_none_match);
+    let answer = Answer {
+        status,
+        etag,
+        body: if status == 304 { Value::Null } else { body },
+    };
+    let aad = [REPLY_AAD, &nonce].concat();
+    Some(seal(&key, &aad, &serde_json::to_vec(&answer).ok()?).0)
+}
+
+/// Run `curl` (as the rest of Runo does for HTTP) and return the status and body.
+fn curl(args: &[&str], input: Option<&str>) -> Result<(u16, String), String> {
+    let mut child = std::process::Command::new("curl")
+        .args(["-sS", "-w", "\n%{http_code}"])
+        .args(args)
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("couldn't run curl: {e}"))?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", &text));
+    match code.trim().parse() {
+        Ok(code) if code != 0 => Ok((code, body.to_string())),
+        _ => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+    }
+}
+
+/// Keep asking the relay for the phone's messages and answer them, until stopped.
+fn relay_loop(relay: &str, base: &Path, token: &str) {
+    let rooms = format!("{relay}/v1/rooms/{}", room(token));
+    let next = format!("{rooms}/next");
+    let mut seen = Seen::default();
+    let mut wait = Duration::from_secs(1);
+    let mut down: Option<String> = None;
+    loop {
+        let problem = match curl(&["--max-time", "40", &next], None) {
+            Ok((200, text)) => {
+                let message: Value = serde_json::from_str(&text).unwrap_or_default();
+                let id = message["id"].as_u64();
+                let sealed = message["body"].as_str().unwrap_or("");
+                if let (Some(id), Some(reply)) = (id, answer_sealed(sealed, base, token, &mut seen))
+                {
+                    let url = format!("{rooms}/reply/{id}");
+                    let args = [
+                        "--max-time",
+                        "15",
+                        "-X",
+                        "POST",
+                        "--data-binary",
+                        "@-",
+                        &url,
+                    ];
+                    let _ = curl(&args, Some(&reply));
+                }
+                None
+            }
+            Ok((204, _)) => None,
+            Ok((code, text)) => Some(format!("the relay answered {code}: {}", text.trim())),
+            Err(e) => Some(e),
+        };
+        match problem {
+            None => {
+                if down.take().is_some() {
+                    println!("Connected to the relay again.");
+                }
+                wait = Duration::from_secs(1);
+            }
+            Some(problem) => {
+                if down.as_deref() != Some(problem.as_str()) {
+                    eprintln!("runo: can't reach the relay at {relay} ({problem}); retrying.");
+                    down = Some(problem);
+                }
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(Duration::from_secs(30));
+            }
+        }
+    }
 }
 
 impl RunoApp {
@@ -917,6 +1149,117 @@ mod tests {
         assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
     }
 
+    /// What the phone app does: seal a request the way `answer_sealed` expects.
+    fn phone_ask(token: &str, method: &str, path: &str, body: Value) -> (String, [u8; 12]) {
+        let ask = Ask {
+            method: method.into(),
+            path: path.into(),
+            if_none_match: String::new(),
+            body,
+            time: now_secs(),
+        };
+        seal(
+            &derive(KEY_LABEL, token),
+            ASK_AAD,
+            &serde_json::to_vec(&ask).unwrap(),
+        )
+    }
+
+    fn phone_open(token: &str, nonce: [u8; 12], sealed: &str) -> Answer {
+        let aad = [REPLY_AAD, &nonce].concat();
+        let (plain, _) = open(&derive(KEY_LABEL, token), &aad, sealed).unwrap();
+        serde_json::from_slice(&plain).unwrap()
+    }
+
+    #[test]
+    fn sealed_requests_are_answered_once_and_only_with_the_token() {
+        let base = temp("sealed");
+        seed(&base);
+        let token = "secret-token";
+        let mut seen = Seen::default();
+        let (ask, nonce) = phone_ask(token, "GET", "/v1/sessions/7", Value::Null);
+        let reply = answer_sealed(&ask, &base, token, &mut seen).unwrap();
+        let answer = phone_open(token, nonce, &reply);
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.body["session"]["title"], "Fix the sidebar");
+        // The same message again, another token's, or a changed one: no answer.
+        assert!(answer_sealed(&ask, &base, token, &mut seen).is_none());
+        let (other, _) = phone_ask("other-token", "GET", "/v1/sessions", Value::Null);
+        assert!(answer_sealed(&other, &base, token, &mut seen).is_none());
+        let (ask, _) = phone_ask(token, "GET", "/v1/sessions", Value::Null);
+        let mut bytes = ask.into_bytes();
+        let last = bytes.len() - 3;
+        bytes[last] = if bytes[last] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(bytes).unwrap();
+        assert!(answer_sealed(&tampered, &base, token, &mut seen).is_none());
+        // A reply can't be passed off as the answer to a different request.
+        let (ask, _) = phone_ask(token, "GET", "/v1/hello", Value::Null);
+        let reply = answer_sealed(&ask, &base, token, &mut seen).unwrap();
+        let aad = [REPLY_AAD, &[0u8; 12][..]].concat();
+        assert!(open(&derive(KEY_LABEL, token), &aad, &reply).is_none());
+        assert_eq!(room(token).len(), 64);
+        assert_ne!(room(token), hex(&derive(KEY_LABEL, token)));
+    }
+
+    #[test]
+    fn reaches_the_computer_through_the_relay() {
+        let base = temp("relay");
+        seed(&base);
+        let token = "secret-token";
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || runo_relay::Relay::new().serve(listener));
+        let relay = format!("http://127.0.0.1:{port}");
+        let (served, url) = (base.clone(), relay.clone());
+        std::thread::spawn(move || relay_loop(&url, &served, token));
+
+        let send = |sealed: &str| {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(
+                stream,
+                "POST /v1/rooms/{}/ask HTTP/1.1\r\nContent-Length: {}\r\n\r\n{sealed}",
+                room(token),
+                sealed.len()
+            )
+            .unwrap();
+            let mut out = String::new();
+            stream.read_to_string(&mut out).unwrap();
+            out
+        };
+        // The computer has to be polling first; until then the relay says it's offline.
+        let start = std::time::Instant::now();
+        let (out, nonce) = loop {
+            let (ask, nonce) = phone_ask(token, "GET", "/v1/sessions", Value::Null);
+            let out = send(&ask);
+            if !out.starts_with("HTTP/1.1 503") {
+                break (out, nonce);
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "{out}");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        let answer = phone_open(token, nonce, out.split("\r\n\r\n").nth(1).unwrap());
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.body["sessions"][0]["title"], "Fix the sidebar");
+
+        let (ask, nonce) = phone_ask(
+            token,
+            "POST",
+            "/v1/sessions/7/prompt",
+            json!({ "text": "Go left" }),
+        );
+        let out = send(&ask);
+        let answer = phone_open(token, nonce, out.split("\r\n\r\n").nth(1).unwrap());
+        assert_eq!(answer.status, 202);
+        assert_eq!(
+            take(&base),
+            vec![Request::Prompt {
+                session: 7,
+                text: "Go left".into()
+            }]
+        );
+    }
+
     #[test]
     fn previews_drop_code_fences() {
         assert_eq!(
@@ -928,8 +1271,12 @@ mod tests {
     #[test]
     fn pair_link_carries_url_and_token() {
         assert_eq!(
-            pair_link("http://100.64.0.2:7631", "abc"),
+            pair_link("http://100.64.0.2:7631", "abc", None),
             "runo://pair?url=http%3A%2F%2F100.64.0.2%3A7631&token=abc"
+        );
+        assert_eq!(
+            pair_link("http://h:1", "abc", Some("https://relay.example")),
+            "runo://pair?url=http%3A%2F%2Fh%3A1&token=abc&relay=https%3A%2F%2Frelay.example"
         );
         let t = new_token();
         assert_eq!(t.len(), 64);
