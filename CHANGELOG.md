@@ -40,7 +40,11 @@ All notable changes to Runo are documented here.
 - Reviews refreshes every five minutes in the background, filters pull requests and issues by state, author and review request, loads past 30 with Load more, and lets you pick the agent for sessions started there.
 - Review this PR: the agent writes its review to `.runo/review.json`, and Post review shows it for confirmation, then posts it to GitHub with its line comments.
 - Playbook schedules can run at a time of day on chosen weekdays, or on a cron expression. Runs missed while Runo was closed catch up once on launch (Settings can turn this off).
-- On macOS, scheduled playbooks can run while Runo is closed, from a launchd job; their runs show up as sessions when Runo opens.
+- On macOS, scheduled playbooks can run while Runo is closed, from a launchd job: each runs in a new worktree after the project's setup command, with the agent's settings and the playbook's permissions, and shows up as a session when Runo opens.
+- Settings → Providers and each agent's page list every copy of its CLI on this computer (PATH, nvm, ~/.local/bin, Homebrew, npm, Bun, Cargo, Runo's own) with version and path. Pick the one Runo runs, Use newest when an older copy comes first, Update the one in use, or remove a stray link after a confirmation that names it.
+- Each agent's page lists its models from the CLI's own list, Codex's hidden and retiring ones included with their dates, with Use as default and a Test that tries each model with a one-line prompt and marks it works, not available on your account, or needs a newer CLI. Codex can also save the default into ~/.codex/config.toml (off by default; only the model line changes, after a backup).
+- A turn that fails because the agent is signed out, the model isn't available, or the CLI is too old for the model offers the fix under it: Sign in (runs the agent's login in the terminal panel and checks again), Retry with a model that works, Pick a model, Use the newer copy, Update or Install for Runo, and make the working model the default for the project or every session. Playbook runs get the same card.
+- The composer's model menu marks models that need a newer CLI or are being retired, and a session on a retiring model offers a one-click switch to its replacement.
 
 ### Fixed
 
@@ -92,8 +96,16 @@ All notable changes to Runo are documented here.
 - A repository with no commits no longer fails to start an isolated session: Runo's git init makes a first empty commit, and otherwise the session runs in the project folder with a note.
 - Quit (Cmd+Q, the menu and Cmd+K) warns about running agents, the same as closing the window.
 - Agents: OpenCode and Codex errors show their message instead of nothing or raw JSON, a turn that reports an error counts as failed, and expired OpenCode and signed-out Gemini sign-ins get the sign-in hint.
-- Gemini: the session's mode applies in new worktrees (Runo marks the folder trusted), and follow-ups resume by Gemini's session number.
+- Gemini: the session's mode applies in new worktrees (Runo marks the folder trusted), and follow-ups resume the conversation by its id.
 - Codex: commands, edits and reasoning show while they run, and reply text streams when the CLI sends updates.
 - Notifications are on by default, cover turns waiting for you, open the session when clicked, and work on Windows. Permission requests can wait indefinitely.
 - Agents that can't resume (such as Grok) keep a one-line summary of earlier requests; Copilot sessions no longer pick up each other's conversation.
 - Tests pass on macOS.
+- Playbooks started in Runo wait for their worktree and run the project's own setup command there, instead of possibly running the setup in your home folder.
+- Playbooks run while Runo is closed use the agent's settings, run the setup command first, edit in every agent's edit mode, and let Claude Code run commands when allowed.
+- Codex: no Approval chip in Chat, where `codex exec` ignored it; warnings such as missing model metadata show once in the chat, and a model your account can't use points to the model chip.
+- Sign-in is checked ahead of time: Settings → Providers and New session show signed-out agents, and a turn on one shows the sign-in hint before it starts.
+- Spending limits, the spend shown and each session's context meter say that only Claude Code and OpenCode report a cost.
+- Architecture reads Swift, Maven, Gradle, Ruby, .NET, PHP and Dart manifests.
+- A CI workflow checks formatting, Clippy and the tests on macOS and Linux for every push and pull request.
+- Agents: a model an outdated Codex rejects ("not supported when using Codex with a ChatGPT account", "requires a newer version of Codex") is reported as a version problem, not blamed on the account, when a newer Codex wrote its model list.

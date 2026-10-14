@@ -18,6 +18,8 @@ pub enum Update {
     Summary(String),
     /// The run failed; the CLI's own explanation.
     Error(String),
+    /// A warning from the CLI that doesn't end the run, such as an unknown model.
+    Notice(String),
     /// Token use: the context after the latest model call, then totals from the result.
     Usage(Usage),
     /// Tools the agent wanted but its permission mode did not allow.
@@ -365,6 +367,8 @@ pub struct JsonStream {
     written: std::collections::HashMap<String, usize>,
     /// The last error reported, so the same failure isn't shown twice.
     last_error: String,
+    /// Warnings already shown, so a repeated one isn't.
+    notices: std::collections::HashSet<String>,
 }
 
 impl JsonStream {
@@ -378,7 +382,17 @@ impl JsonStream {
             shown: Default::default(),
             written: Default::default(),
             last_error: String::new(),
+            notices: Default::default(),
         }
+    }
+
+    /// A warning, unless it was already shown in this run.
+    fn notice(&mut self, message: String) -> Option<Update> {
+        let message = message.trim().to_string();
+        if message.is_empty() || !self.notices.insert(message.clone()) {
+            return None;
+        }
+        Some(Update::Notice(message))
     }
 
     /// An error, unless it repeats the one just reported.
@@ -471,6 +485,13 @@ impl JsonStream {
                 }
             }
             "todo_list" => out.push(Update::Step("Updated the plan".into())),
+            // Warnings that don't stop the run, such as "Model metadata for … not found".
+            "error" | "warning" => {
+                let message = error_message(&item["message"])
+                    .or_else(|| error_message(&item["text"]))
+                    .unwrap_or_default();
+                out.extend(self.notice(message));
+            }
             // Reasoning summaries start with a bold heading, such as "**Reading the tests**".
             "reasoning" => {
                 let text = item["text"].as_str().unwrap_or("");
@@ -1017,6 +1038,29 @@ mod tests {
         assert_eq!(
             json_all(&[r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#]),
             [Update::Error("usage limit reached".into())]
+        );
+    }
+
+    #[test]
+    fn codex_warnings_show_once() {
+        let warning = "Model metadata for `gpt-6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.";
+        let out = json_all(&[
+            &format!(
+                r#"{{"type":"item.completed","item":{{"id":"item_0","type":"error","message":"{warning}"}}}}"#
+            ),
+            &format!(
+                r#"{{"type":"item.completed","item":{{"id":"item_1","type":"error","message":"{warning}"}}}}"#
+            ),
+            r#"{"type":"item.completed","item":{"id":"item_2","type":"warning","message":"Heads up"}}"#,
+            r#"{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Hi."}}"#,
+        ]);
+        assert_eq!(
+            out,
+            [
+                Update::Notice(warning.into()),
+                Update::Notice("Heads up".into()),
+                Update::Text("Hi.".into()),
+            ]
         );
     }
 

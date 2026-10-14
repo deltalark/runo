@@ -29,8 +29,9 @@ const MAX_FILES: usize = 6000;
 /// Modules shown per package, largest first.
 const MAX_MODULES: usize = 60;
 
-/// A buildable unit found from its manifest: a crate, an npm package, a Python project or
-/// a Go module.
+/// A buildable unit found from its manifest: a crate, an npm package, a Python project, a
+/// Go module, a Swift package, a Maven or Gradle project, a Ruby gem, a .NET project, a
+/// Composer package or a Dart package.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Package {
     pub name: String,
@@ -311,6 +312,323 @@ pub(crate) fn read_go_mod(text: &str) -> Option<Manifest> {
     Some((name?, "Go module", deps.into_iter().collect(), Vec::new()))
 }
 
+/// The quoted strings in `text`, in order, with either quote.
+fn quoted_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '"' || c == '\'' {
+            let inner: String = chars.by_ref().take_while(|&d| d != c).collect();
+            out.push(inner);
+        }
+    }
+    out
+}
+
+/// The last part of a path or URL, without `.git` or a project file's extension.
+fn last_part(path: &str) -> String {
+    let part = path
+        .trim_end_matches('/')
+        .rsplit(['/', '\\', ':'])
+        .next()
+        .unwrap_or(path);
+    let part = part.strip_suffix(".git").unwrap_or(part);
+    match part.rsplit_once('.') {
+        Some((stem, "csproj" | "fsproj" | "vbproj")) => stem.to_string(),
+        _ => part.to_string(),
+    }
+}
+
+/// Read a `Package.swift`: the package's name and the packages it depends on, by URL or
+/// by local path.
+pub(crate) fn read_swift_package(text: &str, dir_name: &str) -> Option<Manifest> {
+    let body = &text[text.find("Package(")?..];
+    let name = body
+        .find("name:")
+        .and_then(|at| quoted_strings(&body[at..]).into_iter().next())
+        .unwrap_or_else(|| dir_name.to_string());
+    let mut deps = BTreeSet::new();
+    let mut local = BTreeSet::new();
+    for call in body.split(".package(").skip(1) {
+        let args = call.split(')').next().unwrap_or("");
+        let value = |key: &str| {
+            args.find(key)
+                .and_then(|at| quoted_strings(&args[at..]).into_iter().next())
+        };
+        if let Some(path) = value("path:") {
+            local.insert(last_part(&path));
+        } else if let Some(name) = value("name:") {
+            deps.insert(name);
+        } else if let Some(url) = value("url:") {
+            deps.insert(last_part(&url));
+        }
+    }
+    Some((
+        name,
+        "Swift package",
+        deps.into_iter().collect(),
+        local.into_iter().collect(),
+    ))
+}
+
+/// The text inside each `<tag>…</tag>` in `xml`.
+fn xml_values<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    xml.split(open.as_str())
+        .skip(1)
+        .filter_map(|rest| rest.split_once(close.as_str()).map(|(v, _)| v.trim()))
+        .collect()
+}
+
+/// Read a Maven `pom.xml`: its artifactId and the artifacts it depends on.
+pub(crate) fn read_pom(text: &str, dir_name: &str) -> Option<Manifest> {
+    if !text.contains("<project") {
+        return None;
+    }
+    // The parent's and the dependencies' ids are not the project's own.
+    let own = match (text.find("<parent>"), text.find("</parent>")) {
+        (Some(a), Some(b)) if a < b => format!("{}{}", &text[..a], &text[b..]),
+        _ => text.to_string(),
+    };
+    let own = own.split("<dependencies>").next().unwrap_or("");
+    let own = own.split("<dependencyManagement>").next().unwrap_or("");
+    let name = xml_values(own, "artifactId")
+        .first()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| dir_name.to_string());
+    let deps: BTreeSet<String> = xml_values(text, "dependency")
+        .into_iter()
+        .filter_map(|d| xml_values(d, "artifactId").first().map(|a| a.to_string()))
+        .collect();
+    Some((
+        name,
+        "Maven project",
+        deps.into_iter().collect(),
+        Vec::new(),
+    ))
+}
+
+/// Read a Gradle build script (Groovy or Kotlin), or a settings script for the name.
+/// Dependencies are `group:artifact:version` strings, version catalog entries and
+/// `project(":sub")` references to other projects of the build.
+pub(crate) fn read_gradle(text: &str, dir_name: &str) -> Manifest {
+    let mut name = dir_name.to_string();
+    let mut deps = BTreeSet::new();
+    let mut local = BTreeSet::new();
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or("").trim();
+        if let Some(rest) = line.strip_prefix("rootProject.name") {
+            if let Some(n) = quoted_strings(rest).into_iter().next() {
+                name = n;
+            }
+            continue;
+        }
+        let Some(call) = line.split(['(', ' ']).next() else {
+            continue;
+        };
+        let configuration = call.ends_with("mplementation")
+            || call.ends_with("Only")
+            || matches!(
+                call,
+                "api" | "kapt" | "ksp" | "annotationProcessor" | "classpath"
+            );
+        if !configuration {
+            continue;
+        }
+        if let Some(at) = line.find("project(") {
+            if let Some(p) = quoted_strings(&line[at..]).into_iter().next() {
+                local.insert(last_part(&p));
+            }
+        } else if let Some(at) = line.find("libs.") {
+            let alias: String = line[at + 5..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                .collect();
+            deps.insert(alias.replace('.', "-"));
+        } else if let Some(coords) = quoted_strings(line).into_iter().next() {
+            let mut parts = coords.split(':');
+            if let (Some(_), Some(artifact)) = (parts.next(), parts.next()) {
+                deps.insert(artifact.to_string());
+            }
+        }
+    }
+    (
+        name,
+        "Gradle project",
+        deps.into_iter().collect(),
+        local.into_iter().collect(),
+    )
+}
+
+/// Read a `Gemfile` or a `.gemspec`: the gem's name and the gems it uses.
+pub(crate) fn read_ruby(text: &str, dir_name: &str) -> Manifest {
+    let mut name = dir_name.to_string();
+    let mut deps = BTreeSet::new();
+    let mut local = BTreeSet::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let first = || quoted_strings(line).into_iter().next();
+        if line.contains(".name") && line.contains('=') {
+            if let Some(n) = first() {
+                name = n;
+            }
+        } else if line.starts_with("gem ") || line.starts_with("gem(") {
+            if let Some(gem) = first() {
+                if line.contains("path:") || line.contains(":path") {
+                    local.insert(gem);
+                } else {
+                    deps.insert(gem);
+                }
+            }
+        } else if line.contains("add_dependency")
+            || line.contains("add_runtime_dependency")
+            || line.contains("add_development_dependency")
+        {
+            deps.extend(first());
+        }
+    }
+    (
+        name,
+        "Ruby project",
+        deps.into_iter().collect(),
+        local.into_iter().collect(),
+    )
+}
+
+/// The value of attribute `name` in each `<tag …>` element of `xml`.
+fn xml_attrs(xml: &str, tag: &str, name: &str) -> Vec<String> {
+    let open = format!("<{tag} ");
+    let key = format!("{name}=\"");
+    xml.split(open.as_str())
+        .skip(1)
+        .filter_map(|rest| {
+            let element = rest.split('>').next()?;
+            let at = element.find(&key)? + key.len();
+            Some(element[at..].split('"').next()?.to_string())
+        })
+        .collect()
+}
+
+/// Read a .NET project file (`.csproj`, `.fsproj`, `.vbproj`): NuGet packages and the
+/// projects it references.
+pub(crate) fn read_dotnet_project(text: &str, file_stem: &str) -> Manifest {
+    let name = xml_values(text, "AssemblyName")
+        .first()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| file_stem.to_string());
+    let deps: BTreeSet<String> = xml_attrs(text, "PackageReference", "Include")
+        .into_iter()
+        .collect();
+    let local: BTreeSet<String> = xml_attrs(text, "ProjectReference", "Include")
+        .iter()
+        .map(|p| last_part(p))
+        .collect();
+    (
+        name,
+        ".NET project",
+        deps.into_iter().collect(),
+        local.into_iter().collect(),
+    )
+}
+
+/// Read a `.sln`: the solution and the projects it holds.
+pub(crate) fn read_sln(text: &str, file_stem: &str) -> Manifest {
+    let local: BTreeSet<String> = text
+        .lines()
+        .filter(|l| l.starts_with("Project("))
+        .filter_map(|l| {
+            let (_, rest) = l.split_once('=')?;
+            let path = quoted_strings(rest).into_iter().nth(1)?;
+            let project = last_part(&path);
+            // Solution folders list themselves as the path.
+            (project != path || path.contains('.')).then_some(project)
+        })
+        .collect();
+    (
+        file_stem.to_string(),
+        ".NET solution",
+        Vec::new(),
+        local.into_iter().collect(),
+    )
+}
+
+/// Read a `composer.json`.
+pub(crate) fn read_composer(text: &str, dir_name: &str) -> Option<Manifest> {
+    let doc: serde_json::Value = serde_json::from_str(text).ok()?;
+    let name = doc["name"]
+        .as_str()
+        .filter(|n| !n.is_empty())
+        .unwrap_or(dir_name)
+        .to_string();
+    let mut deps = BTreeSet::new();
+    for key in ["require", "require-dev"] {
+        if let Some(map) = doc[key].as_object() {
+            deps.extend(
+                map.keys()
+                    .filter(|d| *d != "php" && !d.starts_with("ext-"))
+                    .cloned(),
+            );
+        }
+    }
+    Some((
+        name,
+        "Composer package",
+        deps.into_iter().collect(),
+        Vec::new(),
+    ))
+}
+
+/// Read a Dart or Flutter `pubspec.yaml`: its name and the packages under
+/// `dependencies` and `dev_dependencies`, with `path:` ones as local.
+pub(crate) fn read_pubspec(text: &str, dir_name: &str) -> Manifest {
+    let mut name = dir_name.to_string();
+    let mut deps = BTreeSet::new();
+    let mut local = BTreeSet::new();
+    let mut section = "";
+    let mut current = String::new();
+    // How far a section's entries are indented, from its first one.
+    let mut entry = 0;
+    for line in text.lines() {
+        let content = line.split('#').next().unwrap_or("").trim_end();
+        if content.trim().is_empty() {
+            continue;
+        }
+        let indent = content.len() - content.trim_start().len();
+        let content = content.trim();
+        if indent == 0 {
+            section = content.split(':').next().unwrap_or("");
+            entry = 0;
+            if section == "name" {
+                name = content["name:".len()..]
+                    .trim()
+                    .trim_matches(['"', '\''])
+                    .to_string();
+            }
+            continue;
+        }
+        if !matches!(section, "dependencies" | "dev_dependencies") {
+            continue;
+        }
+        if entry == 0 {
+            entry = indent;
+        }
+        if indent <= entry {
+            if let Some((dep, _)) = content.split_once(':') {
+                current = dep.trim().to_string();
+                deps.insert(current.clone());
+            }
+        } else if content.starts_with("path:") && deps.remove(&current) {
+            local.insert(current.clone());
+        }
+    }
+    (
+        name,
+        "Dart package",
+        deps.into_iter().collect(),
+        local.into_iter().collect(),
+    )
+}
+
 /// Whether `text` refers to Rust module `name` as a path: `name::`, `crate::name::` or
 /// `super::name::`, but not `std::name::`.
 fn mentions_rust_module(text: &str, name: &str) -> bool {
@@ -424,12 +742,51 @@ pub(crate) fn js_unit(inside: &str) -> String {
     }
 }
 
+/// A module named by the first folder under the package's source folder, or by the
+/// file itself when it sits at the top of it.
+fn folder_unit(inside: &str, roots: &[&str]) -> String {
+    let inside = roots
+        .iter()
+        .find_map(|r| inside.strip_prefix(r))
+        .unwrap_or(inside);
+    match inside.split_once('/') {
+        Some((dir, _)) => dir.to_string(),
+        None => Path::new(inside)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "(root)".into()),
+    }
+}
+
 /// The module a Rust file belongs to, from its path under `src/`.
 fn rust_unit(inside_src: &str) -> String {
     match inside_src.split_once('/') {
         Some((dir, _)) => dir.to_string(),
         None => inside_src.trim_end_matches(".rs").to_string(),
     }
+}
+
+/// Two manifests of one folder as one package. Of the same kind (a Gemfile and a
+/// gemspec, a Gradle build and settings script) their dependencies add up and a real
+/// name beats the folder's; otherwise the later one stands, as a project file does over
+/// its solution.
+fn merge_manifests(old: Manifest, new: Manifest, dir_name: &str) -> Manifest {
+    if old.1 != new.1 {
+        return if old.1 == ".NET solution" || new.1 != ".NET solution" {
+            new
+        } else {
+            old
+        };
+    }
+    let name = if new.0 != dir_name { new.0 } else { old.0 };
+    let union = |a: Vec<String>, b: Vec<String>| {
+        a.into_iter()
+            .chain(b)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    (name, new.1, union(old.2, new.2), union(old.3, new.3))
 }
 
 /// Build the map of the project at `root`.
@@ -479,17 +836,38 @@ pub(crate) fn scan(root: &Path) -> ProjectMap {
             .or_else(|| root.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_default();
         let read = || std::fs::read_to_string(root.join(file)).unwrap_or_default();
-        let manifest = match name {
-            "Cargo.toml" => read_cargo(&read()),
-            "package.json" => read_package_json(&read(), &dir_name),
-            "pyproject.toml" => read_pyproject(&read(), &dir_name),
-            "requirements.txt" if !found.contains_key(&dir) => {
+        let stem = file
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let manifest = match (name, ext) {
+            ("Cargo.toml", _) => read_cargo(&read()),
+            ("package.json", _) => read_package_json(&read(), &dir_name),
+            ("pyproject.toml", _) => read_pyproject(&read(), &dir_name),
+            ("requirements.txt", _) if !found.contains_key(&dir) => {
                 Some(read_requirements(&read(), &dir_name))
             }
-            "go.mod" => read_go_mod(&read()),
+            ("go.mod", _) => read_go_mod(&read()),
+            ("Package.swift", _) => read_swift_package(&read(), &dir_name),
+            ("pom.xml", _) => read_pom(&read(), &dir_name),
+            (
+                "build.gradle" | "build.gradle.kts" | "settings.gradle" | "settings.gradle.kts",
+                _,
+            ) => Some(read_gradle(&read(), &dir_name)),
+            ("Gemfile", _) | (_, "gemspec") => Some(read_ruby(&read(), &dir_name)),
+            (_, "csproj" | "fsproj" | "vbproj") => Some(read_dotnet_project(&read(), &stem)),
+            // A solution beside a project file is that project's folder.
+            (_, "sln") if !found.contains_key(&dir) => Some(read_sln(&read(), &stem)),
+            ("composer.json", _) => read_composer(&read(), &dir_name),
+            ("pubspec.yaml", _) => Some(read_pubspec(&read(), &dir_name)),
             _ => None,
         };
         if let Some(m) = manifest {
+            let m = match found.remove(&dir) {
+                Some((old, _)) => merge_manifests(old, m, &dir_name),
+                None => m,
+            };
             found.insert(dir.clone(), (m, name.to_string()));
         }
     }
@@ -562,6 +940,46 @@ fn modules_of(root: &Path, dir: &str, kind: &str, files: &[&PathBuf]) -> Vec<Mod
                     Some((d, _)) => d.to_string(),
                     None => inside.trim_end_matches(".py").to_string(),
                 }
+            }
+            "Swift package"
+                if file.extension().is_some_and(|e| e == "swift") && inside != "Package.swift" =>
+            {
+                folder_unit(&inside, &["Sources/"])
+            }
+            "Maven project" | "Gradle project"
+                if file.extension().is_some_and(|e| {
+                    matches!(e.to_str(), Some("java" | "kt" | "scala" | "groovy"))
+                }) =>
+            {
+                // By Java package, under the source set's folder.
+                let inside = inside
+                    .split_once("/java/")
+                    .or_else(|| inside.split_once("/kotlin/"))
+                    .or_else(|| inside.split_once("/scala/"))
+                    .map(|(_, rest)| rest)
+                    .unwrap_or(&inside);
+                let d = rel_dir(Path::new(inside));
+                if d.is_empty() {
+                    "(root)".to_string()
+                } else {
+                    d
+                }
+            }
+            "Ruby project" if file.extension().is_some_and(|e| e == "rb") => {
+                folder_unit(&inside, &["lib/", "app/"])
+            }
+            ".NET project" | ".NET solution"
+                if file
+                    .extension()
+                    .is_some_and(|e| matches!(e.to_str(), Some("cs" | "fs" | "vb"))) =>
+            {
+                folder_unit(&inside, &[])
+            }
+            "Composer package" if file.extension().is_some_and(|e| e == "php") => {
+                folder_unit(&inside, &["src/", "app/"])
+            }
+            "Dart package" if file.extension().is_some_and(|e| e == "dart") => {
+                folder_unit(&inside, &["lib/src/", "lib/"])
             }
             "Go module" if file.extension().is_some_and(|e| e == "go") => {
                 let d = rel_dir(Path::new(&inside));
@@ -1275,7 +1693,7 @@ impl RunoApp {
                     div()
                         .text_size(px(12.5))
                         .text_color(rgb(c_muted()))
-                        .child("No Cargo.toml, package.json, pyproject.toml, requirements.txt or go.mod found."),
+                        .child("No package manifest found (Cargo.toml, package.json, pyproject.toml, go.mod, Package.swift, pom.xml, build.gradle, Gemfile, .csproj, composer.json or pubspec.yaml)."),
                 );
             }
             for (i, p) in map.packages.iter().enumerate() {
@@ -1533,6 +1951,150 @@ tempfile = "3"
             deps,
             vec!["github.com/a/b", "github.com/c/d", "golang.org/x/net"]
         );
+    }
+
+    #[test]
+    fn swift_maven_and_gradle_manifests_are_read() {
+        let swift = r#"// swift-tools-version:5.9
+import PackageDescription
+
+let package = Package(
+    name: "Kit",
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        .package(path: "../Core"),
+    ],
+    targets: [.target(name: "Kit")]
+)
+"#;
+        let (name, kind, deps, local) = read_swift_package(swift, "dir").unwrap();
+        assert_eq!((name.as_str(), kind), ("Kit", "Swift package"));
+        assert_eq!(deps, vec!["swift-argument-parser"]);
+        assert_eq!(local, vec!["Core"]);
+
+        let pom = r#"<project>
+  <parent><groupId>com.acme</groupId><artifactId>acme-parent</artifactId></parent>
+  <artifactId>billing</artifactId>
+  <dependencies>
+    <dependency><groupId>com.acme</groupId><artifactId>core</artifactId></dependency>
+    <dependency><groupId>junit</groupId><artifactId>junit</artifactId><scope>test</scope></dependency>
+  </dependencies>
+</project>"#;
+        let (name, kind, deps, _) = read_pom(pom, "dir").unwrap();
+        assert_eq!((name.as_str(), kind), ("billing", "Maven project"));
+        assert_eq!(deps, vec!["core", "junit"]);
+
+        let gradle = r#"plugins { id("org.jetbrains.kotlin.jvm") }
+dependencies {
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(project(":core"))
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
+    api(libs.kotlinx.coroutines)
+    // implementation("old:thing:1")
+}
+"#;
+        let (name, kind, deps, local) = read_gradle(gradle, "app");
+        assert_eq!((name.as_str(), kind), ("app", "Gradle project"));
+        assert_eq!(deps, vec!["junit-jupiter", "kotlinx-coroutines", "okhttp"]);
+        assert_eq!(local, vec!["core"]);
+        let settings = "rootProject.name = \"shop\"\ninclude(\":app\", \":core\")\n";
+        assert_eq!(read_gradle(settings, "dir").0, "shop");
+    }
+
+    #[test]
+    fn ruby_dotnet_php_and_dart_manifests_are_read() {
+        let gemfile = "source 'https://rubygems.org'\ngem 'rails', '~> 7.1'\ngem \"pg\"\ngem 'engine', path: 'engines/engine'\n# gem 'old'\n";
+        let (_, kind, deps, local) = read_ruby(gemfile, "shop");
+        assert_eq!(kind, "Ruby project");
+        assert_eq!(deps, vec!["pg", "rails"]);
+        assert_eq!(local, vec!["engine"]);
+        let gemspec = "Gem::Specification.new do |spec|\n  spec.name = \"tiny\"\n  spec.add_dependency \"rack\", \">= 2\"\n  spec.add_development_dependency 'rspec'\nend\n";
+        let (name, _, deps, _) = read_ruby(gemspec, "dir");
+        assert_eq!(name, "tiny");
+        assert_eq!(deps, vec!["rack", "rspec"]);
+
+        let csproj = r#"<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <ProjectReference Include="..\Core\Core.csproj" />
+  </ItemGroup>
+</Project>"#;
+        let (name, kind, deps, local) = read_dotnet_project(csproj, "Api");
+        assert_eq!((name.as_str(), kind), ("Api", ".NET project"));
+        assert_eq!(deps, vec!["Newtonsoft.Json"]);
+        assert_eq!(local, vec!["Core"]);
+        let sln = "Microsoft Visual Studio Solution File\nProject(\"{FAE04EC0}\") = \"Api\", \"src\\Api\\Api.csproj\", \"{1}\"\nEndProject\nProject(\"{2150E333}\") = \"docs\", \"docs\", \"{2}\"\nEndProject\n";
+        let (name, kind, _, local) = read_sln(sln, "Shop");
+        assert_eq!((name.as_str(), kind), ("Shop", ".NET solution"));
+        assert_eq!(local, vec!["Api"]);
+
+        let composer = r#"{"name":"acme/site","require":{"php":">=8.2","ext-json":"*","laravel/framework":"^11"},"require-dev":{"phpunit/phpunit":"^11"}}"#;
+        let (name, kind, deps, _) = read_composer(composer, "dir").unwrap();
+        assert_eq!((name.as_str(), kind), ("acme/site", "Composer package"));
+        assert_eq!(deps, vec!["laravel/framework", "phpunit/phpunit"]);
+
+        let pubspec = "name: app\nenvironment:\n  sdk: '>=3.0.0 <4.0.0'\ndependencies:\n  flutter:\n    sdk: flutter\n  http: ^1.2.0\n  shared:\n    path: ../shared\ndev_dependencies:\n    lints: ^3.0.0\nflutter:\n  uses-material-design: true\n";
+        let (name, kind, deps, local) = read_pubspec(pubspec, "dir");
+        assert_eq!((name.as_str(), kind), ("app", "Dart package"));
+        assert_eq!(deps, vec!["flutter", "http", "lints"]);
+        assert_eq!(local, vec!["shared"]);
+    }
+
+    #[test]
+    fn scan_reads_other_ecosystems() {
+        let root = temp("scan-more");
+        write(
+            &root,
+            "settings.gradle.kts",
+            "rootProject.name = \"shop\"\n",
+        );
+        write(
+            &root,
+            "build.gradle.kts",
+            "dependencies {\n    implementation(project(\":core\"))\n}\n",
+        );
+        write(
+            &root,
+            "src/main/kotlin/com/shop/App.kt",
+            "package com.shop\n",
+        );
+        write(
+            &root,
+            "core/build.gradle.kts",
+            "dependencies {\n    api(\"com.google.guava:guava:33.0.0-jre\")\n}\n",
+        );
+        write(
+            &root,
+            "core/src/main/kotlin/com/shop/core/Money.kt",
+            "package com.shop.core\n",
+        );
+        write(
+            &root,
+            "ios/Package.swift",
+            "let package = Package(name: \"ShopKit\")\n",
+        );
+        write(&root, "ios/Sources/ShopKit/Cart.swift", "struct Cart {}\n");
+        write(
+            &root,
+            "api/Api.csproj",
+            "<Project><ItemGroup><PackageReference Include=\"Dapper\" /></ItemGroup></Project>",
+        );
+        write(&root, "api/Shop.sln", "");
+        write(&root, "api/Controllers/Home.cs", "class Home {}\n");
+        let map = scan(&root);
+        let find = |name: &str| map.packages.iter().find(|p| p.name == name).unwrap();
+        let shop = find("shop");
+        assert_eq!((shop.kind, shop.path.as_str()), ("Gradle project", ""));
+        assert_eq!(shop.internal, vec!["core"]);
+        assert_eq!(shop.modules[0].name, "com/shop");
+        assert_eq!(find("core").deps, vec!["guava"]);
+        let kit = find("ShopKit");
+        assert_eq!(kit.modules[0].name, "ShopKit");
+        let api = find("Api");
+        assert_eq!(api.kind, ".NET project");
+        assert_eq!(api.deps, vec!["Dapper"]);
+        assert_eq!(api.modules[0].name, "Controllers");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod chatctl;
 mod cliview;
 mod connections;
 mod connections_ui;
+mod copies;
 mod cove;
 mod ctxmenu;
 mod design;
@@ -18,6 +19,7 @@ mod desktop_notify;
 mod detach;
 mod files;
 mod fileview;
+mod fixes;
 mod gemini;
 mod git;
 mod github;
@@ -29,6 +31,7 @@ mod install;
 mod keymap;
 mod mcp;
 mod memory_mcp;
+mod modelcheck;
 mod models;
 mod notes;
 mod pbfile;
@@ -45,6 +48,7 @@ mod settings_ui;
 mod shell;
 mod shellenv;
 mod ship;
+mod signin;
 mod split;
 mod store;
 mod stream;
@@ -191,6 +195,12 @@ struct RunoApp {
     cli_runs: HashMap<u64, cliview::CliRun>,
     /// The agent whose install confirm card is open.
     install_confirm: Option<&'static str>,
+    /// A copy of an agent's CLI waiting for the person to confirm its removal.
+    remove_copy: Option<fixes::RemoveCopy>,
+    /// Terminal tabs signing an agent in: shell id → agent.
+    sign_ins: HashMap<u64, &'static str>,
+    /// The session whose failed turn shows the model list.
+    fix_models: Option<u64>,
     project_form: Option<projects::ProjectForm>,
     project_name: Entity<InputState>,
     /// The project form's worktree setup command.
@@ -1261,6 +1271,9 @@ impl RunoApp {
             next_shell: 0,
             cli_runs: HashMap::new(),
             install_confirm: None,
+            remove_copy: None,
+            sign_ins: HashMap::new(),
+            fix_models: None,
             project_form: None,
             project_name,
             project_setup: cx
@@ -1909,6 +1922,23 @@ impl RunoApp {
                                 self.stream_failed.insert(id);
                                 session.messages.push(Message::new(Role::System, error))
                             }
+                            stream::Update::Notice(text) => {
+                                let turn = session
+                                    .messages
+                                    .iter()
+                                    .rposition(|m| m.role == Role::User)
+                                    .unwrap_or(0);
+                                let seen = session.messages[turn..]
+                                    .iter()
+                                    .any(|m| m.meta == "warning" && m.text == text);
+                                if !seen {
+                                    // Ahead of the reply, which carries on below it.
+                                    let mut warning = Message::new(Role::System, text);
+                                    warning.meta = "warning".into();
+                                    let at = session.messages.len() - 1;
+                                    session.messages.insert(at, warning);
+                                }
+                            }
                             stream::Update::Usage(usage) => m.usage = usage,
                             stream::Update::Denied(tools) => {
                                 m.denied =
@@ -1968,6 +1998,7 @@ impl RunoApp {
                     .cloned()
                     .unwrap_or_default()
                     .into_iter()
+                    .map(|l| alerts::clean_line(&l))
                     .filter(|l| !l.starts_with(connections::WARNING))
                     .collect();
                 let signed_out = self.signed_out.remove(&id);
@@ -2043,9 +2074,24 @@ impl RunoApp {
                     if let Some(warning) = sync_warning {
                         session.messages.push(warning);
                     }
+                    if !stopped && !session.elsewhere() {
+                        if sign_in.is_some() {
+                            signin::set(&session.provider, false);
+                        } else if ok {
+                            signin::set(&session.provider, true);
+                        }
+                    }
                     if let Some(hint) = sign_in {
                         hold = true;
-                        session.messages.push(Message::new(Role::System, hint));
+                        let turn = session
+                            .messages
+                            .iter()
+                            .rposition(|m| m.role == Role::User)
+                            .unwrap_or(0);
+                        // Said already before the turn started.
+                        if !session.messages[turn..].iter().any(|m| m.text == hint) {
+                            session.messages.push(Message::new(Role::System, hint));
+                        }
                     } else if !ok {
                         let mut lines: Vec<String> = Vec::new();
                         for line in all.iter().filter(|l| {
@@ -2082,12 +2128,8 @@ impl RunoApp {
                                 log.replace("```", "'''")
                             ));
                         }
-                        if log.contains("model")
-                            && (log.contains("not supported")
-                                || log.contains("not found")
-                                || log.contains("does not exist"))
-                        {
-                            text.push_str("\nTip: choose another model from the model menu, or set one under Settings for this agent.");
+                        if let Some(tip) = modelcheck::tip(&session.provider, &log) {
+                            text.push_str(&format!("\n{tip}"));
                         }
                         let text = text.trim_start().to_string();
                         if !text.is_empty() {
@@ -2117,6 +2159,7 @@ impl RunoApp {
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
                 self.cli_exited(id);
+                self.sign_in_exited(id);
                 if self.setups.contains_key(&id) {
                     self.setup_exited(id, cx);
                 }
@@ -2193,6 +2236,7 @@ impl RunoApp {
 
     pub(crate) fn open_settings(&mut self) {
         self.view = View::Settings;
+        signin::refresh(false);
         let dir = self.current().filter(|_| !self.demo).map(|s| s.dir.clone());
         self.discovered = Some(settings::discover(dir.as_deref()));
     }
@@ -3020,7 +3064,7 @@ impl RunoApp {
 
     /// Start a new session's agent, after the worktree setup command when there is one.
     /// The session must be selected, since setup runs in its Terminal.
-    fn launch(&mut self, id: u64, task: String, cx: &mut Context<Self>) {
+    pub(crate) fn launch(&mut self, id: u64, task: String, cx: &mut Context<Self>) {
         let Some(session) = self.state.session(id) else {
             return;
         };
@@ -3031,11 +3075,11 @@ impl RunoApp {
             return;
         }
         // The project's own setup command, else the one in Settings.
-        let setup = self
+        let own = self
             .project_of(session)
-            .map(|p| p.setup.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| cx.global::<AppSettings>().worktree_setup.trim().to_string());
+            .map(|p| p.setup.clone())
+            .unwrap_or_default();
+        let setup = cx.global::<AppSettings>().setup_for(&own);
         if isolated && !setup.is_empty() && !self.demo {
             self.pending_start.insert(id, task);
             if self.run_setup_in(id, &setup, cx) {
@@ -3054,13 +3098,14 @@ impl RunoApp {
             return;
         }
         // CLI-first people get the agent's own CLI, with the task as its first prompt.
-        // Only CLIs known to take a first prompt on the command line open this way.
+        // Only CLIs known to take a first prompt on the command line open this way, and
+        // playbook runs stay in Chat, where their limits hold.
         if cx.global::<AppSettings>().default_view == "cli"
             && agent::imports_cli_turns(&provider)
             && self
                 .state
                 .session(id)
-                .is_some_and(|s| cliview::cli_blocker(s).is_none())
+                .is_some_and(|s| s.playbook == 0 && cliview::cli_blocker(s).is_none())
         {
             // Context a session was started with goes ahead of the task here too.
             let mut task = task;
@@ -4400,7 +4445,9 @@ impl RunoApp {
         if message.role == Role::System && message.meta == "sync" {
             return self.sync_card(index, message, cx);
         }
-        if message.role == Role::System && (message.meta == "moved" || message.meta == "note") {
+        if message.role == Role::System
+            && matches!(message.meta.as_str(), "moved" | "note" | "warning")
+        {
             return fade(
                 div()
                     .id(("message", index))
@@ -4413,15 +4460,11 @@ impl RunoApp {
                     .bg(tint(c_subtle()))
                     .text_size(px(12.5))
                     .text_color(rgb(c_secondary()))
-                    .child(icon(
-                        if message.meta == "note" {
-                            IconName::Info
-                        } else {
-                            IconName::Server
-                        },
-                        13.,
-                        c_blue(),
-                    ))
+                    .child(match message.meta.as_str() {
+                        "note" => icon(IconName::Info, 13., c_blue()),
+                        "warning" => icon(IconName::TriangleAlert, 13., c_amber()),
+                        _ => icon(IconName::Server, 13., c_blue()),
+                    })
                     .child(div().flex_1().min_w_0().child(message.text.clone())),
             )
             .into_any_element();
@@ -5751,6 +5794,7 @@ impl RunoApp {
     }
 
     fn open_new_session(&mut self) {
+        signin::refresh(false);
         if self.view != View::NewSession {
             self.new_back = if self.view == View::Settings {
                 View::Session
@@ -5920,8 +5964,11 @@ impl RunoApp {
             }
             let caps = caps::get(p.id);
             let installed = installed_all[i];
+            let signed_out = installed && signin::get(p.id) == Some(false);
             let detail = if !installed {
                 "Not installed".to_string()
+            } else if signed_out {
+                "Not signed in".to_string()
             } else if caps.version.is_empty() {
                 "Installed".to_string()
             } else {
@@ -5976,7 +6023,13 @@ impl RunoApp {
                                 div()
                                     .truncate()
                                     .text_xs()
-                                    .text_color(rgb(if installed { c_muted() } else { c_red() }))
+                                    .text_color(rgb(if !installed {
+                                        c_red()
+                                    } else if signed_out {
+                                        c_amber()
+                                    } else {
+                                        c_muted()
+                                    }))
                                     .child(detail),
                             ),
                     )
@@ -8062,6 +8115,8 @@ impl Render for RunoApp {
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if this.tour.is_some() {
                     this.end_tour(cx);
+                } else if this.remove_copy.is_some() {
+                    this.remove_copy = None;
                 } else if this.install_confirm.is_some() {
                     this.install_confirm = None;
                 } else if this.project_form.is_some() {
@@ -8302,10 +8357,19 @@ impl Render for RunoApp {
                                                     .iter()
                                                     .map(|m| m.usage.cost_cents)
                                                     .sum();
-                                                (u, cost)
+                                                let reports = agent::reports_cost(&s.provider);
+                                                let about = if reports {
+                                                    format!("session cost ${:.2}", cost / 100.0)
+                                                } else {
+                                                    format!(
+                                                        "{} reports no cost, so spending limits don't count it",
+                                                        agent::provider(&s.provider).name
+                                                    )
+                                                };
+                                                (u, cost, reports, about)
                                             })
                                     }),
-                                |el, (usage, cost)| {
+                                |el, (usage, cost, reports, about)| {
                                     let window = if usage.window > 0 { usage.window } else { 200_000 };
                                     let pct = (usage.context() as f32 / window as f32).min(1.0);
                                     el.child(
@@ -8316,8 +8380,7 @@ impl Render for RunoApp {
                                             .gap(px(6.))
                                             .tooltip(move |window, cx| {
                                                 gpui_kit::component::tooltip::Tooltip::new(format!(
-                                                    "Context used by the latest turn · session cost ${:.2}",
-                                                    cost / 100.0
+                                                    "Context used by the latest turn · {about}"
                                                 ))
                                                 .build(window, cx)
                                             })
@@ -8342,7 +8405,8 @@ impl Render for RunoApp {
                                             .child(format!("{:.0}%", pct * 100.))
                                             .when(cost > 0.0, |el| {
                                                 el.child(format!("· ${:.2}", cost / 100.0))
-                                            }),
+                                            })
+                                            .when(!reports, |el| el.child("· no cost reported")),
                                     )
                                 },
                             )
@@ -8368,6 +8432,7 @@ impl Render for RunoApp {
             .children(palette)
             .children(self.ctx_menu_view(cx))
             .children(self.install_modal(cx))
+            .children(self.remove_copy_modal(cx))
             .children(self.project_modal(cx))
             .children(self.remove_project_modal(cx))
             .children(self.playbook_run_form(cx))
