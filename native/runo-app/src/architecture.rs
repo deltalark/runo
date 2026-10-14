@@ -1294,6 +1294,16 @@ impl ArchPage {
 impl RunoApp {
     /// Load the current project's notes and map, when the page shows another project.
     pub(crate) fn prepare_architecture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.all_scope() {
+            // The chooser shows each project's size, so map the ones not read yet.
+            let ids: Vec<u64> = self.state.projects.iter().map(|p| p.id).collect();
+            for id in ids {
+                if !self.arch.maps.contains_key(&id) {
+                    self.map_project(id);
+                }
+            }
+            return;
+        }
         let Some(project) = self
             .current_project()
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
@@ -1593,6 +1603,16 @@ impl RunoApp {
     }
 
     pub(crate) fn architecture_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.all_scope() {
+            return shell::mode_frame(
+                Mode::Architecture,
+                "Architecture",
+                Some(self.mode_project_chip(cx)),
+                "Pick a project to see its structure and notes.",
+                self.project_chooser(Mode::Architecture, cx),
+                None,
+            );
+        }
         let Some(project) = self
             .arch
             .project
@@ -1602,6 +1622,7 @@ impl RunoApp {
             return shell::mode_frame(
                 Mode::Architecture,
                 "Architecture",
+                None,
                 "See how the project fits together and keep its decisions.",
                 div().child(empty_hint(
                     "arch-empty",
@@ -1873,7 +1894,8 @@ impl RunoApp {
             );
         shell::mode_frame(
             Mode::Architecture,
-            &format!("Architecture · {}", project.name),
+            "Architecture",
+            Some(self.mode_project_chip(cx)),
             "The project's structure from its manifests and imports, notes and decisions kept in the repository, and agents that start with both.",
             body,
             None,
