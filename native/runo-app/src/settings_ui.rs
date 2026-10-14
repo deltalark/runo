@@ -689,7 +689,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Updates", "Runo looks for a newer release on GitHub and offers to download it. Nothing installs without you.", vec![
                 switch_row("Check for Runo updates", "Checks at start and every few hours.", st.check_runo_updates, |s, v| s.check_runo_updates = v),
-                row("Logs and crash reports", "Each launch writes a log, and crashes leave a report, in ~/.runo/logs.", Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
+                row("Logs and crash reports", &format!("Each launch writes a log, and crashes leave a report, in {}.", tilde(&crate::applog::logs_dir())), Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
             ]),
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
@@ -1108,7 +1108,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::Phone => phone_sections(st),
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
             row("Worktree folder", "Created next to each repository as .runo-worktrees/<repo>/<branch>.", Ctl::Chip(".runo-worktrees".into(), 3)),
-            row("Runo data", "Projects are saved in state.json and each session in its own file under sessions. Settings live next to them in settings.json.", Ctl::Chip("~/.runo".into(), 3)),
+            row("Runo data", "Projects are saved in state.json and each session in its own file under sessions. Settings live next to them in settings.json.", Ctl::Chip(tilde(&store::data_dir()), 3)),
         ])],
     }
 }
