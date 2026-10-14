@@ -58,6 +58,8 @@ mod terminal;
 mod tour;
 mod turns;
 mod updater;
+mod usage;
+mod usage_ui;
 mod workspace;
 
 use agent::{Event, Handle, Target};
@@ -1034,6 +1036,10 @@ impl RunoApp {
                 let idle_scan = ticks.is_multiple_of(200);
                 let pr_check = ticks % 1200 == 600;
                 let check = ticks % 1200 == 2;
+                // Ten seconds in, once agents are detected, then every five minutes: each agent's plan usage for the status bar.
+                if ticks % 6000 == 200 {
+                    usage::refresh(true);
+                }
                 let alive = this.update(cx, |this, cx| {
                     if check && !this.demo {
                         this.maybe_check_updates();
@@ -8392,6 +8398,7 @@ impl Render for RunoApp {
                             .items_center()
                             .gap_3()
                             .text_color(rgb(c_muted()))
+                            .children(self.usage_status(cx))
                             .when(running > 0, |el| {
                                 el.child(
                                     div()
