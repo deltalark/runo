@@ -4,6 +4,7 @@ mod alerts;
 mod applog;
 mod approvals;
 mod architecture;
+mod assistant;
 mod browser;
 mod browser_engine;
 mod caps;
@@ -130,6 +131,7 @@ actions!(
         ArchiveSession,
         ContextMenu,
         ShowTour,
+        AskRuno,
         Quit
     ]
 );
@@ -428,6 +430,8 @@ struct RunoApp {
     new_context: Option<shell::StartContext>,
     /// The Design and Architecture pages.
     design: design::DesignPage,
+    /// The Runo assistant in the corner, when turned on in Settings.
+    assistant: assistant::Assistant,
     arch: architecture::ArchPage,
     /// Each session's unsent prompt while another session is on screen, and the session
     /// whose text the composer holds now.
@@ -1180,6 +1184,7 @@ impl RunoApp {
             }
         });
         let (design, design_subs) = design::DesignPage::new(window, cx);
+        let (assistant, assistant_subs) = assistant::Assistant::new(window, cx);
         let (arch, arch_subs) = architecture::ArchPage::new(window, cx);
         let notes_input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -1422,6 +1427,7 @@ impl RunoApp {
             launch_images: HashMap::new(),
             new_context: None,
             design,
+            assistant,
             arch,
             drafts: HashMap::new(),
             draft_for: None,
@@ -1620,6 +1626,7 @@ impl RunoApp {
         });
         app._subscriptions.push(activation_sub);
         app._subscriptions.extend(design_subs);
+        app._subscriptions.extend(assistant_subs);
         app._subscriptions.extend(arch_subs);
         cx.set_global(MainApp(cx.entity().downgrade()));
         app.init_github(window, cx);
@@ -2587,6 +2594,16 @@ impl RunoApp {
                 .keywords(["welcome", "help", "guide", "onboarding"]),
         );
         command_jumps.push(Jump::Tour);
+        if Self::assistant_enabled(cx) {
+            commands = commands.item(
+                CommandItem::new()
+                    .label("Ask Runo")
+                    .icon(IconName::CircleQuestionMark)
+                    .keywords(["help", "assistant", "how do i", "question"])
+                    .action(Box::new(AskRuno)),
+            );
+            command_jumps.push(Jump::Action);
+        }
         groups.push((commands, command_jumps));
 
         let mut playbooks = CommandGroup::new().label("Playbooks");
@@ -8361,6 +8378,12 @@ impl Render for RunoApp {
             .v_flex()
             .key_context("Runo")
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &AskRuno, window, cx| {
+                if this.palette.is_some() {
+                    this.close_palette(window, cx);
+                }
+                this.toggle_assistant(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| {
                 this.open_palette(window, cx);
                 cx.notify();
@@ -8463,6 +8486,8 @@ impl Render for RunoApp {
                     this.switch_plan = None;
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
+                } else if this.assistant.open {
+                    this.close_assistant(window, cx);
                 } else if this.menu.is_some() || this.settings_menu.is_some() {
                     this.menu = None;
                     this.settings_menu = None;
@@ -8769,6 +8794,7 @@ impl Render for RunoApp {
                 ))
             })
             .children(self.alerts_view(cx))
+            .children(self.assistant_view(cx))
             .children(self.switch_modal(cx))
             .children(palette)
             .children(self.ctx_menu_view(cx))

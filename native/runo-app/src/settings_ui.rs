@@ -90,7 +90,7 @@ impl SettingsPage {
 
     fn subtitle(self) -> &'static str {
         match self {
-            Self::General => "Alerts, the built-in browser, motion and how deleting works.",
+            Self::General => "Alerts, the built-in browser, the Runo assistant, motion and how deleting works.",
             Self::Appearance => "Theme, glass, fonts and how wide conversations run.",
             Self::Terminal => "Text size, font, scrolling and mouse behavior in the terminal panel and agent CLIs.",
             Self::Keybindings => "The shortcuts Runo responds to. ⌘ on macOS, Ctrl elsewhere. Inside a terminal on Linux and Windows, add Shift (Ctrl+Shift+K), or press Esc twice to leave it.",
@@ -659,6 +659,10 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::General => vec![
             section("Getting started", "A one-minute walk through the window and what each part does.", vec![
                 row("Welcome tour", "Highlights each part of Runo with a short explanation. Also in the palette as Take the tour.", Ctl::Button("Take the tour".into(), Rc::new(|this, _| this.start_tour()))),
+            ]),
+            section("Runo assistant", "A Runo mark in the corner of the window that answers questions about Runo from its built-in guide. It never changes anything.", vec![
+                switch_row("Show the Runo assistant", "Click the mark or press the Ask Runo shortcut, then ask how to do something. Off, the mark is hidden.", st.assistant, |s, v| s.assistant = v),
+                row("Answers with", "Your default agent writes answers from the guide on a fast model, and it counts toward usage. Guide only answers offline with the best matching article.", Ctl::Dropdown(options(&[("agent", "Default agent"), ("guide", "Guide only")]), st.assistant_answers.clone(), Rc::new(|s, v| s.assistant_answers = v))),
             ]),
             section("Browser", "Show pages in the Browser tab with a headless copy of the Chrome, Edge, Brave or Chromium on this machine, using its own profile.", vec![
                 switch_row("Built-in browser", "Adds the Browser tab: open your dev server beside the conversation and click and type in it. Off, the tab is hidden.", st.browser_enabled, |s, v| s.browser_enabled = v),

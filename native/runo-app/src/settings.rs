@@ -156,6 +156,10 @@ pub struct AppSettings {
     /// Let the phone bridge listen on every network, over plain HTTP, instead of only
     /// Tailscale or this computer.
     pub phone_everywhere: bool,
+    /// Show the Runo assistant in the corner of the window. Off until turned on.
+    pub assistant: bool,
+    /// Who writes its answers: "agent" (the default agent on a fast model) or "guide".
+    pub assistant_answers: String,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -229,6 +233,8 @@ impl Default for AppSettings {
             check_runo_updates: true,
             phone_bridge: false,
             phone_everywhere: false,
+            assistant: false,
+            assistant_answers: "agent".into(),
         }
     }
 }

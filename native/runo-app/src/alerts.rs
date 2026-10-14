@@ -1229,7 +1229,7 @@ impl RunoApp {
     }
 
     /// Sessions waiting on the person, except the one already on screen.
-    fn waiting_sessions(&self) -> Vec<(u64, usize, Waiting)> {
+    pub(crate) fn waiting_sessions(&self) -> Vec<(u64, usize, Waiting)> {
         let on_screen = (self.view == View::Session)
             .then_some(self.selected)
             .flatten();
@@ -1245,7 +1245,7 @@ impl RunoApp {
 
     /// The popups in the corner of the window.
     pub(crate) fn alerts_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.demo || self.view == View::Settings || self.tour.is_some() {
+        if self.demo || self.view == View::Settings || self.tour.is_some() || self.assistant.open {
             return None;
         }
         let mut cards: Vec<AnyElement> = Vec::new();
@@ -1602,7 +1602,8 @@ impl RunoApp {
         let mut stack = div()
             .absolute()
             .right_4()
-            .bottom(px(36.))
+            // Above the Runo assistant's mark when it is shown.
+            .bottom(px(if self.assistant_shown(cx) { 96. } else { 36. }))
             .w(px(380.))
             .max_w(relative(0.9))
             .v_flex()

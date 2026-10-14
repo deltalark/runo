@@ -12,7 +12,7 @@ pub(crate) struct Shortcut {
     pub default: &'static [&'static str],
 }
 
-pub(crate) const SHORTCUTS: [Shortcut; 24] = [
+pub(crate) const SHORTCUTS: [Shortcut; 25] = [
     Shortcut {
         id: "quick-open",
         title: "Quick open",
@@ -157,6 +157,12 @@ pub(crate) const SHORTCUTS: [Shortcut; 24] = [
         desc: "Open the right-click menu of the highlighted or open session.",
         default: &["shift-f10"],
     },
+    Shortcut {
+        id: "ask-runo",
+        title: "Ask Runo",
+        desc: "Open the Runo assistant, when it is turned on in Settings > General.",
+        default: &["secondary-j"],
+    },
 ];
 
 /// Shortcuts the text boxes and the system already use.
@@ -204,6 +210,7 @@ fn binding_in(id: &str, keys: &str, context: &str) -> Option<KeyBinding> {
         "focus-composer" => KeyBinding::new(keys, FocusComposer, context),
         "archive" => KeyBinding::new(keys, ArchiveSession, context),
         "context-menu" => KeyBinding::new(keys, ContextMenu, context),
+        "ask-runo" => KeyBinding::new(keys, AskRuno, context),
         _ => return None,
     })
 }
