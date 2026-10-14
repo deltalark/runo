@@ -1049,6 +1049,9 @@ impl RunoApp {
 
     /// Results of one-off background commands.
     pub(crate) fn handle_output(&mut self, key: String, result: Result<String, String>) {
+        if key.starts_with("assistant:") {
+            return self.assistant_reply(key, result);
+        }
         if key.starts_with("commit-msg:") {
             self.writing_commit = false;
             match result {
