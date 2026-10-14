@@ -1371,7 +1371,15 @@ mod tests {
         // Turning the bridge off frees the port.
         stop.store(true, Ordering::Relaxed);
         server.join().unwrap();
-        assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+        // The last request's handler can hold its socket for a moment after the
+        // listener closes (macOS refuses the bind until it does).
+        let freed = (0..50).any(|_| {
+            TcpListener::bind(("127.0.0.1", port)).is_ok() || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            }
+        });
+        assert!(freed, "the port is still taken after stopping");
     }
 
     #[test]
