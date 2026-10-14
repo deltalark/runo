@@ -22,16 +22,6 @@ first and goes through `relay` when it can't reach it.
 
 ## Reaching your computer from anywhere
 
-Runo doesn't run a server for this; you pick one of these:
-
-- **Tailscale** (simplest, no server): install it on your computer and phone, then pair with
-  the computer's Tailscale address, such as `runo --phone 100.x.y.z:7631`.
-- **Your own relay**, below, if you already have a VPS or a Cove server.
-- **Cloudflare Tunnel** to the bridge's port, which gives it an HTTPS address without a
-  server of your own, with Cloudflare in the middle of the traffic.
-
-### Your own relay
-
 Run the relay on a server you control (a small VPS or a Cove server), behind HTTPS:
 
 ```sh
