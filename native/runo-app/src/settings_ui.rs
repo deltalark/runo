@@ -2519,7 +2519,15 @@ impl RunoApp {
             .size_full()
             .flex()
             .child(nav)
-            .child(main)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .bg(glass_fill(c_canvas()))
+                    .child(main),
+            )
             .into_any_element()
     }
 }

@@ -385,7 +385,20 @@ impl RunoApp {
     }
 
     /// Show `url` in the panel, in the selected session's page.
+    /// Open the Browser tab and show it.
+    pub(crate) fn show_browser(&mut self) {
+        if !self.browser_open {
+            self.scan_ports();
+        }
+        self.browser_open = true;
+        self.browser_main = true;
+        if self.view != View::Session && self.current().is_some() {
+            self.view = View::Session;
+        }
+    }
+
     pub(crate) fn open_in_panel(&mut self, url: String, cx: &mut Context<Self>) {
+        self.show_browser();
         self.remember_url(&url);
         let Some(engine) = self.engine() else {
             cx.notify();
@@ -419,10 +432,8 @@ impl RunoApp {
             return;
         };
         let key = self.browser_key();
-        let shown = self.design_page_key().is_some()
-            || (self.right_tab == RightTab::Browser
-                && self.show_panel
-                && self.view == View::Session);
+        let shown =
+            self.design_page_key().is_some() || (self.browser_main && self.view == View::Session);
         let visible = shown
             && self.browser_view.pages.contains(&key)
             && cx.global::<AppSettings>().browser_enabled;

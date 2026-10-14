@@ -15,6 +15,57 @@ pub struct GhItem {
     pub state: String,
 }
 
+/// Why GitHub can't be shown for a project at all, each with its own way out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GhBlock {
+    /// The project folder is not a git repository.
+    NoGit,
+    /// A git repository with no GitHub remote.
+    NoRemote,
+    /// The GitHub CLI is not installed.
+    NoCli,
+    /// The GitHub CLI is not signed in.
+    SignedOut,
+}
+
+impl GhBlock {
+    /// The block a failed `gh` call means, when it stops every list rather than one.
+    pub fn from_error(first: &str) -> Option<Self> {
+        if first.contains("could not start") {
+            Some(Self::NoCli)
+        } else if first.contains("not a git repository") {
+            Some(Self::NoGit)
+        } else if first.contains("none of the git remotes") || first.contains("no git remotes") {
+            Some(Self::NoRemote)
+        } else if first.contains("auth login") || first.contains("not logged") {
+            Some(Self::SignedOut)
+        } else {
+            None
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::NoGit => "This project isn't a git repository yet",
+            Self::NoRemote => "This project isn't on GitHub yet",
+            Self::NoCli => "Install the GitHub CLI",
+            Self::SignedOut => "Sign in to GitHub",
+        }
+    }
+
+    fn body(self) -> &'static str {
+        match self {
+            Self::NoGit => "Pull requests, issues and checks show up here once the project is in git and on GitHub. An agent can set up both, and asks you before it publishes anything.",
+            Self::NoRemote => "Publish it to GitHub to see its pull requests, issues and checks here. An agent can create the repository and push, and asks you first whether it should be private.",
+            Self::NoCli => "Runo reads GitHub through gh. Install it, run gh auth login in the Terminal, then refresh.",
+            Self::SignedOut => "Run gh auth login in the Terminal, then refresh.",
+        }
+    }
+}
+
+/// What an agent is asked to do to put a project on GitHub.
+const SETUP_TASK: &str = "Put this project on GitHub. If the folder is not a git repository, run git init, add a .gitignore that fits the project, and make a first commit. Then ask me whether the GitHub repository should be private or public and what to name it, and only after I answer, create it with gh repo create --source . --push. Tell me the repository's URL when it is done.";
+
 #[derive(Default)]
 pub struct GhData {
     pub project: u64,
@@ -24,8 +75,8 @@ pub struct GhData {
     pub issues: Vec<GhItem>,
     pub runs: Vec<GhItem>,
     pub loading: usize,
-    /// Why the whole page is unavailable (no gh, not signed in, no GitHub remote).
-    pub error: Option<String>,
+    /// Why the whole page is unavailable (no git, no GitHub remote, no gh, signed out).
+    pub error: Option<GhBlock>,
     /// Errors of single lists, by list ("prs", "issues", "runs"); the others still show.
     pub errors: HashMap<&'static str, String>,
     pub filter: GhFilter,
@@ -591,6 +642,12 @@ impl RunoApp {
         for list in lists {
             self.gh.errors.remove(list);
         }
+        // Without git, gh can only fail, once per list; say it once instead.
+        if !git::is_repo(&project.path) {
+            self.gh.error = Some(GhBlock::NoGit);
+            self.gh.loading = 0;
+            return;
+        }
         self.gh.loading += lists.len();
         // Each list is keyed by project, so a late answer for another project is dropped.
         for &list in lists {
@@ -660,21 +717,9 @@ impl RunoApp {
             Err(error) => {
                 let first = error.lines().next().unwrap_or("").to_string();
                 // These stop every list; anything else stays with its own list.
-                let whole = if first.contains("could not start") {
-                    Some(
-                        "The GitHub CLI (gh) is not installed. Install it, then run gh auth login.",
-                    )
-                } else if first.contains("none of the git remotes")
-                    || first.contains("no git remotes")
-                {
-                    Some("This project has no GitHub remote. Push it to GitHub to see its pull requests, issues and runs here.")
-                } else if first.contains("auth login") || first.contains("not logged") {
-                    Some("Sign in to GitHub first: run gh auth login in the Terminal.")
-                } else {
-                    None
-                };
+                let whole = GhBlock::from_error(&first);
                 match whole {
-                    Some(why) => self.gh.error = Some(why.into()),
+                    Some(block) => self.gh.error = Some(block),
                     None => {
                         self.gh.errors.insert(list, first);
                     }
@@ -952,7 +997,7 @@ impl RunoApp {
                 })),
         );
         let filter = &self.gh.filter;
-        let mut filters = div().flex().flex_wrap().items_center().gap_2();
+        let mut states = segmented();
         for (i, (label, state)) in [
             ("Open", "open"),
             ("Merged", "merged"),
@@ -962,35 +1007,43 @@ impl RunoApp {
         .into_iter()
         .enumerate()
         {
-            filters = filters.child(
-                self.chip(("gh-state", i), label.into(), filter.state == state)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+            states = states.child(
+                segment(("gh-state", i), label, filter.state == state).on_click(cx.listener(
+                    move |this, _, _, cx| {
                         this.gh.filter.state = state;
                         this.gh.filter.prs_limit = PAGE;
                         this.gh.filter.issues_limit = PAGE;
                         this.fetch_github(&["prs", "issues"]);
                         cx.notify();
-                    })),
+                    },
+                )),
             );
         }
-        filters = filters.child(
-            self.chip(
-                ("gh-requested", 0),
-                "Review requested".into(),
-                filter.review_requested,
+        let mut filters = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(states)
+            .child(
+                self.chip(
+                    ("gh-requested", 0),
+                    "Review requested".into(),
+                    filter.review_requested,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gh.filter.review_requested = !this.gh.filter.review_requested;
+                    this.gh.filter.prs_limit = PAGE;
+                    this.fetch_github(&["prs"]);
+                    cx.notify();
+                })),
             )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.gh.filter.review_requested = !this.gh.filter.review_requested;
-                this.gh.filter.prs_limit = PAGE;
-                this.fetch_github(&["prs"]);
-                cx.notify();
-            })),
-        );
+            .child(div().flex_1());
         if let Some(author) = &self.gh.author {
             filters = filters.child(
                 div()
-                    .w(px(170.))
-                    .child(Input::new(author).bordered(true).h(px(28.))),
+                    .w(px(180.))
+                    .child(Input::new(author).bordered(true).h(px(30.))),
             );
         }
         // Agents still being detected stay listed until Runo knows they're missing.
@@ -999,26 +1052,32 @@ impl RunoApp {
         } else {
             self.gh.provider.clone()
         };
-        let mut agents = div().flex().flex_wrap().items_center().gap_2().child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(c_muted()))
-                .child("Sessions start with"),
-        );
+        let mut picker = segmented();
         for (i, p) in agent::PROVIDERS.iter().enumerate() {
             let caps = caps::get(p.id);
             if p.id != chosen && caps.detected && !caps.installed {
                 continue;
             }
             let id = p.id;
-            agents = agents.child(
-                self.chip(("gh-agent", i), p.name.into(), p.id == chosen)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.gh.provider = id.to_string();
-                        cx.notify();
-                    })),
-            );
+            picker = picker.child(segment(("gh-agent", i), p.name, p.id == chosen).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.gh.provider = id.to_string();
+                    cx.notify();
+                }),
+            ));
         }
+        let agents = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .child("Review and Start session use"),
+            )
+            .child(picker);
         let more = |list: &'static str, shown: usize, limit: usize, cx: &mut Context<Self>| {
             (shown >= limit).then(|| {
                 self.button(("gh-more", (list == "issues") as usize), "Load more", false)
@@ -1132,32 +1191,23 @@ impl RunoApp {
                     .into_any_element()
             })
         };
+        let blocked = self.gh.error.map(|block| self.gh_blocked(block, cx));
         self.page(
-            "Reviews",
-            div()
-                .v_flex()
-                .gap_2()
-                .child(chips)
-                .child(filters)
-                .child(agents)
-                .when_some(self.gh.error.clone(), |el, error| {
-                    el.child(empty_hint(
-                        "gh-error",
-                        IconName::GitPullRequest,
-                        "GitHub is not available for this project",
-                        &error,
-                    ))
-                })
-                .when(self.gh.loading > 0, |el| {
-                    el.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_muted()))
-                            .child("Loading from GitHub…"),
-                    )
-                })
-                .when(self.gh.error.is_none(), |el| {
-                    el.child(section("PULL REQUESTS", self.gh.prs.len()))
+            "GitHub",
+            div().v_flex().gap_3().child(chips).children(blocked).when(
+                self.gh.error.is_none(),
+                |el| {
+                    el.child(filters)
+                        .child(agents)
+                        .when(self.gh.loading > 0, |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(c_muted()))
+                                    .child("Loading from GitHub…"),
+                            )
+                        })
+                        .child(section("PULL REQUESTS", self.gh.prs.len()))
                         .child(failed("prs").unwrap_or_else(|| {
                             if self.gh.prs.is_empty() {
                                 empty("No pull requests match.").into_any_element()
@@ -1181,9 +1231,117 @@ impl RunoApp {
                                 runs.into_any_element()
                             }
                         }))
-                }),
+                },
+            ),
         )
     }
+
+    /// The page when GitHub can't be shown for the project: what is missing and the
+    /// way to fix it, in place of the lists and their filters.
+    fn gh_blocked(&self, block: GhBlock, cx: &mut Context<Self>) -> AnyElement {
+        let refresh = self
+            .button("gh-blocked-refresh", "Refresh", false)
+            .child(icon(IconName::RefreshCw, 12., c_secondary()))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.load_github();
+                cx.notify();
+            }));
+        let actions = div().flex().items_center().justify_center().gap_2();
+        let actions = match block {
+            GhBlock::NoGit | GhBlock::NoRemote => actions
+                .child(
+                    self.button(
+                        "gh-setup",
+                        if block == GhBlock::NoGit {
+                            "Set it up with an agent"
+                        } else {
+                            "Publish with an agent"
+                        },
+                        true,
+                    )
+                    .child(icon(IconName::Sparkles, 12., c_canvas()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.start_from_github(SETUP_TASK.to_string(), None, cx);
+                        cx.notify();
+                    })),
+                )
+                .when(block == GhBlock::NoGit, |el| {
+                    el.child(
+                        self.button("gh-git-init", "Only run git init", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(project) = this.gh_project() {
+                                    let done = std::process::Command::new("git")
+                                        .arg("init")
+                                        .current_dir(&project.path)
+                                        .output();
+                                    if !done.is_ok_and(|o| o.status.success()) {
+                                        this.notice = Some(
+                                            "Runo couldn't run git init in this folder.".into(),
+                                        );
+                                    }
+                                }
+                                this.load_github();
+                                cx.notify();
+                            })),
+                    )
+                }),
+            GhBlock::NoCli => actions
+                .child(
+                    self.button("gh-get-cli", "Get the GitHub CLI", true)
+                        .child(icon(IconName::ExternalLink, 12., c_canvas()))
+                        .on_click(cx.listener(|_, _, _, cx| cx.open_url("https://cli.github.com"))),
+                )
+                .child(refresh),
+            GhBlock::SignedOut => actions.child(refresh),
+        };
+        div()
+            .mt_2()
+            .pb_8()
+            .v_flex()
+            .items_center()
+            .rounded_lg()
+            .border_1()
+            .border_color(divider())
+            .child(empty_hint(
+                "gh-blocked",
+                IconName::GitPullRequest,
+                block.title(),
+                block.body(),
+            ))
+            // The hint keeps generous space below its text; pull the buttons up to it.
+            .child(actions.mt(px(-20.)))
+            .into_any_element()
+    }
+}
+
+/// A row of connected choices, one of them on, like Home's project scope.
+fn segmented() -> Div {
+    div()
+        .flex()
+        .flex_none()
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(c_border()))
+}
+
+fn segment(id: (&'static str, usize), label: &'static str, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(26.))
+        .px_3()
+        .flex()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .when(on, |el| el.bg(tint(c_active())).text_color(rgb(c_text())))
+        .when(!on, |el| {
+            el.text_color(rgb(c_secondary()))
+                .hover(|el| el.bg(tint(c_subtle())))
+        })
+        .child(label)
 }
 
 #[cfg(test)]
@@ -1191,6 +1349,22 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn whole_page_errors_name_their_fix() {
+        let no_git = "failed to run git: fatal: not a git repository (or any of the parent directories): .git";
+        assert_eq!(GhBlock::from_error(no_git), Some(GhBlock::NoGit));
+        let base = "failed to determine base repo: failed to run git: fatal: not a git repository";
+        assert_eq!(GhBlock::from_error(base), Some(GhBlock::NoGit));
+        let remote =
+            "none of the git remotes configured for this repository point to a known GitHub host";
+        assert_eq!(GhBlock::from_error(remote), Some(GhBlock::NoRemote));
+        assert_eq!(
+            GhBlock::from_error("To get started with GitHub CLI, please run:  gh auth login"),
+            Some(GhBlock::SignedOut)
+        );
+        assert_eq!(GhBlock::from_error("HTTP 502: Bad Gateway"), None);
+    }
 
     #[test]
     fn parses_gh_json() {

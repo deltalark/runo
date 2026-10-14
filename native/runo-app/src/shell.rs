@@ -16,9 +16,12 @@ pub(crate) enum Mode {
     Sessions,
     Design,
     Architecture,
+    Review,
+    GitHub,
     Playbooks,
-    Reviews,
+    History,
     Inbox,
+    Notes,
     Settings,
 }
 
@@ -27,11 +30,14 @@ impl Mode {
     pub(crate) const MAIN: [Mode; 6] = [
         Mode::Home,
         Mode::Sessions,
-        Mode::Design,
-        Mode::Architecture,
+        Mode::Review,
+        Mode::GitHub,
         Mode::Playbooks,
-        Mode::Reviews,
+        Mode::History,
     ];
+
+    /// The modes for deciding what to build, below the main ones; ⌘7 and ⌘8.
+    pub(crate) const PLAN: [Mode; 2] = [Mode::Design, Mode::Architecture];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -39,9 +45,12 @@ impl Mode {
             Mode::Sessions => "Sessions",
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
+            Mode::Review => "Review",
+            Mode::GitHub => "GitHub",
             Mode::Playbooks => "Playbooks",
-            Mode::Reviews => "Reviews",
+            Mode::History => "History",
             Mode::Inbox => "Inbox",
+            Mode::Notes => "Notes",
             Mode::Settings => "Settings",
         }
     }
@@ -53,9 +62,13 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
+            Mode::Review => "go-review",
+            // Kept under its old name so shortcuts people changed still apply.
+            Mode::GitHub => "go-reviews",
             Mode::Playbooks => "go-playbooks",
-            Mode::Reviews => "go-reviews",
+            Mode::History => "go-history",
             Mode::Inbox => "go-inbox",
+            Mode::Notes => "go-notes",
             Mode::Settings => "settings",
         }
     }
@@ -66,9 +79,12 @@ impl Mode {
             Mode::Sessions => IconName::CodeXml,
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
+            Mode::Review => IconName::GitCompare,
+            Mode::GitHub => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
-            Mode::Reviews => IconName::GitPullRequest,
+            Mode::History => IconName::RotateCcwClock,
             Mode::Inbox => IconName::Inbox,
+            Mode::Notes => IconName::NotebookPen,
             Mode::Settings => IconName::Settings,
         }
     }
@@ -80,15 +96,16 @@ impl Mode {
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
-            View::GitHub => Mode::Reviews,
+            View::Review => Mode::Review,
+            View::GitHub => Mode::GitHub,
+            View::History => Mode::History,
             View::Inbox => Mode::Inbox,
+            View::Notes => Mode::Notes,
             View::Settings => Mode::Settings,
             View::Session
             | View::NewSession
             | View::AllSessions
-            | View::History
             | View::Worktrees
-            | View::Notes
             | View::Activity
             | View::Editor => Mode::Sessions,
         }
@@ -257,9 +274,12 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
+            Mode::Review => self.open_review(),
+            Mode::GitHub => self.load_github(),
             Mode::Playbooks => self.view = View::Automations,
-            Mode::Reviews => self.load_github(),
+            Mode::History => self.open_history(cx),
             Mode::Inbox => self.view = View::Inbox,
+            Mode::Notes => self.open_notes(window, cx),
             Mode::Settings => self.open_settings(),
         }
         self.save();
@@ -546,7 +566,6 @@ impl RunoApp {
 
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let counts = self.counts();
-        let inbox = counts.needs_you + self.gh.needs_you();
         let mut top = div()
             .v_flex()
             .items_center()
@@ -554,15 +573,22 @@ impl RunoApp {
             .relative()
             .child(tour::anchor(&self.anchors, "nav"));
         for mode in Mode::MAIN {
-            // Amber: something there needs you. Blue: agents are working.
+            // Amber: something there needs you. Blue: agents are working, or work waits
+            // to be reviewed.
             let badge = match mode {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
-                Mode::Reviews if self.gh.needs_you() > 0 => Some(c_amber()),
+                Mode::Review if counts.review > 0 => Some(c_blue()),
+                Mode::GitHub if self.gh.needs_you() > 0 => Some(c_amber()),
                 _ => None,
             };
             top = top.child(self.rail_item(mode, badge, cx));
         }
+        top = top.child(div().my_1().w(px(22.)).h(px(1.)).bg(divider()));
+        for mode in Mode::PLAN {
+            top = top.child(self.rail_item(mode, None, cx));
+        }
+        // The Inbox opens from the bell in the top bar, so the rail doesn't repeat it.
         div()
             .w(px(RAIL_WIDTH))
             .flex_none()
@@ -580,7 +606,7 @@ impl RunoApp {
                     .v_flex()
                     .items_center()
                     .gap_1()
-                    .child(self.rail_item(Mode::Inbox, (inbox > 0).then_some(c_amber()), cx))
+                    .child(self.rail_item(Mode::Notes, None, cx))
                     .child(
                         div()
                             .relative()
@@ -752,7 +778,7 @@ impl RunoApp {
             .map(|s| s.id)
             .max();
         match (self.mode(), latest) {
-            (Mode::Reviews, _) => self.load_github(),
+            (Mode::GitHub, _) => self.load_github(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
                 self.view = View::Home;
@@ -943,133 +969,146 @@ impl RunoApp {
             .border_color(divider())
             .bg(pane(c_sidebar()))
             .window_control_area(WindowControlArea::Drag)
-            .when(mode == Mode::Sessions, |el| {
-                el.child(
-                    self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.show_sidebar = !this.show_sidebar;
-                            this.save();
-                            cx.notify();
-                        })),
-                )
-            })
+            // Three zones: the two sides share what the search box leaves, so the box
+            // sits in the middle of the window on every page instead of moving with the
+            // breadcrumb's length.
             .child(
                 div()
-                    .relative()
-                    .flex_none()
-                    .child(
-                        div()
-                            .id("project-switch")
-                            .h(px(30.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .when(menu_open, |el| el.bg(tint(c_active())))
-                            .hover(|el| el.bg(tint(c_subtle())))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = if this.menu.as_deref() == Some("project-switch") {
-                                    None
-                                } else {
-                                    Some("project-switch".into())
-                                };
-                                cx.notify();
-                            }))
-                            .when_some(project, |el, p| el.child(project_mark(p, 20.)))
-                            .child(div().max_w(px(200.)).truncate().child(
-                                project.map_or("No project".to_string(), |p| p.name.clone()),
-                            ))
-                            .child(icon(IconName::ChevronDown, 12., c_muted())),
-                    )
-                    .when(menu_open, |el| el.child(self.project_menu(cx))),
-            )
-            .when_some(branch, |el, (sid, branch)| {
-                el.child(
-                    div()
-                        .id("top-branch")
-                        .h(px(24.))
-                        .px(px(7.))
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(5.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(c_border()))
-                        .text_size(px(12.))
-                        .text_color(rgb(c_secondary()))
-                        .cursor_pointer()
-                        .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
-                        .tooltip(|window, cx| {
-                            Tooltip::new("Branch: changes, terminal, worktrees").build(window, cx)
-                        })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            self.on_context(ctxmenu::CtxTarget::Branch(sid), cx),
-                        )
-                        .child(icon(IconName::GitBranch, 12., c_muted()))
-                        .child(div().max_w(px(180.)).truncate().child(branch)),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .flex_shrink(1.)
+                    .flex_1()
                     .min_w_0()
+                    .h_full()
+                    .flex()
                     .items_center()
-                    .gap_1()
-                    .text_size(px(12.5))
-                    .text_color(rgb(c_secondary()))
-                    .child(icon(IconName::ChevronRight, 12., c_muted()))
+                    .gap_2()
+                    .overflow_hidden()
+                    .when(mode == Mode::Sessions, |el| {
+                        el.child(
+                            self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_sidebar = !this.show_sidebar;
+                                    this.save();
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .child(
                         div()
-                            .id("crumb-mode")
+                            .relative()
                             .flex_none()
-                            .px_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                // The mode's own top page: Sessions lists every session.
-                                if mode == Mode::Sessions {
-                                    this.view = View::AllSessions;
-                                    this.save();
-                                } else {
-                                    this.go(mode, window, cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child(mode.label()),
+                            .child(
+                                div()
+                                    .id("project-switch")
+                                    .h(px(30.))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .when(menu_open, |el| el.bg(tint(c_active())))
+                                    .hover(|el| el.bg(tint(c_subtle())))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.menu = if this.menu.as_deref() == Some("project-switch") {
+                                            None
+                                        } else {
+                                            Some("project-switch".into())
+                                        };
+                                        cx.notify();
+                                    }))
+                                    .when_some(project, |el, p| el.child(project_mark(p, 20.)))
+                                    .child(div().max_w(px(200.)).truncate().child(
+                                        project.map_or("No project".to_string(), |p| p.name.clone()),
+                                    ))
+                                    .child(icon(IconName::ChevronDown, 12., c_muted())),
+                            )
+                            .when(menu_open, |el| el.child(self.project_menu(cx))),
                     )
-                    .when_some(crumb, |el, title| {
-                        el.child(icon(IconName::ChevronRight, 12., c_muted())).child(
+                    .when_some(branch, |el, (sid, branch)| {
+                        el.child(
                             div()
-                                .id("crumb-session")
-                                .min_w_0()
-                                .max_w(px(220.))
-                                .truncate()
-                                .px_1()
-                                .rounded_sm()
+                                .id("top-branch")
+                                .h(px(24.))
+                                .px(px(7.))
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap(px(5.))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(c_border()))
+                                .text_size(px(12.))
+                                .text_color(rgb(c_secondary()))
                                 .cursor_pointer()
-                                .text_color(rgb(c_text()))
-                                .hover(|el| el.bg(tint(c_subtle())))
+                                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
                                 .tooltip(|window, cx| {
-                                    Tooltip::new("Rename this session").build(window, cx)
+                                    Tooltip::new("Branch: changes, terminal, worktrees").build(window, cx)
                                 })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.start_rename(window, cx);
-                                    cx.notify();
-                                }))
-                                .child(title),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    self.on_context(ctxmenu::CtxTarget::Branch(sid), cx),
+                                )
+                                .child(icon(IconName::GitBranch, 12., c_muted()))
+                                .child(div().max_w(px(180.)).truncate().child(branch)),
                         )
-                    }),
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink(1.)
+                            .min_w_0()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_secondary()))
+                            .child(icon(IconName::ChevronRight, 12., c_muted()))
+                            .child(
+                                div()
+                                    .id("crumb-mode")
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        // The mode's own top page: Sessions lists every session.
+                                        if mode == Mode::Sessions {
+                                            this.view = View::AllSessions;
+                                            this.save();
+                                        } else {
+                                            this.go(mode, window, cx);
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(mode.label()),
+                            )
+                            .when_some(crumb, |el, title| {
+                                el.child(icon(IconName::ChevronRight, 12., c_muted())).child(
+                                    div()
+                                        .id("crumb-session")
+                                        .min_w_0()
+                                        .max_w(px(220.))
+                                        .truncate()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .cursor_pointer()
+                                        .text_color(rgb(c_text()))
+                                        .hover(|el| el.bg(tint(c_subtle())))
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new("Rename this session").build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.start_rename(window, cx);
+                                            cx.notify();
+                                        }))
+                                        .child(title),
+                                )
+                            }),
+                    )
             )
             .child(
-                div().flex_1().min_w_0().flex().justify_center().child(
+                div().flex_shrink(1.).min_w(px(160.)).flex().justify_center().child(
                     div()
                         .id("top-search")
                         .relative()
@@ -1116,8 +1155,9 @@ impl RunoApp {
             )
             .child(
                 div()
+                    .flex_1()
                     .flex()
-                    .flex_none()
+                    .justify_end()
                     .items_center()
                     .gap(px(6.))
                     .child(
@@ -1343,7 +1383,8 @@ impl RunoApp {
                 continue;
             };
             let provider = agent::provider(&session.provider);
-            let active = self.selected == Some(id) && self.view == View::Session;
+            let active =
+                self.selected == Some(id) && self.view == View::Session && !self.browser_main;
             let working = self.handles.contains_key(&Target::Session(id));
             let dot = match self.need(session) {
                 _ if working => Some(c_blue()),
@@ -1356,7 +1397,8 @@ impl RunoApp {
                 id,
                 title: session.title.clone().into(),
             };
-            tabs = tabs.child(
+            tabs = tabs.child(tab_slot(
+                active,
                 div()
                     .id(("tab", id as usize))
                     .on_mouse_down(
@@ -1371,29 +1413,15 @@ impl RunoApp {
                         cx.notify();
                     }))
                     .group("tab")
-                    .h(px(28.))
-                    .mb(px(3.))
-                    .mr_1()
                     .flex_none()
                     .w(px(180.))
                     .px_3()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(transparent_black())
                     .cursor_pointer()
                     .text_size(px(12.5))
-                    .when(active, |el| {
-                        el.bg(glass_fill(c_canvas()))
-                            .text_color(rgb(c_text()))
-                            .border_color(divider())
-                    })
-                    .when(!active, |el| {
-                        el.text_color(rgb(c_secondary()))
-                            .hover(|el| el.bg(tint(c_subtle())))
-                    })
+                    .map(|el| tab_shape(el, active))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.select(id);
                         cx.notify();
@@ -1431,7 +1459,49 @@ impl RunoApp {
                                 None => icon(IconName::X, 11., c_muted()).into_any_element(),
                             }),
                     ),
-            );
+            ));
+        }
+        if self.browser_open {
+            let active = self.browser_main && self.view == View::Session;
+            tabs = tabs.child(tab_slot(
+                active,
+                div()
+                    .id("tab-browser")
+                    .group("tab")
+                    .flex_none()
+                    .w(px(140.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .map(|el| tab_shape(el, active))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_browser();
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::Globe, 12., c_secondary()))
+                    .child(div().flex_1().min_w_0().truncate().child("Browser"))
+                    .child(
+                        div()
+                            .id("tab-browser-x")
+                            .size(px(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .hover(|el| el.bg(rgb(c_border())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.browser_open = false;
+                                this.browser_main = false;
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::X, 11., c_muted())),
+                    ),
+            ));
         }
         let (added, removed) = self
             .changes
@@ -1444,11 +1514,10 @@ impl RunoApp {
             .flex_none()
             .flex()
             .items_end()
-            .gap_2()
-            .px_2()
-            .border_b_1()
-            .border_color(divider())
             .bg(pane(c_sidebar()))
+            // Every part of the strip draws its own bottom edge except the open tab, which
+            // runs straight into the page below.
+            .child(strip_edge(div().w(px(8.))))
             .child(
                 div()
                     .flex_1()
@@ -1456,12 +1525,12 @@ impl RunoApp {
                     .h_full()
                     .flex()
                     .items_end()
-                    .child(tabs.relative().child(tour::anchor(&self.anchors, "tabs"))),
+                    .child(tabs.relative().child(tour::anchor(&self.anchors, "tabs")))
+                    .child(strip_edge(div().flex_1())),
             )
             .when(show_stats, |el| {
                 el.child(
-                    div()
-                        .h_full()
+                    strip_edge(div())
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1474,8 +1543,7 @@ impl RunoApp {
             })
             .when(self.tabs.len() > 1, |el| {
                 el.child(
-                    div()
-                        .h_full()
+                    strip_edge(div())
                         .flex()
                         .items_center()
                         .relative()
@@ -1499,6 +1567,7 @@ impl RunoApp {
                         .when(menu_open, |el| el.child(self.tabs_menu(cx))),
                 )
             })
+            .child(strip_edge(div().w(px(8.))))
     }
 
     // ---------- Home ----------
@@ -1566,7 +1635,16 @@ impl RunoApp {
                 self.on_context(ctxmenu::CtxTarget::Session(id), cx),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.select(id);
+                // Work waiting for review opens on Review, where it can be shipped.
+                let waiting = this
+                    .state
+                    .session(id)
+                    .is_some_and(|s| this.bucket(s) == Some(Bucket::Review));
+                if waiting {
+                    this.review(id);
+                } else {
+                    this.select(id);
+                }
                 cx.notify();
             }))
             .child(self.provider_mark(provider, 14.))
@@ -1647,7 +1725,7 @@ impl RunoApp {
     }
 
     /// A small bordered button with an icon, for Home's actions.
-    fn home_button(
+    pub(crate) fn home_button(
         &self,
         id: &'static str,
         glyph: IconName,
@@ -2156,6 +2234,45 @@ pub(crate) fn mode_frame(
 }
 
 /// A project's square badge: its icon on its colour, or its initial.
+/// A piece of the tab strip that carries the strip's bottom edge.
+fn strip_edge(el: Div) -> Div {
+    el.h_full().border_b_1().border_color(divider())
+}
+
+/// Where a tab sits in the strip, with the gap after it. Only the open tab's slot has no
+/// bottom edge.
+fn tab_slot(active: bool, tab: Stateful<Div>) -> Div {
+    let slot = div().h_full().flex_none().flex().items_end().child(tab);
+    if active {
+        slot.child(strip_edge(div().w(px(4.))))
+    } else {
+        strip_edge(slot.pr_1())
+    }
+}
+
+/// A tab's outline: the open tab is the page's own colour with no bottom edge, so it
+/// joins the page under the strip; the others float above the strip's edge.
+fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
+    if active {
+        el.h(px(32.))
+            .rounded_t_md()
+            .border_t_1()
+            .border_l_1()
+            .border_r_1()
+            .border_color(divider())
+            .bg(glass_fill(c_canvas()))
+            .text_color(rgb(c_text()))
+    } else {
+        el.h(px(28.))
+            .mb(px(3.))
+            .rounded_md()
+            .border_1()
+            .border_color(transparent_black())
+            .text_color(rgb(c_secondary()))
+            .hover(|el| el.bg(tint(c_subtle())))
+    }
+}
+
 pub(crate) fn project_mark(project: &Project, size: f32) -> Div {
     let color = projects::color_of(project).unwrap_or(c_secondary());
     let initial = project
@@ -2183,6 +2300,34 @@ mod tests {
     use super::*;
     use std::prelude::v1::test;
     use store::Message;
+
+    #[test]
+    fn every_rail_place_owns_its_views() {
+        // Each place on the rail opens a view that lights that same place up again.
+        for (view, mode) in [
+            (View::Review, Mode::Review),
+            (View::GitHub, Mode::GitHub),
+            (View::History, Mode::History),
+            (View::Notes, Mode::Notes),
+            (View::Automations, Mode::Playbooks),
+            (View::Session, Mode::Sessions),
+        ] {
+            assert_eq!(Mode::of(view), mode);
+        }
+        let rail: Vec<Mode> = Mode::MAIN
+            .iter()
+            .chain(Mode::PLAN.iter())
+            .copied()
+            .collect();
+        for mode in &rail {
+            assert_eq!(rail.iter().filter(|m| *m == mode).count(), 1);
+            assert!(
+                keymap::SHORTCUTS.iter().any(|s| s.id == mode.shortcut()),
+                "{} has no shortcut",
+                mode.label()
+            );
+        }
+    }
 
     #[test]
     fn one_rule_for_needs_you() {

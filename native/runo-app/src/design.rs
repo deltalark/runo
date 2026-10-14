@@ -208,7 +208,7 @@ impl DesignPage {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<RunoApp>) -> (Self, Vec<Subscription>) {
         let notes = cx.new(|cx| {
             TextareaState::new(window, cx).placeholder(
-                "Who it is for, the look and feel, rules for spacing, type and colour. Saved to the repository as you type.",
+                "Who it is for, the look and feel, and rules for spacing, type and colour.",
             )
         });
         let task = cx.new(|cx| {

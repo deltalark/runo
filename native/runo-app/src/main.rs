@@ -42,6 +42,7 @@ mod phone;
 mod playbooks;
 mod projects;
 mod pty;
+mod review;
 mod schedule;
 mod sessions;
 mod settings;
@@ -117,6 +118,9 @@ actions!(
         GoArchitecture,
         GoPlaybooks,
         GoReviews,
+        GoReview,
+        GoHistory,
+        GoNotes,
         GoInbox,
         CloseTab,
         NextTab,
@@ -153,6 +157,8 @@ enum View {
     Automations,
     GitHub,
     Editor,
+    /// Changes waiting to be reviewed and shipped, one session at a time.
+    Review,
 }
 
 /// What a quick-open entry does when chosen.
@@ -176,7 +182,6 @@ enum Jump {
 #[repr(u8)]
 enum RightTab {
     Changes,
-    Browser,
     Files,
 }
 
@@ -186,6 +191,9 @@ struct RunoApp {
     selected: Option<u64>,
     view: View,
     right_tab: RightTab,
+    /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
+    browser_open: bool,
+    browser_main: bool,
     cli_tab: bool,
     /// Interactive shells, across all sessions.
     shells: Vec<pty::Shell>,
@@ -1266,6 +1274,8 @@ impl RunoApp {
             demo,
             selected,
             right_tab: RightTab::Changes,
+            browser_open: false,
+            browser_main: false,
             cli_tab: false,
             shells: Vec::new(),
             shell_tab: None,
@@ -1840,6 +1850,7 @@ impl RunoApp {
             self.stash_open_file(old);
         }
         self.selected = Some(id);
+        self.browser_main = false;
         if !self.tabs.contains(&id) {
             self.tabs.push(id);
         }
@@ -2364,6 +2375,7 @@ impl RunoApp {
                 View::History => self.open_history(cx),
                 View::Notes => self.open_notes(window, cx),
                 View::GitHub => self.load_github(),
+                View::Review => self.open_review(),
                 _ => self.view = view,
             },
             Jump::Session(id) => self.select(id),
@@ -2443,7 +2455,8 @@ impl RunoApp {
                 IconName::RotateCcwClock,
                 View::History,
             ),
-            ("Go to Reviews", IconName::GitPullRequest, View::GitHub),
+            ("Go to Review", IconName::GitCompare, View::Review),
+            ("Go to GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
             ("Go to Design", IconName::PanelsTopLeft, View::Design),
@@ -2564,8 +2577,10 @@ impl RunoApp {
                 div()
                     .id("palette")
                     .w(px(640.))
-                    .h_auto()
-                    .max_h(px(520.))
+                    // A fixed height: the list scrolls inside it and the card does not
+                    // jump in size as results come and go while typing.
+                    .h(px(480.))
+                    .v_flex()
                     .rounded_xl()
                     .border_1()
                     .border_color(float_edge())
@@ -2576,7 +2591,12 @@ impl RunoApp {
                     .child(
                         command
                             .bordered(false)
-                            .max_h(px(440.))
+                            // The palette paints the surface, so the list and the rest of
+                            // the card are one material, translucent in glass mode.
+                            .bg(transparent_black())
+                            .flex_1()
+                            .min_h_0()
+                            .max_h(px(480.))
                             .placeholder("Jump to a session, project, file, setting or command…")
                             .on_query(move |query, _, cx| {
                                 let query = query.to_string();
@@ -4994,6 +5014,35 @@ impl RunoApp {
                     .child(icon(IconName::Play, 11., c_secondary()))
                     .child("Playbooks"),
             )
+            .when(cx.global::<AppSettings>().browser_enabled, |el| {
+                el.child(
+                    div()
+                        .id("hdr-browser")
+                        .h(px(26.))
+                        .px_2()
+                        .mr_2()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(5.))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .hover(|el| el.bg(tint(c_subtle())))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Open your app in a Browser tab",
+                            )
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show_browser();
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::Globe, 13., c_secondary())),
+                )
+            })
             .children(self.runs_on_badge(session, cx))
             .child(self.view_toggle(session, cx))
             .child(
@@ -6675,9 +6724,6 @@ impl RunoApp {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.right_tab = tab;
-                if tab == RightTab::Browser {
-                    this.scan_ports();
-                }
                 cx.notify();
             }))
             .child(icon(name, 13., if selected { c_text() } else { c_muted() }))
@@ -6703,8 +6749,8 @@ impl RunoApp {
                         .items_center()
                         .gap_2()
                         .border_y_1()
-                        .border_color(rgb(c_border()))
-                        .bg(rgb(c_sidebar()))
+                        .border_color(divider())
+                        .bg(inset(c_sidebar()))
                         .cursor_pointer()
                         .text_size(px(12.))
                         .font_family(self.mono_font.clone())
@@ -6841,8 +6887,8 @@ impl RunoApp {
                 continue;
             }
             let (bg, mark, color) = match row.kind {
-                LineKind::Added => (Some(c_add_bg()), "+", c_add()),
-                LineKind::Removed => (Some(c_del_bg()), "−", c_del()),
+                LineKind::Added => (Some(c_add()), "+", c_add()),
+                LineKind::Removed => (Some(c_del()), "−", c_del()),
                 LineKind::Note => (None, "", c_muted()),
                 _ => (None, " ", c_text()),
             };
@@ -6857,7 +6903,7 @@ impl RunoApp {
                     .group("diff-line")
                     .flex()
                     .min_h(px(19.))
-                    .when_some(bg, |el, bg| el.bg(rgb(bg)))
+                    .when_some(bg, |el, bg| el.bg(diff_fill(bg)))
                     .when(can_note, |el| {
                         el.cursor_pointer()
                             .hover(|el| el.bg(tint(c_selected())))
@@ -7221,7 +7267,12 @@ impl RunoApp {
             .flex_1()
             .min_h_0()
             .v_flex()
-            .child(div().p_3().child(self.ship_bar(cx)))
+            // Shipping happens on Review; a session's panel only points there.
+            .child(div().p_3().child(if self.view == View::Review {
+                self.ship_bar(cx).into_any_element()
+            } else {
+                self.review_strip(cx)
+            }))
             .child(
                 div()
                     .h(px(28.))
@@ -7340,8 +7391,8 @@ impl RunoApp {
                         .min_h_0()
                         .v_flex()
                         .border_t_1()
-                        .border_color(rgb(c_border()))
-                        .bg(rgb(c_canvas()))
+                        .border_color(divider())
+                        .bg(inset(c_canvas()))
                         .child(
                             div()
                                 .h(px(32.))
@@ -7731,14 +7782,6 @@ impl RunoApp {
                         },
                         cx,
                     ))
-                    .when(cx.global::<AppSettings>().browser_enabled, |el| {
-                        el.child(self.right_tab_button(
-                            RightTab::Browser,
-                            IconName::Globe,
-                            "Browser".into(),
-                            cx,
-                        ))
-                    })
                     .child(self.right_tab_button(
                         RightTab::Files,
                         IconName::FileText,
@@ -7754,7 +7797,6 @@ impl RunoApp {
                     .flex_col()
                     .child(match self.right_tab {
                         RightTab::Changes => self.changes_tab(cx),
-                        RightTab::Browser => self.browser_tab(cx),
                         RightTab::Files => self.files_tab(cx),
                     }),
                 SharedString::from(format!(
@@ -7847,10 +7889,11 @@ impl Render for RunoApp {
             self.open_or_ask(&path, window, cx);
         }
         self.restore_open_file(window, cx);
-        if self.right_tab == RightTab::Browser && !st.browser_enabled {
-            self.right_tab = RightTab::Changes;
+        if !st.browser_enabled {
+            self.browser_open = false;
+            self.browser_main = false;
         }
-        if self.right_tab == RightTab::Browser || self.design_page_key().is_some() {
+        if self.browser_main || self.design_page_key().is_some() {
             self.sync_browser_address(window, cx);
         }
         // Design and Architecture follow the project in the top bar.
@@ -7899,6 +7942,8 @@ impl Render for RunoApp {
         let glass = glass_on();
         if self.applied_glass != Some(glass) {
             self.applied_glass = Some(glass);
+            // Reload the theme so its code-block shade matches the new glass setting.
+            self.applied_dark = None;
             // Blurred maps to vibrancy on macOS, acrylic on Windows 10 and 11, and the
             // compositor's blur on Linux; without a compositor the window stays opaque.
             window.set_background_appearance(if glass {
@@ -7918,6 +7963,9 @@ impl Render for RunoApp {
                 Some(window),
                 cx,
             );
+            if glass {
+                gpui_kit::component::Theme::update(cx, |theme| theme.muted = code_wash().into());
+            }
             // A theme switch reloads the theme file's fonts; set the UI font again.
             self.applied_font = None;
         }
@@ -7944,6 +7992,14 @@ impl Render for RunoApp {
             View::Home => self.home_view(cx),
             View::Design => self.design_view(window, cx),
             View::Architecture => self.architecture_view(cx),
+            // The Browser tab takes the work area while it is the tab shown.
+            View::Session if self.browser_main && self.current().is_some() => div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .v_flex()
+                .child(self.browser_tab(cx))
+                .into_any_element(),
             View::Session | View::NewSession => self.session_view(window, cx),
             View::Inbox => self.inbox_view(cx),
             View::AllSessions => self.list_view(View::AllSessions, cx),
@@ -7954,6 +8010,7 @@ impl Render for RunoApp {
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
             View::GitHub => self.github_view(cx),
+            View::Review => self.review_view(cx),
             View::Editor => div()
                 .flex_1()
                 .min_w_0()
@@ -8086,7 +8143,19 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoReviews, window, cx| {
-                this.go(Mode::Reviews, window, cx);
+                this.go(Mode::GitHub, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoReview, window, cx| {
+                this.go(Mode::Review, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoHistory, window, cx| {
+                this.go(Mode::History, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoNotes, window, cx| {
+                this.go(Mode::Notes, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NewSession, _, cx| {
@@ -8250,7 +8319,11 @@ impl Render for RunoApp {
                             .flex_1()
                             .min_w_0()
                             .v_flex()
-                            .bg(glass_fill(c_canvas()))
+                            // Pages with their own list beside the content paint the two
+                            // layers themselves, so the list is as clear as the sidebar.
+                            .when(!matches!(self.view, View::Review | View::Settings), |el| {
+                                el.bg(glass_fill(c_canvas()))
+                            })
                             .when(show_tabs, |el| el.child(self.tab_strip(cx)))
                             .child(div().flex_1().min_h_0().flex().child(center))
                             .animated(
@@ -8684,8 +8757,11 @@ fn app_menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
+            MenuItem::action("Review", GoReview),
+            MenuItem::action("GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
-            MenuItem::action("Reviews", GoReviews),
+            MenuItem::action("History", GoHistory),
+            MenuItem::action("Notes", GoNotes),
             MenuItem::action("Inbox", GoInbox),
             MenuItem::separator(),
             MenuItem::action("Toggle sidebar", ToggleSidebar),
