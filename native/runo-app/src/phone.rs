@@ -480,6 +480,7 @@ pub fn sync(on: bool, everywhere: bool) {
         if let Some(thread) = thread {
             let _ = thread.join();
         }
+        crate::applog::info("phone", "bridge stopped");
     }
     if !on {
         return;
@@ -489,6 +490,7 @@ pub fn sync(on: bool, everywhere: bool) {
     let started = TcpListener::bind(&address).and_then(|l| Ok((l.local_addr()?, l)));
     *slot = Some(match started {
         Ok((bound, listener)) => {
+            crate::applog::info("phone", format!("bridge listening on {bound}"));
             let stop = Arc::new(AtomicBool::new(false));
             let flag = stop.clone();
             let thread = std::thread::Builder::new()
@@ -504,10 +506,12 @@ pub fn sync(on: bool, everywhere: bool) {
                 thread,
             )
         }
-        Err(e) => (
-            Bridge::Failed(format!("Couldn't listen on {address}: {e}")),
-            None,
-        ),
+        Err(e) => {
+            let why = format!("Couldn't listen on {address}: {e}");
+            // Settings may sync again while it stays failed; one line is enough.
+            crate::applog::warn_once("phone", format!("bridge: {why}"));
+            (Bridge::Failed(why), None)
+        }
     });
 }
 

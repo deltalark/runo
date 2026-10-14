@@ -53,7 +53,7 @@ const STEPS: &[Step] = &[
         side: Side::Right,
         glyph: IconName::Folder,
         title: "Projects and sessions",
-        body: "Sessions are grouped by project. A dot means an agent is working or something waits for you. Right-click any session for pin, rename, open beside, archive and more.",
+        body: "Sessions are grouped by project. A dot means an agent is working or something waits for you. Right-click any session to pin, rename, archive and more.",
     },
     Step {
         anchor: Some("tabs"),

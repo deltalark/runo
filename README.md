@@ -111,7 +111,7 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 - **Quick open** with <kbd>⌘K</kbd> to jump to any session, file or command.
 - **Light and dark themes**, accent colors, colorblind-friendly diff colors, and an optional glass look.
 - **A one-minute tour** on first launch that you can replay any time.
-- **Right-click menus** everywhere: pin, rename, open beside, archive and more.
+- **Right-click menus** everywhere: pin, rename, archive and more.
 
 ## Supported agents
 

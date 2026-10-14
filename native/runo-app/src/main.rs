@@ -276,7 +276,7 @@ struct RunoApp {
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
     chat_scroll: ScrollHandle,
-    /// Second session shown beside the selected one.
+    /// Recent error output of each session's run, for failure messages and the log.
     stderr: HashMap<u64, Vec<String>>,
     /// Parsers for runs that print JSON rather than plain text.
     streams: HashMap<u64, stream::Parser>,
@@ -2212,9 +2212,9 @@ impl RunoApp {
                     }
                     if !stopped && !session.elsewhere() {
                         if sign_in.is_some() {
-                            signin::set(&session.provider, false);
+                            signin::turn_showed(&session.provider, false);
                         } else if ok {
-                            signin::set(&session.provider, true);
+                            signin::turn_showed(&session.provider, true);
                         }
                     }
                     if let Some(hint) = sign_in {

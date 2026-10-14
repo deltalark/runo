@@ -379,6 +379,9 @@ impl RunoApp {
     /// them as running again: their output replays from the start and their work comes
     /// back when they end.
     pub(crate) fn resume_remote_turns(&mut self) {
+        if self.demo {
+            return;
+        }
         let ids: Vec<u64> = self
             .state
             .sessions

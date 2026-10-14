@@ -716,16 +716,19 @@ impl RunoApp {
             },
             Err(error) => {
                 let first = error.lines().next().unwrap_or("").to_string();
-                // Lists refresh every few minutes; the same failure is written once.
-                crate::applog::warn_once(
-                    "gh",
-                    format!(
-                        "project #{project}: gh {list} list failed: {}",
-                        crate::applog::gist(&error)
-                    ),
-                );
                 // These stop every list; anything else stays with its own list.
                 let whole = GhBlock::from_error(&first);
+                // A project that isn't in git or on GitHub yet is not a failure; the page
+                // says so. Lists refresh every few minutes; the same failure is written once.
+                if !matches!(whole, Some(GhBlock::NoGit | GhBlock::NoRemote)) {
+                    crate::applog::warn_once(
+                        "gh",
+                        format!(
+                            "project #{project}: gh {list} list failed: {}",
+                            crate::applog::gist(&error)
+                        ),
+                    );
+                }
                 match whole {
                     Some(block) => self.gh.error = Some(block),
                     None => {

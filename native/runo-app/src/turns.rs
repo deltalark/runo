@@ -1212,10 +1212,13 @@ impl RunoApp {
         if session.messages[user].checkpoint.is_empty() {
             return None;
         }
-        let files = self.turn_files.get(&session.id).copied();
-        if files == Some(0) {
-            return None;
-        }
+        // The count is only known for a turn run since launch. Without it the turn may
+        // have changed nothing, and Undo would roll back work done since, so say nothing.
+        let n = self
+            .turn_files
+            .get(&session.id)
+            .copied()
+            .filter(|n| *n > 0)?;
         let id = session.id;
         Some(
             div()
@@ -1224,13 +1227,10 @@ impl RunoApp {
                 .gap_2()
                 .text_size(px(12.))
                 .text_color(rgb(c_secondary()))
-                .child(match files {
-                    Some(n) => format!(
-                        "This turn changed {n} file{}.",
-                        if n == 1 { "" } else { "s" }
-                    ),
-                    None => "Changes from this turn.".into(),
-                })
+                .child(format!(
+                    "This turn changed {n} file{}.",
+                    if n == 1 { "" } else { "s" }
+                ))
                 .child(div().flex_1())
                 .child(
                     self.button(("undo-turn", index), "Undo", false)

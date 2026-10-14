@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 
 static STATE: RwLock<Option<HashMap<String, bool>>> = RwLock::new(None);
 static CHECKED: Mutex<Option<Instant>> = Mutex::new(None);
+/// Agents whose last turn here ran signed in. A turn that worked outweighs a check that
+/// found none of the usual logins (a token from a wrapper or an unusual variable).
+static WORKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// How long a check stands before opening a page checks again.
 const FRESH: Duration = Duration::from_secs(60);
@@ -21,7 +24,7 @@ pub fn get(provider: &str) -> Option<bool> {
 }
 
 /// Record what a check or a turn showed.
-pub fn set(provider: &str, signed_in: bool) {
+fn set(provider: &str, signed_in: bool) {
     let Ok(mut state) = STATE.write() else {
         return;
     };
@@ -29,6 +32,23 @@ pub fn set(provider: &str, signed_in: bool) {
     if map.insert(provider.to_string(), signed_in) != Some(signed_in) {
         crate::caps::mark_updated();
     }
+}
+
+/// Record what a turn showed: it ran signed in, or the CLI said it isn't.
+pub fn turn_showed(provider: &str, signed_in: bool) {
+    if let Ok(mut worked) = WORKED.lock() {
+        worked.retain(|p| p != provider);
+        if signed_in {
+            worked.push(provider.to_string());
+        }
+    }
+    set(provider, signed_in);
+}
+
+fn turn_worked(provider: &str) -> bool {
+    WORKED
+        .lock()
+        .is_ok_and(|worked| worked.iter().any(|p| p == provider))
 }
 
 fn forget(provider: &str) {
@@ -72,7 +92,10 @@ pub fn refresh(force: bool) {
                     })
             };
             match judge(p.id, &crate::caps::binary(p), &home, &has_var, &run) {
-                Some(signed_in) => set(p.id, signed_in),
+                Some(true) => set(p.id, true),
+                // A turn ran signed in since: the check missed how this CLI signs in.
+                _ if turn_worked(p.id) => set(p.id, true),
+                Some(false) => set(p.id, false),
                 None => forget(p.id),
             }
         }
