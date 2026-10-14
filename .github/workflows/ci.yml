@@ -56,7 +56,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy -p runo -p runo-relay --all-targets -- -D warnings
+        run: cargo clippy -p runo --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test -p runo -p runo-relay
+        run: cargo test -p runo

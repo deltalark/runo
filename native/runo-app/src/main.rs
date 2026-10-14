@@ -8576,10 +8576,9 @@ fn main() {
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."));
         return;
     }
-    // `runo --phone [address] [--relay URL]`: the API Runo's mobile app talks to, without
-    // a window.
+    // `runo --phone [address]`: the API Runo's mobile app talks to, without a window.
     if args.get(1).map(String::as_str) == Some("--phone") {
-        std::process::exit(phone::serve(&args[2..]));
+        std::process::exit(phone::serve(args.get(2).map(String::as_str)));
     }
     // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed (launchd).
     if args.get(1).map(String::as_str) == Some("--run-due-playbooks") {

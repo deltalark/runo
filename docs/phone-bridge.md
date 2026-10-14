@@ -4,9 +4,9 @@
 without a window, and lets a phone follow every session and answer it.
 
 ```
-at home:   phone ──HTTP──────────────────────────▶ runo --phone (your computer)
-anywhere:  phone ──HTTPS──▶ runo-relay ◀──HTTPS── runo --phone --relay URL
-                            (sealed messages only)
+phone ──HTTP──▶ runo --phone (on your computer) ──▶ ~/.runo state, approvals
+                         │
+                         └──▶ ~/.runo/phone-inbox ──▶ the Runo app runs it
 ```
 
 ## Running it
@@ -17,32 +17,7 @@ runo --phone 100.x.y.z:7631      # or only on one address, such as your Tailscal
 ```
 
 From source, use `cargo run -p runo -- --phone`. It prints a QR code and a pairing link,
-`runo://pair?url=…&token=…&relay=…`, that the phone app reads. The phone tries `url`
-first and goes through `relay` when it can't reach it.
-
-## Reaching your computer from anywhere
-
-Run the relay on a server you control (a small VPS or a Cove server), behind HTTPS:
-
-```sh
-cargo build --release -p runo-relay        # one small binary, no dependencies
-./target/release/runo-relay                # listens on 0.0.0.0:7632
-```
-
-Put HTTPS in front of it, for example with Caddy: `relay.example.com { reverse_proxy
-localhost:7632 }`. Then on your computer:
-
-```sh
-runo --phone --relay https://relay.example.com
-```
-
-Your computer and phone both connect out to the relay, so nothing at home needs an open
-port. The computer keeps a request open to the relay and answers the phone's messages as
-they come. While the computer is asleep or offline, the phone is told so.
-
-The relay can't read or fake anything. Every message is sealed with ChaCha20-Poly1305 under
-a key made from the pairing token, which never reaches the relay, and the room the two
-sides meet in is named by another hash of the token. The relay keeps rooms in memory only.
+`runo://pair?url=…&token=…`, that the phone app reads.
 
 ## How it works
 
@@ -62,25 +37,6 @@ Every request needs `Authorization: Bearer <token>`. The 256-bit token is made o
 and kept in `~/.runo/phone.json` (readable only by you). The bridge speaks plain HTTP: use it
 over your home Wi-Fi or a private network such as [Tailscale](https://tailscale.com), never
 open to the internet. To revoke a phone, delete `~/.runo/phone.json` and restart the bridge.
-
-## Relay protocol
-
-For the phone app. With `token` from the pairing link:
-
-- `key = SHA-256("runo-phone-key-v1:" + token)`, `room = hex(SHA-256("runo-phone-room-v1:" + token))`.
-- A request is the JSON `{ "method", "path", "if_none_match", "body", "time" }`, where
-  `body` is the JSON body or `null` and `time` is now in Unix seconds. Seal it as
-  `base64(nonce ‖ ChaCha20-Poly1305(key, nonce, request, aad = "runo-ask"))` with a random
-  12-byte nonce.
-- `POST {relay}/v1/rooms/{room}/ask` with the sealed text as the body. A `200` body is the
-  sealed answer: open it with `aad = "runo-reply" ‖ nonce` (the request's nonce) to get
-  `{ "status", "etag", "body" }`. `503` means the computer isn't connected; `504` that it
-  didn't answer in time.
-- The computer ignores requests more than two minutes off its clock, and any it has
-  already answered.
-
-The computer's side is `GET /v1/rooms/{room}/next` (held open up to 25 seconds; `200`
-gives `{ "id", "body" }`, `204` nothing yet) and `POST /v1/rooms/{room}/reply/{id}`.
 
 ## API
 
@@ -130,5 +86,4 @@ A message in a session:
 
 A pending permission request: `{ "id", "tool", "what": "run `cargo test`", "asked" }`.
 
-The bridge is `native/runo-app/src/phone.rs` (`cargo test -p runo phone::`) and the relay
-is `native/runo-relay` (`cargo test -p runo-relay`).
+The code is in `native/runo-app/src/phone.rs`; its tests run with `cargo test -p runo phone::`.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["native/runo-app", "native/runo-relay"]
+members = ["native/runo-app"]
 exclude = ["vendor/portable-pty", "vendor/gpui-pre-apple", "vendor/vt100"]
 
 [workspace.package]
