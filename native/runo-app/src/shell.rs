@@ -36,8 +36,14 @@ impl Mode {
         Mode::History,
     ];
 
-    /// The modes for deciding what to build, below the main ones; ⌘7 and ⌘8.
+    /// The current project's own modes, grouped under its badge below the main ones; ⌘7
+    /// and ⌘8.
     pub(crate) const PLAN: [Mode; 2] = [Mode::Design, Mode::Architecture];
+
+    /// Whether the mode shows one project at a time, or a chooser under All projects.
+    pub(crate) fn per_project(self) -> bool {
+        Self::PLAN.contains(&self)
+    }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -513,9 +519,13 @@ impl RunoApp {
 
     fn rail_item(&self, mode: Mode, badge: Option<u32>, cx: &mut Context<Self>) -> AnyElement {
         let on = self.mode() == mode;
+        let name = match self.scoped_project() {
+            Some(p) if mode.per_project() => format!("{} · {}", mode.label(), p.name),
+            _ => mode.label().to_string(),
+        };
         let tip = match keymap::label(cx, mode.shortcut()) {
-            keys if keys.is_empty() => mode.label().to_string(),
-            keys => format!("{}  {keys}", mode.label()),
+            keys if keys.is_empty() => name,
+            keys => format!("{name}  {keys}"),
         };
         div()
             .id(SharedString::from(format!("rail-{}", mode.label())))
@@ -584,10 +594,9 @@ impl RunoApp {
             };
             top = top.child(self.rail_item(mode, badge, cx));
         }
-        top = top.child(div().my_1().w(px(22.)).h(px(1.)).bg(divider()));
-        for mode in Mode::PLAN {
-            top = top.child(self.rail_item(mode, None, cx));
-        }
+        top = top
+            .child(div().my_1().w(px(22.)).h(px(1.)).bg(divider()))
+            .child(self.project_group(cx));
         // The Inbox opens from the bell in the top bar, so the rail doesn't repeat it.
         div()
             .w(px(RAIL_WIDTH))
@@ -616,6 +625,62 @@ impl RunoApp {
             )
     }
 
+    /// Design and Architecture under the badge of the project they show, so they read as
+    /// that project's pages. The badge opens the project switcher.
+    fn project_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let project = self.scoped_project();
+        let tip: SharedString = match project {
+            Some(p) => format!("{}: switch project", p.name).into(),
+            None => "All projects: switch project".into(),
+        };
+        let badge = div()
+            .id("rail-project")
+            .size(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|el| el.bg(tint(c_active())))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.menu = Some("project-switch".into());
+                cx.notify();
+            }))
+            .child(match project {
+                Some(p) => project_mark(p, 20.).into_any_element(),
+                None => icon(IconName::LayoutGrid, 15., c_muted()).into_any_element(),
+            });
+        let mut group = div()
+            .v_flex()
+            .items_center()
+            .gap_1()
+            .py(px(3.))
+            .w(px(44.))
+            .rounded_xl()
+            .bg(tint(c_subtle()))
+            .child(badge);
+        for mode in Mode::PLAN {
+            group = group.child(self.rail_item(mode, None, cx));
+        }
+        group.into_any_element()
+    }
+
+    /// The project the per-project modes show: none under All projects.
+    pub(crate) fn scoped_project(&self) -> Option<&Project> {
+        if self.all_scope() {
+            return None;
+        }
+        self.current_project()
+            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
+    }
+
+    /// All projects is picked and the page on screen has a view of every project: Home's
+    /// lists, or the project chooser on Design and Architecture.
+    pub(crate) fn all_scope(&self) -> bool {
+        self.home_all && (self.mode() == Mode::Home || self.mode().per_project())
+    }
+
     // ---------- top bar ----------
 
     fn bar_pill(&self, id: &'static str) -> Stateful<Div> {
@@ -637,7 +702,7 @@ impl RunoApp {
     }
 
     /// The project switcher's list, opened under its chip.
-    fn project_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn project_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.current_project();
         let mut list = div().v_flex().p_1().child(
             div()
@@ -654,12 +719,17 @@ impl RunoApp {
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.menu = None;
                     this.home_all = true;
-                    this.go(Mode::Home, window, cx);
+                    // Design and Architecture stay put and offer every project to pick.
+                    if this.mode().per_project() {
+                        this.save();
+                    } else {
+                        this.go(Mode::Home, window, cx);
+                    }
                     cx.notify();
                 }))
                 .child(icon(IconName::LayoutGrid, 15., c_secondary()))
                 .child(div().flex_1().child("All projects"))
-                .when(self.home_all && self.view == View::Home, |el| {
+                .when(self.all_scope(), |el| {
                     el.child(icon(IconName::Check, 13., c_text()))
                 }),
         );
@@ -702,7 +772,7 @@ impl RunoApp {
                                 n => format!("{n} sessions"),
                             }),
                     )
-                    .when(current == Some(pid), |el| {
+                    .when(current == Some(pid) && !self.all_scope(), |el| {
                         el.child(icon(IconName::Check, 13., c_text()))
                     }),
             );
@@ -727,7 +797,7 @@ impl RunoApp {
                         this.pick_project(cx);
                     }))
                     .child(icon(IconName::FolderPlus, 14., c_muted()))
-                    .child("Add a project folder…"),
+                    .child("New project…"),
             );
         div()
             .absolute()
@@ -939,9 +1009,7 @@ impl RunoApp {
         let counts = self.counts();
         let inbox = counts.needs_you + self.gh.needs_you();
         let lead = if cfg!(target_os = "macos") { 80. } else { 8. };
-        let project = self
-            .current_project()
-            .and_then(|id| self.state.projects.iter().find(|p| p.id == id));
+        let project = self.scoped_project();
         let mode = self.mode();
         // The branch and session crumb belong to the open session, when it is this project's.
         let session = self
@@ -1018,9 +1086,14 @@ impl RunoApp {
                                         cx.notify();
                                     }))
                                     .when_some(project, |el, p| el.child(project_mark(p, 20.)))
-                                    .child(div().max_w(px(200.)).truncate().child(
-                                        project.map_or("No project".to_string(), |p| p.name.clone()),
-                                    ))
+                                    .when(self.all_scope(), |el| {
+                                        el.child(icon(IconName::LayoutGrid, 15., c_secondary()))
+                                    })
+                                    .child(div().max_w(px(200.)).truncate().child(match project {
+                                        Some(p) => p.name.clone(),
+                                        None if self.all_scope() => "All projects".to_string(),
+                                        None => "No project".to_string(),
+                                    }))
                                     .child(icon(IconName::ChevronDown, 12., c_muted())),
                             )
                             .when(menu_open, |el| el.child(self.project_menu(cx))),
@@ -2151,6 +2224,213 @@ impl RunoApp {
     }
 }
 
+impl RunoApp {
+    /// The project a Design or Architecture page shows, beside its title: a switcher with
+    /// the same list as the top bar's.
+    pub(crate) fn mode_project_chip(&self, cx: &mut Context<Self>) -> AnyElement {
+        let project = self.scoped_project();
+        let open = self.menu.as_deref() == Some("mode-project");
+        div()
+            .relative()
+            .min_w_0()
+            .child(
+                div()
+                    .id("mode-project")
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .cursor_pointer()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .when(open, |el| el.bg(tint(c_active())))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = if this.menu.as_deref() == Some("mode-project") {
+                            None
+                        } else {
+                            Some("mode-project".into())
+                        };
+                        cx.notify();
+                    }))
+                    .child(match project {
+                        Some(p) => project_mark(p, 18.).into_any_element(),
+                        None => icon(IconName::LayoutGrid, 14., c_secondary()).into_any_element(),
+                    })
+                    .child(div().max_w(px(260.)).truncate().child(match project {
+                        Some(p) => p.name.clone(),
+                        None => "All projects".to_string(),
+                    }))
+                    .child(icon(IconName::ChevronDown, 12., c_muted())),
+            )
+            .when(open, |el| el.child(self.project_menu(cx)))
+            .into_any_element()
+    }
+}
+
+impl RunoApp {
+    /// Design and Architecture under All projects: every project with what it has, to
+    /// pick one, instead of guessing which project is meant.
+    pub(crate) fn project_chooser(&self, mode: Mode, cx: &mut Context<Self>) -> AnyElement {
+        let mut grid = div().flex().flex_wrap().gap_3();
+        for project in &self.state.projects {
+            let pid = project.id;
+            let root = std::path::Path::new(&project.path);
+            let missing = !self.demo && !root.is_dir();
+            let summary = if missing {
+                "Folder missing".to_string()
+            } else {
+                chooser_summary(mode, root, self.arch.maps.get(&pid), self.demo)
+            };
+            let sessions = self
+                .state
+                .sessions
+                .iter()
+                .filter(|s| s.project_id == pid && !s.archived)
+                .count();
+            grid = grid.child(
+                div()
+                    .id(("chooser-project", pid as usize))
+                    .w(px(280.))
+                    .p_4()
+                    .v_flex()
+                    .gap_2()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(pane(c_canvas()))
+                    .cursor_pointer()
+                    .hover(|el| el.border_color(rgb(c_muted())).bg(tint(c_subtle())))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.switch_project(pid, window, cx);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(project_mark(project, 22.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(project.name.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(if missing { c_amber() } else { c_secondary() }))
+                            .child(summary),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .truncate()
+                            .child(match sessions {
+                                0 => project.path.clone(),
+                                1 => format!("1 session · {}", project.path),
+                                n => format!("{n} sessions · {}", project.path),
+                            }),
+                    ),
+            );
+        }
+        let (start, line) = if mode == Mode::Design {
+            (
+                "New design project",
+                "Start from a brief, sketches or screenshots, with no code yet.",
+            )
+        } else {
+            (
+                "New architecture project",
+                "Sketch the system before writing it.",
+            )
+        };
+        grid = grid.child(
+            div()
+                .id("chooser-new")
+                .w(px(280.))
+                .p_4()
+                .v_flex()
+                .gap_2()
+                .rounded_xl()
+                .border_1()
+                .border_dashed()
+                .border_color(rgb(c_border()))
+                .cursor_pointer()
+                .text_color(rgb(c_secondary()))
+                .hover(|el| el.border_color(rgb(c_muted())).text_color(rgb(c_text())))
+                .on_click(cx.listener(move |this, _, _, cx| this.start_project(mode, cx)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(icon(IconName::Plus, 15., c_secondary()))
+                        .child(start),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(rgb(c_muted()))
+                        .child(line),
+                ),
+        );
+        grid.into_any_element()
+    }
+}
+
+/// One line on a chooser card: what the project has for this mode.
+fn chooser_summary(
+    mode: Mode,
+    root: &std::path::Path,
+    map: Option<&architecture::ProjectMap>,
+    demo: bool,
+) -> String {
+    if demo {
+        return "Sample project".into();
+    }
+    if mode == Mode::Design {
+        let refs = std::fs::read_dir(root.join(design::FOLDER))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| turns::is_image(&e.path()))
+            .count();
+        let notes = design::notes_path(root).is_file();
+        match (refs, notes) {
+            (0, false) => "No references or notes yet".into(),
+            (0, true) => "Design notes written".into(),
+            (1, n) => format!("1 reference{}", if n { " · notes written" } else { "" }),
+            (r, n) => format!("{r} references{}", if n { " · notes written" } else { "" }),
+        }
+    } else {
+        let notes = architecture::notes_path(root).is_file();
+        let shape = map.map(|m| match m.packages.len() {
+            0 => format!("{} files", m.files),
+            1 => format!("1 package · {} files", m.files),
+            n => format!("{n} packages · {} files", m.files),
+        });
+        match (shape, notes) {
+            (Some(shape), true) => format!("{shape} · notes written"),
+            (Some(shape), false) => shape,
+            (None, true) => "Notes written".into(),
+            (None, false) => "No notes yet".into(),
+        }
+    }
+}
+
 /// What a session started from Design or Architecture brings along: named on the New
 /// session dialog, sent ahead of the task, with its images attached.
 #[derive(Clone, Debug, Default)]
@@ -2164,6 +2444,7 @@ pub(crate) struct StartContext {
 pub(crate) fn mode_frame(
     mode: Mode,
     title: &str,
+    project: Option<AnyElement>,
     subtitle: &str,
     body: impl IntoElement,
     action: Option<AnyElement>,
@@ -2214,10 +2495,17 @@ pub(crate) fn mode_frame(
                                 .gap(px(2.))
                                 .child(
                                     div()
-                                        .truncate()
-                                        .text_size(px(22.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(title.to_string()),
+                                        .flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .text_size(px(22.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(title.to_string()),
+                                        )
+                                        .children(project),
                                 )
                                 .child(
                                     div()
@@ -2300,6 +2588,12 @@ mod tests {
     use super::*;
     use std::prelude::v1::test;
     use store::Message;
+
+    #[test]
+    fn only_design_and_architecture_show_one_project() {
+        assert!(Mode::Design.per_project() && Mode::Architecture.per_project());
+        assert!(Mode::MAIN.iter().all(|m| !m.per_project()));
+    }
 
     #[test]
     fn every_rail_place_owns_its_views() {
