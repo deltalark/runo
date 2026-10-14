@@ -575,6 +575,12 @@ pub fn check_release() -> Option<Release> {
         {
             info("app-update", format!("checked: {current} is the latest"))
         }
+        // GitHub answers 404 until the first release is published.
+        None if serde_json::from_str::<serde_json::Value>(&body)
+            .is_ok_and(|v| v["message"] == "Not Found") =>
+        {
+            info("app-update", "checked: no release published yet".to_string())
+        }
         None => warn(
             "app-update",
             format!(
