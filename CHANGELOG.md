@@ -24,7 +24,7 @@ All notable changes to Runo are documented here.
 - Tabs scroll, list in an overflow menu and drag into a new order. New shortcuts for close, next and previous tab, Inbox, split, message box, archive and the context menu (Shift+F10); arrow keys move through the sidebar, Home and Inbox.
 - In a terminal, Ctrl+Shift shortcuts and Esc twice get you back to Runo. Esc no longer switches modes.
 - Top bar: the project switcher handles empty projects, the Agents pill lists running agents to open or stop, spend shows today, the branch and breadcrumb are clickable, and Runs on shows the session's real connection and moves it.
-- Home follows the top-bar project with an All projects toggle and Add project. Reviews follows it too and badges only review requests and failed checks. A project whose folder is gone offers Relink or Remove.
+- Home follows the top-bar project with an All projects toggle and Add project. The GitHub page follows it too and badges only review requests and failed checks. A project whose folder is gone offers Relink or Remove.
 - App menu with Quit, and the window reopens from the Dock on macOS. Closing the last tab stays in Sessions, the tour starts in Sessions, existing users get a one-time What's new card, shortcut hints follow your keybindings, and blank session names are refused.
 - Local agent turns keep running when Runo closes or crashes; Runo follows them again on its next start instead of marking them Interrupted.
 - Limits in Settings → General: a card with Stop when an agent goes quiet for too long, spending limits per session and per day that hold new turns (with Send anyway), and a cap on agents running at once with a visible "Waiting for a slot".
@@ -38,7 +38,7 @@ All notable changes to Runo are documented here.
 - New project can clone a repository from a URL into a folder you choose, with git's progress and errors shown, then adds it.
 - Design mode: collect design references per project (pasted or picked images, captures of the preview) with notes, keep design notes in `docs/design.md`, see the app's dev server beside them, and start a session with the picked references attached.
 - Architecture mode: a map of the project's packages, dependencies and module imports read from its manifests and code, architecture notes and decisions kept in `docs/architecture.md` with a generated Mermaid diagram, and agent sessions that start with both attached.
-- Reviews refreshes every five minutes in the background, filters pull requests and issues by state, author and review request, loads past 30 with Load more, and lets you pick the agent for sessions started there.
+- The GitHub page refreshes every five minutes in the background, filters pull requests and issues by state, author and review request, loads past 30 with Load more, and lets you pick the agent for sessions started there.
 - Review this PR: the agent writes its review to `.runo/review.json`, and Post review shows it for confirmation, then posts it to GitHub with its line comments.
 - Playbook schedules can run at a time of day on chosen weekdays, or on a cron expression. Runs missed while Runo was closed catch up once on launch (Settings can turn this off).
 - On macOS, scheduled playbooks can run while Runo is closed, from a launchd job: each runs in a new worktree after the project's setup command, with the agent's settings and the playbook's permissions, and shows up as a session when Runo opens.
@@ -46,6 +46,9 @@ All notable changes to Runo are documented here.
 - Each agent's page lists its models from the CLI's own list, Codex's hidden and retiring ones included with their dates, with Use as default and a Test that tries each model with a one-line prompt and marks it works, not available on your account, or needs a newer CLI. Codex can also save the default into ~/.codex/config.toml (off by default; only the model line changes, after a backup).
 - A turn that fails because the agent is signed out, the model isn't available, or the CLI is too old for the model offers the fix under it: Sign in (runs the agent's login in the terminal panel and checks again), Retry with a model that works, Pick a model, Use the newer copy, Update or Install for Runo, and make the working model the default for the project or every session. Playbook runs get the same card.
 - The composer's model menu marks models that need a newer CLI or are being retired, and a session on a retiring model offers a one-click switch to its replacement.
+- A Review page lists every session whose agent stopped with changed files, with commit, push, pull request and merge in one place. A session's Changes panel shows where its work stands and a Review and ship button. The mode rail is regrouped to Home, Sessions, Review, GitHub, Playbooks and History, then Design and Architecture, with Notes and Settings at the bottom.
+- The browser opens as its own tab, glass mode looks the same on every page, the GitHub page has clearer empty states and filters, and the GitHub and Review pages come back after a restart.
+- Design and Architecture belong to the current project: they sit under its badge on the rail, their title switches project, and All projects shows a chooser instead of opening the first project. New project can start from Design an app or Architecture, making an empty git project in `~/Runo/<name>/`.
 
 ### Fixed
 

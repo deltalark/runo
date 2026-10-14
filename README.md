@@ -52,6 +52,8 @@ Coding agents are good at working on their own, but juggling several of them acr
 - **Approve from anywhere.** Permission requests, questions and plans from any session pop up in the corner, so you can answer without leaving what you're doing. Claude Code's permission requests arrive while the turn runs and it carries on as soon as you answer.
 - **Undo, Keep or Review each turn.** Runo checkpoints the worktree before every turn, so you can roll back a turn that went wrong with one click.
 - **Usage at a glance.** Tokens, cost and context use per turn and per session.
+- **Context control.** `/compact` shrinks a long conversation and `/clear` starts fresh, also from the session's right-click menu. Fork a session from any turn, or edit and resend a sent message.
+- **Limits.** Stop an agent that goes quiet, cap spending per session and per day, and cap how many agents run at once (Settings → General).
 
 ### Switch agents mid-task
 
@@ -67,12 +69,17 @@ Every session has two views of the same conversation. **Chat** is Runo's own int
 
 ### Review and ship
 
+- **Review page.** Every session whose agent stopped with changed files, in one list. Pick one to see its changes and commit, push, open a pull request or merge.
 - **Changes.** Real `git` status and diffs for each session, with stage, discard, commit, push and **Create PR** buttons.
 - **Diff notes.** Click any diff line, leave a note, and send all notes back to the agent as one follow-up.
 - **Files.** Browse and edit the worktree, with syntax highlighting, rendered Markdown, images and CSV tables.
 - **Terminal.** A real interactive shell (PTY) in the session's folder, with several tabs per session, your saved commands as one-click buttons, and the agent's own command output.
 - **Browser.** A live, interactive page from a Chromium-based browser already on your Mac, embedded in the session. Before a page is open it lists the dev servers running on your machine, and for a session on a connection the ones running there, which it forwards to your machine when you open them.
 - **GitHub.** Pull requests, issues and Actions runs for the project through the `gh` CLI, with one-click "review this PR" sessions.
+
+### Design and Architecture
+
+Two pages for the current project. **Design** keeps reference images and notes (`docs/design.md`) beside the app's dev server and starts sessions with the references attached. **Architecture** maps the project's packages, dependencies and imports, keeps notes and decisions in `docs/architecture.md` with a Mermaid diagram, and starts sessions with both attached. New project can start from either, before any code exists.
 
 ### Playbooks and automations
 
@@ -124,6 +131,10 @@ See [provider setup](docs/providers.md) for details.
 
 ## Getting started
 
+### Download
+
+Builds for Apple silicon and Intel Macs are on the [Releases](https://github.com/deltalark/runo/releases) page. Runo checks there for newer versions and offers to download them; nothing installs on its own.
+
 ### Requirements
 
 - macOS (Windows and Linux builds are also targeted, but macOS is the primary platform today)
@@ -149,11 +160,11 @@ cargo install cargo-bundle
 cd native/runo-app && cargo bundle --release
 ```
 
-On Linux the same command makes a `.deb`, and on Windows the icon is built into `Runo.exe`. To change the icon, edit `native/runo-app/assets/icon/runo.svg` and run `python3 build.py` in that folder.
+On Linux the same command makes a `.deb`, and on Windows the icon is built into `Runo.exe`. To publish a release, see [docs/releasing.md](docs/releasing.md). To change the icon, edit `native/runo-app/assets/icon/runo.svg` and run `python3 build.py` in that folder.
 
 ### Where Runo keeps its data
 
-Projects and sessions are stored in `~/.runo/state.json` and settings in `~/.runo/settings.json`. Set `RUNO_HOME` to move them.
+Projects are stored in `~/.runo/state.json`, each session in its own file under `~/.runo/sessions`, and settings in `~/.runo/settings.json`. A log for each launch and any crash reports are in `~/.runo/logs`; after a crash, Runo offers to show or report it on the next start. Set `RUNO_HOME` to move them all.
 
 ## Connections: run anywhere
 
