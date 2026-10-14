@@ -1,15 +1,8 @@
 //! Gemini CLI specifics. Gemini only applies an approval mode in folders it trusts, and
-//! a new worktree isn't trusted yet, so Runo trusts the folder it runs Gemini in. Its
-//! `--resume` takes "latest" or the session's number in `gemini --list-sessions`, so
-//! Runo learns those numbers after each turn.
+//! a new worktree isn't trusted yet, so Runo trusts the folder it runs Gemini in.
 
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-
-/// Session numbers in `gemini --list-sessions`, by session id.
-static NUMBERS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 /// Gemini's list of trusted folders: `GEMINI_CLI_TRUSTED_FOLDERS_PATH` when set (in the
 /// agent's environment from Settings first), else `~/.gemini/trustedFolders.json`.
@@ -74,97 +67,9 @@ fn trust_in(file: &Path, dir: &Path) -> Option<()> {
     std::fs::rename(&tmp, file).ok()
 }
 
-/// What to pass to `--resume` for session `id`: its number when known, else "latest",
-/// which is the session's own conversation in a worktree of its own.
-pub fn resume_arg(id: &str) -> String {
-    NUMBERS
-        .lock()
-        .ok()
-        .and_then(|map| map.as_ref()?.get(id).cloned())
-        .unwrap_or_else(|| "latest".into())
-}
-
-/// Learn the session numbers in `dir` from `gemini --list-sessions`, in the background.
-pub fn learn_sessions(bin: String, dir: String) {
-    let mut command = std::process::Command::new(bin);
-    command.arg("--list-sessions");
-    let (tx, rx) = std::sync::mpsc::channel();
-    // A CLI that hangs (waiting for a sign-in, say) is stopped after a while.
-    crate::agent::oneshot_within(
-        "gemini-sessions".into(),
-        command,
-        &dir,
-        std::time::Duration::from_secs(30),
-        tx,
-    );
-    std::thread::spawn(move || {
-        let Ok(crate::agent::Event::Output(_, result)) = rx.recv() else {
-            return;
-        };
-        let text = result.unwrap_or_else(|error| error);
-        let found = parse_sessions(&text);
-        if let Ok(mut map) = NUMBERS.lock() {
-            map.get_or_insert_with(HashMap::new).extend(found);
-        }
-    });
-}
-
-/// (id, number) pairs from `--list-sessions`, whose lines read like
-/// "  3. Fix the login test (2 hours ago) [0f9c…-…]".
-fn parse_sessions(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let (number, rest) = line.split_once('.')?;
-            if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            let id = rest
-                .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
-                .rev()
-                .find(|w| is_uuid(w))?;
-            Some((id.to_string(), number.to_string()))
-        })
-        .collect()
-}
-
-fn is_uuid(word: &str) -> bool {
-    let parts: Vec<&str> = word.split('-').collect();
-    parts.len() == 5
-        && parts
-            .iter()
-            .zip([8, 4, 4, 4, 12])
-            .all(|(p, n)| p.len() == n && p.chars().all(|c| c.is_ascii_hexdigit()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn list_sessions_lines_give_numbers() {
-        let text = "Available sessions for this project (2):\n  1. Fix the login test (2 hours ago) [0f9c1a2b-1111-4222-8333-444455556666]\n  2. Add a README (Just now) [aaaaaaaa-bbbb-4ccc-8ddd-eeeeffff0000]\n";
-        assert_eq!(
-            parse_sessions(text),
-            [
-                (
-                    "0f9c1a2b-1111-4222-8333-444455556666".to_string(),
-                    "1".to_string()
-                ),
-                (
-                    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeffff0000".to_string(),
-                    "2".to_string()
-                ),
-            ]
-        );
-        assert!(parse_sessions("No previous sessions found.").is_empty());
-        if let Ok(mut map) = NUMBERS.lock() {
-            map.get_or_insert_with(HashMap::new)
-                .extend(parse_sessions(text));
-        }
-        assert_eq!(resume_arg("aaaaaaaa-bbbb-4ccc-8ddd-eeeeffff0000"), "2");
-        assert_eq!(resume_arg("unknown"), "latest");
-    }
 
     #[test]
     fn folders_are_trusted_once_and_distrust_is_kept() {

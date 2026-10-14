@@ -21,6 +21,12 @@ pub struct ModelInfo {
     /// Reasoning / effort levels this model accepts (empty: use the provider-wide list).
     pub efforts: Vec<Choice>,
     pub tiers: Vec<Choice>,
+    /// The oldest CLI release that can use this model ("0.162.0"), when the CLI says.
+    pub needs: String,
+    /// When the model is retired ("2026-10-13"), when the CLI says.
+    pub retires: String,
+    /// The model the CLI suggests moving to.
+    pub upgrade_to: String,
 }
 
 #[derive(Clone, Default)]
@@ -41,6 +47,12 @@ pub struct Caps {
     pub default_model: String,
     /// The CLI's own `--help`, for flags that only newer releases have.
     pub help: String,
+    /// Models the CLI keeps out of its menu but still accepts (Codex's hidden ones).
+    pub hidden_models: Vec<ModelInfo>,
+    /// The CLI release that wrote its model list, which can be newer than the one installed.
+    pub client_version: String,
+    /// The model the CLI's own config file picks (Codex's config.toml).
+    pub config_model: String,
 }
 
 /// One dropdown shown in the composer.
@@ -95,12 +107,26 @@ pub fn set(provider: &str, caps: Caps) {
     }
 }
 
+/// The installed CLI's version, without copying the rest.
+pub fn version(provider: &str) -> String {
+    store()
+        .read()
+        .ok()
+        .and_then(|m| m.get(provider).map(|c| c.version.clone()))
+        .unwrap_or_default()
+}
+
 pub fn get(provider: &str) -> Caps {
     store()
         .read()
         .ok()
         .and_then(|m| m.get(provider).cloned())
         .unwrap_or_default()
+}
+
+/// Ask the UI to repaint, as when discovery finished.
+pub fn mark_updated() {
+    UPDATED.store(true, Ordering::Relaxed);
 }
 
 /// True once after discovery finished, so the UI can repaint.
@@ -113,19 +139,28 @@ pub fn refresh() {
     std::thread::spawn(|| {
         crate::install::refresh_node();
         for provider in crate::agent::PROVIDERS.iter() {
-            let bin = binary(provider);
-            let caps = match provider.id {
-                "claude" => claude(&bin),
-                "codex" => codex(&bin),
-                "opencode" => opencode(&bin),
-                id => generic(id, &bin),
-            };
-            if let Ok(mut map) = store().write() {
-                map.insert(provider.id.to_string(), caps);
-            }
+            detect(provider);
             UPDATED.store(true, Ordering::Relaxed);
         }
+        for provider in crate::agent::PROVIDERS.iter() {
+            crate::copies::refresh(provider);
+        }
+        crate::signin::refresh(true);
     });
+}
+
+/// Discover one provider now, on this thread.
+pub fn detect(provider: &'static crate::agent::Provider) {
+    let bin = binary(provider);
+    let caps = match provider.id {
+        "claude" => claude(&bin),
+        "codex" => codex(&bin),
+        "opencode" => opencode(&bin),
+        id => generic(id, &bin),
+    };
+    if let Ok(mut map) = store().write() {
+        map.insert(provider.id.to_string(), caps);
+    }
 }
 
 /// Agents without parseable help: the version, and Runo's three permission levels,
@@ -377,12 +412,14 @@ fn codex(bin: &str) -> Caps {
         })
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    parse_codex(
+    let mut caps = parse_codex(
         &version,
         &run(bin, &["exec", "--help"]),
         &run(bin, &["--help"]),
         cache.as_ref(),
-    )
+    );
+    caps.config_model = crate::modelcheck::codex_config_model().unwrap_or_default();
+    caps
 }
 
 /// Codex: sandbox modes from `codex exec --help`, approval policies from `codex --help`,
@@ -431,14 +468,13 @@ fn parse_codex(
     }
 
     let mut models: Vec<(i64, ModelInfo)> = Vec::new();
+    let mut hidden_models: Vec<(i64, ModelInfo)> = Vec::new();
     if let Some(list) = cache
         .and_then(|v| v.get("models"))
         .and_then(|m| m.as_array())
     {
         for m in list {
-            if m.get("visibility").and_then(|v| v.as_str()) != Some("list") {
-                continue;
-            }
+            let hidden = m.get("visibility").and_then(|v| v.as_str()) != Some("list");
             let Some(slug) = m.get("slug").and_then(|v| v.as_str()) else {
                 continue;
             };
@@ -472,21 +508,34 @@ fn parse_codex(
                     })
                     .unwrap_or_default()
             };
-            models.push((
-                m.get("priority").and_then(|p| p.as_i64()).unwrap_or(999),
-                ModelInfo {
-                    choice: Choice {
-                        value: slug.to_string(),
-                        label: name.to_string(),
-                        desc: desc.to_string(),
-                    },
-                    efforts: pick("supported_reasoning_levels", "effort", "effort"),
-                    tiers: pick("service_tiers", "id", "name"),
+            let (upgrade_to, retires) = codex_upgrade(m);
+            let info = ModelInfo {
+                choice: Choice {
+                    value: slug.to_string(),
+                    label: name.to_string(),
+                    desc: desc.to_string(),
                 },
-            ));
+                efforts: pick("supported_reasoning_levels", "effort", "effort"),
+                tiers: pick("service_tiers", "id", "name"),
+                needs: m
+                    .get("minimal_client_version")
+                    .or_else(|| m.get("min_client_version"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                retires,
+                upgrade_to,
+            };
+            let priority = m.get("priority").and_then(|p| p.as_i64()).unwrap_or(999);
+            if hidden {
+                hidden_models.push((priority, info));
+            } else {
+                models.push((priority, info));
+            }
         }
     }
     models.sort_by_key(|(p, _)| *p);
+    hidden_models.sort_by_key(|(p, _)| *p);
     Caps {
         installed: true,
         version: version
@@ -495,11 +544,113 @@ fn parse_codex(
             .trim()
             .to_string(),
         models: models.into_iter().map(|(_, m)| m).collect(),
+        hidden_models: hidden_models.into_iter().map(|(_, m)| m).collect(),
+        client_version: cache
+            .and_then(|v| v.get("client_version"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         modes,
         approvals,
         detected: true,
         ..Default::default()
     }
+}
+
+/// The model a Codex cache entry says to move to, and the day it retires. Codex has
+/// written this in a few shapes, so each is read when present.
+fn codex_upgrade(m: &serde_json::Value) -> (String, String) {
+    let text = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let upgrade = m.get("upgrade");
+    let to = match upgrade {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(u) => ["model", "id", "slug", "to"]
+            .iter()
+            .map(|k| text(u.get(*k)))
+            .find(|v| !v.is_empty())
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let keys = [
+        "retires_at",
+        "retirement_date",
+        "deprecation_date",
+        "sunset_date",
+        "shutdown_date",
+        "date",
+    ];
+    let mut date = keys
+        .iter()
+        .flat_map(|k| [upgrade.and_then(|u| u.get(*k)), m.get(*k)])
+        .map(text)
+        .find(|v| !v.is_empty())
+        .unwrap_or_default();
+    if date.is_empty() {
+        // Otherwise a date written in the upgrade notice.
+        let notice = upgrade
+            .map(|u| {
+                ["upgrade_copy", "migration_markdown", "message"]
+                    .iter()
+                    .map(|k| text(u.get(*k)))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        date = first_date(&notice).unwrap_or_default();
+    }
+    (to, date.chars().take(10).collect())
+}
+
+/// The first YYYY-MM-DD date in a text.
+fn first_date(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    (0..bytes.len().saturating_sub(9)).find_map(|i| {
+        let w = &bytes[i..i + 10];
+        let digits = |r: std::ops::Range<usize>| w[r].iter().all(u8::is_ascii_digit);
+        (digits(0..4) && w[4] == b'-' && digits(5..7) && w[7] == b'-' && digits(8..10))
+            .then(|| text[i..i + 10].to_string())
+    })
+}
+
+/// A note for a model's menu entry: that it needs a newer CLI than `version`, or when it
+/// retires and what replaces it. Empty when there's nothing to say.
+pub fn model_note(provider: &str, m: &ModelInfo, version: &str, today: &str) -> String {
+    let name = crate::agent::provider(provider).name;
+    if !m.needs.is_empty() && crate::alerts::is_newer(&m.needs, version) {
+        return format!("Needs {name} {}+", short_version(&m.needs));
+    }
+    if m.retires.is_empty() {
+        return String::new();
+    }
+    let when = match m.retires.as_str().cmp(today) {
+        std::cmp::Ordering::Less => format!("Retired {}", m.retires),
+        std::cmp::Ordering::Equal => "Retires today".to_string(),
+        std::cmp::Ordering::Greater => format!("Retires {}", m.retires),
+    };
+    if m.upgrade_to.is_empty() {
+        when
+    } else {
+        format!("{when}, switch to {}", m.upgrade_to)
+    }
+}
+
+/// "0.162.1" from "codex-cli 0.162.1", or the text as given when it has no number.
+pub fn short_version(version: &str) -> String {
+    let parts = crate::alerts::version_parts(version);
+    if parts.is_empty() {
+        version.trim().to_string()
+    } else {
+        parts
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+/// Every model the CLI accepts: its menu, then the hidden ones.
+pub fn all_models(caps: &Caps) -> impl Iterator<Item = &ModelInfo> {
+    caps.models.iter().chain(caps.hidden_models.iter())
 }
 
 fn opencode(bin: &str) -> Caps {
@@ -590,7 +741,23 @@ pub fn controls(provider: &str, sel: &HashMap<String, String>) -> Vec<Control> {
 fn controls_for(provider: &str, caps: &Caps, sel: &HashMap<String, String>) -> Vec<Control> {
     let value = |id: &str| sel.get(id).cloned().unwrap_or_default();
     let mut out = Vec::new();
-    let model_choices: Vec<Choice> = caps.models.iter().map(|m| m.choice.clone()).collect();
+    let today = crate::store::today();
+    let model_choices: Vec<Choice> = caps
+        .models
+        .iter()
+        .map(|m| {
+            let mut c = m.choice.clone();
+            let note = model_note(provider, m, &caps.version, &today);
+            if !note.is_empty() {
+                c.desc = if c.desc.is_empty() {
+                    note
+                } else {
+                    format!("{note} · {}", c.desc)
+                };
+            }
+            c
+        })
+        .collect();
     if !model_choices.is_empty() {
         out.push(Control {
             id: "model",
@@ -648,13 +815,8 @@ fn controls_for(provider: &str, caps: &Caps, sel: &HashMap<String, String>) -> V
             choices: with_default("Default", caps.modes.clone()),
         });
     }
-    if !caps.approvals.is_empty() {
-        out.push(Control {
-            id: "approval",
-            label: "Approval".into(),
-            choices: with_default("Default", caps.approvals.clone()),
-        });
-    }
+    // No Approval chip: `codex exec` never stops to ask, so its policy changes nothing
+    // in Chat.
     if !caps.agents.is_empty() {
         out.push(Control {
             id: "agent",
@@ -782,6 +944,48 @@ mod fixture_tests {
     }
 
     #[test]
+    fn codex_cache_keeps_hidden_retiring_and_newer_models() {
+        let cache: serde_json::Value = serde_json::from_str(
+            r#"{"client_version":"0.162.1","models":[
+              {"slug":"gpt-6-sol","priority":1,"visibility":"list","minimal_client_version":"0.160.0"},
+              {"slug":"gpt-5.5","priority":2,"visibility":"list",
+               "upgrade":{"model":"gpt-6.1-sol","migration_markdown":"GPT-5.5 retires on 2026-10-13."}},
+              {"slug":"gpt-5.4","priority":3,"visibility":"list","upgrade":"gpt-5.6-sol","retires_at":"2026-11-01T00:00:00Z"},
+              {"slug":"gpt-6-astra","priority":4,"visibility":"hide"}
+            ]}"#,
+        )
+        .unwrap();
+        let caps = parse_codex("codex-cli 0.147.0", "", "", Some(&cache));
+        assert_eq!(caps.client_version, "0.162.1");
+        assert_eq!(caps.models.len(), 3);
+        assert_eq!(
+            values(
+                &caps
+                    .hidden_models
+                    .iter()
+                    .map(|m| m.choice.clone())
+                    .collect::<Vec<_>>()
+            ),
+            ["gpt-6-astra"]
+        );
+        assert_eq!(all_models(&caps).count(), 4);
+        let note = |i: usize| model_note("codex", &caps.models[i], &caps.version, "2026-10-13");
+        assert_eq!(note(0), "Needs Codex 0.160.0+");
+        assert_eq!(note(1), "Retires today, switch to gpt-6.1-sol");
+        assert_eq!(note(2), "Retires 2026-11-01, switch to gpt-5.6-sol");
+        assert_eq!(
+            model_note("codex", &caps.models[0], "0.162.1", "2026-10-13"),
+            ""
+        );
+        assert_eq!(
+            model_note("codex", &caps.models[1], "0.162.1", "2026-10-14"),
+            "Retired 2026-10-13, switch to gpt-6.1-sol"
+        );
+        assert_eq!(first_date("no date"), None);
+        assert_eq!(short_version("codex-cli 0.162.1\n"), "0.162.1");
+    }
+
+    #[test]
     fn parses_opencode_output() {
         let models = "opencode/big-pickle\nanthropic/claude-x\nnot a model\n  \n";
         let agents = "build (primary)\n  {\n    \"edit\": \"allow\"\n  }\nplan (primary)\ngeneral (subagent)\ntitle (primary)\n[\n]\n";
@@ -808,12 +1012,13 @@ mod fixture_tests {
                 ModelInfo {
                     choice: level("a"),
                     efforts: vec![level("low")],
-                    tiers: vec![],
+                    ..Default::default()
                 },
                 ModelInfo {
                     choice: level("b"),
                     efforts: vec![level("high"), level("max")],
                     tiers: vec![level("priority")],
+                    ..Default::default()
                 },
             ],
             modes: vec![level("read-only")],
@@ -822,7 +1027,7 @@ mod fixture_tests {
         };
         let ids = |c: &[Control]| c.iter().map(|c| c.id).collect::<Vec<_>>();
         let none = controls_for("codex", &caps, &HashMap::new());
-        assert_eq!(ids(&none), ["model", "effort", "mode", "approval"]);
+        assert_eq!(ids(&none), ["model", "effort", "mode"]);
         assert_eq!(none[1].label, "Reasoning");
         assert_eq!(
             values(&none[1].choices),
@@ -833,7 +1038,7 @@ mod fixture_tests {
 
         let sel = HashMap::from([("model".to_string(), "b".to_string())]);
         let b = controls_for("codex", &caps, &sel);
-        assert_eq!(ids(&b), ["model", "effort", "tier", "mode", "approval"]);
+        assert_eq!(ids(&b), ["model", "effort", "tier", "mode"]);
         assert_eq!(values(&b[1].choices), ["", "high", "max"]);
         assert_eq!(b[2].choices[0].label, "Standard");
 

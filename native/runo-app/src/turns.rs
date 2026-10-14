@@ -82,11 +82,18 @@ impl RunoApp {
             .session(id)
             .filter(|s| !s.has_conversation())
             .and_then(|s| self.shared_notes(s.project_id));
+        // A playbook's own session names it on its first message, however late that starts.
+        let playbook = self
+            .state
+            .session(id)
+            .filter(|s| s.playbook != 0 && !s.messages.iter().any(|m| m.role == Role::User))
+            .and_then(|s| self.state.automations.iter().find(|a| a.id == s.playbook))
+            .map(|a| a.name.clone());
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
         // A session a playbook started keeps to its limits on every turn.
-        let held = crate::workspace::held_options(session, opts);
+        let held = crate::workspace::held_options(session, &opts.for_project(session.project_id));
         let opts = &held;
         let mode = session
             .selections()
@@ -162,6 +169,7 @@ impl RunoApp {
         };
         let mut user = Message::now(Role::User, prompt.clone());
         user.images = images.clone();
+        user.playbook = playbook.unwrap_or_default();
         if in_git {
             user.checkpoint = git::checkpoint(&dir).unwrap_or_default();
         }
@@ -170,6 +178,13 @@ impl RunoApp {
         let sel = session.selections();
         let agent_session = session.agent_session.clone();
         let sandbox = session.sandbox();
+        // A signed-out agent says so before its turn fails, not after.
+        if sandbox.is_none() && !demo && crate::signin::get(&provider) == Some(false) {
+            let mut hint = Message::new(Role::System, agent::sign_in_help(&provider));
+            hint.meta = "warning".into();
+            let at = session.messages.len() - 1;
+            session.messages.insert(at, hint);
+        }
         crate::connections::prepare_run(
             Some((provider.clone(), agent_session.clone())),
             crate::settings::sync_backup(),
@@ -303,13 +318,6 @@ impl RunoApp {
         // Servers Runo merged into the agent's project file go before the snapshot.
         if let Some(s) = self.state.session(id) {
             crate::mcp::clean_project(std::path::Path::new(&s.dir));
-            // Gemini resumes by the conversation's number in its list for the folder.
-            if s.provider == "gemini" && !s.agent_session.is_empty() && s.sandbox().is_none() {
-                crate::gemini::learn_sessions(
-                    crate::caps::binary(agent::provider("gemini")),
-                    s.dir.clone(),
-                );
-            }
         }
         // A pull request's state, and a review the agent wrote for it, show right away.
         if self.state.session(id).is_some_and(|s| !s.pr_url.is_empty()) {
@@ -1585,54 +1593,70 @@ impl RunoApp {
                 .is_some_and(|m| m.role == Role::System)
             && session.messages.iter().any(|m| m.role == Role::User);
         let edit_bar = self.edit_bar(cx);
+        let retiring = if working {
+            None
+        } else {
+            self.retiring_bar(id, cx)
+        };
         if session.queue.is_empty()
             && attached.is_empty()
             && matches.is_empty()
             && playbooks.is_empty()
             && !retry
             && edit_bar.is_none()
+            && retiring.is_none()
         {
             return None;
         }
-        let mut col = div().v_flex().gap_1().children(edit_bar);
+        let mut col = div().v_flex().gap_1().children(edit_bar).children(retiring);
         if retry {
-            col = col.child(
-                div()
-                    .h(px(28.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+            let fixes = self.turn_fixes(id, cx);
+            let bar = div()
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .bg(tint(c_subtle()))
+                .text_size(px(12.5))
+                .child(icon(IconName::TriangleAlert, 12., c_amber()))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgb(c_secondary()))
+                        .child("The last turn didn't finish."),
+                )
+                .child(
+                    self.button("retry-turn", "Retry", false)
+                        .h(px(22.))
+                        .px_2()
+                        .text_size(px(12.))
+                        .child(icon(IconName::RefreshCw, 11., c_secondary()))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Send the last message again, with its images",
+                            )
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.retry_last(id, cx);
+                            cx.notify();
+                        })),
+                );
+            // What would fix the agent goes under it, one click each.
+            col = col.child(match fixes {
+                Some(fixes) => div()
+                    .v_flex()
                     .rounded_md()
                     .bg(tint(c_subtle()))
-                    .text_size(px(12.5))
-                    .child(icon(IconName::TriangleAlert, 12., c_amber()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(rgb(c_secondary()))
-                            .child("The last turn didn't finish."),
-                    )
-                    .child(
-                        self.button("retry-turn", "Retry", false)
-                            .h(px(22.))
-                            .px_2()
-                            .text_size(px(12.))
-                            .child(icon(IconName::RefreshCw, 11., c_secondary()))
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(
-                                    "Send the last message again, with its images",
-                                )
-                                .build(window, cx)
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.retry_last(id, cx);
-                                cx.notify();
-                            })),
-                    ),
-            );
+                    .child(bar.bg(gpui_kit::transparent_black()))
+                    .child(fixes)
+                    .into_any_element(),
+                None => bar.into_any_element(),
+            });
         }
         if let Some(line) = self.held_line(id, cx) {
             col = col.child(line);

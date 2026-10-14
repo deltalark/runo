@@ -361,8 +361,8 @@ mod stage_tests {
     }
 }
 
-/// A line of updater output without colour codes or spinner characters.
-fn clean_line(raw: &str) -> String {
+/// A line of output without colour codes or spinner characters.
+pub(crate) fn clean_line(raw: &str) -> String {
     let mut out = String::new();
     let mut chars = raw.chars().peekable();
     while let Some(c) = chars.next() {
@@ -569,7 +569,7 @@ pub(crate) fn npm_package(provider: &str) -> Option<&'static str> {
 }
 
 /// The numeric parts of a version such as "v2.1.296 (Claude Code)" or "codex-cli 0.50.1".
-fn version_parts(v: &str) -> Vec<u64> {
+pub(crate) fn version_parts(v: &str) -> Vec<u64> {
     let start = v.find(|c: char| c.is_ascii_digit()).unwrap_or(v.len());
     v[start..]
         .split(|c: char| !c.is_ascii_digit() && c != '.')
@@ -1414,6 +1414,10 @@ impl RunoApp {
                 .collect::<Vec<_>>()
                 .join(".");
             let (body, actions) = match run {
+                Some(_) if done && latest == "latest" => (
+                    format!("{} is up to date.", provider.name),
+                    div().flex().child(update_done_badge(n, "Updated")),
+                ),
                 Some(_) if done => (
                     format!("{} is now on version {latest}.", provider.name),
                     div().flex().child(update_done_badge(n, "Updated")),
@@ -2149,6 +2153,11 @@ mod tests {
         assert_eq!(
             clean_line("\x1b[32mDownloading\x1b[0m 12% \u{280b}"),
             "Downloading 12%"
+        );
+        // OpenCode colours its stderr errors even when it isn't a terminal.
+        assert_eq!(
+            clean_line("\x1b[91m\x1b[1mError: \x1b[0mSession not found"),
+            "Error: Session not found"
         );
         assert_eq!(
             phase_of("npm http fetch GET 200 https://x 41ms"),

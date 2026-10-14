@@ -369,28 +369,6 @@ fn detected_section(pid: &'static str) -> Section {
             Ctl::Chip("Detecting…".into(), 2)
         },
     )];
-    if !caps.models.is_empty() {
-        let names: Vec<&str> = caps
-            .models
-            .iter()
-            .take(10)
-            .map(|m| m.choice.value.as_str())
-            .collect();
-        let more = caps.models.len().saturating_sub(10);
-        rows.push(row(
-            "Models",
-            &format!(
-                "{}{}",
-                names.join(", "),
-                if more > 0 {
-                    format!(" and {more} more")
-                } else {
-                    String::new()
-                }
-            ),
-            Ctl::Chip(format!("{} found", caps.models.len()), 3),
-        ));
-    }
     match pid {
         "claude" => {
             rows.push(row(
@@ -447,12 +425,201 @@ fn detected_section(pid: &'static str) -> Section {
             ));
         }
     }
+    if crate::signin::get(pid) == Some(false) {
+        rows.push(row(
+            "Signed out",
+            &agent::sign_in_help(pid),
+            Ctl::Button(
+                "Sign in".into(),
+                Rc::new(move |this, cx| this.sign_in_here(pid, cx)),
+            ),
+        ));
+    }
     rows.push(row(
         "Re-detect options",
         "Ask the CLI again after updating or signing in. Menus in the composer refresh automatically.",
         Ctl::Button("Re-detect".into(), Rc::new(|_, _| install::redetect())),
     ));
     section("Detected from the CLI", "Runo asks each CLI what it supports instead of hard-coding it, so new models and modes appear on their own.", rows)
+}
+
+/// Every copy of an agent's CLI on this computer, to pick the one Runo runs, when there
+/// is more than one.
+fn copies_section(pid: &'static str, title: &str) -> Option<Section> {
+    let p = agent::PROVIDERS.iter().find(|p| p.id == pid)?;
+    let copies = crate::copies::get(pid);
+    if copies.len() < 2 {
+        return None;
+    }
+    let using = crate::copies::in_use(p, &copies).map(|c| c.real.clone());
+    let first = crate::updater::resolve(p.bin).and_then(|r| std::fs::canonicalize(r).ok());
+    let newest = crate::copies::newest(&copies).map(|c| c.version.clone());
+    let caps = caps::get(pid);
+    let mut rows = Vec::new();
+    if let Some((old, new)) = crate::copies::shadow(
+        &copies,
+        copies.iter().find(|c| Some(&c.real) == using.as_ref()),
+    ) {
+        let path = new.path.to_string_lossy().into_owned();
+        rows.push(row(
+            "An older copy is in use",
+            &format!(
+                "Runo runs {} {} at {}, but {} at {} is newer.",
+                p.name,
+                old.version,
+                tilde(&old.path),
+                new.version,
+                tilde(&new.path)
+            ),
+            Ctl::Buttons(vec![(
+                "Use newest".into(),
+                Rc::new(move |this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                    this.use_copy(pid, path.clone(), cx)
+                }) as Action,
+            )]),
+        ));
+    }
+    for copy in &copies {
+        let in_use = Some(&copy.real) == using.as_ref();
+        let mut desc = tilde(&copy.path);
+        if copy.link {
+            desc.push_str(&format!(" → {}", tilde(&copy.real)));
+        }
+        if first.as_ref() == Some(&copy.real) {
+            desc.push_str(" · first on PATH");
+        }
+        if let Some(app) = &copy.owner {
+            desc.push_str(&format!(" · comes with {app}, which updates it"));
+        }
+        if in_use {
+            desc.push_str(" · Runo runs this one");
+        }
+        let outdated = newest
+            .as_ref()
+            .is_some_and(|n| crate::alerts::is_newer(n, &copy.version))
+            || crate::alerts::is_newer(&caps.client_version, &copy.version);
+        let mut buttons: Vec<(String, Action)> = Vec::new();
+        if copy.link {
+            let c = copy.clone();
+            buttons.push((
+                "Remove this copy…".into(),
+                Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                    this.ask_remove_copy(pid, &c)
+                }) as Action,
+            ));
+        }
+        if in_use && outdated {
+            buttons.push((
+                "Update".into(),
+                Rc::new(move |this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                    this.update_agent(pid, cx)
+                }) as Action,
+            ));
+        }
+        if !in_use {
+            let path = copy.path.to_string_lossy().into_owned();
+            buttons.push((
+                "Use this".into(),
+                Rc::new(move |this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                    this.use_copy(pid, path.clone(), cx)
+                }) as Action,
+            ));
+        }
+        let version = if copy.version.is_empty() {
+            "Unknown version".to_string()
+        } else {
+            format!("{} {}", p.name, copy.version)
+        };
+        rows.push(row(
+            &version,
+            &desc,
+            if buttons.is_empty() {
+                Ctl::Chip("In use".into(), 0)
+            } else {
+                Ctl::Buttons(buttons)
+            },
+        ));
+    }
+    Some(section(title, "Every copy found on your PATH and in the folders installers use. Each launch runs the one picked here.", rows))
+}
+
+/// The agent's models, from its own list, with which ones tested as working and a
+/// button to make one the default.
+fn models_section(pid: &'static str, st: &AppSettings) -> Option<Section> {
+    let caps = caps::get(pid);
+    crate::caps::all_models(&caps).next()?;
+    let name = agent::provider(pid).name;
+    let current = st.agent(pid).model_override;
+    let today = crate::store::today();
+    let mut rows = Vec::new();
+    if crate::modelcheck::can_test(pid) {
+        rows.push(row(
+            "Test models",
+            &format!("Sends \"Reply with the single word OK.\" to each model below with the {name} Runo runs, one at a time, and marks which ones work."),
+            if crate::modelcheck::testing(pid) {
+                Ctl::Chip("Testing…".into(), 2)
+            } else {
+                Ctl::Button("Test".into(), Rc::new(move |this, cx| this.test_models(pid, cx)))
+            },
+        ));
+    }
+    if pid == "codex" {
+        rows.push(row(
+            "Also save to ~/.codex/config.toml",
+            "When you pick a default here, also set model in Codex's own config, so codex in a terminal uses it too. Only that line changes, after a backup.",
+            Ctl::Switch(st.agent("codex").save_to_config, Rc::new(|s, v| s.agents.entry("codex".into()).or_default().save_to_config = v)),
+        ));
+    }
+    if !current.is_empty() {
+        rows.push(row(
+            &format!("Default: {current}"),
+            "Runo passes it on every run where the session picks no model, over the CLI's own config.",
+            Ctl::Button("Use the CLI's default".into(), Rc::new(move |this, cx| this.set_default_model(pid, String::new(), cx))),
+        ));
+    }
+    let all: Vec<&caps::ModelInfo> = crate::caps::all_models(&caps).collect();
+    for m in all.iter().take(crate::fixes::MODELS_SHOWN) {
+        let mut desc = vec![m.choice.value.clone()];
+        if caps
+            .hidden_models
+            .iter()
+            .any(|h| h.choice.value == m.choice.value)
+        {
+            desc.push("hidden from the CLI's menu".into());
+        }
+        let note = caps::model_note(pid, m, &caps.version, &today);
+        if !note.is_empty() {
+            desc.push(note);
+        }
+        if let Some(v) = crate::modelcheck::verdict(pid, &m.choice.value) {
+            desc.push(v.label().into());
+        }
+        let value = m.choice.value.clone();
+        rows.push(row(
+            &m.choice.label,
+            &desc.join(" · "),
+            if current == value {
+                Ctl::Chip("Default".into(), 0)
+            } else {
+                Ctl::Button(
+                    "Use as default".into(),
+                    Rc::new(move |this, cx| this.set_default_model(pid, value.clone(), cx)),
+                )
+            },
+        ));
+    }
+    let more = all.len().saturating_sub(crate::fixes::MODELS_SHOWN);
+    Some(section(
+        "Models",
+        &if more > 0 {
+            format!("From {name}'s own model list; {more} more aren't shown. Type any of them under Launch.")
+        } else {
+            format!(
+                "From {name}'s own model list, including models it hides and ones being retired."
+            )
+        },
+        rows,
+    ))
 }
 
 fn launch_section(pid: &'static str, st: &AppSettings, model_hint: &str) -> Section {
@@ -502,8 +669,8 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Limits", "Keep agents from running away with time or money.", vec![
                 row("Flag a quiet agent after", "An agent that prints nothing for this long gets a card with Stop. A long build or test run can be quiet too.", Ctl::Dropdown(options(&[("5", "5 minutes"), ("10", "10 minutes"), ("20", "20 minutes"), ("60", "1 hour"), ("0", "Never")]), st.stuck_after_mins.to_string(), Rc::new(|s, v| s.stuck_after_mins = v.parse().unwrap_or(10)))),
-                row("Spending limit per session", "Counts the cost agents report. Once a session reaches it, new turns wait until you raise the limit or send anyway.", Ctl::Dropdown(options(&[("0", "No limit"), ("1", "$1"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100")]), st.session_limit_usd.to_string(), Rc::new(|s, v| s.session_limit_usd = v.parse().unwrap_or(0)))),
-                row("Spending limit per day", "Across every session. New turns wait once today's reported cost reaches it.", Ctl::Dropdown(options(&[("0", "No limit"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100"), ("250", "$250")]), st.daily_limit_usd.to_string(), Rc::new(|s, v| s.daily_limit_usd = v.parse().unwrap_or(0)))),
+                row("Spending limit per session", &format!("Counts the cost agents report. Once a session reaches it, new turns wait until you raise the limit or send anyway. {}", agent::cost_note()), Ctl::Dropdown(options(&[("0", "No limit"), ("1", "$1"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100")]), st.session_limit_usd.to_string(), Rc::new(|s, v| s.session_limit_usd = v.parse().unwrap_or(0)))),
+                row("Spending limit per day", "Across every session. New turns wait once today's reported cost reaches it; agents that report no cost don't count toward it.", Ctl::Dropdown(options(&[("0", "No limit"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100"), ("250", "$250")]), st.daily_limit_usd.to_string(), Rc::new(|s, v| s.daily_limit_usd = v.parse().unwrap_or(0)))),
                 row("Agents running at once", "Turns past this many wait for a free slot, shown as Waiting for a slot, and start in order.", Ctl::Dropdown(options(&[("0", "No cap"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("6", "6"), ("8", "8")]), st.max_running.to_string(), Rc::new(|s, v| s.max_running = v.parse().unwrap_or(0)))),
             ]),
             section("Updates", "Runo looks for a newer release on GitHub and offers to download it. Nothing installs without you.", vec![
@@ -615,7 +782,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Scheduled runs to keep", "Older runs of each scheduled playbook are deleted, with their worktrees. Pinned and unread runs stay.", Ctl::Dropdown(options(&[("5", "5"), ("10", "10"), ("20", "20"), ("50", "50"), ("0", "All")]), st.playbook_keep_runs.to_string(), Rc::new(|s, v| s.playbook_keep_runs = v.parse().unwrap_or(10)))),
                 switch_row("Catch up on missed runs", "When a scheduled playbook came due while Runo was closed, run it once when Runo opens. Off skips it until its next time.", st.playbook_catch_up, |s, v| s.playbook_catch_up = v),
             ].into_iter().chain(cfg!(target_os = "macos").then(|| {
-                switch_row("Run while Runo is closed", "A background job (launchd) checks every 5 minutes and runs due playbooks in their own worktree with the agent's one-shot command. The runs show up as sessions when Runo opens. Playbooks on a connection still wait for Runo.", st.playbooks_while_closed, |s, v| s.playbooks_while_closed = v)
+                switch_row("Run while Runo is closed", "A background job (launchd) checks every 5 minutes and runs due playbooks in their own worktree, after the setup command, with the agent's settings and the playbook's permissions. The runs show up as sessions when Runo opens. Playbooks on a connection still wait for Runo.", st.playbooks_while_closed, |s, v| s.playbooks_while_closed = v)
             })).collect()),
         ],
         SettingsPage::Providers => {
@@ -632,13 +799,21 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 let pid = p.id;
                 if caps.installed {
                     let path = install::agent_path(p);
-                    let desc = match &path {
+                    let mut desc = match &path {
                         Some(path) => match crate::shellenv::found_via(path) {
                             Some(via) => format!("{} · via {via}", tilde(path)),
                             None => tilde(path),
                         },
                         None => String::new(),
                     };
+                    if let Some((old, new)) = crate::copies::shadowed(p) {
+                        desc.push_str(&format!(" · Runs {}, but {} is on this computer", old.version, new.version));
+                    }
+                    match crate::signin::get(p.id) {
+                        Some(true) => desc.push_str(" · Signed in"),
+                        Some(false) => desc.push_str(&format!(" · {}", agent::sign_in_help(p.id))),
+                        None => {}
+                    }
                     let mut r = row(p.name, &desc, Ctl::Open(caps.version.clone()));
                     r.open = Some(SettingsPage::Agent(p.id));
                     installed.push(r);
@@ -696,6 +871,9 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             if !installed.is_empty() {
                 sections.push(section("Installed", "Pick an agent to change its model, flags and environment. Installed agents are also listed under Providers on the left.", installed));
             }
+            for p in agent::PROVIDERS.iter() {
+                sections.extend(copies_section(p.id, &format!("{} copies", p.name)));
+            }
             if !available.is_empty() {
                 sections.push(section("More agents", "Install any of these with the vendor's official installer, or point Runo at a copy you already have. Once found it appears in the list above and in the sidebar.", available));
             }
@@ -703,6 +881,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         }
         SettingsPage::Agent("claude") => vec![
             detected_section("claude"),
+        ].into_iter().chain(copies_section("claude", "Copies on this computer")).chain(models_section("claude", st)).chain(vec![
             launch_section("claude", st, "Model alias or full name, used when the session has none selected."),
             section("Behavior", "Passed to claude on every run.", vec![
                 agent_text("claude", st, "Append to system prompt", "Extra instructions added to Claude's system prompt (--append-system-prompt).", "None", |o| o.append_prompt.clone(), |o, v| o.append_prompt = v),
@@ -712,29 +891,32 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 agent_text("claude", st, "Fallback model", "Used automatically when the main model is overloaded (--fallback-model).", "None", |o| o.fallback_model.clone(), |o, v| o.fallback_model = v),
                 agent_choice("claude", st, "Default effort", "How much thinking Claude does when the composer has none selected.", std::iter::once(("".to_string(), "Default".to_string())).chain(caps::get("claude").efforts.iter().map(|c| (c.value.clone(), c.label.clone()))).collect(), |o| o.effort.clone(), |o, v| o.effort = v),
             ]),
-        ],
+        ]).collect(),
         SettingsPage::Agent("codex") => vec![
             detected_section("codex"),
+        ].into_iter().chain(copies_section("codex", "Copies on this computer")).chain(models_section("codex", st)).chain(vec![
             launch_section("codex", st, "Any model your account supports. Empty uses the model in ~/.codex/config.toml."),
             section("Behavior", "Passed to codex exec on every run.", vec![
                 agent_text("codex", st, "Config profile", "A profile from ~/.codex/config.toml (-p).", "None", |o| o.profile.clone(), |o, v| o.profile = v),
                 agent_text("codex", st, "Extra directories", "Comma-separated writable folders besides the project (--add-dir).", "None", |o| o.add_dirs.clone(), |o, v| o.add_dirs = v),
                 agent_choice("codex", st, "Default reasoning", "model_reasoning_effort when the composer has none selected.", std::iter::once(("".to_string(), "Default".to_string())).chain(caps::get("codex").models.first().map(|m| m.efforts.clone()).unwrap_or_default().iter().map(|c| (c.value.clone(), c.label.clone()))).collect(), |o| o.effort.clone(), |o, v| o.effort = v),
             ]),
-        ],
+        ]).collect(),
         SettingsPage::Agent("opencode") => vec![
             detected_section("opencode"),
+        ].into_iter().chain(copies_section("opencode", "Copies on this computer")).chain(models_section("opencode", st)).chain(vec![
             launch_section("opencode", st, "In provider/model form, for example opencode/big-pickle."),
             section("Behavior", "Passed to opencode run on every run.", vec![
                 agent_text("opencode", st, "Default agent", "Run with a named OpenCode agent (--agent). Plan only uses the plan agent when this is empty.", "None", |o| o.sub_agent.clone(), |o, v| o.sub_agent = v),
                 agent_text("opencode", st, "Model variant", "Provider-specific reasoning effort such as high, max or minimal (--variant).", "None", |o| o.variant.clone(), |o, v| o.variant = v),
                 row("Show thinking", "Include thinking blocks in the output (--thinking).", Ctl::Switch(st.agent("opencode").thinking, Rc::new(|s, v| s.agents.entry("opencode".into()).or_default().thinking = v))),
             ]),
-        ],
-        SettingsPage::Agent(id) => vec![
-            detected_section(id),
-            launch_section(id, st, "Passed with the CLI's model flag."),
-        ],
+        ]).collect(),
+        SettingsPage::Agent(id) => std::iter::once(detected_section(id))
+            .chain(copies_section(id, "Copies on this computer"))
+            .chain(models_section(id, st))
+            .chain([launch_section(id, st, "Passed with the CLI's model flag.")])
+            .collect(),
         SettingsPage::Mcp => {
             let mut sections = Vec::new();
             let shared = data

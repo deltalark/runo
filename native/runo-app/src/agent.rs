@@ -407,10 +407,6 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             if !tier.is_empty() {
                 args.extend([s("-c"), format!("service_tier=\"{tier}\"")]);
             }
-            let approval = get("approval");
-            if !approval.is_empty() {
-                args.extend([s("-c"), format!("approval_policy=\"{approval}\"")]);
-            }
             if !opts.profile.is_empty() {
                 args.extend([s("-p"), opts.profile.clone()]);
             }
@@ -728,9 +724,8 @@ pub fn imports_cli_turns(provider: &str) -> bool {
     matches!(provider, "claude" | "codex")
 }
 
-/// Gemini's and Qwen Code's conversation flags: `--resume` to continue, or a new
-/// conversation's id up front. Gemini resumes by its number for the session (or
-/// "latest"), and names a new one only when it has `--session-id`.
+/// Gemini's and Qwen Code's conversation flags: `--resume <id>` to continue, or a new
+/// conversation's id up front. Gemini names a new one only when it has `--session-id`.
 fn conversation_args(spec: &RunSpec) -> Vec<String> {
     let id = spec.session_id;
     if id.is_empty() {
@@ -738,12 +733,7 @@ fn conversation_args(spec: &RunSpec) -> Vec<String> {
     }
     let gemini = spec.provider == "gemini";
     if spec.resume {
-        let to = if gemini {
-            crate::gemini::resume_arg(id)
-        } else {
-            id.to_string()
-        };
-        vec!["--resume".into(), to]
+        vec!["--resume".into(), id.to_string()]
     } else if !gemini || names_conversation("gemini") {
         vec!["--session-id".into(), id.to_string()]
     } else {
@@ -831,6 +821,11 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
                 out.extend(["resume".to_string(), spec.session_id.to_string()]);
             }
             out.extend(flags);
+            // The interactive CLI is the only place an approval policy has an effect.
+            let approval = spec.sel.get("approval").cloned().unwrap_or_default();
+            if !approval.is_empty() {
+                out.extend([s("-c"), format!("approval_policy=\"{approval}\"")]);
+            }
             if !spec.prompt.is_empty() {
                 out.push(spec.prompt.to_string());
             }
@@ -873,6 +868,7 @@ mod interactive_tests {
         let sel = std::collections::HashMap::from([
             ("model".to_string(), "haiku".to_string()),
             ("mode".to_string(), "edit".to_string()),
+            ("approval".to_string(), "untrusted".to_string()),
         ]);
         let opts = AgentOptions::default();
         let spec = |provider, resume, prompt| RunSpec {
@@ -906,6 +902,12 @@ mod interactive_tests {
             .any(|a| a == "exec" || a == "--skip-git-repo-check"));
         assert!(codex.windows(2).any(|w| w == ["-m", "haiku"]));
         assert_eq!(codex.iter().filter(|a| *a == "resume").count(), 1);
+        assert!(codex
+            .windows(2)
+            .any(|w| w == ["-c", "approval_policy=\"untrusted\""]));
+        // Chat turns can't stop to ask, so the policy stays out of them.
+        let chat = provider_args(&spec("codex", true, "Go on"));
+        assert!(!chat.iter().any(|a| a.contains("approval_policy")));
     }
 }
 
@@ -1159,6 +1161,11 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
     if !signs.iter().any(|s| lower.contains(s)) {
         return None;
     }
+    Some(sign_in_help(provider))
+}
+
+/// How to sign an agent in, as "Codex isn't signed in. Open a terminal and run …".
+pub fn sign_in_help(provider: &str) -> String {
     let name = self::provider(provider).name;
     let how = match provider {
         "claude" => "Open a terminal, run `claude` and type `/login`, or set ANTHROPIC_API_KEY under Settings > Claude Code > Environment.",
@@ -1173,7 +1180,54 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
         "grok" => "Set GROK_API_KEY under Settings > Grok > Environment.",
         _ => "Sign in to it in a terminal, then try again.",
     };
-    Some(format!("{name} isn't signed in. {how}"))
+    format!("{name} isn't signed in. {how}")
+}
+
+/// Whether the CLI reports what a turn cost, which spending limits count.
+pub fn reports_cost(provider: &str) -> bool {
+    matches!(provider, "claude" | "opencode")
+}
+
+/// Which agents report a cost, for spending limits and the spend shown: "Only Claude
+/// Code and OpenCode report a cost; …".
+pub fn cost_note() -> String {
+    let (some, none): (Vec<&Provider>, Vec<&Provider>) =
+        PROVIDERS.iter().partition(|p| reports_cost(p.id));
+    let names = |list: &[&Provider]| {
+        let names: Vec<&str> = list.iter().map(|p| p.name).collect();
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => names.join(""),
+        }
+    };
+    format!(
+        "Only {} report a cost; {} report none, so their turns count as $0 and limits don't hold them.",
+        names(&some),
+        names(&none)
+    )
+}
+
+/// Where to pick another model, when the CLI's errors say the model can't be used.
+pub fn model_hint(provider: &str, log: &str) -> Option<String> {
+    let lower = log.to_lowercase();
+    let unusable = [
+        "not supported",
+        "not found",
+        "does not exist",
+        "unknown model",
+        "invalid model",
+        "model_not_found",
+        "unsupported model",
+        "do not have access",
+        "does not have access",
+    ];
+    if !lower.contains("model") || !unusable.iter().any(|s| lower.contains(s)) {
+        return None;
+    }
+    let name = self::provider(provider).name;
+    Some(format!(
+        "Tip: this model isn't available to your {name} account. Pick another from the model chip under the message box, or change the default model under Settings → {name}."
+    ))
 }
 
 /// Whether a line shows the CLI waiting for a browser sign-in, which never finishes in
@@ -1281,20 +1335,19 @@ impl Handle {
     }
 }
 
-/// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
-pub fn run_agent(
-    target: Target,
-    spec: &RunSpec,
-    dir: &str,
-    sandbox: Option<&crate::connections::Sandbox>,
-    tx: Sender<Event>,
-) -> Result<Handle, String> {
-    let bin = if spec.opts.binary.trim().is_empty() {
+/// The program to run for a turn: the agent's Settings binary, else its usual name.
+fn program<'a>(spec: &RunSpec<'a>) -> &'a str {
+    if spec.opts.binary.trim().is_empty() {
         self::provider(spec.provider).bin
     } else {
         spec.opts.binary.trim()
-    };
-    let mut command = Command::new(bin);
+    }
+}
+
+/// The command for one turn: the agent's program with the arguments and environment
+/// its settings and the session's selections call for.
+pub fn turn_command(spec: &RunSpec) -> Command {
+    let mut command = Command::new(program(spec));
     command.args(provider_args(spec));
     command.envs(provider_env(spec));
     for line in spec.opts.env.lines() {
@@ -1304,8 +1357,13 @@ pub fn run_agent(
             }
         }
     }
-    // Gemini holds to the session's mode only in a folder it trusts.
-    if spec.provider == "gemini" && spec.local && sandbox.is_none() {
+    command
+}
+
+/// What the folder needs before a turn: Gemini's trust, so it holds to the session's
+/// mode, and MCP servers for CLIs that read them from a project file.
+pub fn prepare_folder(spec: &RunSpec, dir: &str, sandboxed: bool) {
+    if spec.provider == "gemini" && spec.local && !sandboxed {
         crate::gemini::trust(dir, &spec.opts.env);
     }
     if crate::mcp::project_file(spec.provider).is_some() {
@@ -1315,6 +1373,19 @@ pub fn run_agent(
             &file_servers(spec),
         );
     }
+}
+
+/// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
+pub fn run_agent(
+    target: Target,
+    spec: &RunSpec,
+    dir: &str,
+    sandbox: Option<&crate::connections::Sandbox>,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
+    let bin = program(spec);
+    let mut command = turn_command(spec);
+    prepare_folder(spec, dir, sandbox.is_some());
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
     } else if let (Target::Session(id), Some(root)) = (target, crate::detach::root()) {
@@ -1852,8 +1923,6 @@ mod arg_tests {
                 "model_reasoning_effort=\"high\"",
                 "-c",
                 "service_tier=\"priority\"",
-                "-c",
-                "approval_policy=\"never\"",
                 "-p",
                 "work",
                 "--skip-git-repo-check",
@@ -1939,8 +2008,7 @@ mod arg_tests {
                 .windows(2)
                 .any(|w| w == pair)
         };
-        // Gemini resumes by number, or the folder's latest while the number is unknown.
-        assert!(has("gemini", true, ["--resume", "latest"]));
+        assert!(has("gemini", true, ["--resume", "id-1"]));
         assert!(has("qwen", true, ["--resume", "id-1"]));
         assert!(has("cursor", true, ["--resume", "id-1"]));
         assert!(has("copilot", true, ["--resume", "id-1"]));
@@ -2144,7 +2212,7 @@ mod arg_tests {
         let fresh = run_args("gemini", "edit", false, &[]);
         assert!(fresh.windows(2).any(|w| w == ["--session-id", "id-1"]));
         let resumed = run_args("gemini", "edit", true, &[]);
-        assert!(resumed.windows(2).any(|w| w == ["--resume", "latest"]));
+        assert!(resumed.windows(2).any(|w| w == ["--resume", "id-1"]));
         assert!(!resumed.contains(&"--session-id".to_string()));
     }
 
@@ -2178,6 +2246,17 @@ mod arg_tests {
         assert!(hint.contains("codex login"));
         assert!(sign_in_hint("claude", "Invalid API key · Please run /login").is_some());
         assert!(sign_in_hint("claude", "error: model not found").is_none());
+        let tip = model_hint(
+            "codex",
+            "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.",
+        )
+        .unwrap();
+        assert!(tip.contains("model chip") && tip.contains("Settings → Codex"));
+        assert!(model_hint("codex", "Model metadata for `x` not found.").is_some());
+        assert!(model_hint("codex", "file not found").is_none());
+        let note = cost_note();
+        assert!(note.starts_with("Only Claude Code and OpenCode report a cost; Codex, "));
+        assert!(note.contains(" and Grok report none"));
         assert!(sign_in_hint("opencode", "Error: Token refresh failed: 401")
             .unwrap()
             .contains("opencode auth login"));

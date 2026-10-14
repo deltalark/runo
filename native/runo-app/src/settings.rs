@@ -36,6 +36,25 @@ pub struct AgentOptions {
     pub sub_agent: String,
     /// OpenCode: show thinking blocks.
     pub thinking: bool,
+    /// Codex: also write the default model into ~/.codex/config.toml (after a backup).
+    pub save_to_config: bool,
+    /// Default models of single projects, by project id; they win over `model_override`.
+    pub project_models: HashMap<String, String>,
+}
+
+impl AgentOptions {
+    /// These options with the project's own default model, when it has one.
+    pub fn for_project(&self, project: u64) -> AgentOptions {
+        let mut opts = self.clone();
+        if let Some(model) = self
+            .project_models
+            .get(&project.to_string())
+            .filter(|m| !m.trim().is_empty())
+        {
+            opts.model_override = model.trim().to_string();
+        }
+        opts
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -223,6 +242,16 @@ fn settings_path() -> PathBuf {
 impl AppSettings {
     pub fn agent(&self, id: &str) -> AgentOptions {
         self.agents.get(id).cloned().unwrap_or_default()
+    }
+
+    /// The worktree setup command for a project: its own, else the one in Settings.
+    pub fn setup_for(&self, project_setup: &str) -> String {
+        let own = project_setup.trim();
+        if own.is_empty() {
+            self.worktree_setup.trim().to_string()
+        } else {
+            own.to_string()
+        }
     }
 
     pub fn load() -> Self {
@@ -1071,6 +1100,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_project_setup_command_comes_first() {
+        let s = AppSettings {
+            worktree_setup: " npm ci ".into(),
+            ..Default::default()
+        };
+        assert_eq!(s.setup_for("cargo fetch"), "cargo fetch");
+        assert_eq!(s.setup_for("  "), "npm ci");
+        assert_eq!(AppSettings::default().setup_for(""), "");
     }
 
     #[test]
