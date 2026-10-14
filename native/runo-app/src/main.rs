@@ -5077,7 +5077,8 @@ impl RunoApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .min_w_0()
+                    // A long title gives way, so the branch beside it stays readable.
+                    .min_w(px(64.))
                     .flex_shrink(1.)
                     .cursor_pointer()
                     .group("title")
@@ -5106,18 +5107,31 @@ impl RunoApp {
                     .into_any_element()
             })
             .child(
-                // The branch gives way first when the chat is narrow, so the buttons
-                // on the right stay in view.
+                // The branch keeps room for a short name like "local folder" and a
+                // long one is cut, with the full name in the tooltip.
                 div()
+                    .id("session-branch")
                     .flex()
-                    .min_w_0()
-                    .flex_shrink(2.)
+                    .min_w(px(96.))
+                    .flex_shrink(1.)
+                    .tooltip({
+                        let branch = session.branch.clone();
+                        move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(branch.clone())
+                                .build(window, cx)
+                        }
+                    })
                     .items_center()
                     .gap(px(6.))
                     .text_size(px(12.))
                     .text_color(rgb(c_muted()))
                     .child(icon(IconName::GitBranch, 12., c_muted()).flex_none())
-                    .child(div().min_w_0().truncate().child(session.branch.clone()))
+                    .child(
+                        div()
+                            .max_w(px(160.))
+                            .truncate()
+                            .child(session.branch.clone()),
+                    )
                     .when(isolated, |el| {
                         el.child(
                             div()
