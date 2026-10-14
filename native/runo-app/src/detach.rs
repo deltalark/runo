@@ -8,7 +8,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Marks Runo's wrapper in the process list, so an unrelated process that reused a pid is
@@ -18,6 +18,19 @@ const MARK: &str = "runo-turn";
 const SCRIPT: &str = r#"d="$1"; shift; "$@" >"$d/out" 2>"$d/err" </dev/null; echo $? >"$d/exit.tmp"; mv "$d/exit.tmp" "$d/exit""#;
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Turns stopped on purpose, by their process group, so their end isn't logged as a fault.
+static STOPPED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Whether the turn led by `pid` was stopped on purpose; forgets it either way.
+fn was_stopped(pid: u32) -> bool {
+    let Ok(mut stopped) = STOPPED.lock() else {
+        return false;
+    };
+    let before = stopped.len();
+    stopped.retain(|g| *g != pid);
+    stopped.len() != before
+}
 
 /// Run local turns detached, keeping their output under `root`. Only the app does this;
 /// elsewhere turns run as plain child processes.
@@ -91,6 +104,9 @@ pub fn stop(group: u32) {
     {
         if !is_turn(group) {
             return;
+        }
+        if let Ok(mut stopped) = STOPPED.lock() {
+            stopped.push(group);
         }
         // SAFETY: signals to the process group of a turn wrapper Runo started.
         unsafe {
@@ -249,7 +265,9 @@ fn follow(target: Target, turn: PathBuf, pid: u32, mut child: Option<Child>, tx:
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 let code = exit_code(&turn);
-                if code != Some(0) {
+                // A stop on purpose is logged with the turn ("turn stopped").
+                let stopped = was_stopped(pid);
+                if code != Some(0) && !stopped {
                     crate::applog::warn("agent", format!("{target:?}: {}", exit_text(code)));
                 }
                 let _ = tx.send(Event::Done(target, code == Some(0)));
