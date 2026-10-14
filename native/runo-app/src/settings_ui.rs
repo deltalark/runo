@@ -1501,7 +1501,10 @@ fn phone_sections(st: &AppSettings) -> Vec<Section> {
                             "Copy".into(),
                             Rc::new(move |this: &mut RunoApp, cx: &mut Context<RunoApp>| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()));
-                                this.notice = Some("Copied the pairing link.".into());
+                                this.info = Some((
+                                    "Copied the pairing link.".into(),
+                                    std::time::Instant::now(),
+                                ));
                             }) as Action,
                         ),
                     ]),
@@ -1554,8 +1557,10 @@ fn phone_sections(st: &AppSettings) -> Vec<Section> {
                         "Remove".into(),
                         Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
                             phone::unpair(&store::data_dir(), &gone);
-                            this.notice =
-                                Some(format!("Removed {name}. Its link no longer works."));
+                            this.info = Some((
+                                format!("Removed {name}. Its link no longer works."),
+                                std::time::Instant::now(),
+                            ));
                         }) as Action,
                     ),
                     (
