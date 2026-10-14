@@ -270,7 +270,7 @@ impl RunoApp {
 
     /// The browser page shown on the Design page, while its preview is open.
     pub(crate) fn design_page_key(&self) -> Option<u64> {
-        (self.view == View::Design && self.design.preview)
+        (self.view == View::Design && self.design.preview && !self.all_scope())
             .then_some(self.design.project)
             .flatten()
             .map(page_key)
@@ -279,6 +279,9 @@ impl RunoApp {
     /// Load the current project's references and notes, when the page shows another
     /// project.
     pub(crate) fn prepare_design(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.all_scope() {
+            return;
+        }
         let Some(project) = self
             .current_project()
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
@@ -567,10 +570,21 @@ impl RunoApp {
     }
 
     pub(crate) fn design_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some((_, name, root)) = self.design_root() else {
+        if self.all_scope() {
             return shell::mode_frame(
                 Mode::Design,
                 "Design",
+                Some(self.mode_project_chip(cx)),
+                "Pick a project to see its references and design notes.",
+                self.project_chooser(Mode::Design, cx),
+                None,
+            );
+        }
+        let Some((_, _, root)) = self.design_root() else {
+            return shell::mode_frame(
+                Mode::Design,
+                "Design",
+                None,
                 "Collect design references and start agents from them.",
                 div().child(empty_hint(
                     "design-empty",
@@ -1018,7 +1032,8 @@ impl RunoApp {
         };
         shell::mode_frame(
             Mode::Design,
-            &format!("Design · {name}"),
+            "Design",
+            Some(self.mode_project_chip(cx)),
             "Collect references, keep design notes, see the running app beside them, and start agents with the references attached.",
             body,
             Some(preview_toggle.into_any_element()),

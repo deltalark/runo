@@ -81,6 +81,28 @@ pub(crate) struct ProjectForm {
     pub parent: Option<PathBuf>,
     /// The clone is running; its latest progress line.
     pub cloning: Option<String>,
+    /// Start with no code, for Design or Architecture: a new folder under `~/Runo/`.
+    pub blank: Option<Mode>,
+}
+
+/// Where projects started without code get their folder: `~/Runo/`.
+pub(crate) fn blank_parent() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join("Runo"))
+}
+
+/// A folder name for a project name: lowercase letters, digits and dashes.
+pub(crate) fn folder_name(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.trim().chars() {
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
 }
 
 /// Where clones go unless another folder is picked: beside the newest project, else home.
@@ -513,8 +535,24 @@ impl RunoApp {
             clone: false,
             parent: clone_parent(&self.state.projects),
             cloning: None,
+            blank: None,
         });
         cx.notify();
+    }
+
+    /// Open the New project popup set to start without code, for Design or Architecture.
+    pub(crate) fn start_project(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.pick_project(cx);
+        let glyph = if mode == Mode::Design {
+            "palette"
+        } else {
+            "layers"
+        };
+        if let Some(form) = self.project_form.as_mut() {
+            form.blank = Some(mode);
+            form.start_session = false;
+            form.icon = ICONS.iter().position(|(k, _)| *k == glyph).unwrap_or(0);
+        }
     }
 
     /// Open the popup to change an existing project's name, color or icon.
@@ -536,6 +574,7 @@ impl RunoApp {
             clone: false,
             parent: None,
             cloning: None,
+            blank: None,
         });
     }
 
@@ -774,6 +813,10 @@ impl RunoApp {
             self.start_clone(cx);
             return;
         }
+        if let Some(mode) = form.blank {
+            self.create_blank_project(mode, name, color, glyph, cx);
+            return;
+        }
         let Some(path) = form.path.clone() else {
             if let Some(form) = self.project_form.as_mut() {
                 form.error = Some("Choose a folder first.".into());
@@ -819,6 +862,70 @@ impl RunoApp {
             }
         }
         cx.notify();
+    }
+
+    /// Make `~/Runo/<name>/` with git and add it as a project that has no code yet, then
+    /// open its Design or Architecture page.
+    fn create_blank_project(
+        &mut self,
+        mode: Mode,
+        name: String,
+        color: String,
+        glyph: String,
+        cx: &mut Context<Self>,
+    ) {
+        let slug = folder_name(&name);
+        let fail = |this: &mut Self, why: String, cx: &mut Context<Self>| {
+            if let Some(form) = this.project_form.as_mut() {
+                form.error = Some(why);
+            }
+            cx.notify();
+        };
+        if slug.is_empty() {
+            return fail(self, "Give the project a name.".into(), cx);
+        }
+        let Some(parent) = blank_parent() else {
+            return fail(self, "Could not find your home folder.".into(), cx);
+        };
+        let dir = parent.join(&slug);
+        let taken = std::fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_some());
+        if taken {
+            return fail(
+                self,
+                format!("{} already exists. Pick another name.", dir.display()),
+                cx,
+            );
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return fail(self, format!("Could not create {}: {e}", dir.display()), cx);
+        }
+        let path_str = dir.to_string_lossy().into_owned();
+        if !git::is_repo(&path_str) {
+            let out = std::process::Command::new("git")
+                .arg("init")
+                .current_dir(&dir)
+                .output();
+            if out.is_ok_and(|o| o.status.success()) {
+                // Sessions branch from a commit once code is added here.
+                let _ = git::initial_commit(&path_str);
+            }
+        }
+        match self.add_project(&dir, name, color, glyph, false) {
+            Ok(()) => {
+                self.project_form = None;
+                let id = self.state.projects.last().map(|p| p.id);
+                self.project = id;
+                self.home_all = false;
+                self.view = if mode == Mode::Design {
+                    View::Design
+                } else {
+                    View::Architecture
+                };
+                self.save();
+                cx.notify();
+            }
+            Err(why) => fail(self, why, cx),
+        }
     }
 
     pub(crate) fn project_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -893,6 +1000,7 @@ impl RunoApp {
             });
 
         let clone_mode = form.clone && !editing;
+        let blank = form.blank.filter(|_| !editing);
         let cloning = form.cloning.clone();
         let mut source = div()
             .flex()
@@ -903,14 +1011,26 @@ impl RunoApp {
             .border_1()
             .border_color(rgb(c_border()))
             .bg(rgb(c_canvas()));
-        for (j, (value, glyph, text)) in [
-            (false, IconName::FolderOpen, "Local folder"),
-            (true, IconName::GitBranch, "Clone from URL"),
+        for (j, (value, start, glyph, text)) in [
+            (false, None, IconName::FolderOpen, "Folder"),
+            (true, None, IconName::GitBranch, "Clone"),
+            (
+                false,
+                Some(Mode::Design),
+                IconName::PanelsTopLeft,
+                "Design an app",
+            ),
+            (
+                false,
+                Some(Mode::Architecture),
+                IconName::Network,
+                "Architecture",
+            ),
         ]
         .into_iter()
         .enumerate()
         {
-            let on = clone_mode == value;
+            let on = clone_mode == value && blank == start;
             source = source.child(
                 div()
                     .id(("project-source", j))
@@ -937,6 +1057,8 @@ impl RunoApp {
                         if let Some(f) = this.project_form.as_mut().filter(|f| f.cloning.is_none())
                         {
                             f.clone = value;
+                            f.blank = start;
+                            f.start_session = start.is_none();
                             f.error = None;
                         }
                         cx.notify();
@@ -1034,6 +1156,46 @@ impl RunoApp {
                         ),
                 )
             });
+
+        let typed = self.project_name.read(cx).value().trim().to_string();
+        let blank_box = div()
+            .v_flex()
+            .gap_1p5()
+            .child(label("Folder"))
+            .child(
+                div()
+                    .h(px(40.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(tint(c_subtle()))
+                    .child(icon(IconName::FolderPlus, 15., c_muted()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_family(self.mono_font.clone())
+                            .child(match (blank_parent(), folder_name(&typed)) {
+                                (Some(parent), slug) if !slug.is_empty() => {
+                                    parent.join(slug).display().to_string()
+                                }
+                                (Some(parent), _) => format!("{}/…", parent.display()),
+                                (None, _) => "~/Runo/…".into(),
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child("A new folder with git and no code yet. Sessions you start here add the code to this same project."),
+            );
 
         let mut swatches = div().flex().flex_wrap().gap_2();
         for (i, (key, hex)) in COLORS.iter().enumerate() {
@@ -1188,10 +1350,15 @@ impl RunoApp {
                             },
                         ))
                         .child(div().text_xs().text_color(rgb(c_muted())).truncate().child(
-                            if editing {
-                                "Change how this project looks in the sidebar"
-                            } else {
-                                "Pick a folder for Runo's agents to work in"
+                            match (editing, blank) {
+                                (true, _) => "Change how this project looks in the sidebar",
+                                (false, Some(Mode::Design)) => {
+                                    "Start with design references and notes, before any code"
+                                }
+                                (false, Some(_)) => {
+                                    "Sketch the system and its decisions, before any code"
+                                }
+                                (false, None) => "Pick a folder for Runo's agents to work in",
                             },
                         )),
                 );
@@ -1212,7 +1379,8 @@ impl RunoApp {
             .child(preview)
             .when(!editing, |el| el.child(source))
             .when(clone_mode, |el| el.child(clone_box))
-            .when(!clone_mode, |el| {
+            .when(blank.is_some(), |el| el.child(blank_box))
+            .when(!clone_mode && blank.is_none(), |el| {
                 el.child(div().v_flex().gap_1p5().child(label("Folder")).child(folder))
             })
             .child(
@@ -1222,7 +1390,7 @@ impl RunoApp {
                     .child(label("Name"))
                     .child(Input::new(&self.project_name).bordered(true).h(px(34.))),
             )
-            .child(
+            .when(blank.is_none(), |el| el.child(
                 div()
                     .v_flex()
                     .gap_1p5()
@@ -1234,10 +1402,10 @@ impl RunoApp {
                             .text_color(rgb(c_muted()))
                             .child("Runs in each new worktree before its agent starts, such as npm install. Empty uses the one in Settings."),
                     ),
-            )
+            ))
             .child(div().v_flex().gap_1p5().child(label("Color")).child(swatches))
             .child(div().v_flex().gap_1p5().child(label("Icon")).child(glyphs))
-            .when(!editing, |el| {
+            .when(!editing && blank.is_none(), |el| {
                 el.child(
                     div()
                         .v_flex()
@@ -1288,6 +1456,8 @@ impl RunoApp {
                                 "Cloning…"
                             } else if clone_mode {
                                 "Clone and add"
+                            } else if blank.is_some() {
+                                "Create project"
                             } else {
                                 "Add project"
                             },
@@ -1298,6 +1468,8 @@ impl RunoApp {
                                 && (cloning.is_some()
                                     || if clone_mode {
                                         repo_name.is_empty()
+                                    } else if blank.is_some() {
+                                        folder_name(&typed).is_empty()
                                     } else {
                                         path_text.is_none()
                                     }),
@@ -1348,6 +1520,13 @@ mod tests {
             },
         ];
         assert_eq!(clone_parent(&projects), Some(PathBuf::from("/work")));
+    }
+
+    #[test]
+    fn projects_without_code_get_a_plain_folder_name() {
+        assert_eq!(folder_name("Habit tracker"), "habit-tracker");
+        assert_eq!(folder_name("  Acme: Checkout v2! "), "acme-checkout-v2");
+        assert_eq!(folder_name("!!!"), "");
     }
 
     #[test]
