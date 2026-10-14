@@ -229,7 +229,7 @@ Deleting a session deletes its VM or its copies on every connection it ran on, a
 
 ## On your phone
 
-`runo --phone` serves a small API that a phone app can use to follow every session and answer it: allow or deny a permission request, approve a plan, answer an agent's questions, send a follow-up or stop a run. It prints a pairing code and works on your home network, or from anywhere through `runo-relay`, a small relay you run on your own server that only passes along end-to-end encrypted messages. See [docs/phone-bridge.md](docs/phone-bridge.md). The mobile app itself is coming next.
+`runo --phone` serves a small API that a phone app can use to follow every session and answer it: allow or deny a permission request, approve a plan, answer an agent's questions, send a follow-up or stop a run. It prints a pairing code and works on your home network, or from anywhere over Tailscale or `runo-relay`, a small relay you run on your own server that only passes along end-to-end encrypted messages. Runo runs no server of its own. See [docs/phone-bridge.md](docs/phone-bridge.md). The mobile app itself is coming next.
 
 ## Status
 
