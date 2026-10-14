@@ -50,6 +50,15 @@ All notable changes to Runo are documented here.
 - The browser opens as its own tab, glass mode looks the same on every page, the GitHub page has clearer empty states and filters, and the GitHub and Review pages come back after a restart.
 - Design and Architecture belong to the current project: they sit under its badge on the rail, their title switches project, and All projects shows a chooser instead of opening the first project. New project can start from Design an app or Architecture, making an empty git project in `~/Runo/<name>/`.
 
+### Changed
+
+- Deleting a session asks in a popup first, from the session header or its menu, instead of swapping the header buttons.
+- Stop moved from the session header into the message box: the send button becomes Stop while the agent works.
+- "Working" and how long the turn has run now show at the bottom of the chat instead of in the header.
+- Split view is gone; it broke the session layout. Tabs remain for moving between sessions.
+- The right panel (Changes, Files, terminal) resizes by dragging its left edge, and keeps its width after a restart.
+- The Browser button in the session header only shows once something is served for the session: a dev server on a usual port (3000, 5173, 8080 and the like), or a local URL printed in its terminal.
+
 ### Fixed
 
 - Agents: permission modes now match what each CLI can do. Plan is read-only everywhere it is offered, Grok runs in full access only, and Amp, Copilot and Cursor respect Edit vs Full.

@@ -1324,7 +1324,7 @@ impl RunoApp {
 }
 
 /// A row of connected choices, one of them on, like Home's project scope.
-fn segmented() -> Div {
+pub(crate) fn segmented() -> Div {
     div()
         .flex()
         .flex_none()
@@ -1335,7 +1335,7 @@ fn segmented() -> Div {
         .border_color(rgb(c_border()))
 }
 
-fn segment(id: (&'static str, usize), label: &'static str, on: bool) -> Stateful<Div> {
+pub(crate) fn segment(id: (&'static str, usize), label: &'static str, on: bool) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(26.))

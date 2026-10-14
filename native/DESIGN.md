@@ -24,7 +24,7 @@ At wide desktop sizes, the content area has three stable zones:
 2. **Project sidebar (260–280 px):** Sessions / Explorer / Changes tabs, local search, New run, compact session rows showing provider, task, status, branch and time. It follows the current project.
 3. **Work canvas (flexible):** tab strip across top, selected run transcript, file/diff, terminal, browser, worktrees or settings page. A prompt composer anchors the run view. A terminal dock can open beneath it.
 
-Optional split panes are user initiated. The default run view stays single-column. The window uses host titlebar controls; content chrome works on macOS, Windows and Linux.
+The run view stays single-column. The window uses host titlebar controls; content chrome works on macOS, Windows and Linux.
 
 At 1100–1399 px, the global sidebar narrows and the terminal may collapse. At 800–1099 px, the project sidebar is collapsible. Below 800 px, show one work pane and a clear project switcher. Every primary action works by keyboard and pointer; shortcut labels use the platform modifier.
 
@@ -32,7 +32,7 @@ At 1100–1399 px, the global sidebar narrows and the terminal may collapse. At 
 
 ### Open a project
 
-Show recent projects with path, branch and availability. Opening a project restores its selected run, open tabs, split and terminal layout. A missing folder shows a repair action. No provider sign-in blocks project opening.
+Show recent projects with path, branch and availability. Opening a project restores its selected run, open tabs and terminal layout. A missing folder shows a repair action. No provider sign-in blocks project opening.
 
 ### Start a run
 
@@ -58,7 +58,7 @@ A compact table shows branch, path, run owner, dirty state, changed-file count a
 
 | Area | Screens and states |
 | --- | --- |
-| Workspace | Empty project, active run, waiting for input, completed run, failed/disconnected run, multiple runs, split view |
+| Workspace | Empty project, active run, waiting for input, completed run, failed/disconnected run, multiple runs |
 | Project navigation | Recent projects, active/pinned/archived runs, branch groups, search/filter |
 | Files | Explorer, editor, quick open, binary/large file, conflict |
 | Source control | Changes list, unified/split diff, commit, branch, worktree management |

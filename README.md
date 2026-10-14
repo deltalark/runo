@@ -42,7 +42,7 @@ Coding agents are good at working on their own, but juggling several of them acr
 - **Projects and sessions.** Add any local folder and start sessions on it. Sessions are grouped by project, with live status dots, unread markers and `+/-` line counts.
 - **Isolated worktrees.** A session can run in its own branch and folder under `.runo-worktrees/`, or right in your checkout. A setup command runs in each new worktree, in a terminal tab where you can answer its prompts, before the agent starts, and git-ignored files listed in `.worktreeinclude` (such as `.env`) are copied in.
 - **Race several agents.** Send one task to several agents at once, each in its own worktree, compare the results and keep the best one.
-- **Tabs and split view.** Open sessions stay in tabs, and any two sessions can sit side by side, each live with its own reply box.
+- **Tabs.** Open sessions stay in tabs, so you can move between them in one click.
 - **Agent history.** Past Claude Code and Codex conversations on this machine are listed, and opening one resumes that exact conversation.
 
 ### Talking to agents
@@ -107,8 +107,6 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 - **Per-agent settings.** Default model, executable path, extra arguments, environment variables and agent-specific options.
 
 ### Made to feel at home
-
-<img src="docs/images/split-view.png" alt="Split view with two sessions side by side, one showing a plan ready for approval" width="900" />
 
 - **Quick open** with <kbd>⌘K</kbd> to jump to any session, file or command.
 - **Light and dark themes**, accent colors, colorblind-friendly diff colors, and an optional glass look.

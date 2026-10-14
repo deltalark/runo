@@ -22,7 +22,6 @@ impl RunoApp {
                 Mode::Settings => String::new(),
                 mode => mode.label().to_string(),
             },
-            split: self.split,
             right_tab: match self.right_tab {
                 RightTab::Changes => "changes",
                 RightTab::Files => "files",
@@ -31,6 +30,7 @@ impl RunoApp {
             expanded: Some(self.expanded.clone()),
             project: self.project,
             sidebar_width: self.sidebar_width,
+            panel_width: self.panel_width,
             home_all: self.home_all,
             window: self.window_place,
         };
@@ -51,10 +51,6 @@ impl RunoApp {
                 self.tabs.push(id);
             }
         }
-        self.split = layout
-            .split
-            .filter(exists)
-            .filter(|id| Some(*id) != self.selected);
         self.show_sidebar = !layout.hide_sidebar;
         self.show_panel = !layout.hide_panel;
         self.right_tab = match layout.right_tab.as_str() {
@@ -75,6 +71,9 @@ impl RunoApp {
         }
         if layout.sidebar_width > 0. {
             self.sidebar_width = layout.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        }
+        if layout.panel_width > 0. {
+            self.panel_width = layout.panel_width.clamp(PANEL_MIN, PANEL_MAX);
         }
         self.home_all = layout.home_all;
         self.window_place = layout.window;

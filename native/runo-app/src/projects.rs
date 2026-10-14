@@ -228,9 +228,6 @@ impl RunoApp {
         if self.new_project.is_none() {
             self.new_project = self.state.projects.first().map(|p| p.id);
         }
-        if self.split.is_some_and(|id| ids.contains(&id)) {
-            self.split = None;
-        }
         if self.selected.is_some_and(|id| ids.contains(&id)) {
             match self.tabs.last().copied() {
                 Some(next) => self.select(next),

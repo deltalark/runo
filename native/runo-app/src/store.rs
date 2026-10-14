@@ -736,9 +736,6 @@ pub struct Layout {
     /// The mode on the rail, by its label ("Home", "Sessions", ...).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode: String,
-    /// The session open beside the selected one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub split: Option<u64>,
     /// The right panel's tab: "changes", "browser" or "files".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub right_tab: String,
@@ -751,6 +748,9 @@ pub struct Layout {
     /// Sidebar width in pixels; 0 is the default.
     #[serde(default)]
     pub sidebar_width: f32,
+    /// Right panel width in pixels; 0 is the default.
+    #[serde(default)]
+    pub panel_width: f32,
     /// Home lists every project instead of the one in the top bar.
     #[serde(default)]
     pub home_all: bool,
