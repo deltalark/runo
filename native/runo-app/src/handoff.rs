@@ -540,6 +540,56 @@ impl RunoApp {
         let _ = std::fs::write(path, text);
     }
 
+    /// Hand a session to another agent at once, with a brief of the work so far for its
+    /// next message. Asks from a canvas switch agents this way, without the dialog.
+    pub(crate) fn carry_to(&mut self, id: u64, to: usize) {
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        let to = &agent::PROVIDERS[to];
+        if session.provider == to.id {
+            return;
+        }
+        if exchanges(&session.messages).is_empty() {
+            if let Some(s) = self.state.session_mut(id) {
+                s.switch_provider(to.id);
+            }
+            self.save();
+            return;
+        }
+        let from = session.provider.clone();
+        let (files, commits) = if !self.demo && git::is_repo(&session.dir) {
+            (
+                git::changes(&session.dir),
+                git::recent_commits(&session.dir, 5),
+            )
+        } else {
+            (Vec::new(), String::new())
+        };
+        let brief = brief(&BriefInput {
+            from: agent::provider(&from).name,
+            dir: &session.dir,
+            branch: &session.branch,
+            messages: &session.messages,
+            files: &files,
+            commits: &commits,
+            notes: &read_notes(&session.dir),
+        });
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        session.switch_provider_keeping(to.id);
+        let mut divider = Message::now(Role::System, "");
+        divider.meta = divider_meta(&from, to.id, true, tokens(&brief));
+        session.messages.push(divider);
+        session.conversation_start = session.messages.len();
+        session.handoff = brief.clone();
+        session.carried = brief;
+        self.state
+            .log(id, format!("Switched to {} with context", to.name));
+        self.save();
+    }
+
     pub(crate) fn confirm_switch(&mut self, carry: bool) {
         let Some(plan) = self.switch_plan.take() else {
             return;

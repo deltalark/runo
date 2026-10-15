@@ -2614,6 +2614,68 @@ pub(crate) fn canvas_title(view: View) -> &'static str {
 }
 
 impl RunoApp {
+    /// An ask from a canvas's AI bar. The canvas keeps one chat: a later ask continues it,
+    /// with its history and the agent's own conversation, handing it to another agent
+    /// with a brief if one was picked. The first ask starts it in the project folder with
+    /// the picked agent. Neither asks anything more. Asks that don't edit in place still
+    /// open the New session dialog.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ask_from_canvas(
+        &mut self,
+        pid: u64,
+        view: View,
+        task: &str,
+        context: StartContext,
+        agent: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !context.in_place {
+            self.new_provider = agent;
+            self.start_with_context(pid, task, context, window, cx);
+            return;
+        }
+        let same = agent::PROVIDERS[agent].id;
+        let chat = self.canvas_sessions(pid, view).first().map(|s| {
+            let busy = self.is_running(s) && s.provider != same;
+            (s.id, busy)
+        });
+        if let Some((id, false)) = chat {
+            self.carry_to(id, agent);
+            self.apply_context(id, &context);
+            if let Some(session) = self.state.session_mut(id) {
+                session.unread = false;
+            }
+            let provider = agent::PROVIDERS[agent].id;
+            let opts = cx.global::<AppSettings>().agent(provider);
+            self.start_agent(id, task.to_string(), &opts);
+            self.save();
+            return;
+        }
+        // The first ask, or another agent while this one still works: a new chat.
+        self.new_project = Some(pid);
+        self.new_provider = agent;
+        self.new_isolated = false;
+        self.new_context = Some(context);
+        self.new_back = view;
+        self.new_task
+            .update(cx, |t, cx| t.set_value(task, window, cx));
+        self.branch.update(cx, |b, cx| b.set_value("", window, cx));
+        self.new_connection = self.project_connection(pid);
+        let race = std::mem::replace(&mut self.race_mode, false);
+        self.create_session(window, cx);
+        self.race_mode = race;
+        if matches!(self.view, View::NewSession) {
+            self.view = view;
+        }
+    }
+
+    /// The agent a canvas's last chat used, for its AI bar to start on.
+    pub(crate) fn canvas_agent(&self, pid: u64, view: View) -> Option<usize> {
+        let s = self.canvas_sessions(pid, view).into_iter().next()?;
+        agent::PROVIDERS.iter().position(|p| p.id == s.provider)
+    }
+
     /// Open a session where it belongs: one asked from the Design or Architecture canvas
     /// opens that canvas, any other its chat.
     pub(crate) fn open_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -2637,7 +2699,7 @@ impl RunoApp {
     }
 
     /// The agent chats asked from a canvas of project `pid`, newest first.
-    fn canvas_sessions(&self, pid: u64, view: View) -> Vec<&Session> {
+    pub(crate) fn canvas_sessions(&self, pid: u64, view: View) -> Vec<&Session> {
         let name = canvas_name(view);
         let mut out: Vec<&Session> = self
             .state

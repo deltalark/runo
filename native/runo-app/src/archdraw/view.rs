@@ -619,6 +619,11 @@ impl ArchEditor {
 
     /// Read the files again if nothing is waiting to be saved (an agent or git may have
     /// changed them).
+    /// Start the AI bar on this agent, such as the one the canvas's chat used last.
+    pub(crate) fn use_agent(&mut self, agent: usize) {
+        self.pick.agent = agent;
+    }
+
     pub(crate) fn reload_if_clean(&mut self, cx: &mut Context<Self>) {
         if self.ed.dirty || !exists(&self.root) || self.waiting.is_some() || self.review.is_some() {
             return;
