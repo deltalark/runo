@@ -88,6 +88,7 @@ All notable changes to Runo are documented here.
 - ⌘Z and ⇧⌘Z undo and redo on the Design canvas wherever you last clicked in it, and ⌘Z also takes back an AI change that isn't kept yet, like Undo on the ask bar.
 - The Layers tab on the Design canvas shows the selected screen's layers however the screen was selected, instead of staying on "Reading the screen…". Layers show an icon for what each element is and its text or class, and the panel's tabs share the width so the Checks count fits.
 - The agent and model menu on the canvas ask bars keeps its size while you hover agents with fewer models.
+- Chats asked from the Design or Architecture canvas no longer show in All sessions, Isolated, Needs you or on Home, or in their counts. They live only under Chats on their canvas.
 - The Design canvas no longer fails with "The browser that draws the screens didn't start" when a second project's Design page opens, or after Runo was force-quit or crashed and left its browser running. Each project's screens now draw in a browser with its own profile for every run, it gets more time to start, and profiles from earlier runs are cleaned up.
 - Agents: permission modes now match what each CLI can do. Plan is read-only everywhere it is offered, Grok runs in full access only, and Amp, Copilot and Cursor respect Edit vs Full.
 - Agents: Runo's memory server and shared MCP servers reach every CLI that takes servers by flag or env (Claude, Codex, OpenCode, Qwen, Copilot, Amp), and local servers are skipped for sandboxed or remote runs.

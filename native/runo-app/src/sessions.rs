@@ -156,6 +156,8 @@ pub(crate) fn filtered<'a>(
     let mut list: Vec<&Session> = state
         .sessions
         .iter()
+        // Chats asked from the Design or Architecture canvas live on that canvas.
+        .filter(|s| s.canvas.is_empty())
         .filter(|s| !isolated_only || s.isolated)
         .filter(|s| filter.project.is_none_or(|p| s.project_id == p))
         .filter(|s| filter.agent.as_ref().is_none_or(|a| &s.provider == a))
