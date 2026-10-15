@@ -1,4 +1,5 @@
 mod agent;
+mod agent_pick;
 mod agentcmds;
 mod alerts;
 mod applog;

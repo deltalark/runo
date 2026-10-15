@@ -35,6 +35,8 @@ pub(crate) enum DesignEvent {
         context: String,
         edit: bool,
         images: Vec<String>,
+        /// The agent to hand it to, by index into `agent::PROVIDERS`.
+        agent: usize,
     },
 }
 
@@ -151,6 +153,8 @@ pub(crate) struct DesignCanvas {
     ai: Option<AiChange>,
     /// The ask bar is describing a new screen for this device.
     ask_new: Option<Device>,
+    /// The agent the ask bar hands its task to.
+    pick: crate::agent_pick::AgentPick,
     _subs: Vec<Subscription>,
 }
 
@@ -264,6 +268,7 @@ impl DesignCanvas {
             f_ask,
             ai: None,
             ask_new: None,
+            pick: crate::agent_pick::AgentPick::new(cx),
             _subs: subs,
         };
         this.seen = this.file_times();
@@ -550,7 +555,9 @@ impl DesignCanvas {
             context,
             edit: true,
             images: Vec::new(),
+            agent: self.pick.agent,
         });
+        self.pick.open = false;
         cx.notify();
         true
     }
@@ -864,6 +871,7 @@ impl DesignCanvas {
                         .min_w_0()
                         .child(Input::new(&self.f_ask).appearance(false)),
                 )
+                .child(self.pick.chip("design-ask", cx, |t: &mut Self| &mut t.pick))
                 .child(
                     text_btn("design-ask-send", "Send", None, !empty)
                         .on_click(cx.listener(|this, _, window, cx| this.send_ask(window, cx))),
@@ -878,7 +886,21 @@ impl DesignCanvas {
                 .right_0()
                 .flex()
                 .justify_center()
-                .child(bar)
+                .child(
+                    div()
+                        .v_flex()
+                        .items_end()
+                        .gap_1()
+                        .when(self.ai.is_none(), |el| {
+                            el.children(self.pick.menu(
+                                "design-ask",
+                                "the screens in design/",
+                                cx,
+                                |t: &mut Self| &mut t.pick,
+                            ))
+                        })
+                        .child(bar),
+                )
                 .into_any_element(),
         )
     }
@@ -2358,20 +2380,7 @@ impl DesignCanvas {
                 .left_0()
                 .size_full(),
             )
-            .children(self.empty_state(cx))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(12.))
-                    .bottom(px(10.))
-                    .px_2()
-                    .py(px(3.))
-                    .rounded_md()
-                    .bg(float(c_canvas()))
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_muted()))
-                    .child(status),
-            );
+            .children(self.empty_state(cx));
         if let Some(e) = &self.error {
             area = area.child(
                 div()
@@ -2420,7 +2429,27 @@ impl DesignCanvas {
             area = area.child(self.new_menu(cx));
         }
         area = area.children(self.player(cx));
-        area.into_any_element()
+        // The status sits in a strip under the canvas, so nothing drawn over the canvas covers it.
+        div()
+            .flex_1()
+            .min_h_0()
+            .v_flex()
+            .child(area)
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(26.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(rgb(c_border()))
+                    .bg(tint(c_canvas()))
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child(div().min_w_0().truncate().child(status)),
+            )
+            .into_any_element()
     }
 
     // ---- The side panel

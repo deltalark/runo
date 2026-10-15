@@ -360,18 +360,22 @@ impl RunoApp {
                     context,
                     edit,
                     images,
-                } => this.start_with_context(
-                    pid,
-                    task,
-                    shell::StartContext {
-                        label: "Design canvas".into(),
-                        text: context.clone(),
-                        images: images.clone(),
-                        in_place: *edit,
-                    },
-                    window,
-                    cx,
-                ),
+                    agent,
+                } => {
+                    this.new_provider = *agent;
+                    this.start_with_context(
+                        pid,
+                        task,
+                        shell::StartContext {
+                            label: "Design canvas".into(),
+                            text: context.clone(),
+                            images: images.clone(),
+                            in_place: *edit,
+                        },
+                        window,
+                        cx,
+                    )
+                }
             }
             cx.notify();
         });
