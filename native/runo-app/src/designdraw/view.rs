@@ -191,6 +191,8 @@ pub(crate) struct DesignCanvas {
     /// Links between screens drawn on the canvas and outlined in Play.
     hotspots: bool,
     new_open: bool,
+    /// The right-click menu of a screen: where it opened on the canvas, and the screen.
+    menu: Option<(Pt, String)>,
     new_device: Device,
     /// Clicking through the prototype: the screen shown and the way back.
     playing: Option<String>,
@@ -337,6 +339,7 @@ impl DesignCanvas {
             dark: false,
             hotspots: true,
             new_open: false,
+            menu: None,
             new_device: Device::Phone,
             playing: None,
             play_back: Vec::new(),
@@ -1820,23 +1823,36 @@ impl DesignCanvas {
         cx.notify();
     }
 
+    /// Delete the selected screen, with Undo on the ask bar to bring it back.
     fn delete_screen(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.screen.clone() else {
             return;
         };
-        let file = screen_path(&self.root, &id);
-        let html = std::fs::read_to_string(&file).unwrap_or_default();
-        if std::fs::remove_file(&file).is_err() {
+        let name = self
+            .canvas
+            .screen(&id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| id.clone());
+        let before = match self.ai.take() {
+            Some(ai) => ai.before,
+            None => snapshot(&folder(&self.root)),
+        };
+        if let Err(e) = std::fs::remove_file(screen_path(&self.root, &id)) {
+            self.error = Some(format!("Couldn't delete {id}.html: {e}"));
+            cx.notify();
             return;
         }
         self.canvas.screens.retain(|s| s.id != id);
         self.shots.remove(&id);
         self.save_canvas();
         self.select_screen(None);
-        self.say(format!(
-            "Deleted {id}.html. It's in git if you need it back."
-        ));
-        let _ = html;
+        self.ai = Some(AiChange {
+            task: format!("Deleted {name}"),
+            before,
+            changed: true,
+            by_ai: false,
+            started: Instant::now(),
+        });
         cx.notify();
     }
 
@@ -2350,6 +2366,78 @@ impl DesignCanvas {
         cx.notify();
     }
 
+    /// Right-click a screen for what can be done to it.
+    fn on_right(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        self.new_open = false;
+        let local = self.local(e.position);
+        self.menu = self.screen_at(self.world(local)).map(|(id, _)| {
+            self.select_screen(Some(id.clone()));
+            (local, id)
+        });
+        cx.notify();
+    }
+
+    fn screen_menu(&self, at: Pt, cx: &mut Context<Self>) -> AnyElement {
+        type Act = fn(&mut DesignCanvas, &mut Context<DesignCanvas>);
+        let items: [(&str, &str, Act); 3] = [
+            ("Duplicate", "⌘D", |this, cx| this.duplicate_screen(cx)),
+            ("Play from here", "", |this, cx| this.play(cx)),
+            ("Delete", "⌫", |this, cx| this.delete_screen(cx)),
+        ];
+        // Keep the whole menu on the canvas.
+        let (vw, vh) = self.view_size();
+        let tall = items.len() as f32 * 28. + 10.;
+        let left = at.0.min(vw - 208.).max(4.);
+        let top = at.1.min(vh - tall - 4.).max(4.);
+        let mut list = div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(200.))
+            .p_1()
+            .v_flex()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(float(c_canvas()))
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }));
+        for (i, (label, keys, act)) in items.into_iter().enumerate() {
+            list = list.child(
+                div()
+                    .id(("design-menu", i))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .text_color(rgb(if label == "Delete" { c_red() } else { c_text() }))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        act(this, cx);
+                        cx.notify();
+                    }))
+                    .child(div().flex_1().child(label))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(c_muted()))
+                            .child(keys),
+                    ),
+            );
+        }
+        list.into_any_element()
+    }
+
     fn on_scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let local = self.local(e.position);
         let d = e.delta.pixel_delta(px(16.));
@@ -2390,6 +2478,8 @@ impl DesignCanvas {
             (false, _, _, "backspace" | "delete") => {
                 if self.element.is_some() {
                     self.delete_element(cx);
+                } else if self.screen.is_some() && self.playing.is_none() {
+                    self.delete_screen(cx);
                 }
                 true
             }
@@ -2427,6 +2517,8 @@ impl DesignCanvas {
             self.inline_open = false;
         } else if self.new_open {
             self.new_open = false;
+        } else if self.menu.is_some() {
+            self.menu = None;
         } else if !self.focus.is_focused(window) {
             window.focus(&self.focus, cx);
         } else if let Some(el) = &self.element {
@@ -3654,6 +3746,7 @@ impl DesignCanvas {
             .bg(rgb(c_subtle()))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_pinch(cx.listener(|this, e: &PinchEvent, _, cx| {
                 let local = this.local(e.position);
@@ -3745,6 +3838,9 @@ impl DesignCanvas {
         }
         if self.new_open {
             area = area.child(self.new_menu(cx));
+        }
+        if let Some((at, _)) = &self.menu {
+            area = area.child(self.screen_menu(*at, cx));
         }
         area = area.children(self.player(cx));
         // The status sits in a strip under the canvas, so nothing drawn over the canvas covers it.
