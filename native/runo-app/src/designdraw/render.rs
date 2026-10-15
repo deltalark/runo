@@ -15,6 +15,44 @@ use std::time::Duration;
 /// A screen taller than its device is captured down to this many screens high.
 const MAX_SCREENS_TALL: f32 = 4.;
 
+/// Where a project's screen browser keeps its profile. Each project's canvas runs its own
+/// browser, and Chromium won't start a second one on a profile that's in use, so every
+/// project gets its own, and so does every run of Runo: a browser left behind by a run
+/// that crashed or was force-quit can't block the next one.
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) fn profile_dir(root: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut h);
+    profiles_dir().join(format!("{:016x}-{}", h.finish(), std::process::id()))
+}
+
+#[cfg(any(not(target_os = "macos"), test))]
+fn profiles_dir() -> PathBuf {
+    crate::store::data_dir()
+        .join("browser")
+        .join("design-profiles")
+}
+
+/// Remove the profiles of earlier runs whose browser has quit, so they don't pile up.
+#[cfg(not(target_os = "macos"))]
+fn clear_old_profiles() {
+    let own = format!("-{}", std::process::id());
+    for entry in std::fs::read_dir(profiles_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Chromium removes its lock when it quits.
+        let in_use = std::fs::symlink_metadata(path.join("SingletonLock")).is_ok();
+        if !name.ends_with(&own) && !in_use {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 /// A screen as last drawn.
 #[derive(Clone)]
 pub(crate) struct Shot {
@@ -34,7 +72,7 @@ struct Surface(super::webkit::Page);
 
 #[cfg(target_os = "macos")]
 impl Surface {
-    fn start() -> Result<Self, String> {
+    fn start(_root: &Path) -> Result<Self, String> {
         super::webkit::Page::new(390., 844.).map(Self)
     }
 
@@ -70,18 +108,17 @@ impl Surface {
     /// Pixels per CSS pixel in captures, so screens stay sharp when zoomed in.
     const SCALE: f32 = 2.;
 
-    fn start() -> Result<Self, String> {
+    fn start(root: &Path) -> Result<Self, String> {
         use crate::browser_engine::{self, Engine};
         let path = browser_engine::find_chromium()
             .ok_or_else(|| browser_engine::not_found_message().to_string())?;
-        let profile = crate::store::data_dir()
-            .join("browser")
-            .join("design-profile");
+        clear_old_profiles();
+        let profile = profile_dir(root);
         let engine = Arc::new(Engine::start(path, &profile)?);
         engine.open(Self::PAGE, "about:blank", (390, 844, Self::SCALE));
         let start = std::time::Instant::now();
         while !engine.ready(Self::PAGE) {
-            if start.elapsed() > Duration::from_secs(15) || !engine.alive() {
+            if start.elapsed() > Duration::from_secs(30) || !engine.alive() {
                 return Err("The browser that draws the screens didn't start.".into());
             }
             std::thread::sleep(Duration::from_millis(30));
@@ -121,6 +158,8 @@ pub(crate) struct Renderer {
     /// The screen loaded in the page, and whether the page shows it as saved.
     current: Option<String>,
     dark: bool,
+    /// Play tapped the page, so it no longer shows the file as saved.
+    played: bool,
 }
 
 impl Renderer {
@@ -130,19 +169,31 @@ impl Renderer {
             surface: None,
             current: None,
             dark: false,
+            played: false,
         }
     }
 
     fn surface(&mut self) -> Result<&mut Surface, String> {
         if !self.surface.as_ref().is_some_and(Surface::alive) {
             self.current = None;
-            self.surface = Some(Surface::start()?);
+            self.surface = Some(Surface::start(&self.root)?);
         }
         Ok(self.surface.as_mut().expect("just started"))
     }
 
     /// Load the screen unless it's loaded already (or `fresh`, to read the file again).
     fn open(&mut self, id: &str, device: Device, fresh: bool) -> Result<&mut Surface, String> {
+        let fresh = fresh || std::mem::take(&mut self.played);
+        self.open_as_is(id, device, fresh)
+    }
+
+    /// Load the screen unless it's loaded already, keeping what Play did to it.
+    fn open_as_is(
+        &mut self,
+        id: &str,
+        device: Device,
+        fresh: bool,
+    ) -> Result<&mut Surface, String> {
         if fresh || self.current.as_deref() != Some(id) {
             self.current = None;
             let file = screen_path(&self.root, id);
@@ -161,6 +212,29 @@ impl Renderer {
     /// Draw the screen from its file.
     pub(crate) fn shoot(&mut self, id: &str, device: Device) -> Result<Shot, String> {
         let engine = self.open(id, device, true)?;
+        Self::capture(engine, id, device)
+    }
+
+    /// Tap the screen at a point in Play, as a person would, and draw what it shows then.
+    /// The page keeps its state between taps on the same screen; anything else that
+    /// reads the page loads the file again first, so Play never ends up saved.
+    pub(crate) fn tap(&mut self, id: &str, device: Device, at: (f32, f32)) -> Result<Shot, String> {
+        let fresh = self.current.as_deref() != Some(id) || !self.played;
+        self.played = true;
+        let engine = self.open_as_is(id, device, fresh)?;
+        engine.eval(super::model::UI_JS);
+        engine.eval(&format!(
+            "(() => {{ const el = document.elementFromPoint({}, {}); \
+             if (!el || el.closest('[data-goto]')) return false; \
+             if (el.focus) el.focus(); el.click(); return true; }})()",
+            at.0, at.1
+        ));
+        // Let CSS transitions settle.
+        std::thread::sleep(Duration::from_millis(200));
+        Self::capture(engine, id, device)
+    }
+
+    fn capture(engine: &mut Surface, id: &str, device: Device) -> Result<Shot, String> {
         let (w, h) = device.size();
         let page_h = engine
             .eval(&dom::call("size", &[]))
@@ -317,6 +391,26 @@ mod tests {
         assert!(before.contains(">Sign in</button>"));
         let saved = std::fs::read_to_string(screen_path(&root, "sign-in")).unwrap();
         assert!(saved.contains(">Log in</button>"));
+
+        // Another project's canvas draws while this one's browser is still running.
+        let other = std::env::temp_dir().join(format!("runo-render-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&other);
+        super::super::model::seed(&other).unwrap();
+        std::fs::write(
+            screen_path(&other, "home"),
+            super::super::model::template("Blank", "Home", Device::Phone),
+        )
+        .unwrap();
+        let mut r2 = Renderer::new(other.clone());
+        assert!(r2.shoot("home", Device::Phone).is_ok());
+        assert!(r.shoot("sign-in", Device::Phone).is_ok());
+    }
+
+    #[test]
+    fn each_project_has_its_own_browser_profile() {
+        let a = profile_dir(std::path::Path::new("/p/a"));
+        assert_eq!(a, profile_dir(std::path::Path::new("/p/a")));
+        assert_ne!(a, profile_dir(std::path::Path::new("/p/b")));
     }
 
     #[test]

@@ -57,6 +57,7 @@ if (!window.__runo) window.__runo = (() => {
       path: pathOf(el), label: label(el), tag: el.tagName.toLowerCase(),
       text: ownText(el), classes: Array.from(el.classList), rect: rect(el),
       computed, inline, goto: el.dataset.goto || null, hidden: el.hidden,
+      transition: el.dataset.transition || null, speed: el.dataset.speed || null,
       children: kids(el).length,
     };
   };
@@ -93,7 +94,8 @@ if (!window.__runo) window.__runo = (() => {
     return out;
   };
   const links = () => Array.from(document.querySelectorAll('[data-goto]'))
-    .map((el) => ({ path: pathOf(el), goto: el.dataset.goto.replace(/\.html$/, ''), rect: rect(el) }))
+    .map((el) => ({ path: pathOf(el), goto: el.dataset.goto.replace(/\.html$/, ''), rect: rect(el),
+      transition: el.dataset.transition || '', speed: el.dataset.speed || '' }))
     .filter((l) => l.path);
   const html = () => '<!doctype html>\n' + document.documentElement.outerHTML + '\n';
   const parse = (s) => {
@@ -203,6 +205,11 @@ pub(crate) struct Element {
     #[serde(default)]
     pub inline: std::collections::HashMap<String, String>,
     pub goto: Option<String>,
+    /// How the prototype moves to `goto`, and how fast: `data-transition`, `data-speed`.
+    #[serde(default)]
+    pub transition: Option<String>,
+    #[serde(default)]
+    pub speed: Option<String>,
     #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
@@ -345,6 +352,14 @@ pub(crate) fn moved_path(from: &Path, to: &Path, after: bool) -> Path {
 pub(crate) struct Link {
     pub goto: String,
     pub rect: Box,
+    /// Where the linked element is on its screen.
+    #[serde(default)]
+    pub path: Path,
+    /// `data-transition` and `data-speed`, empty for the platform's own.
+    #[serde(default)]
+    pub transition: String,
+    #[serde(default)]
+    pub speed: String,
 }
 
 /// The parent's path, or None at the top.

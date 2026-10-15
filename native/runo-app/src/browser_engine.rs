@@ -1,8 +1,8 @@
 //! A headless Chromium driven over the DevTools protocol, for the Browser tab.
 //!
-//! Runo starts the Chrome, Edge, Brave or Chromium already on the machine with
-//! `--remote-debugging-pipe`, so CDP runs over two inherited file descriptors (3 and 4)
-//! as NUL-separated JSON. Each Runo session gets its own page (target); the one on
+//! Runo starts a Chromium-based browser already on the machine (the default browser when
+//! it is one) with `--remote-debugging-pipe`, so CDP runs over two inherited file
+//! descriptors (3 and 4) as NUL-separated JSON. Each Runo session gets its own page (target); the one on
 //! screen streams JPEG frames that are decoded here, off the UI thread.
 
 use gpui_kit::RenderImage;
@@ -16,75 +16,219 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Where Chromium-based browsers install on macOS, most likely first.
-#[cfg(target_os = "macos")]
-const CANDIDATES: &[&str] = &[
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+/// A Chromium-based browser Runo can drive: its macOS app (and the executable inside it,
+/// which has the same name), its macOS bundle id, and its command names on Linux.
+pub struct Known {
+    pub app: &'static str,
+    bundle: &'static str,
+    commands: &'static [&'static str],
+}
+
+/// The Chromium-based browsers Runo knows, in the order they're tried when the default
+/// browser isn't one of them.
+const KNOWN: &[Known] = &[
+    Known {
+        app: "Google Chrome",
+        bundle: "com.google.chrome",
+        commands: &["google-chrome", "google-chrome-stable"],
+    },
+    Known {
+        app: "Chromium",
+        bundle: "org.chromium.chromium",
+        commands: &["chromium", "chromium-browser"],
+    },
+    Known {
+        app: "Microsoft Edge",
+        bundle: "com.microsoft.edgemac",
+        commands: &["microsoft-edge", "microsoft-edge-stable"],
+    },
+    Known {
+        app: "Brave Browser",
+        bundle: "com.brave.browser",
+        commands: &["brave-browser", "brave"],
+    },
+    Known {
+        app: "Arc",
+        bundle: "company.thebrowser.browser",
+        commands: &[],
+    },
+    Known {
+        app: "Vivaldi",
+        bundle: "com.vivaldi.vivaldi",
+        commands: &["vivaldi", "vivaldi-stable"],
+    },
+    Known {
+        app: "Opera",
+        bundle: "com.operasoftware.opera",
+        commands: &["opera"],
+    },
+    Known {
+        app: "Dia",
+        bundle: "company.thebrowser.dia",
+        commands: &[],
+    },
+    Known {
+        app: "Comet",
+        bundle: "ai.perplexity.comet",
+        commands: &[],
+    },
+    Known {
+        app: "Google Chrome Canary",
+        bundle: "com.google.chrome.canary",
+        commands: &[],
+    },
 ];
+
+/// Where Chromium-based browsers install on Linux outside PATH's usual directories.
 #[cfg(not(target_os = "macos"))]
-const CANDIDATES: &[&str] = &[
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/microsoft-edge",
-    "/usr/bin/microsoft-edge-stable",
-    "/usr/bin/brave-browser",
+const OTHER_PLACES: &[&str] = &[
     "/opt/google/chrome/chrome",
     "/opt/microsoft/msedge/msedge",
     "/opt/brave.com/brave/brave",
+    "/opt/vivaldi/vivaldi",
     "/snap/bin/chromium",
 ];
 
-/// Browser commands looked up on PATH when none of the usual paths exist.
-const PATH_NAMES: &[&str] = &[
-    "google-chrome",
-    "google-chrome-stable",
-    "chromium",
-    "chromium-browser",
-    "microsoft-edge",
-    "microsoft-edge-stable",
-    "brave-browser",
-    "brave",
-];
+/// The browser chosen in Settings: a path, or empty (or "auto") for the default browser.
+static CHOICE: Mutex<String> = Mutex::new(String::new());
 
-/// The first candidate that exists, also looking under `~/Applications`.
+/// Remember the browser chosen in Settings. It's used the next time a browser starts.
+pub fn set_choice(choice: &str) {
+    if let Ok(mut c) = CHOICE.lock() {
+        *c = choice.to_string();
+    }
+}
+
+/// Where `k` would be: in /Applications or ~/Applications on macOS, under /usr/bin or on
+/// PATH elsewhere.
+fn places(k: &Known, home: Option<&Path>, path: &std::ffi::OsStr) -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let inside = format!("{0}.app/Contents/MacOS/{0}", k.app);
+        let mut out = vec![Path::new("/Applications").join(&inside)];
+        out.extend(home.map(|h| h.join("Applications").join(&inside)));
+        out
+    } else {
+        let mut dirs = vec![PathBuf::from("/usr/bin")];
+        dirs.extend(std::env::split_paths(path));
+        k.commands
+            .iter()
+            .flat_map(|c| dirs.iter().map(move |d| d.join(c)))
+            .collect()
+    }
+}
+
+/// The first known browser that exists, also looking under `~/Applications`.
 pub fn pick_chromium(home: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    CANDIDATES.iter().find_map(|c| {
-        let system = PathBuf::from(c);
-        let user = home.and_then(|h| {
-            c.strip_prefix("/Applications/")
-                .map(|rest| h.join("Applications").join(rest))
-        });
-        [Some(system), user]
+    KNOWN.iter().find_map(|k| {
+        places(k, home, std::ffi::OsStr::new(""))
             .into_iter()
-            .flatten()
             .find(|p| exists(p))
     })
 }
 
-/// The first browser command found in a PATH-style list of directories.
+/// The first known browser command found in a PATH-style list of directories.
 pub fn search_path(path: &std::ffi::OsStr, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let dirs: Vec<PathBuf> = std::env::split_paths(path).collect();
-    PATH_NAMES
+    KNOWN
         .iter()
+        .flat_map(|k| k.commands)
         .find_map(|name| dirs.iter().map(|d| d.join(name)).find(|p| exists(p)))
 }
 
-/// The browser to drive: `CHROME_PATH` when set, then the usual install paths, then PATH.
+/// The known browser a default-browser id names: a macOS bundle id (`com.brave.Browser`)
+/// or a Linux desktop file (`brave-browser.desktop`, or a Flatpak's `com.brave.Browser.desktop`).
+pub fn known_for(id: &str) -> Option<&'static Known> {
+    let id = id.trim().to_ascii_lowercase();
+    let id = id.strip_suffix(".desktop").unwrap_or(&id);
+    KNOWN
+        .iter()
+        .find(|k| k.bundle == id || k.commands.contains(&id))
+}
+
+/// The bundle id that opens https links, from macOS's Launch Services settings as JSON.
+pub fn https_handler(launch_services: &Value) -> Option<String> {
+    let handlers = launch_services["LSHandlers"].as_array()?;
+    ["https", "http"].iter().find_map(|scheme| {
+        handlers
+            .iter()
+            .find(|h| h["LSHandlerURLScheme"].as_str() == Some(scheme))
+            .and_then(|h| h["LSHandlerRoleAll"].as_str())
+            .map(str::to_string)
+    })
+}
+
+/// The person's default browser, when it's one Runo can drive. Looked up once per run.
+fn default_browser() -> Option<&'static Known> {
+    static FOUND: std::sync::OnceLock<Option<&'static Known>> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let id = if cfg!(target_os = "macos") {
+            let home = std::env::var_os("HOME").map(PathBuf::from)?;
+            let plist = home.join(
+                "Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist",
+            );
+            let out = Command::new("plutil")
+                .args(["-convert", "json", "-o", "-"])
+                .arg(plist)
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            https_handler(&serde_json::from_slice(&out.stdout).ok()?)?
+        } else {
+            let out = Command::new("xdg-settings")
+                .args(["get", "default-web-browser"])
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        known_for(&id)
+    })
+}
+
+/// Every known browser on this machine, in the order they're tried.
+pub fn installed() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    KNOWN
+        .iter()
+        .filter_map(|k| {
+            places(k, home.as_deref(), &path)
+                .into_iter()
+                .find(|p| p.exists())
+        })
+        .collect()
+}
+
+/// The browser to drive: `CHROME_PATH` when set, then the one chosen in Settings, then the
+/// default browser when it's Chromium-based, then the first known browser found.
 pub fn find_chromium() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CHROME_PATH").map(PathBuf::from) {
         if path.exists() {
             return Some(path);
         }
     }
+    let chosen = CHOICE.lock().map(|c| c.clone()).unwrap_or_default();
+    if !chosen.is_empty() && chosen != "auto" && Path::new(&chosen).exists() {
+        return Some(PathBuf::from(chosen));
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    pick_chromium(home.as_deref(), Path::exists)
-        .or_else(|| search_path(&std::env::var_os("PATH").unwrap_or_default(), Path::exists))
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let default = default_browser().and_then(|k| {
+        places(k, home.as_deref(), &path)
+            .into_iter()
+            .find(|p| p.exists())
+    });
+    let other = || {
+        #[cfg(not(target_os = "macos"))]
+        if let Some(p) = OTHER_PLACES.iter().map(PathBuf::from).find(|p| p.exists()) {
+            return Some(p);
+        }
+        None
+    };
+    default
+        .or_else(|| pick_chromium(home.as_deref(), Path::exists))
+        .or_else(|| search_path(&path, Path::exists))
+        .or_else(other)
 }
 
 /// Where downloads from the panel go: the person's Downloads folder.
@@ -98,13 +242,13 @@ fn downloads_dir() -> Option<String> {
 /// What to say when no browser was found, for this system.
 pub fn not_found_message() -> &'static str {
     if cfg!(target_os = "macos") {
-        "No Chrome, Edge, Brave or Chromium found in /Applications or ~/Applications. \
-         Install one, or set CHROME_PATH to its executable."
+        "No Chrome, Edge, Brave, Arc, Vivaldi, Opera or Chromium found in /Applications or \
+         ~/Applications. Install one, or set CHROME_PATH to its executable."
     } else if cfg!(windows) {
         "The built-in browser needs macOS or Linux for now."
     } else {
-        "No Chrome, Edge, Brave or Chromium found in /usr/bin, /opt, /snap/bin or on PATH. \
-         Install one (for example chromium), or set CHROME_PATH to its executable."
+        "No Chrome, Edge, Brave, Vivaldi, Opera or Chromium found in /usr/bin, /opt, /snap/bin \
+         or on PATH. Install one (for example chromium), or set CHROME_PATH to its executable."
     }
 }
 
@@ -740,20 +884,6 @@ impl Engine {
         decode_image(reply["data"].as_str()?, image::ImageFormat::Png)
     }
 
-    /// A PNG of the page as it shows now. Blocks for the reply.
-    pub fn screenshot(&self, key: u64) -> Option<Vec<u8>> {
-        use base64::Engine as _;
-        let session = self.session_of(key)?;
-        let reply = self.call(
-            "Page.captureScreenshot",
-            json!({"format": "png"}),
-            Some(&session),
-        )?;
-        base64::engine::general_purpose::STANDARD
-            .decode(reply["data"].as_str()?)
-            .ok()
-    }
-
     /// `kind` is mouseMoved, mousePressed, mouseReleased or mouseWheel.
     #[allow(clippy::too_many_arguments)]
     pub fn mouse(
@@ -1124,6 +1254,26 @@ mod tests {
         assert_eq!(to_page((-5., 999.), (400., 300.), (400., 300.)), (0., 300.));
         assert_eq!(to_page((5., 5.), (0., 0.), (400., 300.)), (0., 0.));
         assert_eq!(modifier_bits(false, true, false, true), 2 | 8);
+    }
+
+    #[test]
+    fn the_default_browser_is_recognised() {
+        let ls = json!({"LSHandlers": [
+            {"LSHandlerURLScheme": "mailto", "LSHandlerRoleAll": "com.apple.mail"},
+            {"LSHandlerURLScheme": "https", "LSHandlerRoleAll": "com.brave.browser"},
+        ]});
+        let id = https_handler(&ls).unwrap();
+        assert_eq!(known_for(&id).unwrap().app, "Brave Browser");
+        assert_eq!(known_for("com.Brave.Browser").unwrap().app, "Brave Browser");
+        assert_eq!(
+            known_for("vivaldi-stable.desktop\n").unwrap().app,
+            "Vivaldi"
+        );
+        assert_eq!(known_for("company.thebrowser.Browser").unwrap().app, "Arc");
+        // Safari and Firefox can't be driven, so they fall through to the list.
+        assert!(known_for("com.apple.safari").is_none());
+        assert!(known_for("firefox.desktop").is_none());
+        assert_eq!(https_handler(&json!({})), None);
     }
 
     #[test]

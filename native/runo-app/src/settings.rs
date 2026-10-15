@@ -118,6 +118,9 @@ pub struct AppSettings {
     pub mcp_shared: Vec<String>,
     /// Show pages in the Browser tab with a headless Chromium.
     pub browser_enabled: bool,
+    /// The browser the Browser tab and Design canvas drive: a path, or "auto" for the
+    /// default browser when it's Chromium-based, else the first one found.
+    pub browser: String,
     /// The built-in browser card was answered.
     pub browser_asked: bool,
     /// Shortcuts changed in Settings > Keybindings: shortcut id → keys ("cmd-shift-k").
@@ -214,6 +217,7 @@ impl Default for AppSettings {
             term_history: 10_000,
             mcp_shared: Vec::new(),
             browser_enabled: false,
+            browser: "auto".into(),
             browser_asked: false,
             keybindings: HashMap::new(),
             connections: Vec::new(),
@@ -280,6 +284,7 @@ impl AppSettings {
 
     /// Push the values that hot paths read (colours, animation switch…) into statics.
     pub fn apply(&self) {
+        crate::browser_engine::set_choice(&self.browser);
         crate::caps::set_binaries(
             self.agents
                 .iter()
