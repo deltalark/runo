@@ -88,7 +88,7 @@ const STEPS: &[Step] = &[
         side: Side::Left,
         glyph: IconName::SquareTerminal,
         title: "Terminal",
-        body: "A real shell in the session's folder. Your saved commands appear as buttons, and the agent's own command output shows here too.",
+        body: "Real shells in the session's folder. Run starts your saved commands in their own tabs; when one fails, hand it to the agent to fix.",
     },
     Step {
         anchor: None,

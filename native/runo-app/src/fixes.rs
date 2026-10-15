@@ -227,7 +227,6 @@ impl RunoApp {
                 self.view = View::Session;
                 self.show_panel = true;
                 self.shell_tab = Some(shell_id);
-                self.cli_tab = false;
                 self.focus_shell = 2;
                 let typed = match provider {
                     "claude" | "copilot" => " Type /login there.",

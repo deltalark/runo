@@ -21,6 +21,8 @@ pub(crate) enum CtxTarget {
     RunsOn(u64),
     /// The branch chip in the top bar, for a session.
     Branch(u64),
+    /// The terminal panel's Run menu of quick commands.
+    Run,
 }
 
 #[derive(Clone)]
@@ -67,6 +69,10 @@ enum Act {
     EditMessage(usize),
     /// Fork the current session from message (index).
     Fork(usize),
+    /// Run a quick command (name, command) in its own terminal tab.
+    Task(String, String),
+    /// Edit the quick commands in Settings.
+    QuickCommands,
 }
 
 struct Item {
@@ -114,7 +120,7 @@ impl RunoApp {
     }
 
     /// Menu entries for the target; `None` entries are separators.
-    fn ctx_items(&self, target: &CtxTarget) -> Vec<Option<Item>> {
+    fn ctx_items(&self, target: &CtxTarget, cx: &App) -> Vec<Option<Item>> {
         let session_dir = |id: u64| {
             self.state
                 .session(id)
@@ -423,6 +429,18 @@ impl RunoApp {
                 }
                 v
             }
+            CtxTarget::Run => {
+                settings::parse_quick_commands(&cx.global::<AppSettings>().quick_commands)
+                    .into_iter()
+                    .map(|(name, command)| {
+                        item(name.clone(), IconName::Play, Act::Task(name, command))
+                    })
+                    .chain([
+                        None,
+                        item("Edit commands…", IconName::Settings, Act::QuickCommands),
+                    ])
+                    .collect()
+            }
             CtxTarget::Terminal => vec![
                 item(
                     if self
@@ -621,6 +639,11 @@ impl RunoApp {
                 self.save();
             }
             Act::Worktrees => self.view = View::Worktrees,
+            Act::Task(name, command) => self.run_task(name, command, cx),
+            Act::QuickCommands => {
+                self.open_settings();
+                self.settings_page = SettingsPage::Terminal;
+            }
         }
         cx.notify();
     }
@@ -635,7 +658,7 @@ impl RunoApp {
         let Some((_, target)) = self.ctx_menu.clone() else {
             return false;
         };
-        let items = self.ctx_items(&target);
+        let items = self.ctx_items(&target, cx);
         let entries: Vec<usize> = items
             .iter()
             .enumerate()
@@ -678,7 +701,7 @@ impl RunoApp {
     /// The open right-click menu, drawn at the pointer and kept inside the window.
     pub(crate) fn ctx_menu_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (pos, target) = self.ctx_menu.clone()?;
-        let items = self.ctx_items(&target);
+        let items = self.ctx_items(&target, cx);
         if items.is_empty() {
             return None;
         }

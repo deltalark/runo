@@ -755,6 +755,9 @@ pub struct Layout {
     /// Right panel width in pixels; 0 is the default.
     #[serde(default)]
     pub panel_width: f32,
+    /// Terminal panel height in pixels; 0 is the default.
+    #[serde(default)]
+    pub term_height: f32,
     /// Home lists every project instead of the one in the top bar.
     #[serde(default)]
     pub home_all: bool,
