@@ -32,6 +32,19 @@ impl Side {
         matches!(self, Side::Left | Side::Right)
     }
 
+    /// Where a connector meets this side: `at` along it, from 0 to 1, else the middle.
+    pub(crate) fn port(self, r: &Rect, at: Option<f32>) -> Pt {
+        let Some(t) = at else {
+            return self.point(r);
+        };
+        match self {
+            Side::Top => (r.x + r.w * t, r.y),
+            Side::Right => (r.right(), r.y + r.h * t),
+            Side::Bottom => (r.x + r.w * t, r.bottom()),
+            Side::Left => (r.x, r.y + r.h * t),
+        }
+    }
+
     pub(crate) fn point(self, r: &Rect) -> Pt {
         let (cx, cy) = r.center();
         match self {
@@ -53,7 +66,7 @@ impl Side {
 }
 
 /// The sides a connector between two boxes should use.
-fn sides(a: &Rect, b: &Rect) -> (Side, Side) {
+pub(crate) fn sides(a: &Rect, b: &Rect) -> (Side, Side) {
     let (ax, ay) = a.center();
     let (bx, by) = b.center();
     let dx = bx - ax;
@@ -200,10 +213,13 @@ pub(crate) struct Way<'a> {
     pub to: Option<Side>,
     pub waypoints: &'a [Pt],
     pub obstacles: &'a [Rect],
+    /// Where along its side each end meets its box (0 to 1), when ends share a side.
+    pub from_at: Option<f32>,
+    pub to_at: Option<f32>,
 }
 
 /// The side of `r` that faces `p`.
-fn side_toward(r: &Rect, p: Pt) -> Side {
+pub(crate) fn side_toward(r: &Rect, p: Pt) -> Side {
     let (cx, cy) = r.center();
     let (dx, dy) = ((p.0 - cx) / r.w.max(1.), (p.1 - cy) / r.h.max(1.));
     if dx.abs() >= dy.abs() {
@@ -451,12 +467,12 @@ pub(crate) fn route_with(a: &Rect, b: &Rect, kind: Route, way: &Way) -> Wire {
     match kind {
         Route::Straight => {
             let start = match (way.from, wps.first()) {
-                (Some(s), _) => s.point(a),
+                (Some(s), _) => s.port(a, way.from_at),
                 (None, Some(f)) => clip(a, *f),
                 (None, None) => clip(a, b.center()),
             };
             let end = match (way.to, wps.last()) {
-                (Some(s), _) => s.point(b),
+                (Some(s), _) => s.port(b, way.to_at),
                 (None, Some(l)) => clip(b, *l),
                 (None, None) => clip(b, a.center()),
             };
@@ -469,9 +485,9 @@ pub(crate) fn route_with(a: &Rect, b: &Rect, kind: Route, way: &Way) -> Wire {
             }
         }
         Route::Elbow if !wps.is_empty() => {
-            let mut through = vec![sa.point(a)];
+            let mut through = vec![sa.port(a, way.from_at)];
             through.extend_from_slice(wps);
-            through.push(sb.point(b));
+            through.push(sb.port(b, way.to_at));
             let mut points = orthogonal_through(&through, sa.across());
             // Come into the end box square to its side.
             let n = points.len();
@@ -494,8 +510,8 @@ pub(crate) fn route_with(a: &Rect, b: &Rect, kind: Route, way: &Way) -> Wire {
             }
         }
         Route::Elbow => {
-            let start = sa.point(a);
-            let end = sb.point(b);
+            let start = sa.port(a, way.from_at);
+            let end = sb.port(b, way.to_at);
             let points = match sa {
                 Side::Left | Side::Right => {
                     let mx = (start.0 + end.0) / 2.;
@@ -529,8 +545,8 @@ pub(crate) fn route_with(a: &Rect, b: &Rect, kind: Route, way: &Way) -> Wire {
             }
         }
         Route::Curved => {
-            let start = sa.point(a);
-            let end = sb.point(b);
+            let start = sa.port(a, way.from_at);
+            let end = sb.port(b, way.to_at);
             let k = (dist(start, end) / 2.).clamp(30., 160.);
             let (na, nb) = (sa.normal(), sb.normal());
             Wire {
@@ -771,8 +787,7 @@ pub(crate) fn align(rects: &[Rect], how: Align) -> Vec<Rect> {
     out
 }
 
-/// A layered layout: each box goes one layer below everything that points at it, and
-/// boxes in a layer are ordered to keep connectors short. Returns top-left corners.
+/// A layered layout of the boxes; see `tidy::layered`.
 pub(crate) fn layered(
     ids: &[String],
     sizes: &HashMap<String, Pt>,
@@ -780,139 +795,7 @@ pub(crate) fn layered(
     origin: Pt,
     horizontal: bool,
 ) -> HashMap<String, Pt> {
-    let index: HashMap<&str, usize> = ids
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (id.as_str(), i))
-        .collect();
-    let n = ids.len();
-    let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (a, b) in links {
-        if let (Some(&i), Some(&j)) = (index.get(a.as_str()), index.get(b.as_str())) {
-            if i != j && !out_edges[i].contains(&j) {
-                out_edges[i].push(j);
-            }
-        }
-    }
-    // Break cycles: drop edges that go back to a node still on the DFS stack.
-    let mut state = vec![0u8; n];
-    let mut keep: Vec<Vec<usize>> = vec![Vec::new(); n];
-    fn dfs(v: usize, out: &[Vec<usize>], state: &mut [u8], keep: &mut [Vec<usize>]) {
-        state[v] = 1;
-        for &w in &out[v] {
-            if state[w] == 1 {
-                continue;
-            }
-            keep[v].push(w);
-            if state[w] == 0 {
-                dfs(w, out, state, keep);
-            }
-        }
-        state[v] = 2;
-    }
-    for v in 0..n {
-        if state[v] == 0 {
-            dfs(v, &out_edges, &mut state, &mut keep);
-        }
-    }
-    // Longest path from the sources.
-    let mut indeg = vec![0usize; n];
-    for outs in &keep {
-        for &w in outs {
-            indeg[w] += 1;
-        }
-    }
-    let mut layer = vec![0usize; n];
-    let mut queue: Vec<usize> = (0..n).filter(|&v| indeg[v] == 0).collect();
-    let mut qi = 0;
-    while qi < queue.len() {
-        let v = queue[qi];
-        qi += 1;
-        for &w in &keep[v] {
-            layer[w] = layer[w].max(layer[v] + 1);
-            indeg[w] -= 1;
-            if indeg[w] == 0 {
-                queue.push(w);
-            }
-        }
-    }
-    let depth = layer.iter().copied().max().unwrap_or(0) + 1;
-    let mut layers: Vec<Vec<usize>> = vec![Vec::new(); depth];
-    for v in 0..n {
-        layers[layer[v]].push(v);
-    }
-    // Order each layer by the average position of its neighbours, a few sweeps each way.
-    let mut ins: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (v, outs) in keep.iter().enumerate() {
-        for &w in outs {
-            ins[w].push(v);
-        }
-    }
-    let mut pos = vec![0f32; n];
-    let set_pos = |layers: &Vec<Vec<usize>>, pos: &mut Vec<f32>| {
-        for l in layers {
-            for (i, &v) in l.iter().enumerate() {
-                pos[v] = i as f32;
-            }
-        }
-    };
-    set_pos(&layers, &mut pos);
-    for sweep in 0..6 {
-        let down = sweep % 2 == 0;
-        let range: Vec<usize> = if down {
-            (1..depth).collect()
-        } else {
-            (0..depth.saturating_sub(1)).rev().collect()
-        };
-        for li in range {
-            let mut keyed: Vec<(f32, usize)> = layers[li]
-                .iter()
-                .map(|&v| {
-                    let nb = if down { &ins[v] } else { &keep[v] };
-                    let k = if nb.is_empty() {
-                        pos[v]
-                    } else {
-                        nb.iter().map(|&u| pos[u]).sum::<f32>() / nb.len() as f32
-                    };
-                    (k, v)
-                })
-                .collect();
-            keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
-            layers[li] = keyed.into_iter().map(|(_, v)| v).collect();
-            set_pos(&layers, &mut pos);
-        }
-    }
-    // Place: layers stacked along the main axis, boxes spread and centred across it.
-    let size = |v: usize| sizes.get(&ids[v]).copied().unwrap_or((180., 90.));
-    let (gap_across, gap_along) = (60., 90.);
-    let across = |v: usize| if horizontal { size(v).1 } else { size(v).0 };
-    let along = |v: usize| if horizontal { size(v).0 } else { size(v).1 };
-    let widths: Vec<f32> = layers
-        .iter()
-        .map(|l| {
-            l.iter().map(|&v| across(v)).sum::<f32>()
-                + gap_across * l.len().saturating_sub(1) as f32
-        })
-        .collect();
-    let widest = widths.iter().copied().fold(0., f32::max);
-    let mut result = HashMap::new();
-    let mut main = 0.;
-    for (li, l) in layers.iter().enumerate() {
-        let thick = l.iter().map(|&v| along(v)).fold(0., f32::max);
-        let mut cross = (widest - widths[li]) / 2.;
-        for &v in l {
-            let off_main = main + (thick - along(v)) / 2.;
-            let p = if horizontal {
-                (origin.0 + off_main, origin.1 + cross)
-            } else {
-                (origin.0 + cross, origin.1 + off_main)
-            };
-            result.insert(ids[v].clone(), p);
-            cross += across(v) + gap_across;
-        }
-        main += thick + gap_along;
-    }
-    result
+    super::tidy::layered(ids, sizes, links, origin, horizontal)
 }
 
 /// Cycles among the links: every link that sits on one.

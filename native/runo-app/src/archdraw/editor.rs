@@ -3,6 +3,7 @@
 
 use super::geom::{self, Align, Pt, Side, Wire};
 use super::model::*;
+use super::tidy;
 use std::collections::{HashMap, HashSet};
 
 /// A shape in the palette.
@@ -1520,17 +1521,341 @@ impl Editor {
             self.set_rects(&moves);
             return;
         }
+        self.layout_all(horizontal);
+    }
+
+    /// Lay out the whole diagram in layers, boundaries and all, where it is now.
+    fn layout_all(&mut self, horizontal: bool) {
+        let v = self.cur().clone();
+        let links: Vec<(String, String)> = v
+            .edges
+            .iter()
+            .filter_map(|e| self.doc.relation(&e.id))
+            .map(|r| (r.from.clone(), r.to.clone()))
+            .collect();
         let origin = Rect::bounds(v.nodes.iter().map(|n| n.rect()))
             .map(|r| (r.x, r.y))
             .unwrap_or((0., 0.));
         let mut placed: HashMap<String, Rect> = HashMap::new();
-        let size = self.layout_level(&v, None, &links, horizontal, &mut placed);
-        let _ = size;
+        self.layout_level(&v, None, &links, horizontal, &mut placed);
         let moves: Vec<(String, Rect)> = placed
             .into_iter()
             .map(|(id, r)| (id, Rect::new(r.x + origin.0, r.y + origin.1, r.w, r.h)))
             .collect();
         self.set_rects(&moves);
+    }
+
+    // ---- Beautify
+
+    /// How tangled the diagram open now looks.
+    pub(crate) fn layout_score(&self) -> tidy::Score {
+        let v = self.cur();
+        let sight = self.sight();
+        let kinds = self.elements();
+        let solid: Vec<(&str, Rect)> = v
+            .nodes
+            .iter()
+            .filter(|n| sight.shows(&n.id))
+            .filter(|n| {
+                n.collapsed
+                    || kinds
+                        .get(n.id.as_str())
+                        .is_some_and(|e| e.kind != Kind::Boundary)
+            })
+            .map(|n| (n.id.as_str(), n.rect()))
+            .collect();
+        let wires = self.wires();
+        let rels = self.relations();
+        let ends: Vec<(&Wire, &str, &str)> = wires
+            .iter()
+            .filter_map(|(id, w)| {
+                let r = rels.get(id.as_str())?;
+                Some((w, sight.stand_in(&r.from)?, sight.stand_in(&r.to)?))
+            })
+            .collect();
+        tidy::score(&solid, &ends)
+    }
+
+    /// A layout's score with a cost for very long, thin results, which read badly.
+    fn layout_cost(&self) -> f32 {
+        let s = self.layout_score().cost();
+        let shape = self
+            .extent()
+            .map(|r| (r.w.max(1.) / r.h.max(1.)).max(r.h.max(1.) / r.w.max(1.)))
+            .unwrap_or(1.);
+        s + (shape - 2.5).max(0.) * 6.
+    }
+
+    /// Make the diagram easier to read; returns its score before and after. One step to
+    /// undo.
+    pub(crate) fn beautify(&mut self, how: Beautify) -> (tidy::Score, tidy::Score) {
+        let before = self.layout_score();
+        if self.cur().nodes.is_empty() {
+            return (before, before);
+        }
+        self.checkpoint();
+        match how {
+            Beautify::Tidy => self.tidy_in_place(),
+            Beautify::Down => self.relayout(false),
+            Beautify::Across => self.relayout(true),
+            Beautify::Best => {
+                // Try each and keep the cleanest. Rearranging moves everything, so it has
+                // to be clearly better than tidying what's there.
+                let start = self.doc.clone();
+                let mut best: Option<(f32, Doc)> = None;
+                for way in [Beautify::Tidy, Beautify::Down, Beautify::Across] {
+                    self.doc = start.clone();
+                    let penalty = match way {
+                        Beautify::Tidy => 0.,
+                        _ => 3.,
+                    };
+                    match way {
+                        Beautify::Tidy => self.tidy_in_place(),
+                        Beautify::Down => self.relayout(false),
+                        _ => self.relayout(true),
+                    }
+                    let c = self.layout_cost() + penalty;
+                    if best.as_ref().is_none_or(|(b, _)| c < *b) {
+                        best = Some((c, self.doc.clone()));
+                    }
+                }
+                if let Some((_, doc)) = best {
+                    self.doc = doc;
+                }
+            }
+        }
+        self.dirty = true;
+        (before, self.layout_score())
+    }
+
+    /// Rearrange in layers from scratch: bends and pinned sides placed by hand go, since
+    /// they were for the old places.
+    fn relayout(&mut self, horizontal: bool) {
+        for e in &mut self.cur_mut().edges {
+            e.waypoints.clear();
+            e.from_side = None;
+            e.to_side = None;
+        }
+        self.layout_all(horizontal);
+    }
+
+    /// Tidy the diagram without rearranging it: inside each boundary and then at the top,
+    /// shapes that almost line up are lined up, neighbours of a size swap places where
+    /// that uncrosses connectors, overlaps are pushed apart, everything lands on the grid,
+    /// and boundaries grow to hold what's in them.
+    fn tidy_in_place(&mut self) {
+        let v = self.cur().clone();
+        let sight = self.sight();
+        let start: HashMap<String, Rect> =
+            v.nodes.iter().map(|n| (n.id.clone(), n.rect())).collect();
+        let mut rects = start.clone();
+        let mut groups: HashMap<Option<String>, Vec<String>> = HashMap::new();
+        for n in &v.nodes {
+            if sight.shows(&n.id) {
+                groups
+                    .entry(n.parent.clone())
+                    .or_default()
+                    .push(n.id.clone());
+            }
+        }
+        let depth = |p: &Option<String>| {
+            let mut d = 0;
+            let mut cur = p.clone();
+            while let Some(id) = cur {
+                d += 1;
+                cur = v.node(&id).and_then(|n| n.parent.clone());
+                if d > 64 {
+                    break;
+                }
+            }
+            d
+        };
+        let mut order: Vec<Option<String>> = groups.keys().cloned().collect();
+        order.sort_by_key(|p| std::cmp::Reverse(depth(p)));
+        let links: Vec<(String, String)> = v
+            .edges
+            .iter()
+            .filter_map(|e| self.doc.relation(&e.id))
+            .map(|r| (r.from.clone(), r.to.clone()))
+            .collect();
+        let descendants: HashMap<String, Vec<String>> = v
+            .nodes
+            .iter()
+            .map(|n| (n.id.clone(), v.descendants(&n.id)))
+            .collect();
+        let shift = |rects: &mut HashMap<String, Rect>, id: &str, dx: f32, dy: f32| {
+            if dx.abs() < 0.01 && dy.abs() < 0.01 {
+                return;
+            }
+            for k in std::iter::once(id.to_string()).chain(descendants[id].iter().cloned()) {
+                if let Some(r) = rects.get_mut(&k) {
+                    r.x += dx;
+                    r.y += dy;
+                }
+            }
+        };
+        let is_boundary = |id: &str| self.kind_of(id) == Kind::Boundary;
+        let pad = 30.;
+        let fit = |rects: &mut HashMap<String, Rect>, id: &str| {
+            let kids: Vec<Rect> = v
+                .nodes
+                .iter()
+                .filter(|n| n.parent.as_deref() == Some(id))
+                .filter_map(|n| rects.get(&n.id).copied())
+                .collect();
+            if let (Some(inner), Some(r)) = (Rect::bounds(kids), rects.get(id).copied()) {
+                let need = Rect::new(
+                    inner.x - pad,
+                    inner.y - pad - BOUNDARY_HEAD,
+                    inner.w + 2. * pad,
+                    inner.h + 2. * pad + BOUNDARY_HEAD,
+                );
+                rects.insert(id.to_string(), r.union(&need));
+            }
+        };
+        for p in order {
+            let ids = &groups[&p];
+            let movable: Vec<bool> = ids
+                .iter()
+                .map(|id| v.node(id).is_some_and(|n| !n.locked))
+                .collect();
+            for id in ids {
+                if is_boundary(id) {
+                    fit(&mut rects, id);
+                }
+            }
+            // Line up what almost lines up.
+            let centres: Vec<Pt> = ids.iter().map(|id| rects[id].center()).collect();
+            let lined = tidy::align_near(&centres, 18.);
+            for (i, id) in ids.iter().enumerate() {
+                if movable[i] {
+                    shift(
+                        &mut rects,
+                        id,
+                        lined[i].0 - centres[i].0,
+                        lined[i].1 - centres[i].1,
+                    );
+                }
+            }
+            // Swap neighbours of a size where that uncrosses connectors.
+            if ids.len() <= 40 {
+                let top = |id: &str| -> Option<String> {
+                    let mut cur = v.node(id)?;
+                    loop {
+                        if cur.parent == p {
+                            return Some(cur.id.clone());
+                        }
+                        cur = v.node(cur.parent.as_deref()?)?;
+                    }
+                };
+                let lifted: Vec<(String, String)> = links
+                    .iter()
+                    .filter_map(|(a, b)| Some((top(a)?, top(b)?)))
+                    .filter(|(a, b)| a != b)
+                    .collect();
+                let pairs: Vec<(&str, &str)> = lifted
+                    .iter()
+                    .map(|(a, b)| (a.as_str(), b.as_str()))
+                    .collect();
+                let mut centres: HashMap<&str, Pt> = ids
+                    .iter()
+                    .map(|id| (id.as_str(), rects[id].center()))
+                    .collect();
+                let alike = |a: &Rect, b: &Rect| {
+                    let r = |x: f32, y: f32| x.max(y) / x.min(y).max(1.);
+                    r(a.w, b.w) < 1.4 && r(a.h, b.h) < 1.4
+                };
+                let mut now = tidy::quick_crossings(&centres, &pairs);
+                for _ in 0..4 {
+                    if now == 0 {
+                        break;
+                    }
+                    let mut better = false;
+                    for i in 0..ids.len() {
+                        for j in i + 1..ids.len() {
+                            if !movable[i]
+                                || !movable[j]
+                                || !alike(&rects[&ids[i]], &rects[&ids[j]])
+                            {
+                                continue;
+                            }
+                            let (a, b) = (ids[i].as_str(), ids[j].as_str());
+                            let (ca, cb) = (centres[a], centres[b]);
+                            centres.insert(a, cb);
+                            centres.insert(b, ca);
+                            let c = tidy::quick_crossings(&centres, &pairs);
+                            if c < now {
+                                now = c;
+                                better = true;
+                                shift(&mut rects, a, cb.0 - ca.0, cb.1 - ca.1);
+                                shift(&mut rects, b, ca.0 - cb.0, ca.1 - cb.1);
+                            } else {
+                                centres.insert(a, ca);
+                                centres.insert(b, cb);
+                            }
+                        }
+                    }
+                    if !better {
+                        break;
+                    }
+                }
+            }
+            // Room between everything.
+            let mut rs: Vec<Rect> = ids.iter().map(|id| rects[id]).collect();
+            let fixed: Vec<bool> = movable.iter().map(|m| !m).collect();
+            tidy::push_apart(&mut rs, &fixed, 40.);
+            for (i, id) in ids.iter().enumerate() {
+                let r0 = rects[id];
+                let (mut dx, mut dy) = (rs[i].x - r0.x, rs[i].y - r0.y);
+                if movable[i] {
+                    // Onto the grid.
+                    dx = (r0.x + dx).round_to(10.) - r0.x;
+                    dy = (r0.y + dy).round_to(10.) - r0.y;
+                }
+                shift(&mut rects, id, dx, dy);
+            }
+        }
+        // Boundaries hold everything inside them, innermost first.
+        let mut bounds: Vec<&Node> = v.nodes.iter().filter(|n| is_boundary(&n.id)).collect();
+        bounds.sort_by_key(|n| std::cmp::Reverse(depth(&Some(n.id.clone()))));
+        for b in bounds {
+            fit(&mut rects, &b.id);
+        }
+        // Bends placed by hand only make sense where the shapes were.
+        let moved = |id: &str| {
+            let (a, b) = (start.get(id), rects.get(id));
+            a.zip(b).is_some_and(|(a, b)| a != b)
+        };
+        let ends: HashMap<String, (String, String)> = self
+            .doc
+            .relations
+            .iter()
+            .map(|r| (r.id.clone(), (r.from.clone(), r.to.clone())))
+            .collect();
+        for e in &mut self.cur_mut().edges {
+            if let Some((a, b)) = ends.get(&e.id) {
+                if moved(a) || moved(b) {
+                    e.waypoints.clear();
+                }
+            }
+        }
+        let moves: Vec<(String, Rect)> = rects
+            .into_iter()
+            .filter(|(id, r)| start.get(id) != Some(r))
+            .collect();
+        self.set_rects(&moves);
+    }
+
+    /// Give every connector on the diagram the same kind of route.
+    pub(crate) fn set_all_routes(&mut self, route: Route) {
+        self.checkpoint();
+        for e in &mut self.cur_mut().edges {
+            e.route = route;
+            if route != Route::Elbow {
+                e.waypoints.clear();
+            }
+        }
+        self.dirty = true;
     }
 
     /// Lay out the direct children of `parent` (recursing into boundaries) at (0, 0), and
@@ -2308,6 +2633,30 @@ impl<'a> Buckets<'a> {
     }
 }
 
+/// How Beautify makes a diagram easier to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Beautify {
+    /// Try each way and keep the cleanest.
+    Best,
+    /// Keep the layout: line up, space out and uncross.
+    Tidy,
+    /// Rearrange in layers, top to bottom.
+    Down,
+    /// Rearrange in layers, left to right.
+    Across,
+}
+
+/// Rounding to a grid step.
+trait RoundTo {
+    fn round_to(self, step: f32) -> f32;
+}
+
+impl RoundTo for f32 {
+    fn round_to(self, step: f32) -> f32 {
+        (self / step).round() * step
+    }
+}
+
 /// Like `view_wires`, reusing routes in `cache` whose ends, settings and nearby boxes
 /// haven't changed, so dragging one shape on a big diagram reroutes only what it touches.
 pub(crate) fn view_wires_cached(
@@ -2338,8 +2687,19 @@ pub(crate) fn view_wires_cached(
             .map(|n| (n.id.as_str(), n.rect())),
     );
     let mut drawn: HashSet<(String, String)> = HashSet::new();
-    let mut used = HashSet::new();
-    let out: Vec<(String, Wire)> = v
+    // First where each connector goes and which sides it uses, so ends sharing a side
+    // can be spread along it before anything is routed.
+    struct Plan<'a> {
+        e: &'a Edge,
+        fa: &'a str,
+        fb: &'a str,
+        a: Rect,
+        b: Rect,
+        waypoints: &'a [Pt],
+        sa: geom::Side,
+        sb: geom::Side,
+    }
+    let plans: Vec<Plan> = v
         .edges
         .iter()
         .filter_map(|e| {
@@ -2350,9 +2710,56 @@ pub(crate) fn view_wires_cached(
                 // Inside one collapsed boundary, or already drawn between the same boxes.
                 return None;
             }
-            let a = rects.get(fa)?;
-            let b = rects.get(fb)?;
-            let mut obstacles: Vec<Rect> = if e.route == Route::Elbow && e.waypoints.is_empty() {
+            let a = *rects.get(fa)?;
+            let b = *rects.get(fb)?;
+            let waypoints: &[Pt] = if folded { &[] } else { &e.waypoints };
+            let (auto_a, auto_b) = match (waypoints.first(), waypoints.last()) {
+                (Some(f), Some(l)) => (geom::side_toward(&a, *f), geom::side_toward(&b, *l)),
+                _ => geom::sides(&a, &b),
+            };
+            Some(Plan {
+                e,
+                fa,
+                fb,
+                a,
+                b,
+                waypoints,
+                sa: e.from_side.unwrap_or(auto_a),
+                sb: e.to_side.unwrap_or(auto_b),
+            })
+        })
+        .collect();
+    let spreads = |p: &Plan| p.e.route != Route::Straight && p.fa != p.fb;
+    let mut ends = Vec::new();
+    let mut slots = Vec::new();
+    for (i, p) in plans.iter().enumerate() {
+        if spreads(p) {
+            ends.push(super::tidy::End {
+                shape: p.fa,
+                side: p.sa,
+                toward: p.waypoints.first().copied().unwrap_or(p.b.center()),
+            });
+            ends.push(super::tidy::End {
+                shape: p.fb,
+                side: p.sb,
+                toward: p.waypoints.last().copied().unwrap_or(p.a.center()),
+            });
+            slots.push(Some(i));
+        }
+    }
+    let spread = super::tidy::spread_ends(&ends);
+    let mut at: Vec<(Option<f32>, Option<f32>)> = vec![(None, None); plans.len()];
+    for (k, i) in slots.into_iter().flatten().enumerate() {
+        at[i] = (spread[2 * k], spread[2 * k + 1]);
+    }
+    let mut used = HashSet::new();
+    let mut out: Vec<(String, Wire)> = plans
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let (e, fa, fb, a, b) = (p.e, p.fa, p.fb, &p.a, &p.b);
+            let (from_at, to_at) = at[i];
+            let mut obstacles: Vec<Rect> = if e.route == Route::Elbow && p.waypoints.is_empty() {
                 solid
                     .near(&a.union(b).inflate(120.))
                     .into_iter()
@@ -2367,7 +2774,6 @@ pub(crate) fn view_wires_cached(
             if obstacles.len() > MAX_OBSTACLES {
                 obstacles.clear();
             }
-            let waypoints: &[Pt] = if folded { &[] } else { &e.waypoints };
             let mut h = std::collections::hash_map::DefaultHasher::new();
             for r in [a, b].into_iter().chain(&obstacles) {
                 for f in [r.x, r.y, r.w, r.h] {
@@ -2375,27 +2781,34 @@ pub(crate) fn view_wires_cached(
                 }
             }
             (e.route as u8, e.from_side, e.to_side).hash(&mut h);
-            for p in waypoints {
-                (p.0.to_bits(), p.1.to_bits()).hash(&mut h);
+            (p.sa, p.sb).hash(&mut h);
+            (from_at.map(f32::to_bits), to_at.map(f32::to_bits)).hash(&mut h);
+            for q in p.waypoints {
+                (q.0.to_bits(), q.1.to_bits()).hash(&mut h);
             }
             let key = h.finish();
             used.insert(e.id.clone());
             if let Some((k, w)) = cache.get(&e.id) {
                 if *k == key {
-                    return Some((e.id.clone(), w.clone()));
+                    return (e.id.clone(), w.clone());
                 }
             }
+            // Straight lines aim at the centres unless pinned, so they keep their own ends.
+            let pinned = e.route == Route::Straight;
             let way = geom::Way {
-                from: e.from_side,
-                to: e.to_side,
-                waypoints,
+                from: if pinned { e.from_side } else { Some(p.sa) },
+                to: if pinned { e.to_side } else { Some(p.sb) },
+                waypoints: p.waypoints,
                 obstacles: &obstacles,
+                from_at,
+                to_at,
             };
             let w = geom::route_with(a, b, e.route, &way);
             cache.insert(e.id.clone(), (key, w.clone()));
-            Some((e.id.clone(), w))
+            (e.id.clone(), w)
         })
         .collect();
+    super::tidy::separate_lanes(&mut out);
     cache.retain(|id, _| used.contains(id));
     out
 }

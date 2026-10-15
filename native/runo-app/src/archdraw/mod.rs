@@ -6,4 +6,5 @@ pub(crate) mod io;
 pub(crate) mod model;
 pub(crate) mod motion;
 pub(crate) mod shape;
+pub(crate) mod tidy;
 pub(crate) mod view;

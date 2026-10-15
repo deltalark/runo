@@ -2,7 +2,8 @@
 //! You draw; nothing changes the diagram behind your back.
 
 use super::editor::{
-    changes, search as search_presets, Changes, Editor, Finding, Hit, Preset, Sel, GROUPS, PRESETS,
+    changes, search as search_presets, Beautify, Changes, Editor, Finding, Hit, Preset, Sel,
+    GROUPS, PRESETS,
 };
 use super::geom::{self, Align, Guide, Handle, Pt, Side};
 use super::io;
@@ -163,6 +164,8 @@ pub(crate) struct ArchEditor {
     save_gen: u64,
     saved_at: Option<Instant>,
     export_open: bool,
+    /// The Beautify menu is open.
+    beautify_open: bool,
     scanning: bool,
     load_error: Option<String>,
     /// When the editor opened: the clock every animation runs on.
@@ -542,6 +545,7 @@ impl ArchEditor {
             save_gen: 0,
             saved_at: None,
             export_open: false,
+            beautify_open: false,
             scanning: false,
             load_error,
             born: Instant::now(),
@@ -1320,6 +1324,40 @@ impl ArchEditor {
                     .on_click(cx.listener(move |this, _, _, cx| this.show_finding(&f2, cx))),
             );
         }
+        let score = self.ed.layout_score();
+        if !score.is_clean() {
+            list = list.child(
+                div()
+                    .id("arch-finding-layout")
+                    .px_3()
+                    .py(px(6.))
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .rounded_md()
+                    .text_size(px(12.5))
+                    .text_color(rgb(c_text()))
+                    .child(icon(IconName::CircleAlert, 12., 0xf59e0b))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(format!("Hard to follow: {}", score.describe())),
+                    )
+                    .child(
+                        text_btn(
+                            "arch-finding-beautify",
+                            "Beautify",
+                            Some(IconName::WandSparkles),
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.check_open = false;
+                            this.run_beautify(Beautify::Best, cx);
+                        })),
+                    ),
+            );
+        }
         let more = found.len().saturating_sub(40);
         Some(
             div()
@@ -1656,6 +1694,18 @@ impl ArchEditor {
                         .child(
                             text_btn("arch-reject", "Reject", Some(IconName::Undo2), false)
                                 .on_click(cx.listener(|this, _, _, cx| this.reject(cx))),
+                        )
+                        .child(
+                            text_btn(
+                                "arch-accept-tidy",
+                                "Accept and beautify",
+                                Some(IconName::WandSparkles),
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.accept(cx);
+                                this.run_beautify(Beautify::Best, cx);
+                            })),
                         )
                         .child(
                             text_btn("arch-accept", "Accept", Some(IconName::Check), true)
@@ -2163,10 +2213,15 @@ impl ArchEditor {
                     self.close_find(window, cx);
                 } else if !matches!(self.drag, Drag::None) {
                     self.drag = Drag::None;
-                } else if self.menu.is_some() || self.quick.is_some() || self.export_open {
+                } else if self.menu.is_some()
+                    || self.quick.is_some()
+                    || self.export_open
+                    || self.beautify_open
+                {
                     self.menu = None;
                     self.quick = None;
                     self.export_open = false;
+                    self.beautify_open = false;
                 } else {
                     self.ed.sel = Sel::default();
                 }
@@ -2220,7 +2275,7 @@ impl ArchEditor {
                 let (w, h) = self.view_size();
                 self.zoom_at((w / 2., h / 2.), 1. / self.zoom);
             }
-            (false, true, false, "a") => self.act(cx, |ed| ed.auto_layout(false)),
+            (false, true, false, "a") => self.run_beautify(Beautify::Best, cx),
             (false, false, false, "v") => self.tool = Tool::Select,
             (false, false, false, "h") => self.tool = Tool::Hand,
             (false, false, false, "space") => self.space = true,
@@ -3670,30 +3725,17 @@ impl ArchEditor {
             )
             .child(sep())
             .child(
-                icon_btn(
-                    "arch-layout",
-                    IconName::Network,
-                    "Tidy layout: the selection, or the whole diagram (Shift+A)",
-                    false,
+                text_btn(
+                    "arch-beautify",
+                    "Beautify",
+                    Some(IconName::WandSparkles),
+                    self.beautify_open,
                 )
+                .tooltip(tip("Untangle connectors and tidy the layout (Shift+A)"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    let h = this.horizontal;
-                    this.act(cx, |ed| ed.auto_layout(h));
-                })),
-            )
-            .child(
-                icon_btn(
-                    "arch-dir",
-                    if self.horizontal {
-                        IconName::ArrowRight
-                    } else {
-                        IconName::ArrowDown
-                    },
-                    "Layout direction",
-                    false,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.horizontal = !this.horizontal;
+                    this.beautify_open = !this.beautify_open;
+                    this.export_open = false;
+                    this.check_open = false;
                     cx.notify();
                 })),
             )
@@ -3742,6 +3784,7 @@ impl ArchEditor {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.check_open = !this.check_open;
                     this.export_open = false;
+                    this.beautify_open = false;
                     cx.notify();
                 })),
             )
@@ -3821,10 +3864,200 @@ impl ArchEditor {
                 text_btn("arch-export", "Export", Some(IconName::Download), false).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.export_open = !this.export_open;
+                        this.beautify_open = false;
                         cx.notify();
                     }),
                 ),
             )
+            .into_any_element()
+    }
+
+    /// Make the diagram easier to read, and say what changed.
+    fn run_beautify(&mut self, how: Beautify, cx: &mut Context<Self>) {
+        self.commit_layer_name(cx);
+        self.menu = None;
+        self.beautify_open = false;
+        let (before, after) = self.ed.beautify(how);
+        self.after_edit(cx);
+        if before != after {
+            self.fit(false);
+        }
+        let text = if before == after {
+            format!(
+                "This is already the cleanest layout Runo found: {}.",
+                after.describe()
+            )
+        } else if after.is_clean() {
+            if before.is_clean() {
+                "Beautified: lined up and spaced out. ⌘Z undoes it.".to_string()
+            } else {
+                format!(
+                    "Beautified: {} before, none now. ⌘Z undoes it.",
+                    before.describe()
+                )
+            }
+        } else {
+            format!(
+                "Beautified: {} before, {} now. ⌘Z undoes it.",
+                before.describe(),
+                after.describe()
+            )
+        };
+        self.note(text, false);
+        cx.notify();
+    }
+
+    /// Have an agent regroup the diagram by meaning, then lay it out.
+    fn beautify_with_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.beautify_open = false;
+        let task = "Make this diagram easy to read without changing what it says. Group parts \
+                    into boundaries by responsibility or tier (for example clients, edge, \
+                    services, data, external systems), order them along the way a request \
+                    flows, give connectors short labels of what flows, and lay shapes on a \
+                    grid in rows or columns so connectors run straight and don't cross or \
+                    pass behind shapes. Keep every part and connection; don't add new ones."
+            .to_string();
+        self.ask_edit(task, Vec::new(), window, cx);
+    }
+
+    fn beautify_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let score = self.ed.layout_score();
+        let item = |id: &'static str, label: &'static str, sub: &'static str, main: bool| {
+            div()
+                .id(id)
+                .px_3()
+                .py_2()
+                .v_flex()
+                .rounded_md()
+                .cursor_pointer()
+                .when(main, |el| el.bg(col(c_blue(), 0.12)))
+                .hover(|el| el.bg(tint(c_subtle())))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .font_weight(if main {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(rgb(c_text()))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(c_muted()))
+                        .child(sub),
+                )
+        };
+        let routes = [
+            (Route::Elbow, "Elbow"),
+            (Route::Curved, "Curved"),
+            (Route::Straight, "Straight"),
+        ];
+        let mut route_row = div().flex().gap_1().px_3().pb_2();
+        for (i, (r, label)) in routes.into_iter().enumerate() {
+            route_row =
+                route_row.child(chip_btn(("arch-beautify-route", i), label, false).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.beautify_open = false;
+                        this.act(cx, |ed| ed.set_all_routes(r));
+                    }),
+                ));
+        }
+        div()
+            .absolute()
+            .top(px(6.))
+            .right(px(8.))
+            .w(px(300.))
+            .p_1()
+            .v_flex()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(float(c_canvas()))
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon(
+                        if score.is_clean() {
+                            IconName::CircleCheck
+                        } else {
+                            IconName::CircleAlert
+                        },
+                        13.,
+                        if score.is_clean() { 0x22c55e } else { 0xf59e0b },
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_secondary()))
+                            .child(format!("Now: {}", score.describe())),
+                    ),
+            )
+            .child(
+                item(
+                    "arch-beautify-best",
+                    "Beautify",
+                    "Tries tidying and each layout, and keeps the cleanest",
+                    true,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.run_beautify(Beautify::Best, cx))),
+            )
+            .child(
+                item(
+                    "arch-beautify-tidy",
+                    "Tidy, keep my layout",
+                    "Lines up, spaces out and uncrosses without moving things far",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.run_beautify(Beautify::Tidy, cx))),
+            )
+            .child(
+                item(
+                    "arch-beautify-down",
+                    "Rearrange top to bottom",
+                    "Callers above what they call, in layers",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.run_beautify(Beautify::Down, cx))),
+            )
+            .child(
+                item(
+                    "arch-beautify-across",
+                    "Rearrange left to right",
+                    "Requests flow from left to right",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.run_beautify(Beautify::Across, cx))),
+            )
+            .child(
+                item(
+                    "arch-beautify-ai",
+                    "Beautify with AI",
+                    "Regroups parts by what they do and labels what flows, for you to accept",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.beautify_with_ai(window, cx))),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_muted()))
+                    .child("Every connector as"),
+            )
+            .child(route_row)
             .into_any_element()
     }
 
@@ -4339,12 +4572,9 @@ impl ArchEditor {
                     Box::new(|this, _, _| this.ed.select_all()),
                 ));
                 items.push((
-                    "Tidy layout",
+                    "Beautify",
                     "⇧A",
-                    Box::new(|this, _, cx| {
-                        let h = this.horizontal;
-                        this.act(cx, |ed| ed.auto_layout(h));
-                    }),
+                    Box::new(|this, _, cx| this.run_beautify(Beautify::Best, cx)),
                 ));
                 items.push((
                     "Fit to screen",
@@ -4794,6 +5024,9 @@ impl ArchEditor {
         }
         if self.export_open {
             area = area.child(self.export_menu(cx));
+        }
+        if self.beautify_open {
+            area = area.child(self.beautify_menu(cx));
         }
         if let Some(panel) = self.check_panel(cx) {
             area = area.child(panel);
