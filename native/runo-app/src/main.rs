@@ -17,6 +17,7 @@ mod copies;
 mod cove;
 mod ctxmenu;
 mod design;
+mod designdraw;
 mod desktop_notify;
 mod detach;
 mod files;
