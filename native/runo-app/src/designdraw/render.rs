@@ -19,6 +19,19 @@ const SCALE: f32 = 2.;
 /// A screen taller than its device is captured down to this many screens high.
 const MAX_SCREENS_TALL: f32 = 4.;
 
+/// Where a project's screen browser keeps its profile. Each project's canvas runs its own
+/// browser, and Chromium won't start a second one on a profile that's in use, so every
+/// project gets its own.
+pub(crate) fn profile_dir(root: &std::path::Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut h);
+    crate::store::data_dir()
+        .join("browser")
+        .join("design-profiles")
+        .join(format!("{:016x}", h.finish()))
+}
+
 /// A screen as last drawn.
 #[derive(Clone)]
 pub(crate) struct Shot {
@@ -57,9 +70,7 @@ impl Renderer {
         self.current = None;
         let path = browser_engine::find_chromium()
             .ok_or_else(|| browser_engine::not_found_message().to_string())?;
-        let profile = crate::store::data_dir()
-            .join("browser")
-            .join("design-profile");
+        let profile = profile_dir(&self.root);
         let engine = Arc::new(Engine::start(path, &profile)?);
         engine.open(PAGE, "about:blank", (390, 844, SCALE));
         let start = std::time::Instant::now();
@@ -251,6 +262,26 @@ mod tests {
         assert!(before.contains(">Sign in</button>"));
         let saved = std::fs::read_to_string(screen_path(&root, "sign-in")).unwrap();
         assert!(saved.contains(">Log in</button>"));
+
+        // Another project's canvas draws while this one's browser is still running.
+        let other = std::env::temp_dir().join(format!("runo-render-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&other);
+        super::super::model::seed(&other).unwrap();
+        std::fs::write(
+            screen_path(&other, "home"),
+            super::super::model::template("Blank", "Home", Device::Phone),
+        )
+        .unwrap();
+        let mut r2 = Renderer::new(other.clone());
+        assert!(r2.shoot("home", Device::Phone).is_ok());
+        assert!(r.shoot("sign-in", Device::Phone).is_ok());
+    }
+
+    #[test]
+    fn each_project_has_its_own_browser_profile() {
+        let a = profile_dir(std::path::Path::new("/p/a"));
+        assert_eq!(a, profile_dir(std::path::Path::new("/p/a")));
+        assert_ne!(a, profile_dir(std::path::Path::new("/p/b")));
     }
 
     #[test]
