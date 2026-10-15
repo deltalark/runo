@@ -1,21 +1,17 @@
-//! Screens drawn by a headless Chromium of the canvas's own: one page, loaded with the
-//! screen being worked on, captured as an image for the canvas and asked about elements.
+//! Screens drawn by an engine of the canvas's own: one page, loaded with the screen being
+//! worked on, captured as an image for the canvas and asked about elements in JavaScript.
+//! On macOS that's WebKit, the engine built into the system; elsewhere a headless Chromium.
 //!
 //! Every call blocks, so callers run them off the UI thread, one at a time.
 
 use super::dom::{self, Link};
 use super::model::{screen_path, Device};
-use crate::browser_engine::{self, Engine};
 use gpui_kit::RenderImage;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The canvas's one page in its engine.
-const PAGE: u64 = 1;
-/// Pixels per CSS pixel in captures, so screens stay sharp when zoomed in.
-const SCALE: f32 = 2.;
 /// A screen taller than its device is captured down to this many screens high.
 const MAX_SCREENS_TALL: f32 = 4.;
 
@@ -23,13 +19,15 @@ const MAX_SCREENS_TALL: f32 = 4.;
 /// browser, and Chromium won't start a second one on a profile that's in use, so every
 /// project gets its own, and so does every run of Runo: a browser left behind by a run
 /// that crashed or was force-quit can't block the next one.
-pub(crate) fn profile_dir(root: &std::path::Path) -> PathBuf {
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) fn profile_dir(root: &Path) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     root.hash(&mut h);
     profiles_dir().join(format!("{:016x}-{}", h.finish(), std::process::id()))
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn profiles_dir() -> PathBuf {
     crate::store::data_dir()
         .join("browser")
@@ -37,6 +35,7 @@ fn profiles_dir() -> PathBuf {
 }
 
 /// Remove the profiles of earlier runs whose browser has quit, so they don't pile up.
+#[cfg(not(target_os = "macos"))]
 fn clear_old_profiles() {
     let own = format!("-{}", std::process::id());
     for entry in std::fs::read_dir(profiles_dir())
@@ -67,9 +66,95 @@ pub(crate) struct Shot {
     pub boxes: Vec<super::dom::Bx>,
 }
 
+/// The page the screens are drawn in, in WebKit.
+#[cfg(target_os = "macos")]
+struct Surface(super::webkit::Page);
+
+#[cfg(target_os = "macos")]
+impl Surface {
+    fn start(_root: &Path) -> Result<Self, String> {
+        super::webkit::Page::new(390., 844.).map(Self)
+    }
+
+    fn alive(&self) -> bool {
+        true
+    }
+
+    fn load(&mut self, file: &Path, folder: &Path, size: (f32, f32), wait: Duration) -> bool {
+        self.0.load(file, folder, size, wait)
+    }
+
+    fn eval(&self, js: &str) -> Option<Value> {
+        self.0.eval(js)
+    }
+
+    fn color_scheme(&self, dark: bool) {
+        self.0.color_scheme(dark)
+    }
+
+    fn capture(&mut self, w: f32, h: f32) -> Option<Arc<RenderImage>> {
+        self.0.capture(w, h)
+    }
+}
+
+/// The page the screens are drawn in, in a headless Chromium.
+#[cfg(not(target_os = "macos"))]
+struct Surface(Arc<crate::browser_engine::Engine>);
+
+#[cfg(not(target_os = "macos"))]
+impl Surface {
+    /// The canvas's one page in its engine.
+    const PAGE: u64 = 1;
+    /// Pixels per CSS pixel in captures, so screens stay sharp when zoomed in.
+    const SCALE: f32 = 2.;
+
+    fn start(root: &Path) -> Result<Self, String> {
+        use crate::browser_engine::{self, Engine};
+        let path = browser_engine::find_chromium()
+            .ok_or_else(|| browser_engine::not_found_message().to_string())?;
+        clear_old_profiles();
+        let profile = profile_dir(root);
+        let engine = Arc::new(Engine::start(path, &profile)?);
+        engine.open(Self::PAGE, "about:blank", (390, 844, Self::SCALE));
+        let start = std::time::Instant::now();
+        while !engine.ready(Self::PAGE) {
+            if start.elapsed() > Duration::from_secs(30) || !engine.alive() {
+                return Err("The browser that draws the screens didn't start.".into());
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        Ok(Self(engine))
+    }
+
+    fn alive(&self) -> bool {
+        self.0.alive()
+    }
+
+    fn load(&mut self, file: &Path, _folder: &Path, (w, h): (f32, f32), wait: Duration) -> bool {
+        self.0.load(
+            Self::PAGE,
+            &file_url(file),
+            (w as u32, h as u32, Self::SCALE),
+            wait,
+        )
+    }
+
+    fn eval(&self, js: &str) -> Option<Value> {
+        self.0.eval(Self::PAGE, js)
+    }
+
+    fn color_scheme(&self, dark: bool) {
+        self.0.color_scheme(Self::PAGE, dark)
+    }
+
+    fn capture(&mut self, w: f32, h: f32) -> Option<Arc<RenderImage>> {
+        self.0.capture(Self::PAGE, w, h)
+    }
+}
+
 pub(crate) struct Renderer {
     root: PathBuf,
-    engine: Option<Arc<Engine>>,
+    surface: Option<Surface>,
     /// The screen loaded in the page, and whether the page shows it as saved.
     current: Option<String>,
     dark: bool,
@@ -81,67 +166,53 @@ impl Renderer {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self {
             root,
-            engine: None,
+            surface: None,
             current: None,
             dark: false,
             played: false,
         }
     }
 
-    fn engine(&mut self) -> Result<Arc<Engine>, String> {
-        if let Some(e) = self.engine.as_ref().filter(|e| e.alive()) {
-            return Ok(e.clone());
+    fn surface(&mut self) -> Result<&mut Surface, String> {
+        if !self.surface.as_ref().is_some_and(Surface::alive) {
+            self.current = None;
+            self.surface = Some(Surface::start(&self.root)?);
         }
-        self.current = None;
-        let path = browser_engine::find_chromium()
-            .ok_or_else(|| browser_engine::not_found_message().to_string())?;
-        clear_old_profiles();
-        let profile = profile_dir(&self.root);
-        let engine = Arc::new(Engine::start(path, &profile)?);
-        engine.open(PAGE, "about:blank", (390, 844, SCALE));
-        let start = std::time::Instant::now();
-        while !engine.ready(PAGE) {
-            if start.elapsed() > Duration::from_secs(30) || !engine.alive() {
-                return Err("The browser that draws the screens didn't start.".into());
-            }
-            std::thread::sleep(Duration::from_millis(30));
-        }
-        self.engine = Some(engine.clone());
-        Ok(engine)
+        Ok(self.surface.as_mut().expect("just started"))
     }
 
     /// Load the screen unless it's loaded already (or `fresh`, to read the file again).
-    fn open(&mut self, id: &str, device: Device, fresh: bool) -> Result<Arc<Engine>, String> {
+    fn open(&mut self, id: &str, device: Device, fresh: bool) -> Result<&mut Surface, String> {
         let fresh = fresh || std::mem::take(&mut self.played);
         self.open_as_is(id, device, fresh)
     }
 
     /// Load the screen unless it's loaded already, keeping what Play did to it.
-    fn open_as_is(&mut self, id: &str, device: Device, fresh: bool) -> Result<Arc<Engine>, String> {
-        let engine = self.engine()?;
-        if !fresh && self.current.as_deref() == Some(id) {
-            return Ok(engine);
+    fn open_as_is(
+        &mut self,
+        id: &str,
+        device: Device,
+        fresh: bool,
+    ) -> Result<&mut Surface, String> {
+        if fresh || self.current.as_deref() != Some(id) {
+            self.current = None;
+            let file = screen_path(&self.root, id);
+            let folder = super::model::folder(&self.root);
+            let dark = self.dark;
+            let surface = self.surface()?;
+            if !surface.load(&file, &folder, device.size(), Duration::from_secs(8)) {
+                return Err(format!("{id}.html didn't load."));
+            }
+            surface.color_scheme(dark);
+            self.current = Some(id.to_string());
         }
-        self.current = None;
-        let (w, h) = device.size();
-        let url = file_url(&screen_path(&self.root, id));
-        if !engine.load(
-            PAGE,
-            &url,
-            (w as u32, h as u32, SCALE),
-            Duration::from_secs(8),
-        ) {
-            return Err(format!("{id}.html didn't load."));
-        }
-        engine.color_scheme(PAGE, self.dark);
-        self.current = Some(id.to_string());
-        Ok(engine)
+        self.surface()
     }
 
     /// Draw the screen from its file.
     pub(crate) fn shoot(&mut self, id: &str, device: Device) -> Result<Shot, String> {
         let engine = self.open(id, device, true)?;
-        self.capture(&engine, id, device)
+        Self::capture(engine, id, device)
     }
 
     /// Tap the screen at a point in Play, as a person would, and draw what it shows then.
@@ -149,42 +220,39 @@ impl Renderer {
     /// reads the page loads the file again first, so Play never ends up saved.
     pub(crate) fn tap(&mut self, id: &str, device: Device, at: (f32, f32)) -> Result<Shot, String> {
         let fresh = self.current.as_deref() != Some(id) || !self.played;
-        let engine = self.open_as_is(id, device, fresh)?;
         self.played = true;
-        engine.eval(PAGE, super::model::UI_JS);
-        engine.eval(
-            PAGE,
-            &format!(
-                "(() => {{ const el = document.elementFromPoint({}, {}); \
-                 if (!el || el.closest('[data-goto]')) return false; \
-                 if (el.focus) el.focus(); el.click(); return true; }})()",
-                at.0, at.1
-            ),
-        );
+        let engine = self.open_as_is(id, device, fresh)?;
+        engine.eval(super::model::UI_JS);
+        engine.eval(&format!(
+            "(() => {{ const el = document.elementFromPoint({}, {}); \
+             if (!el || el.closest('[data-goto]')) return false; \
+             if (el.focus) el.focus(); el.click(); return true; }})()",
+            at.0, at.1
+        ));
         // Let CSS transitions settle.
         std::thread::sleep(Duration::from_millis(200));
-        self.capture(&engine, id, device)
+        Self::capture(engine, id, device)
     }
 
-    fn capture(&mut self, engine: &Engine, id: &str, device: Device) -> Result<Shot, String> {
+    fn capture(engine: &mut Surface, id: &str, device: Device) -> Result<Shot, String> {
         let (w, h) = device.size();
         let page_h = engine
-            .eval(PAGE, &dom::call("size", &[]))
+            .eval(&dom::call("size", &[]))
             .and_then(|v| v["h"].as_f64())
             .unwrap_or(h as f64) as f32;
         let height = page_h.clamp(h, h * MAX_SCREENS_TALL);
         let image = engine
-            .capture(PAGE, w, height)
+            .capture(w, height)
             .ok_or_else(|| format!("Couldn't draw {id}.html."))?;
         let links = engine
-            .eval(PAGE, &dom::call("links", &[]))
+            .eval(&dom::call("links", &[]))
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
         let facts = engine
-            .eval(PAGE, super::checks::FACTS)
+            .eval(super::checks::FACTS)
             .and_then(|v| serde_json::from_value(v).ok());
         let boxes = engine
-            .eval(PAGE, &dom::call("boxes", &[]))
+            .eval(&dom::call("boxes", &[]))
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
         Ok(Shot {
@@ -200,7 +268,7 @@ impl Renderer {
     pub(crate) fn eval(&mut self, id: &str, device: Device, js: &str) -> Result<Value, String> {
         let engine = self.open(id, device, false)?;
         engine
-            .eval(PAGE, js)
+            .eval(js)
             .ok_or_else(|| "The screen didn't answer.".to_string())
     }
 
@@ -257,6 +325,7 @@ impl Renderer {
 }
 
 /// A `file://` URL for a local path.
+#[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn file_url(path: &std::path::Path) -> String {
     let mut out = String::from("file://");
     let text = path.to_string_lossy().replace('\\', "/");
@@ -280,7 +349,9 @@ mod tests {
     use super::*;
 
     /// Draws, picks and edits a real screen. Needs a Chromium, so it runs only when
-    /// RUNO_BROWSER_TESTS is set.
+    /// RUNO_BROWSER_TESTS is set. Not on macOS: WebKit answers on the main thread's run
+    /// loop, which the test runner doesn't turn.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn screens_draw_pick_and_edit() {
         if std::env::var_os("RUNO_BROWSER_TESTS").is_none() {

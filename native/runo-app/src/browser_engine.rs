@@ -799,12 +799,16 @@ impl Engine {
     }
 
     /// Whether the page is attached and takes commands.
+    // The design canvas draws with WebKit on macOS; these serve it elsewhere.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn ready(&self, key: u64) -> bool {
         self.session_of(key).is_some()
     }
 
     /// Run JavaScript in the page and return its value, after any promise it returns
     /// settles. None when it threw or the page didn't answer. Blocks for the reply.
+    // The design canvas draws with WebKit on macOS; these serve it elsewhere.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn eval(&self, key: u64, js: &str) -> Option<Value> {
         let session = self.session_of(key)?;
         let reply = self.call(
@@ -820,6 +824,8 @@ impl Engine {
 
     /// Load `url` at this CSS size and scale, in front so it renders, and wait until it
     /// and its fonts have loaded. False when it didn't within `wait`.
+    // The design canvas draws with WebKit on macOS; these serve it elsewhere.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn load(&self, key: u64, url: &str, viewport: (u32, u32, f32), wait: Duration) -> bool {
         let Some(session) = self.session_of(key) else {
             return false;
@@ -850,6 +856,8 @@ impl Engine {
     }
 
     /// Show the page with the dark or the light colour scheme preferred.
+    // The design canvas draws with WebKit on macOS; these serve it elsewhere.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn color_scheme(&self, key: u64, dark: bool) {
         if let Some(session) = self.session_of(key) {
             self.call(
@@ -863,6 +871,8 @@ impl Engine {
 
     /// The top `width` by `height` CSS pixels of the page, past the viewport if need be,
     /// as an image GPUI can draw. Blocks for the reply.
+    // The design canvas draws with WebKit on macOS; these serve it elsewhere.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn capture(&self, key: u64, width: f32, height: f32) -> Option<Arc<RenderImage>> {
         let session = self.session_of(key)?;
         let reply = self.call(

@@ -1,5 +1,6 @@
-//! The design canvas: every screen as an artboard drawn by Chromium, elements picked and
-//! changed in place, a theme that restyles every screen, and a prototype to click through.
+//! The design canvas: every screen as an artboard drawn by WebKit (Chromium off macOS),
+//! elements picked and changed in place, a theme that restyles every screen, and a
+//! prototype to click through.
 
 use super::checks;
 use super::dom::{self, Element, Layer};
