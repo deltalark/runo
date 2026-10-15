@@ -3843,7 +3843,7 @@ impl RunoApp {
             .child(icon(name, 12., c_secondary()))
     }
 
-    /// A session in the sidebar: agent and age, title, then branch and change counts.
+    /// A session in the sidebar: title and age, then agent, branch and change counts.
     fn session_row(&self, session: &Session, cx: &mut Context<Self>) -> impl IntoElement {
         let id = session.id;
         let provider = agent::provider(&session.provider);
@@ -3891,14 +3891,38 @@ impl RunoApp {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_muted()))
-                    .child(self.provider_mark(provider, 11.))
-                    .child(div().flex_1().min_w_0().truncate().child(match model {
-                        Some(m) => format!("{} · {m}", provider.name),
-                        None => provider.name.to_string(),
-                    }))
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(if unread || selected {
+                                FontWeight::MEDIUM
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(rgb(c_text()))
+                            .child(session.title.clone()),
+                    )
+                    .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted())))
+                    .child(if let Some(need) = self.need(session) {
+                        div()
+                            .size(px(7.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(match need {
+                                shell::Need::Blocked => c_amber(),
+                                shell::Need::Failed => c_red(),
+                                shell::Need::Finished => c_blue(),
+                            }))
+                            .into_any_element()
+                    } else if working {
+                        self.status_dot(Status::Working, ("dot", id as usize), 7.)
+                    } else {
+                        div().into_any_element()
+                    })
                     .child(
                         // The age and the hover actions share one slot, so the actions
                         // replace the age instead of landing on top of it.
@@ -3908,6 +3932,7 @@ impl RunoApp {
                             .min_w(px(40.))
                             .flex()
                             .justify_end()
+                            .text_size(px(11.5))
                             .child(
                                 div()
                                     .text_color(rgb(if working { c_blue() } else { c_muted() }))
@@ -3955,57 +3980,43 @@ impl RunoApp {
                     ),
             )
             .child(
+                // The agent and where it works share one quiet line under the title.
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.))
-                            .font_weight(if unread || selected {
-                                FontWeight::MEDIUM
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(rgb(c_text()))
-                            .child(session.title.clone()),
-                    )
-                    .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted())))
-                    .child(if let Some(need) = self.need(session) {
-                        div()
-                            .size(px(7.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(rgb(match need {
-                                shell::Need::Blocked => c_amber(),
-                                shell::Need::Failed => c_red(),
-                                shell::Need::Finished => c_blue(),
-                            }))
-                            .into_any_element()
-                    } else if working {
-                        self.status_dot(Status::Working, ("dot", id as usize), 7.)
-                    } else {
-                        div().into_any_element()
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
+                    .gap(px(5.))
                     .text_size(px(11.5))
                     .text_color(rgb(c_muted()))
-                    .child(icon(IconName::GitBranch, 11., c_muted()))
+                    .child(self.provider_mark(provider, 11.))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
+                            .flex_none()
+                            .max_w(px(120.))
                             .truncate()
-                            .child(session.branch.clone()),
+                            .child(match model {
+                                Some(m) => format!("{} · {m}", provider.name),
+                                None => provider.name.to_string(),
+                            }),
                     )
+                    .when(!session.branch.is_empty(), |el| {
+                        el.child(icon(
+                            if session.branch == "local folder" {
+                                IconName::Folder
+                            } else {
+                                IconName::GitBranch
+                            },
+                            11.,
+                            c_muted(),
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(session.branch.clone()),
+                        )
+                    })
+                    .when(session.branch.is_empty(), |el| el.child(div().flex_1()))
                     .when_some(stats.filter(|s| s.0 > 0), |el, (_, a, r)| {
                         el.child(
                             div()
@@ -4022,7 +4033,8 @@ impl RunoApp {
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let width = self.sidebar_width;
         let filter = self.search.read(cx).value().to_lowercase();
-        let mut projects = div().v_flex().gap(px(2.)).pb_2();
+        let mut projects = div().v_flex().pb_2();
+        let mut first = true;
         for project in &self.state.projects {
             let pid = project.id;
             let open = self.expanded.contains(&pid);
@@ -4031,7 +4043,17 @@ impl RunoApp {
             if !filter.is_empty() && sessions.is_empty() {
                 continue;
             }
-            projects = projects.child(
+            let color = projects::color_of(project);
+            // Each project is one block: a line above it, its header, and its
+            // sessions hung off a rail in the project's color, so where one
+            // project ends and the next begins reads at a glance.
+            let mut group = div()
+                .v_flex()
+                .mx_1()
+                .py_1()
+                .when(!first, |el| el.border_t_1().border_color(divider()));
+            first = false;
+            group = group.child(
                 div()
                     .id(("project", pid as usize))
                     .on_mouse_down(
@@ -4039,13 +4061,11 @@ impl RunoApp {
                         self.on_context(ctxmenu::CtxTarget::Project(pid), cx),
                     )
                     .group("project")
-                    .h(px(28.))
-                    .mt_2()
-                    .mx_1()
+                    .h(px(30.))
                     .px_2()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(7.))
                     .rounded_md()
                     .cursor_pointer()
                     .hover(|el| el.bg(tint(c_subtle())))
@@ -4067,24 +4087,32 @@ impl RunoApp {
                         12.,
                         c_muted(),
                     ))
-                    .when(
-                        projects::color_of(project).is_some() || !project.icon.is_empty(),
-                        |el| {
-                            el.child(icon(
+                    .child(
+                        div()
+                            .size(px(20.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.))
+                            .bg(match color {
+                                Some(c) => rgba((c << 8) | 0x2e),
+                                None => tint(c_subtle()),
+                            })
+                            .child(icon(
                                 projects::icon_of(project),
-                                13.,
-                                projects::color_of(project).unwrap_or(c_muted()),
-                            ))
-                        },
+                                12.,
+                                color.unwrap_or(c_secondary()),
+                            )),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(c_secondary()))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
                             .child(project.name.clone()),
                     )
                     .when(missing, |el| {
@@ -4100,22 +4128,26 @@ impl RunoApp {
                                 .child(icon(IconName::TriangleAlert, 12., c_amber())),
                         )
                     })
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(c_muted()))
-                            .group_hover("project", |el| el.opacity(0.))
-                            .child(if sessions.is_empty() {
-                                String::new()
-                            } else {
-                                sessions.len().to_string()
-                            }),
-                    )
+                    .when(!sessions.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .px(px(6.))
+                                .h(px(16.))
+                                .flex()
+                                .items_center()
+                                .rounded_full()
+                                .bg(tint(c_subtle()))
+                                .text_size(px(10.5))
+                                .text_color(rgb(c_muted()))
+                                .group_hover("project", |el| el.opacity(0.))
+                                .child(sessions.len().to_string()),
+                        )
+                    })
                     .child(
                         div()
                             .id(("project-new", pid as usize))
                             .absolute()
-                            .right(px(10.))
+                            .right(px(6.))
                             .p(px(3.))
                             .rounded_sm()
                             .cursor_pointer()
@@ -4140,27 +4172,40 @@ impl RunoApp {
                     .relative(),
             );
             if open || !filter.is_empty() {
+                // Sessions hang off a rail under the chevron, in the project's color.
+                let mut rows = div()
+                    .v_flex()
+                    .gap(px(1.))
+                    .ml(px(14.))
+                    .mt(px(2.))
+                    .mb_1()
+                    .pl(px(2.))
+                    .border_l_2()
+                    .border_color(match color {
+                        Some(c) => rgba((c << 8) | 0x8c),
+                        None => rgb(c_border()),
+                    });
                 if sessions.is_empty() {
-                    projects = projects.child(
+                    rows = rows.child(
                         div()
-                            .ml(px(30.))
+                            .px_3()
                             .py_1()
                             .text_size(px(12.))
                             .text_color(rgb(c_muted()))
                             .child("No sessions yet"),
                     );
                 }
-                // Opening a project folds its sessions down into place.
-                let mut rows = div().v_flex().gap(px(2.));
                 for session in sessions {
                     rows = rows.child(self.session_row(session, cx));
                 }
-                projects = projects.child(rows.animated(
+                // Opening a project folds its sessions down into place.
+                group = group.child(rows.animated(
                     ("project-rows", pid as usize),
                     Animation::new(Duration::from_millis(240)).with_easing(ease_out_quint()),
                     |el, d| el.opacity(d).top(px(-6. * (1. - d))),
                 ));
             }
+            projects = projects.child(group);
         }
         if cx.global::<AppSettings>().group_by_status {
             projects = self.status_groups(&filter, cx);
