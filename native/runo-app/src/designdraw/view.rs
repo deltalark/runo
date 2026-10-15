@@ -410,6 +410,11 @@ impl DesignCanvas {
     }
 
     /// Pick up changes made while the page was away.
+    /// Start the AI bar on this agent, such as the one the canvas's chat used last.
+    pub(crate) fn use_agent(&mut self, agent: usize) {
+        self.pick.agent = agent;
+    }
+
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.check_files(cx);
     }
@@ -777,6 +782,8 @@ impl DesignCanvas {
                      right after it.\n",
                 );
             }
+        } else {
+            out.push_str("\nNothing is selected on the canvas.\n");
         }
         out
     }

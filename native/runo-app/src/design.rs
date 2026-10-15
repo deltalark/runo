@@ -361,25 +361,27 @@ impl RunoApp {
                     edit,
                     images,
                     agent,
-                } => {
-                    this.new_provider = *agent;
-                    this.start_with_context(
-                        pid,
-                        task,
-                        shell::StartContext {
-                            label: "Design canvas".into(),
-                            text: context.clone(),
-                            images: images.clone(),
-                            in_place: *edit,
-                        },
-                        window,
-                        cx,
-                    )
-                }
+                } => this.ask_from_canvas(
+                    pid,
+                    View::Design,
+                    task,
+                    shell::StartContext {
+                        label: "Design canvas".into(),
+                        text: context.clone(),
+                        images: images.clone(),
+                        in_place: *edit,
+                    },
+                    *agent,
+                    window,
+                    cx,
+                ),
             }
             cx.notify();
         });
         self.design.canvas_subs.push(sub);
+        if let Some(agent) = self.canvas_agent(pid, View::Design) {
+            canvas.update(cx, |c, _| c.use_agent(agent));
+        }
         self.design.canvases.insert(project.id, canvas);
     }
 

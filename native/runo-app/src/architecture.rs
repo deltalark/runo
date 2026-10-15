@@ -1365,21 +1365,20 @@ impl RunoApp {
                     edit,
                     images,
                     agent,
-                } => {
-                    this.new_provider = *agent;
-                    this.start_with_context(
-                        pid,
-                        task,
-                        shell::StartContext {
-                            label: "Architecture diagram".into(),
-                            text: context.clone(),
-                            images: images.clone(),
-                            in_place: *edit,
-                        },
-                        window,
-                        cx,
-                    )
-                }
+                } => this.ask_from_canvas(
+                    pid,
+                    View::Architecture,
+                    task,
+                    shell::StartContext {
+                        label: "Architecture diagram".into(),
+                        text: context.clone(),
+                        images: images.clone(),
+                        in_place: *edit,
+                    },
+                    *agent,
+                    window,
+                    cx,
+                ),
                 ArchEvent::Open(path) => {
                     this.view = View::Session;
                     this.show_panel = true;
@@ -1390,6 +1389,9 @@ impl RunoApp {
             cx.notify();
         });
         self.arch.editor_subs.push(sub);
+        if let Some(agent) = self.canvas_agent(project.id, View::Architecture) {
+            editor.update(cx, |e, _| e.use_agent(agent));
+        }
         self.arch.editors.insert(project.id, editor);
     }
 

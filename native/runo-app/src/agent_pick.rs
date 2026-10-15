@@ -89,7 +89,7 @@ impl AgentPick {
                 .text_color(rgb(c_muted()))
                 .whitespace_normal()
                 .child(format!(
-                    "The agent runs in your project folder and edits {how} in place. You review its change here before keeping it."
+                    "The agent runs in your project folder and edits {how} in place. You review its change here before keeping it. Each ask carries on this canvas's chat, so the agent remembers the earlier ones; picking another agent hands it that chat."
                 )),
         );
         for i in self.choices(cx) {
