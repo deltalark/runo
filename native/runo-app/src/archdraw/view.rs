@@ -243,6 +243,8 @@ struct Waiting {
     stamp: u64,
     /// The agent's files don't read (yet): why.
     broken: Option<String>,
+    /// When the agent was asked, to show how long it has been working.
+    started: Instant,
 }
 
 /// An agent's change on the canvas, waiting to be accepted or rejected.
@@ -765,6 +767,24 @@ impl ArchEditor {
         self.zoom_at((w / 2., h / 2.), factor);
     }
 
+    /// Whether every shape on the diagram is inside the canvas as it's zoomed now.
+    fn shows_all(&self) -> bool {
+        let (vw, vh) = self.view_size();
+        let Some(area) = Rect::bounds(
+            self.ed
+                .cur()
+                .nodes
+                .iter()
+                .map(|n| n.rect())
+                .collect::<Vec<_>>(),
+        ) else {
+            return true;
+        };
+        let (x0, y0) = self.screen((area.x, area.y));
+        let (x1, y1) = self.screen((area.x + area.w, area.y + area.h));
+        x0 >= 0. && y0 >= 0. && x1 <= vw && y1 <= vh
+    }
+
     /// Show the whole diagram, or the selection.
     fn fit(&mut self, selection: bool) {
         let (vw, vh) = self.view_size();
@@ -1127,7 +1147,15 @@ impl ArchEditor {
                     match result {
                         Ok(doc) => {
                             let n = doc.views.len();
+                            let empty = this.ed.doc.elements.is_empty();
                             io::merge(&mut this.ed, doc);
+                            if empty {
+                                let keep = this.ed.view.clone();
+                                this.ed
+                                    .doc
+                                    .views
+                                    .retain(|v| v.id == keep || !v.nodes.is_empty());
+                            }
                             this.fitted = false;
                             this.note(
                                 format!(
@@ -1349,6 +1377,7 @@ impl ArchEditor {
             before: self.ed.doc.clone(),
             stamp: stamp(&self.root),
             broken: None,
+            started: Instant::now(),
         });
         window.focus(&self.focus, cx);
         cx.emit(ArchEvent::Ask {
@@ -1700,6 +1729,10 @@ impl ArchEditor {
                     let view = self.ed.view.clone();
                     self.ed.replace_doc(doc);
                     self.ed.open_view(&view);
+                    // A fresh drawing, or one that grew past the edges, is brought into view.
+                    if !self.shows_all() {
+                        self.fitted = false;
+                    }
                     if let Some(w) = self.waiting.take() {
                         self.review = Some(Review {
                             snap: w.snap,
@@ -1877,14 +1910,16 @@ impl ArchEditor {
                 .items_center()
                 .gap_1()
                 .child(
-                    bar.border_color(rgb(c_border()))
-                        .child(icon(IconName::Sparkles, 14., c_blue()))
-                        .child(
-                            div()
-                                .px_1()
-                                .text_color(rgb(c_secondary()))
-                                .child("Waiting for the agent to change the diagram…"),
-                        )
+                    bar.border_color(col(c_blue(), 0.5))
+                        .child(icon(IconName::LoaderCircle, 14., c_blue()).animated(
+                            "arch-wait-spin",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            |i, d| i.rotate(percentage(d)),
+                        ))
+                        .child(div().px_1().text_color(rgb(c_secondary())).child(format!(
+                            "The agent is changing the diagram… {}s",
+                            w.started.elapsed().as_secs()
+                        )))
                         .when(w.broken.is_some(), |el| {
                             el.child(
                                 text_btn("arch-restore", "Restore", Some(IconName::Undo2), false)
@@ -5158,7 +5193,7 @@ impl ArchEditor {
     }
 
     fn empty_state(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.ed.cur().nodes.is_empty() || !matches!(self.drag, Drag::None) {
+        if !self.ed.cur().nodes.is_empty() || !matches!(self.drag, Drag::None) || self.working() {
             return None;
         }
         let fresh = self.ed.doc.elements.is_empty();
@@ -5197,6 +5232,195 @@ impl ArchEditor {
                                 .child(text_btn("arch-empty-import", "Import draw.io or a picture", Some(IconName::Upload), false).on_click(cx.listener(|this, _, _, cx| this.import(cx)))),
                         )
                         .child(div().text_size(px(11.5)).text_color(rgb(c_muted())).child("Shortcuts: R container, D database, P person, Q queue, B boundary, T text, N note. Tab adds a connected shape.")),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Whether an agent or a code scan is drawing right now.
+    fn working(&self) -> bool {
+        self.waiting.is_some() || self.scanning
+    }
+
+    /// Seconds the agent has been at it, or None while nothing is waiting on it.
+    fn working_for(&self) -> Option<u64> {
+        self.waiting.as_ref().map(|w| w.started.elapsed().as_secs())
+    }
+
+    /// Shows the canvas is busy while the agent draws: a sketch of a diagram taking shape on
+    /// an empty canvas, else a soft glow round the canvas and a line saying what's going on.
+    fn thinking(&self) -> Option<AnyElement> {
+        if !self.working() {
+            return None;
+        }
+        let line = thinking_line(self.working_for(), self.scanning);
+        let secs = self.working_for().map(|s| format!("{s}s"));
+        let spinner = || {
+            icon(IconName::LoaderCircle, 14., c_blue()).animated(
+                "arch-think-spin",
+                Animation::new(Duration::from_millis(900)).repeat(),
+                |i, d| i.rotate(percentage(d)),
+            )
+        };
+        if !self.ed.cur().nodes.is_empty() {
+            return Some(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .border_2()
+                            .border_color(col(c_blue(), 0.5))
+                            .animated(
+                                "arch-think-glow",
+                                Animation::new(Duration::from_millis(1800)).repeat(),
+                                |el, d| el.opacity(0.25 + 0.75 * pulse(d)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(12.))
+                            .left_0()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_3()
+                                    .py(px(6.))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(col(c_blue(), 0.4))
+                                    .bg(float(c_canvas()))
+                                    .shadow_md()
+                                    .text_size(px(12.))
+                                    .child(spinner())
+                                    .child(div().text_color(rgb(c_text())).child(line))
+                                    .children(
+                                        secs.map(|s| div().text_color(rgb(c_muted())).child(s)),
+                                    ),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // A sketch of boxes and lines that light up in turn, like a diagram being drawn.
+        const BOXES: [(f32, f32); 5] = [(0., 0.), (104., 0.), (208., 0.), (52., 78.), (156., 78.)];
+        const LINES: [(f32, f32, f32, f32); 4] = [
+            (72., 19., 32., 2.),
+            (176., 19., 32., 2.),
+            (87., 40., 2., 38.),
+            (191., 40., 2., 38.),
+        ];
+        let mut sketch = div().relative().w(px(280.)).h(px(118.));
+        for (i, (x, y, w, h)) in LINES.into_iter().enumerate() {
+            sketch = sketch.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(w))
+                    .h(px(h))
+                    .bg(rgb(c_blue()))
+                    .animated(
+                        ("arch-think-line", i),
+                        Animation::new(Duration::from_millis(2400)).repeat(),
+                        move |el, d| {
+                            el.opacity(0.15 + 0.6 * pulse((d + 0.1 + i as f32 * 0.2).fract()))
+                        },
+                    ),
+            );
+        }
+        for (i, (x, y)) in BOXES.into_iter().enumerate() {
+            sketch = sketch.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(72.))
+                    .h(px(40.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(c_blue()))
+                    .bg(col(c_blue(), 0.14))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(36.))
+                            .h(px(5.))
+                            .rounded_full()
+                            .bg(col(c_blue(), 0.6)),
+                    )
+                    .animated(
+                        ("arch-think-box", i),
+                        Animation::new(Duration::from_millis(2400)).repeat(),
+                        move |el, d| el.opacity(0.25 + 0.75 * pulse((d + i as f32 * 0.2).fract())),
+                    ),
+            );
+        }
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .w(px(400.))
+                        .p_5()
+                        .v_flex()
+                        .items_center()
+                        .gap_4()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .bg(float(c_canvas()))
+                        .shadow_lg()
+                        .child(sketch)
+                        .child(
+                            div()
+                                .v_flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_size(px(15.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(spinner())
+                                        .child(if self.scanning {
+                                            "Reading your code"
+                                        } else {
+                                            "Drawing your architecture"
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(c_secondary()))
+                                        .child(match &secs {
+                                            Some(s) => format!("{line} · {s}"),
+                                            None => line.to_string(),
+                                        }),
+                                ),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -5267,6 +5491,7 @@ impl ArchEditor {
             .children(self.labels(theme, cx))
             .children(self.inline_view())
             .children(self.empty_state(cx))
+            .children(self.thinking())
             .children(self.minimap(cx))
             .children(self.player(cx))
             .children(self.breadcrumbs(cx))
@@ -7195,4 +7420,22 @@ impl Render for ArchEditor {
                 ))
             })
     }
+}
+
+/// What the canvas says while it waits, by how long the agent has been working. The agent
+/// doesn't report its steps, so this only names what it is usually doing by then.
+fn thinking_line(secs: Option<u64>, scanning: bool) -> &'static str {
+    match secs {
+        _ if scanning => "Finding the packages and the services they use",
+        None | Some(0..=3) => "Starting the agent",
+        Some(4..=12) => "Reading the request and the diagram",
+        Some(13..=30) => "Working out the parts and how they connect",
+        Some(31..=60) => "Laying out the shapes",
+        Some(_) => "Still working. Bigger diagrams take a little longer",
+    }
+}
+
+/// 0 to 1 and back again over one turn of an animation.
+fn pulse(d: f32) -> f32 {
+    1. - (d * 2. - 1.).abs()
 }
