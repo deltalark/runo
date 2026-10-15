@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 actions!(design_canvas, [DesignEscape]);
 
@@ -134,6 +134,8 @@ pub(crate) struct DesignCanvas {
     panel: Panel,
     tokens: String,
     dark: bool,
+    /// Links between screens drawn on the canvas and outlined in Play.
+    hotspots: bool,
     new_open: bool,
     new_device: Device,
     /// Clicking through the prototype: the screen shown and the way back.
@@ -166,6 +168,8 @@ struct AiChange {
     changed: bool,
     /// Made by an agent, rather than by picking a variant.
     by_ai: bool,
+    /// When it was asked for, to show how long the agent has been working.
+    started: Instant,
 }
 
 impl EventEmitter<DesignEvent> for DesignCanvas {}
@@ -254,6 +258,7 @@ impl DesignCanvas {
             panel: Panel::Inspect,
             tokens,
             dark: false,
+            hotspots: true,
             new_open: false,
             new_device: Device::Phone,
             playing: None,
@@ -547,6 +552,7 @@ impl DesignCanvas {
             before: snapshot(&folder(&self.root)),
             changed: false,
             by_ai: true,
+            started: Instant::now(),
         });
         // Leave the keys to the New session dialog that opens next.
         window.blur(cx);
@@ -629,6 +635,7 @@ impl DesignCanvas {
             before,
             changed: true,
             by_ai: false,
+            started: Instant::now(),
         });
         self.screen = Some(base.clone());
         self.element = None;
@@ -733,6 +740,13 @@ impl DesignCanvas {
                 ));
             }
             out.push_str(".\n");
+            if self.element.is_some() {
+                out.push_str(
+                    "Change only that element unless asked otherwise. If what's asked for isn't \
+                     on the screen yet, add it inside that element when it's a container, else \
+                     right after it.\n",
+                );
+            }
         }
         out
     }
@@ -775,107 +789,167 @@ impl DesignCanvas {
         if self.playing.is_some() {
             return None;
         }
-        let bar = div()
-            .id("design-ask-bar")
-            .w(px(560.))
-            .max_w_full()
-            .p_1()
-            .flex()
-            .items_center()
-            .gap_1()
-            .rounded_lg()
-            .border_1()
-            .bg(float(c_canvas()))
-            .shadow_lg()
-            .text_size(px(12.5))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        let bar = match &self.ai {
-            Some(ai) if ai.changed => bar
-                .border_color(rgb(c_blue()))
-                .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
-                .child(
-                    div()
-                        .flex_1()
-                        .px_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(rgb(c_text()))
-                        .child(if ai.by_ai {
-                            format!("AI changed the design: {}", ai.task)
-                        } else {
-                            ai.task.clone()
-                        }),
+        let body = match &self.ai {
+            Some(ai) if ai.changed => askbar::composer("design-ask-bar", true).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .min_h(px(32.))
+                    .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
+                    .child(
+                        div()
+                            .flex_1()
+                            .px_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(c_text()))
+                            .child(if ai.by_ai {
+                                format!("AI changed the design: {}", ai.task)
+                            } else {
+                                ai.task.clone()
+                            }),
+                    )
+                    .child(
+                        text_btn("design-ai-undo", "Undo", Some(IconName::Undo2), false)
+                            .on_click(cx.listener(|this, _, _, cx| this.undo_ai(cx))),
+                    )
+                    .child(
+                        text_btn("design-ai-keep", "Keep", Some(IconName::Check), true)
+                            .on_click(cx.listener(|this, _, _, cx| this.keep_ai(cx))),
+                    ),
+            ),
+            Some(ai) => askbar::composer("design-ask-bar", true).child(
+                askbar::working_row(
+                    "design-wait-spin",
+                    design_line(ai.started.elapsed().as_secs()).to_string(),
+                    ai.task.clone(),
+                    ai.started.elapsed().as_secs(),
                 )
                 .child(
-                    text_btn("design-ai-undo", "Undo", Some(IconName::Undo2), false)
-                        .on_click(cx.listener(|this, _, _, cx| this.undo_ai(cx))),
-                )
-                .child(
-                    text_btn("design-ai-keep", "Keep", Some(IconName::Check), true)
-                        .on_click(cx.listener(|this, _, _, cx| this.keep_ai(cx))),
-                ),
-            Some(ai) => bar
-                .border_color(rgb(c_border()))
-                .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
-                .child(
-                    div()
-                        .flex_1()
-                        .px_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(rgb(c_secondary()))
-                        .child(format!("Waiting for the agent: {}", ai.task)),
-                )
-                .child(
-                    text_btn("design-ai-stop", "Stop waiting", None, false)
+                    text_btn("design-ai-stop", "Stop", None, false)
                         .on_click(cx.listener(|this, _, _, cx| this.stop_ai(cx))),
                 ),
+            ),
             None => {
                 let empty = self.f_ask.read(cx).value().trim().is_empty();
-                let bar = bar
-                    .border_color(rgb(if self.ask_new.is_some() {
-                        c_blue()
-                    } else {
-                        c_border()
-                    }))
-                    .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())));
-                let bar = match self.ask_new {
-                    Some(d) => bar.child(
+                let screen = self.screen.as_ref().and_then(|id| self.canvas.screen(id));
+                let mut chips = div().flex().flex_wrap().gap_1();
+                let mut any = false;
+                if let Some(d) = self.ask_new {
+                    any = true;
+                    chips = chips.child(
+                        askbar::target_chip(
+                            "design-ask-new",
+                            IconName::Plus,
+                            format!("New {} screen", d.label().to_lowercase()),
+                        )
+                        .tooltip(tip(
+                            "AI designs a new screen. Click to change this one instead.",
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ask_new = None;
+                            cx.notify();
+                        })),
+                    );
+                } else if let Some(s) = screen {
+                    any = true;
+                    let (lead, text) = match &self.element {
+                        Some(el) => (
+                            IconName::Crosshair,
+                            format!(
+                                "{}{} on {}",
+                                kind_of(&el.tag),
+                                el.text
+                                    .as_ref()
+                                    .filter(|t| !t.is_empty())
+                                    .map(|t| format!(
+                                        " \"{}\"",
+                                        t.chars().take(32).collect::<String>()
+                                    ))
+                                    .unwrap_or_default(),
+                                s.name
+                            ),
+                        ),
+                        None => (IconName::Smartphone, format!("{} screen", s.name)),
+                    };
+                    let on_element = self.element.is_some();
+                    chips = chips.child(
+                        askbar::target_chip("design-ask-target", lead, text)
+                            .tooltip(tip(if on_element {
+                                "AI changes this element, or adds what you ask for beside it. Click to clear."
+                            } else {
+                                "AI changes this screen. Click to clear."
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.element.is_some() {
+                                    this.element = None;
+                                } else {
+                                    this.screen = None;
+                                }
+                                cx.notify();
+                            })),
+                    );
+                }
+                let ideas: &[&'static str] = if self.ask_new.is_some() {
+                    &["A sign-in screen", "A profile with stats", "A checkout"]
+                } else if self.element.is_some() {
+                    &["Make it stand out", "Rewrite the text", "Add an icon to it"]
+                } else if screen.is_some() {
+                    &[
+                        "Make a dark version",
+                        "Add a bottom tab bar",
+                        "Tighten the spacing",
+                    ]
+                } else if self.canvas.screens.is_empty() {
+                    &[
+                        "Design an onboarding flow",
+                        "Design a sign-in screen",
+                        "Design a dashboard",
+                    ]
+                } else {
+                    &[
+                        "Add a settings screen",
+                        "Make the theme warmer",
+                        "Link the screens up",
+                    ]
+                };
+                let mut row = div().flex_1().min_w_0().flex().gap_1().overflow_hidden();
+                if empty {
+                    for (i, idea) in ideas.iter().enumerate() {
+                        let idea: &'static str = idea;
+                        row = row.child(askbar::suggestion(("design-idea", i), idea).on_click(
+                            cx.listener(move |this, _, window, cx| this.fill_ask(idea, window, cx)),
+                        ));
+                    }
+                }
+                askbar::composer("design-ask-bar", any)
+                    .when(any, |el| el.child(chips))
+                    .child(
                         div()
-                            .id("design-ask-new")
-                            .flex_none()
-                            .h(px(22.))
-                            .pl_2()
-                            .pr_1()
                             .flex()
                             .items_center()
                             .gap_1()
-                            .rounded_md()
-                            .bg(tint(c_selected()))
-                            .text_size(px(11.5))
-                            .text_color(rgb(c_text()))
-                            .child(format!("New {} screen", d.label().to_lowercase()))
-                            .child(icon(IconName::Close, 11., c_muted()))
-                            .cursor_pointer()
-                            .tooltip(tip("Change this screen instead"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.ask_new = None;
-                                cx.notify();
-                            })),
-                    ),
-                    None => bar,
-                };
-                bar.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&self.f_ask).appearance(false)),
-                )
-                .child(self.pick.chip("design-ask", cx, |t: &mut Self| &mut t.pick))
-                .child(
-                    text_btn("design-ask-send", "Send", None, !empty)
-                        .on_click(cx.listener(|this, _, window, cx| this.send_ask(window, cx))),
-                )
+                            .min_h(px(32.))
+                            .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&self.f_ask).appearance(false)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(row)
+                            .child(self.pick.chip("design-ask", cx, |t: &mut Self| &mut t.pick))
+                            .child(askbar::send_button("design-ask-send", !empty).on_click(
+                                cx.listener(|this, _, window, cx| this.send_ask(window, cx)),
+                            )),
+                    )
             }
         };
         Some(
@@ -899,10 +973,42 @@ impl DesignCanvas {
                                 |t: &mut Self| &mut t.pick,
                             ))
                         })
-                        .child(bar),
+                        .child(body),
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Put a suggestion in the ask bar, ready to send or change.
+    fn fill_ask(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.f_ask.update(cx, |s, cx| s.set_value(text, window, cx));
+        self.focus_ask(window, cx);
+    }
+
+    fn focus_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.f_ask.clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |s, cx| s.focus(window, cx))
+        });
+        cx.notify();
+    }
+
+    /// Whether AI is designing and nothing has changed yet.
+    fn thinking_now(&self) -> bool {
+        self.ai.as_ref().is_some_and(|a| a.by_ai && !a.changed)
+    }
+
+    /// Shows the canvas is busy while AI designs: a sketch taking shape on an empty canvas,
+    /// else a glow round the canvas and a line saying what's going on.
+    fn thinking(&self) -> Option<AnyElement> {
+        let ai = self.ai.as_ref().filter(|a| a.by_ai && !a.changed)?;
+        let secs = ai.started.elapsed().as_secs();
+        let line = design_line(secs).to_string();
+        Some(if self.canvas.screens.is_empty() {
+            askbar::busy_card("Designing your screens", line, Some(secs))
+        } else {
+            askbar::busy_edge(line, Some(secs))
+        })
     }
 
     fn say(&mut self, text: impl Into<String>) {
@@ -1792,6 +1898,18 @@ impl DesignCanvas {
                     this.set_dark(d, cx)
                 })),
             )
+            .child(
+                icon_btn(
+                    "design-hotspots",
+                    IconName::MousePointerClick,
+                    "Show links between screens",
+                    self.hotspots,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.hotspots = !this.hotspots;
+                    cx.notify();
+                })),
+            )
             .child(sep())
             .child(
                 icon_btn("design-zoom-out", IconName::Minus, "Zoom out", false).on_click(
@@ -1979,7 +2097,7 @@ impl DesignCanvas {
                         .size_full()
                         .rounded(px(radius)),
                 ),
-                None => body.child(
+                None if self.error.is_some() => body.child(
                     div()
                         .size_full()
                         .flex()
@@ -1987,14 +2105,35 @@ impl DesignCanvas {
                         .justify_center()
                         .text_size(px(12.))
                         .text_color(rgb(c_muted()))
-                        .child(if self.error.is_some() {
-                            "Couldn't draw this screen"
-                        } else {
-                            "Drawing…"
-                        }),
+                        .child("Couldn't draw this screen"),
                 ),
+                None => body.child(askbar::skeleton(("design-drawing", i), z)),
             };
             out.push(body.into_any_element());
+        }
+        // What opens another screen, outlined where it sits.
+        if self.hotspots {
+            for s in &self.canvas.screens {
+                let Some(shot) = self.shots.get(&s.id) else {
+                    continue;
+                };
+                for l in &shot.links {
+                    let (x, y) = self.screen_pt((s.x + l.rect.x, s.y + l.rect.y));
+                    out.push(
+                        div()
+                            .absolute()
+                            .left(px(x - 1.))
+                            .top(px(y - 1.))
+                            .w(px(l.rect.w * z + 2.))
+                            .h(px(l.rect.h * z + 2.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(col(c_blue(), 0.85))
+                            .bg(col(c_blue(), 0.1))
+                            .into_any_element(),
+                    );
+                }
+            }
         }
         // What the checks found, marked on the screens.
         if self.panel == Panel::Checks {
@@ -2080,6 +2219,31 @@ impl DesignCanvas {
                     .cursor_pointer()
                     .into_any_element(),
             );
+            if !self.inline_open && self.ai.is_none() {
+                out.push(
+                    div()
+                        .id("design-ask-here")
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y + h + 6.))
+                        .h(px(22.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .rounded_full()
+                        .bg(rgb(c_blue()))
+                        .shadow_md()
+                        .text_size(px(11.))
+                        .text_color(rgb(0xffffff))
+                        .cursor_pointer()
+                        .child(icon(IconName::Sparkles, 11., 0xffffff))
+                        .child("Ask AI")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, window, cx| this.focus_ask(window, cx)))
+                        .into_any_element(),
+                );
+            }
             if self.inline_open {
                 out.push(
                     div()
@@ -2103,7 +2267,7 @@ impl DesignCanvas {
     /// Arrows for the links between screens, and the one being dragged.
     fn paint_links(&self) -> (Vec<Arrow>, Option<Arrow>) {
         let mut out = Vec::new();
-        for s in &self.canvas.screens {
+        for s in self.canvas.screens.iter().filter(|_| self.hotspots) {
             let Some(shot) = self.shots.get(&s.id) else {
                 continue;
             };
@@ -2166,7 +2330,12 @@ impl DesignCanvas {
                         .h(px(l.rect.h * scale))
                         .cursor_pointer()
                         .rounded_md()
-                        .hover(|el| el.bg(col(c_blue(), 0.12)))
+                        .when(self.hotspots, |el| {
+                            el.border_1()
+                                .border_color(col(c_blue(), 0.7))
+                                .bg(col(c_blue(), 0.1))
+                        })
+                        .hover(|el| el.bg(col(c_blue(), 0.2)))
                         .on_click(cx.listener(move |this, _, _, cx| this.play_go(&to, cx))),
                 );
             }
@@ -2211,6 +2380,22 @@ impl DesignCanvas {
                                 )),
                         )
                         .child(
+                            text_btn(
+                                "design-play-hotspots",
+                                if self.hotspots {
+                                    "Hide hotspots"
+                                } else {
+                                    "Show hotspots"
+                                },
+                                Some(IconName::MousePointerClick),
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hotspots = !this.hotspots;
+                                cx.notify();
+                            })),
+                        )
+                        .child(
                             text_btn("design-play-stop", "Stop", Some(IconName::X), false)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.playing = None;
@@ -2224,7 +2409,7 @@ impl DesignCanvas {
     }
 
     fn empty_state(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.canvas.screens.is_empty() {
+        if !self.canvas.screens.is_empty() || self.thinking_now() {
             return None;
         }
         let mut row = div()
@@ -2380,7 +2565,8 @@ impl DesignCanvas {
                 .left_0()
                 .size_full(),
             )
-            .children(self.empty_state(cx));
+            .children(self.empty_state(cx))
+            .children(self.thinking());
         if let Some(e) = &self.error {
             area = area.child(
                 div()
@@ -3437,6 +3623,38 @@ fn restore(dir: &std::path::Path, before: &HashMap<PathBuf, Vec<u8>>) -> std::io
         }
     }
     Ok(())
+}
+
+/// What the canvas says while AI designs, by how long it has been working. The agent doesn't
+/// report its steps, so this only names what it is usually doing by then.
+fn design_line(secs: u64) -> &'static str {
+    match secs {
+        0..=3 => "Starting the agent",
+        4..=12 => "Reading the request and the screens",
+        13..=40 => "Laying out the screen",
+        41..=90 => "Writing the HTML and styles",
+        _ => "Still working. Bigger designs take a little longer",
+    }
+}
+
+/// A plain name for an element by its tag, for the ask bar.
+fn kind_of(tag: &str) -> &'static str {
+    match tag {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "Heading",
+        "button" => "Button",
+        "a" => "Link",
+        "img" | "svg" | "picture" => "Image",
+        "input" | "textarea" | "select" => "Field",
+        "p" | "span" | "label" | "strong" | "em" | "small" => "Text",
+        "ul" | "ol" => "List",
+        "li" => "List item",
+        "nav" => "Navigation",
+        "header" => "Header",
+        "footer" => "Footer",
+        "form" => "Form",
+        "section" | "main" | "article" | "aside" => "Section",
+        _ => "Box",
+    }
 }
 
 #[cfg(test)]
