@@ -28,6 +28,8 @@ pub(crate) struct Shot {
     pub links: Vec<Link>,
     /// What the design checks look at, when the page could say.
     pub facts: Option<super::checks::Facts>,
+    /// Every element shown, for finding what's under the pointer.
+    pub boxes: Vec<super::dom::Bx>,
 }
 
 pub(crate) struct Renderer {
@@ -112,11 +114,16 @@ impl Renderer {
         let facts = engine
             .eval(PAGE, super::checks::FACTS)
             .and_then(|v| serde_json::from_value(v).ok());
+        let boxes = engine
+            .eval(PAGE, &dom::call("boxes", &[]))
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
         Ok(Shot {
             image,
             size: (w, height),
             links,
             facts,
+            boxes,
         })
     }
 

@@ -74,6 +74,28 @@ enum Drag {
         from: Pt,
         to: Pt,
     },
+    /// Moving the selected element to a new place on its screen.
+    Element {
+        id: String,
+        from: Pt,
+        at: Pt,
+        moved: bool,
+    },
+    /// Resizing the selected element from its right edge, bottom edge or corner.
+    Resize {
+        wide: bool,
+        tall: bool,
+        from: Pt,
+        at: Pt,
+    },
+}
+
+/// Where a dragged element would land: before or after the element at `target`.
+struct Drop {
+    target: dom::Path,
+    after: bool,
+    /// The line showing it, in canvas units.
+    line: (Pt, Pt),
 }
 
 /// What to select once an edit lands.
@@ -124,6 +146,11 @@ pub(crate) struct DesignCanvas {
     bounds: Rc<Cell<Bounds<Pixels>>>,
     fitted: bool,
     drag: Drag,
+    /// The element under the pointer, on which screen, and where.
+    hover: Option<(String, dom::Path, dom::Box)>,
+    /// Alt is held: show the spacing between the selection and what's under the pointer.
+    measure: bool,
+    drop: Option<Drop>,
     /// The selected screen, and the element picked in it.
     screen: Option<String>,
     element: Option<Element>,
@@ -250,6 +277,9 @@ impl DesignCanvas {
             bounds: Rc::new(Cell::new(Bounds::default())),
             fitted: false,
             drag: Drag::None,
+            hover: None,
+            measure: false,
+            drop: None,
             screen: None,
             element: None,
             layers: Vec::new(),
@@ -1616,6 +1646,28 @@ impl DesignCanvas {
                 return;
             }
         }
+        if let Some((wide, tall)) = self.resize_edge(local) {
+            self.drag = Drag::Resize {
+                wide,
+                tall,
+                from: w,
+                at: w,
+            };
+            return;
+        }
+        if e.click_count == 1 {
+            if let Some((id, r)) = self.picked_rect() {
+                if w.0 >= r.x && w.1 >= r.y && w.0 <= r.x + r.w && w.1 <= r.y + r.h {
+                    self.drag = Drag::Element {
+                        id,
+                        from: w,
+                        at: w,
+                        moved: false,
+                    };
+                    return;
+                }
+            }
+        }
         match self.screen_at(w) {
             Some((id, true)) => {
                 let start = self
@@ -1653,8 +1705,34 @@ impl DesignCanvas {
     fn on_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let local = self.local(e.position);
         let w = self.world(local);
+        if matches!(self.drag, Drag::None) {
+            let hover = self.box_at(w, None);
+            let measure = e.modifiers.alt;
+            let same = |a: &Option<(String, dom::Path, dom::Box)>,
+                        b: &Option<(String, dom::Path, dom::Box)>| {
+                a.as_ref().map(|h| (&h.0, &h.1)) == b.as_ref().map(|h| (&h.0, &h.1))
+            };
+            if !same(&hover, &self.hover) || measure != self.measure {
+                self.hover = hover;
+                self.measure = measure;
+                cx.notify();
+            }
+            return;
+        }
         match &mut self.drag {
             Drag::None => return,
+            Drag::Element {
+                at, from, moved, ..
+            } => {
+                *at = w;
+                if (w.0 - from.0).abs() + (w.1 - from.1).abs() > 4. / self.zoom {
+                    *moved = true;
+                }
+                if *moved {
+                    self.drop = self.drop_at(w);
+                }
+            }
+            Drag::Resize { at, .. } => *at = w,
             Drag::Pan { from, start } => {
                 self.pan = (start.0 + local.0 - from.0, start.1 + local.1 - from.1);
             }
@@ -1684,8 +1762,54 @@ impl DesignCanvas {
     }
 
     fn on_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let drop = self.drop.take();
+        self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Move { moved: true, .. } => self.save_canvas(),
+            Drag::Element {
+                id,
+                from,
+                moved: false,
+                ..
+            } => {
+                // A click on the picked element: pick what's under the pointer, as before.
+                if let Some(s) = self.canvas.screen(&id) {
+                    let at = (from.0 - s.x, from.1 - s.y);
+                    self.pick(&id, at, false, cx);
+                }
+            }
+            Drag::Element { moved: true, .. } => {
+                if let (Some(d), Some(path)) = (drop, self.element.as_ref().map(|e| e.path.clone()))
+                {
+                    let to = dom::moved_path(&path, &d.target, d.after);
+                    self.edit(
+                        dom::op(&path, "moveTo", &[json!(d.target), json!(d.after)]),
+                        After::Path(to),
+                        cx,
+                    );
+                }
+            }
+            Drag::Resize {
+                wide,
+                tall,
+                from,
+                at,
+            } => {
+                if let Some(el) = &self.element {
+                    let mut map = serde_json::Map::new();
+                    if wide {
+                        let w = (el.rect.w + at.0 - from.0).max(8.).round();
+                        map.insert("width".into(), json!(format!("{w}px")));
+                    }
+                    if tall {
+                        let h = (el.rect.h + at.1 - from.1).max(8.).round();
+                        map.insert("height".into(), json!(format!("{h}px")));
+                    }
+                    if (at.0 - from.0).abs() + (at.1 - from.1).abs() > 0.5 {
+                        self.op("styles", &[serde_json::Value::Object(map)], After::Same, cx);
+                    }
+                }
+            }
             Drag::Link { to, .. } => {
                 if let Some((target, _)) = self.screen_at(to) {
                     if Some(&target) != self.screen.as_ref() {
@@ -1803,6 +1927,97 @@ impl DesignCanvas {
     }
 
     /// Where the selected element's link handle sits, in canvas units.
+    /// The picked element's box in canvas units, and its screen.
+    fn picked_rect(&self) -> Option<(String, dom::Box)> {
+        let el = self.element.as_ref()?;
+        let id = self.screen.clone()?;
+        let s = self.canvas.screen(&id)?;
+        Some((
+            id,
+            dom::Box {
+                x: s.x + el.rect.x,
+                y: s.y + el.rect.y,
+                w: el.rect.w,
+                h: el.rect.h,
+            },
+        ))
+    }
+
+    /// Which edges of the picked element are under the pointer, for resizing it:
+    /// (right edge, bottom edge).
+    fn resize_edge(&self, local: Pt) -> Option<(bool, bool)> {
+        let (_, r) = self.picked_rect()?;
+        let (x0, y0) = self.screen_pt((r.x, r.y));
+        let (x1, y1) = self.screen_pt((r.x + r.w, r.y + r.h));
+        // The grip reaches a little outside the edge but only a sliver inside it, so a small
+        // element can still be grabbed and moved rather than always resized.
+        let near = |v: f32, edge: f32, size: f32| v <= edge + 6. && v >= edge - (size / 4.).min(4.);
+        let within = |v: f32, lo: f32, hi: f32| v >= lo - 5. && v <= hi + 5.;
+        let wide = near(local.0, x1, x1 - x0) && within(local.1, y0, y1);
+        let tall = near(local.1, y1, y1 - y0) && within(local.0, x0, x1);
+        // The link handle sits at the middle of the right edge.
+        let mid = (y0 + y1) / 2.;
+        if wide && !tall && (local.1 - mid).abs() < 10. {
+            return None;
+        }
+        (wide || tall).then_some((wide, tall))
+    }
+
+    /// The element under a point on the canvas, leaving out `skip` and what's inside it.
+    fn box_at(&self, w: Pt, skip: Option<&dom::Path>) -> Option<(String, dom::Path, dom::Box)> {
+        let (id, title) = self.screen_at(w)?;
+        if title {
+            return None;
+        }
+        let s = self.canvas.screen(&id)?;
+        let shot = self.shots.get(&id)?;
+        let b = dom::under(&shot.boxes, w.0 - s.x, w.1 - s.y, skip)?;
+        Some((id, b.path.clone(), b.rect.clone()))
+    }
+
+    /// Where the picked element would land if dropped at `w`: beside the element under the
+    /// pointer, before or after it along the way its parent lays out.
+    fn drop_at(&self, w: Pt) -> Option<Drop> {
+        let el = self.element.as_ref()?;
+        let (id, mut path, mut r) = self.box_at(w, Some(&el.path))?;
+        if Some(&id) != self.screen.as_ref() || path.is_empty() {
+            return None;
+        }
+        let s = self.canvas.screen(&id)?;
+        let shot = self.shots.get(&id)?;
+        // Over something inside one of its siblings, it lands beside that sibling, so cards
+        // in a grid reorder rather than nest in each other.
+        let home = dom::parent(&el.path)?;
+        if path.len() > el.path.len() && path.starts_with(&home) {
+            path.truncate(el.path.len());
+            r = shot.boxes.iter().find(|b| b.path == path)?.rect.clone();
+        }
+        let parent = dom::parent(&path)?;
+        let row = shot
+            .boxes
+            .iter()
+            .find(|b| b.path == parent)
+            .is_some_and(|b| b.row);
+        let (x, y) = (s.x + r.x, s.y + r.y);
+        Some(if row {
+            let after = w.0 > x + r.w / 2.;
+            let lx = if after { x + r.w } else { x };
+            Drop {
+                target: path,
+                after,
+                line: ((lx, y), (lx, y + r.h)),
+            }
+        } else {
+            let after = w.1 > y + r.h / 2.;
+            let ly = if after { y + r.h } else { y };
+            Drop {
+                target: path,
+                after,
+                line: ((x, ly), (x + r.w, ly)),
+            }
+        })
+    }
+
     fn link_handle(&self) -> Option<Pt> {
         let el = self.element.as_ref()?;
         let s = self.canvas.screen(self.screen.as_ref()?)?;
@@ -2169,6 +2384,25 @@ impl DesignCanvas {
                 }
             }
         }
+        // What's under the pointer, outlined as it would be picked.
+        if let (Some((id, path, r)), Drag::None) = (&self.hover, &self.drag) {
+            let picked = self.element.as_ref().map(|e| &e.path) == Some(path)
+                && self.screen.as_ref() == Some(id);
+            if let (false, Some(s)) = (picked, self.canvas.screen(id)) {
+                let (x, y) = self.screen_pt((s.x + r.x, s.y + r.y));
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .w(px(r.w * z))
+                        .h(px(r.h * z))
+                        .border_1()
+                        .border_color(col(c_blue(), 0.8))
+                        .into_any_element(),
+                );
+            }
+        }
         // The picked element.
         if let (Some(el), Some(s)) = (
             &self.element,
@@ -2260,7 +2494,292 @@ impl DesignCanvas {
                 );
             }
         }
-        let _ = cx;
+        out.extend(self.editing_marks(cx));
+        out
+    }
+
+    /// What editing on the canvas draws over the picked element: resize handles, the
+    /// layout bar, where a dragged element would land, and spacing while Alt is held.
+    fn editing_marks(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        let (Some(el), Some((sid, r))) = (&self.element, self.picked_rect()) else {
+            return out;
+        };
+        let z = self.zoom;
+        let (x, y) = self.screen_pt((r.x, r.y));
+        let (w, h) = (r.w * z, r.h * z);
+        let red = 0xf24e6b;
+        // Spacing to what's under the pointer, while Alt is held.
+        if let (true, Some((hid, hpath, hr))) = (self.measure, &self.hover) {
+            if *hid == sid && *hpath != el.path {
+                let s = self.canvas.screen(&sid);
+                let (ox, oy) = s.map(|s| (s.x, s.y)).unwrap_or_default();
+                let (hx, hy) = self.screen_pt((ox + hr.x, oy + hr.y));
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(hx))
+                        .top(px(hy))
+                        .w(px(hr.w * z))
+                        .h(px(hr.h * z))
+                        .border_1()
+                        .border_color(rgb(red))
+                        .into_any_element(),
+                );
+                for (i, (a, b, d)) in dom::spacing(&el.rect, hr).into_iter().enumerate() {
+                    let (ax, ay) = self.screen_pt((ox + a.0, oy + a.1));
+                    let (bx, by) = self.screen_pt((ox + b.0, oy + b.1));
+                    let across = (ay - by).abs() < 0.5;
+                    out.push(
+                        div()
+                            .absolute()
+                            .left(px(ax.min(bx)))
+                            .top(px(ay.min(by)))
+                            .w(px(if across { (bx - ax).abs() } else { 1. }))
+                            .h(px(if across { 1. } else { (by - ay).abs() }))
+                            .bg(rgb(red))
+                            .into_any_element(),
+                    );
+                    out.push(
+                        div()
+                            .id(("design-measure", i))
+                            .absolute()
+                            .left(px((ax + bx) / 2. + if across { -12. } else { 4. }))
+                            .top(px((ay + by) / 2. + if across { 3. } else { -8. }))
+                            .px_1()
+                            .rounded_sm()
+                            .bg(rgb(red))
+                            .text_size(px(10.5))
+                            .text_color(rgb(0xffffff))
+                            .child(format!("{}", d.round()))
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+        match &self.drag {
+            // The element follows the pointer, and a line shows where it lands.
+            Drag::Element {
+                from,
+                at,
+                moved: true,
+                ..
+            } => {
+                let (dx, dy) = ((at.0 - from.0) * z, (at.1 - from.1) * z);
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(x + dx))
+                        .top(px(y + dy))
+                        .w(px(w))
+                        .h(px(h))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(rgb(c_blue()))
+                        .bg(col(c_blue(), 0.08))
+                        .into_any_element(),
+                );
+                if let Some(d) = &self.drop {
+                    let (ax, ay) = self.screen_pt(d.line.0);
+                    let (bx, by) = self.screen_pt(d.line.1);
+                    let across = (ay - by).abs() < 0.5;
+                    out.push(
+                        div()
+                            .absolute()
+                            .left(px(ax.min(bx) - if across { 0. } else { 1. }))
+                            .top(px(ay.min(by) - if across { 1. } else { 0. }))
+                            .w(px(if across { (bx - ax).abs() } else { 3. }))
+                            .h(px(if across { 3. } else { (by - ay).abs() }))
+                            .rounded_full()
+                            .bg(rgb(c_blue()))
+                            .into_any_element(),
+                    );
+                }
+            }
+            // The new size, as it will be.
+            Drag::Resize {
+                wide,
+                tall,
+                from,
+                at,
+            } => {
+                let nw = if *wide {
+                    (r.w + at.0 - from.0).max(8.)
+                } else {
+                    r.w
+                };
+                let nh = if *tall {
+                    (r.h + at.1 - from.1).max(8.)
+                } else {
+                    r.h
+                };
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(y))
+                        .w(px(nw * z))
+                        .h(px(nh * z))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(rgb(c_blue()))
+                        .into_any_element(),
+                );
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(x + nw * z + 6.))
+                        .top(px(y + nh * z + 6.))
+                        .px_1()
+                        .rounded_sm()
+                        .bg(rgb(c_blue()))
+                        .text_size(px(10.5))
+                        .text_color(rgb(0xffffff))
+                        .child(format!("{} × {}", nw.round(), nh.round()))
+                        .into_any_element(),
+                );
+            }
+            _ => {}
+        }
+        if !matches!(self.drag, Drag::None) || self.inline_open {
+            return out;
+        }
+        // Resize: drag the right or bottom edge, or the corner.
+        let edge = |id: &'static str| div().id(id).absolute();
+        out.push(
+            edge("design-resize-right")
+                .left(px(x + w - 1.))
+                .top(px(y))
+                .w(px(6.))
+                .h(px(h * 0.4))
+                .cursor_ew_resize()
+                .into_any_element(),
+        );
+        out.push(
+            edge("design-resize-bottom")
+                .left(px(x))
+                .top(px(y + h - 1.))
+                .w(px(w))
+                .h(px(6.))
+                .cursor_ns_resize()
+                .into_any_element(),
+        );
+        out.push(
+            edge("design-resize-corner")
+                .left(px(x + w - 4.))
+                .top(px(y + h - 4.))
+                .size(px(8.))
+                .border_1()
+                .border_color(rgb(c_blue()))
+                .bg(rgb(0xffffff))
+                .cursor_nwse_resize()
+                .into_any_element(),
+        );
+        // The layout bar for a flex container: direction, gap and alignment in a click.
+        if el.is_flex() && self.ai.is_none() {
+            let row = !el.style("flex-direction").starts_with("column");
+            let gap = dom_px(&el.style("gap")).unwrap_or(0.);
+            let align = el.style("align-items");
+            let next_align = match align.as_str() {
+                "center" => "flex-end",
+                "flex-end" | "end" => "stretch",
+                "stretch" | "normal" | "" => "flex-start",
+                _ => "center",
+            };
+            let align_word = match align.as_str() {
+                "center" => "Center",
+                "flex-end" | "end" => "End",
+                "flex-start" | "start" => "Start",
+                _ => "Stretch",
+            };
+            let chip = |id: &'static str| {
+                div()
+                    .id(id)
+                    .h(px(22.))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tint(c_active())))
+            };
+            out.push(
+                div()
+                    .id("design-layout-bar")
+                    .absolute()
+                    .left(px(x + 86.))
+                    .top(px(y + h + 6.))
+                    .h(px(26.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .bg(rgb(c_raised()))
+                    .shadow_md()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_text()))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        chip("design-layout-dir")
+                            .child(icon(
+                                if row {
+                                    IconName::ArrowRight
+                                } else {
+                                    IconName::ArrowDown
+                                },
+                                12.,
+                                c_text(),
+                            ))
+                            .child(if row { "Row" } else { "Column" })
+                            .tooltip(tip("Lay out across or down"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_style(
+                                    "flex-direction",
+                                    if row { "column" } else { "row" },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(div().w(px(1.)).h(px(14.)).bg(rgb(c_border())))
+                    .child(
+                        chip("design-layout-gap-less")
+                            .child(icon(IconName::Minus, 11., c_secondary()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_style("gap", &format!("{}px", (gap - 4.).max(0.)), cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(44.))
+                            .text_center()
+                            .text_color(rgb(c_secondary()))
+                            .child(format!("Gap {}", gap.round())),
+                    )
+                    .child(
+                        chip("design-layout-gap-more")
+                            .child(icon(IconName::Plus, 11., c_secondary()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_style("gap", &format!("{}px", gap + 4.), cx)
+                            })),
+                    )
+                    .child(div().w(px(1.)).h(px(14.)).bg(rgb(c_border())))
+                    .child(
+                        chip("design-layout-align")
+                            .child(format!("Align {align_word}"))
+                            .tooltip(tip(
+                                "Line children up at the start, centre, end, or stretch them",
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_style("align-items", next_align, cx)
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
         out
     }
 
@@ -3655,6 +4174,11 @@ fn kind_of(tag: &str) -> &'static str {
         "section" | "main" | "article" | "aside" => "Section",
         _ => "Box",
     }
+}
+
+/// A pixel length as a number: `12px` gives 12.
+fn dom_px(css: &str) -> Option<f32> {
+    css.trim().strip_suffix("px")?.trim().parse().ok()
 }
 
 #[cfg(test)]
