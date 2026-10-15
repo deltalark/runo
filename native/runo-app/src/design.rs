@@ -406,7 +406,12 @@ impl RunoApp {
     }
 
     /// The design canvas, edge to edge under a slim header.
-    fn design_canvas(&self, canvas: Entity<DesignCanvas>, cx: &mut Context<Self>) -> AnyElement {
+    fn design_canvas(
+        &self,
+        pid: u64,
+        canvas: Entity<DesignCanvas>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .flex_1()
             .min_w_0()
@@ -431,6 +436,7 @@ impl RunoApp {
                     )
                     .child(self.mode_project_chip(cx))
                     .child(div().flex_1())
+                    .children(self.canvas_chats(pid, View::Design, cx))
                     .child(self.design_tabs(cx)),
             )
             .child(div().flex_1().min_h_0().child(canvas))
@@ -715,7 +721,7 @@ impl RunoApp {
         };
         if !self.design.references {
             if let Some(canvas) = self.design.canvases.get(&pid) {
-                return self.design_canvas(canvas.clone(), cx);
+                return self.design_canvas(pid, canvas.clone(), cx);
             }
         }
         let dir = folder(&root);

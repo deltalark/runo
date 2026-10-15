@@ -2131,7 +2131,11 @@ impl RunoApp {
                 }
                 self.measure(id);
                 self.record_spend(id);
-                let on_screen = self.selected == Some(id) && self.view == View::Session;
+                // A session asked from a canvas is on screen while its canvas is.
+                let on_screen = (self.selected == Some(id) && self.view == View::Session)
+                    || self.state.session(id).is_some_and(|s| {
+                        shell::canvas_of(s) == Some(self.view) && self.project == Some(s.project_id)
+                    });
                 let all: Vec<String> = self
                     .stderr
                     .get(&id)
@@ -2501,7 +2505,7 @@ impl RunoApp {
                 View::Review => self.open_review(),
                 _ => self.view = view,
             },
-            Jump::Session(id) => self.select(id),
+            Jump::Session(id) => self.open_session(id, window, cx),
             Jump::Project(pid) => self.switch_project(pid, window, cx),
             Jump::AddProject => self.pick_project(cx),
             Jump::Settings(page) => {
@@ -3051,6 +3055,7 @@ impl RunoApp {
         }
         // An agent editing a diagram in place is watched from the canvas it was asked on.
         let mut stay = None;
+        let before = self.selected;
         if let Some(context) = self.new_context.take() {
             for &id in &created {
                 self.apply_context(id, &context);
@@ -3059,6 +3064,13 @@ impl RunoApp {
                 .in_place
                 .then_some(self.new_back)
                 .filter(|v| matches!(v, View::Architecture | View::Design));
+            if let Some(view) = stay {
+                for &id in &created {
+                    if let Some(session) = self.state.session_mut(id) {
+                        session.canvas = shell::canvas_name(view).into();
+                    }
+                }
+            }
         }
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
@@ -3074,7 +3086,11 @@ impl RunoApp {
         }
         self.select(first);
         if let Some(view) = stay {
+            // Watched from the canvas, so it takes no tab; its chat opens from there.
+            self.tabs.retain(|t| !created.contains(t));
+            self.selected = before.filter(|b| !created.contains(b));
             self.view = view;
+            self.save();
         }
     }
 
@@ -5159,6 +5175,38 @@ impl RunoApp {
                     }),
             )
             .child(div().flex_1())
+            // Asked from a canvas: back to it, where its changes show.
+            .children(shell::canvas_of(session).map(|view| {
+                let id = session.id;
+                div()
+                    .id("hdr-canvas")
+                    .h(px(26.))
+                    .px_2()
+                    .mr_2()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_session(id, window, cx);
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        if view == View::Design {
+                            Mode::Design.glyph()
+                        } else {
+                            Mode::Architecture.glyph()
+                        },
+                        12.,
+                        c_secondary(),
+                    ))
+                    .child(format!("Open {}", shell::canvas_title(view)))
+            }))
             .child(
                 div()
                     .id("hdr-playbooks")
@@ -6819,8 +6867,8 @@ impl RunoApp {
                     .cursor_pointer()
                     .when(archived, |el| el.opacity(0.7))
                     .hover(|el| el.bg(tint(c_subtle())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select(id);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_session(id, window, cx);
                         cx.notify();
                     }))
                     .child(self.provider_badge(provider, 26.))
@@ -6853,6 +6901,11 @@ impl RunoApp {
                             .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
                                 if let Some(said) = self.finder.list_hits.snippet(&query, id) {
                                     format!("{project}  ·  “{said}”")
+                                } else if let Some(view) = shell::canvas_of(session) {
+                                    format!(
+                                        "{project}  ·  Asked from {}",
+                                        shell::canvas_title(view)
+                                    )
                                 } else if worktrees_only && !self.demo {
                                     session.dir.clone()
                                 } else {

@@ -740,7 +740,7 @@ impl RunoApp {
                 .state
                 .sessions
                 .iter()
-                .filter(|s| s.project_id == pid && !s.archived)
+                .filter(|s| s.project_id == pid && !s.archived && s.canvas.is_empty())
                 .count();
             list = list.child(
                 div()
@@ -844,7 +844,7 @@ impl RunoApp {
             .state
             .sessions
             .iter()
-            .filter(|s| s.project_id == pid && !s.archived)
+            .filter(|s| s.project_id == pid && !s.archived && s.canvas.is_empty())
             .map(|s| s.id)
             .max();
         match (self.mode(), latest) {
@@ -2293,7 +2293,7 @@ impl RunoApp {
                 .state
                 .sessions
                 .iter()
-                .filter(|s| s.project_id == pid && !s.archived)
+                .filter(|s| s.project_id == pid && !s.archived && s.canvas.is_empty())
                 .count();
             grid = grid.child(
                 div()
@@ -2587,6 +2587,222 @@ pub(crate) fn project_mark(project: &Project, size: f32) -> Div {
         .font_weight(FontWeight::BOLD)
         .text_color(rgb(color))
         .child(initial)
+}
+
+/// What a session asked from a canvas stores to say which: see `Session::canvas`.
+pub(crate) fn canvas_name(view: View) -> &'static str {
+    match view {
+        View::Design => "design",
+        _ => "architecture",
+    }
+}
+
+/// The canvas a session was asked from, if it was.
+pub(crate) fn canvas_of(s: &Session) -> Option<View> {
+    match s.canvas.as_str() {
+        "design" => Some(View::Design),
+        "architecture" => Some(View::Architecture),
+        _ => None,
+    }
+}
+
+pub(crate) fn canvas_title(view: View) -> &'static str {
+    match view {
+        View::Design => "Design",
+        _ => "Architecture",
+    }
+}
+
+impl RunoApp {
+    /// Open a session where it belongs: one asked from the Design or Architecture canvas
+    /// opens that canvas, any other its chat.
+    pub(crate) fn open_session(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((pid, view)) = self
+            .state
+            .session(id)
+            .and_then(|s| Some((s.project_id, canvas_of(s)?)))
+        else {
+            self.select(id);
+            return;
+        };
+        self.menu = None;
+        self.project = Some(pid);
+        self.home_all = false;
+        if let Some(session) = self.state.session_mut(id) {
+            session.unread = false;
+        }
+        self.view = view;
+        self.save();
+        window.focus(&self.focus, cx);
+    }
+
+    /// The agent chats asked from a canvas of project `pid`, newest first.
+    fn canvas_sessions(&self, pid: u64, view: View) -> Vec<&Session> {
+        let name = canvas_name(view);
+        let mut out: Vec<&Session> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.project_id == pid && s.canvas == name && !s.archived)
+            .collect();
+        out.sort_by_key(|s| std::cmp::Reverse(s.id));
+        out
+    }
+
+    /// On a canvas's header: the chats of the agents asked from it, to read what they did
+    /// and said, or carry on talking to one. Hidden until there is one.
+    pub(crate) fn canvas_chats(
+        &self,
+        pid: u64,
+        view: View,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let sessions = self.canvas_sessions(pid, view);
+        if sessions.is_empty() {
+            return None;
+        }
+        let open = self.menu.as_deref() == Some("canvas-chats");
+        let busy = sessions.iter().any(|s| self.is_running(s));
+        let mut list = div().v_flex().p_1().child(
+            div()
+                .px_2()
+                .pt_1()
+                .pb_2()
+                .text_size(px(11.5))
+                .text_color(rgb(c_muted()))
+                .whitespace_normal()
+                .child(format!(
+                    "Agents asked from the {} canvas. Open one to read its chat or ask it more.",
+                    canvas_title(view)
+                )),
+        );
+        for s in &sessions {
+            let id = s.id;
+            let p = agent::provider(&s.provider);
+            let state = if self.is_running(s) {
+                "Working".to_string()
+            } else if self.need(s).is_some() {
+                "Needs you".to_string()
+            } else {
+                let turns = s.messages.iter().filter(|m| m.role == Role::User).count();
+                match turns {
+                    1 => "1 ask".to_string(),
+                    n => format!("{n} asks"),
+                }
+            };
+            list = list.child(
+                div()
+                    .id(("canvas-chat", id as usize))
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tint(c_active())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        this.select(id);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(16.))
+                            .flex_none()
+                            .text_color(rgb(p.color))
+                            .child(p.mark),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .child(div().truncate().text_size(px(13.)).child(s.title.clone()))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(c_muted()))
+                                    .child(format!("{} · {state}", p.name)),
+                            ),
+                    )
+                    .when(s.unread, |el| {
+                        el.child(div().size(px(7.)).rounded_full().bg(rgb(c_blue())))
+                    }),
+            );
+        }
+        Some(
+            div()
+                .relative()
+                .flex_none()
+                .child(
+                    div()
+                        .id("canvas-chats")
+                        .h(px(30.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .cursor_pointer()
+                        .text_size(px(12.5))
+                        .when(open, |el| el.bg(tint(c_active())))
+                        .hover(|el| el.bg(tint(c_subtle())))
+                        .tooltip(crate::archdraw::view::tip(
+                            "The agents' chats behind this canvas",
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.menu = if this.menu.as_deref() == Some("canvas-chats") {
+                                None
+                            } else {
+                                Some("canvas-chats".into())
+                            };
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::MessagesSquare, 14., c_secondary()))
+                        .child("Chats")
+                        .child(
+                            div()
+                                .px(px(5.))
+                                .rounded_full()
+                                .bg(tint(c_active()))
+                                .text_size(px(11.))
+                                .text_color(rgb(if busy { c_blue() } else { c_muted() }))
+                                .child(sessions.len().to_string()),
+                        ),
+                )
+                .when(open, |el| {
+                    el.child(
+                        div().absolute().top(px(34.)).right_0().child(
+                            deferred(
+                                anchored().snap_to_window_with_margin(px(8.)).child(
+                                    div()
+                                        .id("canvas-chats-menu")
+                                        .w(px(320.))
+                                        .max_h(px(360.))
+                                        .overflow_y_scroll()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(float_edge())
+                                        .bg(float(c_raised()))
+                                        .shadow_lg()
+                                        .occlude()
+                                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                            this.menu = None;
+                                            cx.notify();
+                                        }))
+                                        .child(list),
+                                ),
+                            )
+                            .with_priority(2),
+                        ),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
 }
 
 #[cfg(test)]

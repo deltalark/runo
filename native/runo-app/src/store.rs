@@ -328,6 +328,10 @@ pub struct Session {
     /// The pull request opened for this session's branch.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub pr_url: String,
+    /// The canvas the session was asked from, `design` or `architecture`: it opens there
+    /// and stays out of the session lists, with its chat a click away on that canvas.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub canvas: String,
     /// The newest snapshot of the folder Runo took (end of a turn, an undo or a redo),
     /// so Undo can leave alone what changed after it.
     #[serde(default, skip_serializing_if = "String::is_empty")]

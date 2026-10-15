@@ -101,7 +101,7 @@ impl RunoApp {
             .state
             .sessions
             .iter()
-            .filter(|s| s.project_id == project.id && !s.archived)
+            .filter(|s| s.project_id == project.id && !s.archived && s.canvas.is_empty())
             .filter(|s| {
                 filter.is_empty()
                     || s.title.to_lowercase().contains(filter)
@@ -121,7 +121,7 @@ impl RunoApp {
                 .state
                 .sessions
                 .iter()
-                .filter(|s| !s.archived)
+                .filter(|s| !s.archived && s.canvas.is_empty())
                 .filter(|s| {
                     filter.is_empty()
                         || s.title.to_lowercase().contains(filter)

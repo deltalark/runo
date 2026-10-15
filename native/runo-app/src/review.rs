@@ -17,6 +17,7 @@ impl RunoApp {
             .iter()
             .filter(|s| {
                 !s.archived
+                    && s.canvas.is_empty()
                     && !self.is_running(s)
                     && self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
             })
