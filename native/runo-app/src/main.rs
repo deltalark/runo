@@ -8232,7 +8232,7 @@ impl Render for RunoApp {
             self.browser_open = false;
             self.browser_main = false;
         }
-        if self.browser_main || self.design_page_key().is_some() {
+        if self.browser_main {
             self.sync_browser_address(window, cx);
         }
         // Design and Architecture follow the project in the top bar.
