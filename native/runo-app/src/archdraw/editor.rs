@@ -1,7 +1,7 @@
 //! The diagram editor's state and commands, apart from drawing: selection, undo and
 //! redo, adding and connecting shapes, moving, grouping, styling, clipboard and layout.
 
-use super::geom::{self, Align, Pt, Wire};
+use super::geom::{self, Align, Pt, Side, Wire};
 use super::model::*;
 use std::collections::{HashMap, HashSet};
 
@@ -367,7 +367,41 @@ pub(crate) struct Editor {
     pub dirty: bool,
     clip: Option<Clip>,
     pub style_clip: Option<Style>,
+    /// Connector routes for the diagram as it was last asked about, since routing round
+    /// boxes is the costly part of drawing a big diagram.
+    routes: std::cell::RefCell<Option<(u64, Routes)>>,
+    /// Each connector's route and what it was worked out from.
+    edge_routes: std::cell::RefCell<HashMap<String, (u64, Wire)>>,
 }
+
+/// Every connector of a diagram with its route.
+pub(crate) type Routes = Vec<(String, Wire)>;
+
+/// What is out of sight on a diagram: shapes on hidden layers, and shapes folded into a
+/// collapsed boundary (with the boundary that stands in for them).
+#[derive(Default)]
+pub(crate) struct Sight {
+    pub hidden: HashSet<String>,
+    pub folded: HashMap<String, String>,
+}
+
+impl Sight {
+    pub(crate) fn shows(&self, id: &str) -> bool {
+        !self.hidden.contains(id) && !self.folded.contains_key(id)
+    }
+
+    /// The shape a connector to `id` is drawn to: `id`, the collapsed boundary it is
+    /// folded into, or none when it's hidden.
+    pub(crate) fn stand_in<'a>(&'a self, id: &'a str) -> Option<&'a str> {
+        if self.hidden.contains(id) {
+            return None;
+        }
+        Some(self.folded.get(id).map(String::as_str).unwrap_or(id))
+    }
+}
+
+/// The size of a collapsed boundary.
+pub(crate) const COLLAPSED: (f32, f32) = (220., 110.);
 
 impl Editor {
     pub(crate) fn new(mut doc: Doc) -> Self {
@@ -388,7 +422,23 @@ impl Editor {
             dirty: false,
             clip: None,
             style_clip: None,
+            routes: Default::default(),
+            edge_routes: Default::default(),
         }
+    }
+
+    /// What's out of sight on the current diagram.
+    pub(crate) fn sight(&self) -> Sight {
+        view_sight(self.cur())
+    }
+
+    /// Whether a shape can't be moved: locked itself or on a locked layer.
+    pub(crate) fn is_locked(&self, n: &Node) -> bool {
+        n.locked
+            || n.layer
+                .as_deref()
+                .and_then(|l| self.cur().layer(l))
+                .is_some_and(|l| l.locked)
     }
 
     pub(crate) fn cur(&self) -> &View {
@@ -624,11 +674,12 @@ impl Editor {
         if !add {
             self.sel = Sel::default();
         }
+        let sight = self.sight();
         let inside: Vec<String> = self
             .cur()
             .nodes
             .iter()
-            .filter(|n| area.contains_rect(&n.rect()))
+            .filter(|n| sight.shows(&n.id) && area.contains_rect(&n.rect()))
             .map(|n| n.id.clone())
             .collect();
         for id in inside {
@@ -657,23 +708,90 @@ impl Editor {
 
     /// Every connector of the diagram with its route.
     pub(crate) fn wires(&self) -> Vec<(String, Wire)> {
+        let key = self.route_key();
+        if let Some((k, w)) = self.routes.borrow().as_ref() {
+            if *k == key {
+                return w.clone();
+            }
+        }
+        let w = view_wires_cached(
+            &self.doc,
+            self.cur(),
+            &self.sight(),
+            &mut self.edge_routes.borrow_mut(),
+        );
+        *self.routes.borrow_mut() = Some((key, w.clone()));
+        w
+    }
+
+    /// A fingerprint of everything a route depends on.
+    fn route_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
         let v = self.cur();
-        v.edges
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        v.id.hash(&mut h);
+        let els = self.elements();
+        for n in &v.nodes {
+            n.id.hash(&mut h);
+            for f in [n.x, n.y, n.w, n.h] {
+                f.to_bits().hash(&mut h);
+            }
+            n.parent.hash(&mut h);
+            n.layer.hash(&mut h);
+            n.collapsed.hash(&mut h);
+            els.get(n.id.as_str())
+                .map(|e| e.kind == Kind::Boundary)
+                .hash(&mut h);
+        }
+        for l in &v.layers {
+            l.name.hash(&mut h);
+            l.hidden.hash(&mut h);
+        }
+        let rels = self.relations();
+        for e in &v.edges {
+            e.id.hash(&mut h);
+            (e.route as u8).hash(&mut h);
+            e.from_side.hash(&mut h);
+            e.to_side.hash(&mut h);
+            for p in &e.waypoints {
+                p.0.to_bits().hash(&mut h);
+                p.1.to_bits().hash(&mut h);
+            }
+            if let Some(r) = rels.get(e.id.as_str()) {
+                r.from.hash(&mut h);
+                r.to.hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    /// The model's relations by id, for lookups in loops over a big diagram.
+    pub(crate) fn relations(&self) -> HashMap<&str, &Relation> {
+        self.doc
+            .relations
             .iter()
-            .filter_map(|e| {
-                let r = self.doc.relation(&e.id)?;
-                let a = v.node(&r.from)?.rect();
-                let b = v.node(&r.to)?.rect();
-                Some((e.id.clone(), geom::route(&a, &b, e.route)))
-            })
+            .map(|r| (r.id.as_str(), r))
+            .collect()
+    }
+
+    /// The model's elements by id, for lookups in loops over a big diagram.
+    pub(crate) fn elements(&self) -> HashMap<&str, &Element> {
+        self.doc
+            .elements
+            .iter()
+            .map(|e| (e.id.as_str(), e))
             .collect()
     }
 
     /// What's under `p`, with `tol` of slack for thin things.
     pub(crate) fn hit(&self, p: Pt, tol: f32) -> Hit {
         let v = self.cur();
+        let sight = self.sight();
+        let els = self.elements();
+        let kind = |id: &str| els.get(id).map(|e| e.kind).unwrap_or_default();
+        let boundary = |n: &Node| kind(&n.id) == Kind::Boundary && !n.collapsed;
         for n in v.nodes.iter().rev() {
-            if self.kind_of(&n.id) == Kind::Boundary {
+            if boundary(n) || !sight.shows(&n.id) {
                 continue;
             }
             if n.rect().contains(p) {
@@ -693,7 +811,7 @@ impl Editor {
         // A boundary is grabbed by its title strip or its border, so dragging inside it
         // still draws a selection box.
         for n in v.nodes.iter().rev() {
-            if self.kind_of(&n.id) != Kind::Boundary {
+            if !boundary(n) || !sight.shows(&n.id) {
                 continue;
             }
             let r = n.rect();
@@ -745,26 +863,62 @@ impl Editor {
     /// The selected nodes plus everything inside selected boundaries, minus locked ones.
     pub(crate) fn movable(&self) -> Vec<String> {
         let v = self.cur();
+        let kids = v.children();
+        let nodes: HashMap<&str, &Node> = v.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut out: Vec<String> = Vec::new();
-        for id in &self.sel.nodes {
-            for m in std::iter::once(id.clone()).chain(v.descendants(id)) {
-                if !out.contains(&m) && v.node(&m).is_some_and(|n| !n.locked) {
-                    out.push(m);
-                }
+        let mut queue: Vec<&str> = self.sel.nodes.iter().map(String::as_str).collect();
+        while let Some(id) = queue.pop() {
+            if !seen.insert(id) {
+                continue;
             }
+            if nodes.get(id).is_some_and(|n| !self.is_locked(n)) {
+                out.push(id.to_string());
+            }
+            queue.extend(kids.get(id).into_iter().flatten());
         }
         out
     }
 
     /// Place nodes at new rectangles, without a checkpoint (drags call `checkpoint` once).
     pub(crate) fn set_rects(&mut self, rects: &[(String, Rect)]) {
+        let mut moved: HashMap<String, Pt> = HashMap::new();
         let v = self.cur_mut();
         for (id, r) in rects {
             if let Some(n) = v.node_mut(id) {
-                n.x = r.x.round();
-                n.y = r.y.round();
+                let (x, y) = (r.x.round(), r.y.round());
+                if (r.w.round().max(10.) - n.w).abs() < 0.5
+                    && (r.h.round().max(10.) - n.h).abs() < 0.5
+                {
+                    moved.insert(id.clone(), (x - n.x, y - n.y));
+                }
+                n.x = x;
+                n.y = y;
                 n.w = r.w.round().max(10.);
                 n.h = r.h.round().max(10.);
+            }
+        }
+        // Bends placed by hand travel with a connector whose two ends moved together.
+        let ends: HashMap<String, (String, String)> = self
+            .doc
+            .relations
+            .iter()
+            .map(|r| (r.id.clone(), (r.from.clone(), r.to.clone())))
+            .collect();
+        for e in &mut self.cur_mut().edges {
+            if e.waypoints.is_empty() {
+                continue;
+            }
+            let Some((a, b)) = ends.get(&e.id) else {
+                continue;
+            };
+            if let (Some(da), Some(db)) = (moved.get(a), moved.get(b)) {
+                if (da.0 - db.0).abs() < 0.5 && (da.1 - db.1).abs() < 0.5 {
+                    for p in &mut e.waypoints {
+                        p.0 += da.0;
+                        p.1 += da.1;
+                    }
+                }
             }
         }
         self.dirty = true;
@@ -1431,7 +1585,245 @@ impl Editor {
 
     /// Everything on the diagram, for "fit".
     pub(crate) fn extent(&self) -> Option<Rect> {
-        Rect::bounds(self.cur().nodes.iter().map(|n| n.rect()))
+        let sight = self.sight();
+        Rect::bounds(
+            self.cur()
+                .nodes
+                .iter()
+                .filter(|n| sight.shows(&n.id))
+                .map(|n| n.rect()),
+        )
+    }
+
+    // ---- Layers
+
+    /// Add a layer and put the selected shapes on it.
+    pub(crate) fn add_layer(&mut self, name: &str) -> String {
+        self.checkpoint();
+        let v = self.cur_mut();
+        let mut name = name.trim().to_string();
+        if name.is_empty() {
+            name = "Layer".into();
+        }
+        let base = name.clone();
+        let mut i = 2;
+        while v.layer(&name).is_some() {
+            name = format!("{base} {i}");
+            i += 1;
+        }
+        v.layers.push(Layer {
+            name: name.clone(),
+            ..Default::default()
+        });
+        let sel = self.sel.nodes.clone();
+        for id in sel {
+            if let Some(n) = self.cur_mut().node_mut(&id) {
+                n.layer = Some(name.clone());
+            }
+        }
+        self.dirty = true;
+        name
+    }
+
+    /// Put the selected shapes on a layer, or on the base layer with none.
+    pub(crate) fn set_layer(&mut self, name: Option<&str>) {
+        self.checkpoint();
+        let sel = self.sel.nodes.clone();
+        for id in sel {
+            if let Some(n) = self.cur_mut().node_mut(&id) {
+                n.layer = name.map(String::from);
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub(crate) fn rename_layer(&mut self, i: usize, name: &str) {
+        let name = name.trim();
+        let v = self.cur();
+        if name.is_empty()
+            || v.layers
+                .iter()
+                .enumerate()
+                .any(|(j, l)| j != i && l.name == name)
+        {
+            return;
+        }
+        let Some(old) = v.layers.get(i).map(|l| l.name.clone()) else {
+            return;
+        };
+        self.checkpoint();
+        let v = self.cur_mut();
+        v.layers[i].name = name.to_string();
+        for n in &mut v.nodes {
+            if n.layer.as_deref() == Some(old.as_str()) {
+                n.layer = Some(name.to_string());
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Remove a layer; its shapes go back to the base layer.
+    pub(crate) fn delete_layer(&mut self, i: usize) {
+        if i >= self.cur().layers.len() {
+            return;
+        }
+        self.checkpoint();
+        let v = self.cur_mut();
+        let old = v.layers.remove(i).name;
+        for n in &mut v.nodes {
+            if n.layer.as_deref() == Some(old.as_str()) {
+                n.layer = None;
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Show or hide, lock or unlock a layer.
+    pub(crate) fn layer_flags(&mut self, i: usize, hidden: Option<bool>, locked: Option<bool>) {
+        if i >= self.cur().layers.len() {
+            return;
+        }
+        self.checkpoint();
+        let sight_before: Vec<String> = self.sel.nodes.clone();
+        let v = self.cur_mut();
+        let l = &mut v.layers[i];
+        if let Some(h) = hidden {
+            l.hidden = h;
+        }
+        if let Some(k) = locked {
+            l.locked = k;
+        }
+        // Nothing hidden stays selected.
+        let sight = self.sight();
+        self.sel.nodes = sight_before
+            .into_iter()
+            .filter(|id| sight.shows(id))
+            .collect();
+        let shown: HashSet<String> = self.wires().into_iter().map(|(id, _)| id).collect();
+        self.sel.edges.retain(|id| shown.contains(id));
+        self.dirty = true;
+    }
+
+    // ---- Collapsing boundaries
+
+    /// Fold a boundary to one box, or open it back to its size.
+    pub(crate) fn toggle_collapse(&mut self, id: &str) {
+        if self.kind_of(id) != Kind::Boundary {
+            return;
+        }
+        self.checkpoint();
+        let Some(n) = self.cur_mut().node_mut(id) else {
+            return;
+        };
+        if n.collapsed {
+            let (w, h) = n.open_size.take().unwrap_or((n.w, n.h));
+            n.w = w;
+            n.h = h;
+            n.collapsed = false;
+        } else {
+            n.open_size = Some((n.w, n.h));
+            n.w = COLLAPSED.0;
+            n.h = COLLAPSED.1;
+            n.collapsed = true;
+        }
+        let sight = self.sight();
+        self.sel.nodes.retain(|id| sight.shows(id));
+        let shown: HashSet<String> = self.wires().into_iter().map(|(id, _)| id).collect();
+        self.sel.edges.retain(|id| shown.contains(id));
+        self.dirty = true;
+    }
+
+    // ---- Connector paths
+
+    /// Pin the selected connectors to sides, or let them pick (None leaves a side as is).
+    pub(crate) fn pin_sides(&mut self, from: Option<Option<Side>>, to: Option<Option<Side>>) {
+        self.edges(|e| {
+            if let Some(f) = from {
+                e.from_side = f;
+            }
+            if let Some(t) = to {
+                e.to_side = t;
+            }
+        });
+    }
+
+    /// Set a connector's hand-placed bends, without a checkpoint (drags call it once).
+    pub(crate) fn set_waypoints(&mut self, id: &str, points: Vec<Pt>) {
+        if let Some(e) = self.cur_mut().edge_mut(id) {
+            e.waypoints = points
+                .into_iter()
+                .map(|p| (p.0.round(), p.1.round()))
+                .collect();
+            self.dirty = true;
+        }
+    }
+
+    /// Let the selected connectors find their own way again.
+    pub(crate) fn reset_paths(&mut self) {
+        self.edges(|e| {
+            e.waypoints.clear();
+            e.from_side = None;
+            e.to_side = None;
+        });
+    }
+
+    // ---- Finding
+
+    /// Shapes on this diagram matching `query` by name, technology, description or tag,
+    /// in reading order. `#tag` matches a tag exactly.
+    pub(crate) fn find(&self, query: &str) -> Vec<String> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let els = self.elements();
+        let sight = self.sight();
+        let mut hits: Vec<(&Node, &Element)> = self
+            .cur()
+            .nodes
+            .iter()
+            .filter_map(|n| Some((n, *els.get(n.id.as_str())?)))
+            .filter(|(n, e)| {
+                if !sight.hidden.contains(&n.id) {
+                    if let Some(tag) = q.strip_prefix('#') {
+                        e.tags.iter().any(|t| t.to_lowercase() == tag)
+                    } else {
+                        [&e.name, &e.tech, &e.description, &e.id]
+                            .iter()
+                            .any(|f| f.to_lowercase().contains(&q))
+                            || e.tags.iter().any(|t| t.to_lowercase().contains(&q))
+                    }
+                } else {
+                    false
+                }
+            })
+            .collect();
+        hits.sort_by(|a, b| a.0.y.total_cmp(&b.0.y).then(a.0.x.total_cmp(&b.0.x)));
+        hits.into_iter().map(|(n, _)| n.id.clone()).collect()
+    }
+
+    /// Open every collapsed boundary that hides `id`, so it can be shown.
+    pub(crate) fn reveal(&mut self, id: &str) {
+        let sight = self.sight();
+        let Some(outer) = sight.folded.get(id).cloned() else {
+            return;
+        };
+        let mut chain = Vec::new();
+        let v = self.cur();
+        let mut at = v.node(id).and_then(|n| n.parent.clone());
+        while let Some(p) = at {
+            if p == outer {
+                chain.push(p);
+                break;
+            }
+            at = v.node(&p).and_then(|n| n.parent.clone());
+            chain.push(p);
+        }
+        for p in chain {
+            if self.cur().node(&p).is_some_and(|n| n.collapsed) {
+                self.toggle_collapse(&p);
+            }
+        }
     }
 
     // ---- Diagrams
@@ -1496,17 +1888,20 @@ impl Editor {
     /// Connectors on a dependency cycle, for drawing them as a warning.
     pub(crate) fn cycles(&self) -> HashSet<String> {
         let v = self.cur();
+        let rels = self.relations();
+        let els = self.elements();
+        let part = |id: &str| els.get(id).is_some_and(|e| e.kind.is_part());
         let links: Vec<(String, String)> = v
             .edges
             .iter()
-            .filter_map(|e| self.doc.relation(&e.id))
-            .filter(|r| self.kind_of(&r.from).is_part() && self.kind_of(&r.to).is_part())
+            .filter_map(|e| rels.get(e.id.as_str()))
+            .filter(|r| part(&r.from) && part(&r.to))
             .map(|r| (r.from.clone(), r.to.clone()))
             .collect();
         let on = geom::cyclic_links(&links);
         v.edges
             .iter()
-            .filter_map(|e| self.doc.relation(&e.id))
+            .filter_map(|e| rels.get(e.id.as_str()))
             .filter(|r| on.contains(&(r.from.clone(), r.to.clone())))
             .map(|r| r.id.clone())
             .collect()
@@ -1540,6 +1935,193 @@ impl Editor {
         self.after_history();
         Ok(())
     }
+}
+
+/// What's out of sight on a diagram.
+pub(crate) fn view_sight(v: &View) -> Sight {
+    let mut sight = Sight::default();
+    let hidden_layers: HashSet<&str> = v
+        .layers
+        .iter()
+        .filter(|l| l.hidden)
+        .map(|l| l.name.as_str())
+        .collect();
+    let nodes: HashMap<&str, &Node> = v.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    for n in &v.nodes {
+        if n.layer
+            .as_deref()
+            .is_some_and(|l| hidden_layers.contains(l))
+        {
+            sight.hidden.insert(n.id.clone());
+        }
+        // The outermost collapsed boundary it sits in, if any.
+        let mut at = n.parent.as_deref();
+        let mut outer = None;
+        for _ in 0..64 {
+            let Some(p) = at.and_then(|p| nodes.get(p)) else {
+                break;
+            };
+            if p.collapsed {
+                outer = Some(p.id.clone());
+            }
+            at = p.parent.as_deref();
+        }
+        if let Some(o) = outer {
+            sight.folded.insert(n.id.clone(), o);
+        }
+    }
+    sight
+}
+
+/// Every shown connector of a diagram with its route: to a collapsed boundary for parts
+/// folded into one, round the boxes in its way, through bends placed by hand.
+pub(crate) fn view_wires(doc: &Doc, v: &View, sight: &Sight) -> Vec<(String, Wire)> {
+    view_wires_cached(doc, v, sight, &mut HashMap::new())
+}
+
+/// Connectors that pass more boxes than this keep their plain route: going round that
+/// many would cost more than it helps on a crowded diagram.
+const MAX_OBSTACLES: usize = 60;
+
+/// Boxes bucketed by area, so a connector finds the ones near it without looking at all.
+struct Buckets<'a> {
+    cell: f32,
+    map: HashMap<(i32, i32), Vec<(&'a str, Rect)>>,
+}
+
+impl<'a> Buckets<'a> {
+    const CELL: f32 = 400.;
+
+    fn new(items: impl Iterator<Item = (&'a str, Rect)>) -> Self {
+        let mut map: HashMap<(i32, i32), Vec<(&'a str, Rect)>> = HashMap::new();
+        for (id, r) in items {
+            for key in Self::keys(&r) {
+                map.entry(key).or_default().push((id, r));
+            }
+        }
+        Self {
+            cell: Self::CELL,
+            map,
+        }
+    }
+
+    fn keys(r: &Rect) -> impl Iterator<Item = (i32, i32)> {
+        let c = Self::CELL;
+        let (x0, y0) = ((r.x / c).floor() as i32, (r.y / c).floor() as i32);
+        let (x1, y1) = (
+            (r.right() / c).floor() as i32,
+            (r.bottom() / c).floor() as i32,
+        );
+        (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+    }
+
+    /// Boxes touching `area`, each once, in a stable order.
+    fn near(&self, area: &Rect) -> Vec<(&'a str, Rect)> {
+        let _ = self.cell;
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for key in Self::keys(area) {
+            for (id, r) in self.map.get(&key).into_iter().flatten() {
+                if r.intersects(area) && seen.insert(*id) {
+                    out.push((*id, *r));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(b.0));
+        out
+    }
+}
+
+/// Like `view_wires`, reusing routes in `cache` whose ends, settings and nearby boxes
+/// haven't changed, so dragging one shape on a big diagram reroutes only what it touches.
+pub(crate) fn view_wires_cached(
+    doc: &Doc,
+    v: &View,
+    sight: &Sight,
+    cache: &mut HashMap<String, (u64, Wire)>,
+) -> Vec<(String, Wire)> {
+    use std::hash::{Hash, Hasher};
+    let rects: HashMap<&str, Rect> = v.nodes.iter().map(|n| (n.id.as_str(), n.rect())).collect();
+    let rels: HashMap<&str, &Relation> = doc.relations.iter().map(|r| (r.id.as_str(), r)).collect();
+    let kinds: HashMap<&str, Kind> = doc
+        .elements
+        .iter()
+        .map(|e| (e.id.as_str(), e.kind))
+        .collect();
+    // What a connector may need to go round: shown boxes, and collapsed boundaries.
+    let solid = Buckets::new(
+        v.nodes
+            .iter()
+            .filter(|n| sight.shows(&n.id))
+            .filter(|n| {
+                n.collapsed
+                    || kinds
+                        .get(n.id.as_str())
+                        .is_some_and(|k| *k != Kind::Boundary)
+            })
+            .map(|n| (n.id.as_str(), n.rect())),
+    );
+    let mut drawn: HashSet<(String, String)> = HashSet::new();
+    let mut used = HashSet::new();
+    let out: Vec<(String, Wire)> = v
+        .edges
+        .iter()
+        .filter_map(|e| {
+            let r = rels.get(e.id.as_str())?;
+            let (fa, fb) = (sight.stand_in(&r.from)?, sight.stand_in(&r.to)?);
+            let folded = fa != r.from || fb != r.to;
+            if folded && (fa == fb || !drawn.insert((fa.to_string(), fb.to_string()))) {
+                // Inside one collapsed boundary, or already drawn between the same boxes.
+                return None;
+            }
+            let a = rects.get(fa)?;
+            let b = rects.get(fb)?;
+            let mut obstacles: Vec<Rect> = if e.route == Route::Elbow && e.waypoints.is_empty() {
+                solid
+                    .near(&a.union(b).inflate(120.))
+                    .into_iter()
+                    .filter(|(id, _)| *id != fa && *id != fb)
+                    // A box the connector starts or ends inside isn't in its way.
+                    .filter(|(_, r)| !r.contains_rect(a) && !r.contains_rect(b))
+                    .map(|(_, r)| r)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if obstacles.len() > MAX_OBSTACLES {
+                obstacles.clear();
+            }
+            let waypoints: &[Pt] = if folded { &[] } else { &e.waypoints };
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for r in [a, b].into_iter().chain(&obstacles) {
+                for f in [r.x, r.y, r.w, r.h] {
+                    f.to_bits().hash(&mut h);
+                }
+            }
+            (e.route as u8, e.from_side, e.to_side).hash(&mut h);
+            for p in waypoints {
+                (p.0.to_bits(), p.1.to_bits()).hash(&mut h);
+            }
+            let key = h.finish();
+            used.insert(e.id.clone());
+            if let Some((k, w)) = cache.get(&e.id) {
+                if *k == key {
+                    return Some((e.id.clone(), w.clone()));
+                }
+            }
+            let way = geom::Way {
+                from: e.from_side,
+                to: e.to_side,
+                waypoints,
+                obstacles: &obstacles,
+            };
+            let w = geom::route_with(a, b, e.route, &way);
+            cache.insert(e.id.clone(), (key, w.clone()));
+            Some((e.id.clone(), w))
+        })
+        .collect();
+    cache.retain(|id, _| used.contains(id));
+    out
 }
 
 #[cfg(test)]
@@ -1784,5 +2366,90 @@ mod tests {
         assert_eq!(ed.doc.views.len(), 1);
         ed.delete_view();
         assert_eq!(ed.doc.views.len(), 1, "the last diagram stays");
+    }
+
+    #[test]
+    fn layers_hide_and_lock_their_shapes() {
+        let mut ed = Editor::new(Doc::default());
+        let a = ed.add(preset("Service"), (0., 0.));
+        let b = ed.add(preset("Database"), (0., 300.));
+        let r = ed.connect(&a, &b).unwrap();
+        ed.sel = Sel {
+            nodes: vec![b.clone()],
+            edges: vec![],
+        };
+        let layer = ed.add_layer("Data");
+        assert_eq!(
+            ed.cur().node(&b).unwrap().layer.as_deref(),
+            Some(layer.as_str())
+        );
+        ed.layer_flags(0, Some(true), None);
+        assert!(!ed.sight().shows(&b));
+        assert!(
+            ed.wires().is_empty(),
+            "a connector to a hidden shape hides too"
+        );
+        assert!(ed.sel.nodes.is_empty());
+        assert_eq!(ed.hit((0., 300.), 2.), Hit::None);
+        assert!(ed.find("database").is_empty());
+        ed.layer_flags(0, Some(false), Some(true));
+        assert_eq!(ed.wires().len(), 1);
+        ed.sel = Sel {
+            nodes: vec![b.clone()],
+            edges: vec![],
+        };
+        assert!(ed.movable().is_empty(), "a locked layer's shapes stay put");
+        ed.rename_layer(0, "Stores");
+        assert_eq!(ed.cur().node(&b).unwrap().layer.as_deref(), Some("Stores"));
+        ed.delete_layer(0);
+        assert!(ed.cur().node(&b).unwrap().layer.is_none());
+        let _ = r;
+    }
+
+    #[test]
+    fn collapsed_boundaries_stand_in_for_what_they_hold() {
+        let mut ed = Editor::new(Doc::default());
+        let g = ed.add(preset("VPC / network"), (300., 300.));
+        let a = ed.add(preset("Service"), (300., 300.));
+        let out = ed.add(preset("Database"), (900., 300.));
+        let r = ed.connect(&a, &out).unwrap();
+        let open = ed.rect(&g).unwrap();
+        ed.toggle_collapse(&g);
+        let n = ed.cur().node(&g).unwrap();
+        assert!(n.collapsed);
+        assert_eq!((n.w, n.h), COLLAPSED);
+        assert!(!ed.sight().shows(&a));
+        // The connector now runs from the collapsed boundary.
+        let wires = ed.wires();
+        let (_, w) = wires.iter().find(|(id, _)| *id == r).unwrap();
+        assert!(ed.rect(&g).unwrap().inflate(1.).contains(w.points[0]));
+        assert_eq!(ed.find("service"), vec![a.clone()]);
+        ed.reveal(&a);
+        assert!(ed.sight().shows(&a));
+        assert_eq!(ed.rect(&g).unwrap(), open);
+    }
+
+    #[test]
+    fn hand_placed_bends_move_with_both_ends() {
+        let mut ed = Editor::new(Doc::default());
+        let a = ed.add(preset("Service"), (0., 0.));
+        let b = ed.add(preset("Database"), (400., 300.));
+        let r = ed.connect(&a, &b).unwrap();
+        ed.set_waypoints(&r, vec![(200., 50.)]);
+        ed.sel = Sel {
+            nodes: vec![a.clone(), b.clone()],
+            edges: vec![],
+        };
+        ed.nudge((10., 20.));
+        assert_eq!(ed.cur().edge(&r).unwrap().waypoints, vec![(210., 70.)]);
+        ed.sel.nodes = vec![a.clone()];
+        ed.nudge((10., 0.));
+        assert_eq!(ed.cur().edge(&r).unwrap().waypoints, vec![(210., 70.)]);
+        ed.sel = Sel {
+            nodes: vec![],
+            edges: vec![r.clone()],
+        };
+        ed.reset_paths();
+        assert!(ed.cur().edge(&r).unwrap().waypoints.is_empty());
     }
 }

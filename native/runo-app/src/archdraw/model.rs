@@ -193,6 +193,25 @@ pub(crate) struct Node {
     pub style: Style,
     #[serde(default, skip_serializing_if = "is_default")]
     pub effect: Effect,
+    /// The layer it is on; none is the base layer, which is always shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+    /// A boundary folded to one box; what it holds is hidden until it opens again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
+    /// A collapsed boundary's size when open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_size: Option<(f32, f32)>,
+}
+
+/// A set of shapes that can be hidden or locked together, such as infra or data flows.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Layer {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
@@ -343,6 +362,14 @@ pub(crate) struct Edge {
     pub motion: Motion,
     #[serde(default, skip_serializing_if = "is_default")]
     pub speed: Speed,
+    /// The sides it is pinned to; otherwise the sides facing each other.
+    #[serde(default, rename = "from-side", skip_serializing_if = "Option::is_none")]
+    pub from_side: Option<super::geom::Side>,
+    #[serde(default, rename = "to-side", skip_serializing_if = "Option::is_none")]
+    pub to_side: Option<super::geom::Side>,
+    /// Bends placed by hand, in diagram space; otherwise the route is worked out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waypoints: Vec<(f32, f32)>,
 }
 
 /// One diagram: a view over the model.
@@ -361,6 +388,8 @@ pub(crate) struct View {
     /// Motion is off on this diagram.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub still: bool,
+    #[serde(default, rename = "layer", skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
     #[serde(default, rename = "story", skip_serializing_if = "Vec::is_empty")]
     pub stories: Vec<Story>,
 }
@@ -384,17 +413,34 @@ impl View {
 
     /// Ids of the nodes inside `id`, at any depth.
     pub(crate) fn descendants(&self, id: &str) -> Vec<String> {
+        let kids = self.children();
         let mut out: Vec<String> = Vec::new();
-        let mut queue = vec![id.to_string()];
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::from([id]);
+        let mut queue = vec![id];
         while let Some(p) = queue.pop() {
-            for n in &self.nodes {
-                if n.parent.as_deref() == Some(p.as_str()) && !out.contains(&n.id) && n.id != id {
-                    out.push(n.id.clone());
-                    queue.push(n.id.clone());
+            for k in kids.get(p).into_iter().flatten() {
+                if seen.insert(k) {
+                    out.push(k.to_string());
+                    queue.push(k);
                 }
             }
         }
         out
+    }
+
+    /// Each boundary's direct contents.
+    pub(crate) fn children(&self) -> std::collections::HashMap<&str, Vec<&str>> {
+        let mut kids: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+        for n in &self.nodes {
+            if let Some(p) = n.parent.as_deref() {
+                kids.entry(p).or_default().push(n.id.as_str());
+            }
+        }
+        kids
+    }
+
+    pub(crate) fn layer(&self, name: &str) -> Option<&Layer> {
+        self.layers.iter().find(|l| l.name == name)
     }
 }
 
@@ -452,24 +498,25 @@ impl Doc {
             self.elements.iter().map(|e| e.id.clone()).collect();
         self.relations
             .retain(|r| ids.contains(&r.from) && ids.contains(&r.to));
-        let rels: std::collections::HashSet<String> =
-            self.relations.iter().map(|r| r.id.clone()).collect();
+        let rels: std::collections::HashMap<&str, &Relation> =
+            self.relations.iter().map(|r| (r.id.as_str(), r)).collect();
         for v in &mut self.views {
             v.nodes.retain(|n| ids.contains(&n.id));
             let shown: std::collections::HashSet<String> =
                 v.nodes.iter().map(|n| n.id.clone()).collect();
+            let layers: std::collections::HashSet<String> =
+                v.layers.iter().map(|l| l.name.clone()).collect();
             for n in &mut v.nodes {
                 if n.parent.as_ref().is_some_and(|p| !shown.contains(p)) {
                     n.parent = None;
                 }
+                if n.layer.as_ref().is_some_and(|l| !layers.contains(l)) {
+                    n.layer = None;
+                }
             }
             v.edges.retain(|e| {
-                rels.contains(&e.id)
-                    && self
-                        .relations
-                        .iter()
-                        .find(|r| r.id == e.id)
-                        .is_some_and(|r| shown.contains(&r.from) && shown.contains(&r.to))
+                rels.get(e.id.as_str())
+                    .is_some_and(|r| shown.contains(&r.from) && shown.contains(&r.to))
             });
             let drawn: std::collections::HashSet<String> =
                 v.edges.iter().map(|e| e.id.clone()).collect();
@@ -659,7 +706,6 @@ impl Rect {
         r.x >= self.x && r.y >= self.y && r.right() <= self.right() && r.bottom() <= self.bottom()
     }
 
-    #[cfg(test)]
     pub(crate) fn intersects(&self, r: &Rect) -> bool {
         self.x < r.right() && r.x < self.right() && self.y < r.bottom() && r.y < self.bottom()
     }
@@ -750,6 +796,7 @@ mod tests {
                             ..Default::default()
                         },
                         effect: Effect::Pulse,
+                        layer: Some("Apps".into()),
                         ..Default::default()
                     },
                     Node {
@@ -766,9 +813,16 @@ mod tests {
                     route: Route::Curved,
                     motion: Motion::Packets,
                     speed: Speed::Fast,
+                    from_side: Some(super::super::geom::Side::Bottom),
+                    waypoints: vec![(100., 150.)],
                     ..Default::default()
                 }],
                 still: false,
+                layers: vec![Layer {
+                    name: "Apps".into(),
+                    locked: true,
+                    ..Default::default()
+                }],
                 stories: vec![Story {
                     name: "Read".into(),
                     steps: vec![Step {

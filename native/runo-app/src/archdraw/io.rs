@@ -1,7 +1,7 @@
 //! Getting diagrams in and out: draw.io files both ways, Mermaid, SVG and PNG, and a first
 //! diagram made from the project's code.
 
-use super::editor::Editor;
+use super::editor::{view_sight, view_wires, Editor};
 use super::geom;
 use super::model::*;
 use super::motion;
@@ -225,15 +225,33 @@ pub(crate) fn drawio(doc: &Doc) -> String {
             if !v.still && e.motion != Motion::None {
                 style.push_str("flowAnimation=1;");
             }
+            for (end, side) in [("exit", e.from_side), ("entry", e.to_side)] {
+                if let Some(side) = side {
+                    let (x, y) = side_anchor(side);
+                    let _ = write!(style, "{end}X={x};{end}Y={y};");
+                }
+            }
             let label = [r.label.as_str(), r.tech.as_str()]
                 .iter()
                 .filter(|s| !s.is_empty())
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(" · ");
+            let geometry = if e.waypoints.is_empty() {
+                "<mxGeometry relative=\"1\" as=\"geometry\" />".to_string()
+            } else {
+                let points: String = e
+                    .waypoints
+                    .iter()
+                    .map(|p| format!("<mxPoint x=\"{}\" y=\"{}\" />", p.0, p.1))
+                    .collect();
+                format!(
+                    "<mxGeometry relative=\"1\" as=\"geometry\"><Array as=\"points\">{points}</Array></mxGeometry>"
+                )
+            };
             let _ = writeln!(
                 out,
-                "        <mxCell id=\"e-{}\" value=\"{}\" style=\"{}\" edge=\"1\" parent=\"1\" source=\"n-{}\" target=\"n-{}\">\n          <mxGeometry relative=\"1\" as=\"geometry\" />\n        </mxCell>",
+                "        <mxCell id=\"e-{}\" value=\"{}\" style=\"{}\" edge=\"1\" parent=\"1\" source=\"n-{}\" target=\"n-{}\">\n          {geometry}\n        </mxCell>",
                 esc(&e.id),
                 esc(&label),
                 esc(&style),
@@ -245,6 +263,30 @@ pub(crate) fn drawio(doc: &Doc) -> String {
     }
     out.push_str("</mxfile>\n");
     out
+}
+
+/// Where draw.io anchors a connector on a side, as fractions of the box.
+fn side_anchor(side: geom::Side) -> (f32, f32) {
+    match side {
+        geom::Side::Top => (0.5, 0.),
+        geom::Side::Right => (1., 0.5),
+        geom::Side::Bottom => (0.5, 1.),
+        geom::Side::Left => (0., 0.5),
+    }
+}
+
+/// The side a draw.io anchor sits on, if it's set.
+fn anchor_side(x: Option<&String>, y: Option<&String>) -> Option<geom::Side> {
+    let (x, y): (f32, f32) = (x?.parse().ok()?, y?.parse().ok()?);
+    let d = [
+        (geom::Side::Top, y),
+        (geom::Side::Bottom, 1. - y),
+        (geom::Side::Left, x),
+        (geom::Side::Right, 1. - x),
+    ];
+    d.into_iter()
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(s, _)| s)
 }
 
 fn style_map(style: &str) -> HashMap<String, String> {
@@ -508,9 +550,34 @@ pub(crate) fn import_drawio(text: &str) -> Result<Doc, String> {
             };
             let start = style.get("startArrow").is_some_and(|v| v != "none");
             let end = style.get("endArrow").is_none_or(|v| v != "none");
+            // Bends placed by hand, in the edge's parent's space.
+            let (ox, oy) = c
+                .attribute("parent")
+                .and_then(|p| abs.get(p))
+                .copied()
+                .unwrap_or((0., 0.));
+            let waypoints: Vec<(f32, f32)> = c
+                .children()
+                .filter(|g| g.has_tag_name("mxGeometry"))
+                .flat_map(|g| g.children())
+                .filter(|a| a.has_tag_name("Array") && a.attribute("as") == Some("points"))
+                .flat_map(|a| a.children())
+                .filter(|p| p.has_tag_name("mxPoint"))
+                .map(|p| {
+                    let f = |k| {
+                        p.attribute(k)
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .unwrap_or(0.)
+                    };
+                    (f("x") + ox, f("y") + oy)
+                })
+                .collect();
             view.edges.push(Edge {
                 id,
                 route,
+                from_side: anchor_side(style.get("exitX"), style.get("exitY")),
+                to_side: anchor_side(style.get("entryX"), style.get("entryY")),
+                waypoints,
                 arrow: match (start, end) {
                     (true, _) => Arrow::Both,
                     (false, true) => Arrow::End,
@@ -901,9 +968,14 @@ fn svg_effect(out: &mut String, n: &Node, color: &str) {
 
 fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
     let theme = Theme::LIGHT;
-    let area = Rect::bounds(view.nodes.iter().map(|n| n.rect()))
-        .unwrap_or(Rect::new(0., 0., 400., 300.))
-        .inflate(40.);
+    let area = Rect::bounds(
+        view.nodes
+            .iter()
+            .filter(|n| view_sight(view).shows(&n.id))
+            .map(|n| n.rect()),
+    )
+    .unwrap_or(Rect::new(0., 0., 400., 300.))
+    .inflate(40.);
     let mut out = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\" width=\"{}\" height=\"{}\" font-family=\"Inter, Helvetica, Arial, sans-serif\">\n<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n",
         area.x, area.y, area.w, area.h, area.w.round(), area.h.round(), area.x, area.y, area.w, area.h
@@ -934,7 +1006,9 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
     let draw_node = |out: &mut String, n: &Node| {
         let Some(e) = doc.element(&n.id) else { return };
         let _ = writeln!(out, "<g data-node=\"{}\">", esc(&n.id));
-        let o = shape::outline(e.kind, &n.rect(), &n.style);
+        // A collapsed boundary is drawn as one box with its name in the middle.
+        let shown_kind = if n.collapsed { Kind::Container } else { e.kind };
+        let o = shape::outline(shown_kind, &n.rect(), &n.style);
         let p = shape::paint(e.kind, &n.style, &theme);
         let dash = if p.dashed {
             " stroke-dasharray=\"6 4\""
@@ -982,7 +1056,7 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
                 lines.push((l, size, p.sub, false));
             }
         }
-        text_block(out, &o.text, &lines, e.kind == Kind::Boundary);
+        text_block(out, &o.text, &lines, shown_kind == Kind::Boundary);
         if animated && n.effect != Effect::None {
             svg_effect(
                 out,
@@ -992,7 +1066,13 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
         }
         out.push_str("</g>\n");
     };
-    for n in view.nodes.iter().filter(|n| kind(&n.id) == Kind::Boundary) {
+    let sight = view_sight(view);
+    let boundary = |n: &Node| kind(&n.id) == Kind::Boundary && !n.collapsed;
+    for n in view
+        .nodes
+        .iter()
+        .filter(|n| boundary(n) && sight.shows(&n.id))
+    {
         draw_node(&mut out, n);
     }
     let _ = writeln!(
@@ -1002,15 +1082,15 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
     );
     // Labels go on top of the shapes, so a short gap doesn't hide them.
     let mut labels = String::new();
+    let routes: HashMap<String, geom::Wire> = view_wires(doc, view, &sight).into_iter().collect();
     for e in &view.edges {
         let Some(r) = doc.relation(&e.id) else {
             continue;
         };
-        let (Some(a), Some(b)) = (view.node(&r.from), view.node(&r.to)) else {
+        let Some(w) = routes.get(&e.id) else {
             continue;
         };
-        let w = geom::route(&a.rect(), &b.rect(), e.route);
-        let (d, len) = wire_d(&w);
+        let (d, len) = wire_d(w);
         let color = e
             .style
             .stroke
@@ -1057,7 +1137,11 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
             );
         }
     }
-    for n in view.nodes.iter().filter(|n| kind(&n.id) != Kind::Boundary) {
+    for n in view
+        .nodes
+        .iter()
+        .filter(|n| !boundary(n) && sight.shows(&n.id))
+    {
         draw_node(&mut out, n);
     }
     out.push_str(&labels);
@@ -1281,7 +1365,9 @@ mod tests {
 
     #[test]
     fn drawio_round_trips() {
-        let doc = sample();
+        let mut doc = sample();
+        doc.views[0].edges[0].from_side = Some(geom::Side::Bottom);
+        doc.views[0].edges[0].waypoints = vec![(120., 480.)];
         let xml = drawio(&doc);
         assert!(xml.contains("container=1"));
         assert!(xml.contains("shape=cylinder3"));
@@ -1310,6 +1396,9 @@ mod tests {
         let orig_api = doc.views[0].node("service").unwrap();
         assert_eq!(v.node(&api.id).unwrap().x, orig_api.x);
         assert_eq!(back.relations[0].label, "reads & writes");
+        assert_eq!(v.edges[0].from_side, Some(geom::Side::Bottom));
+        assert_eq!(v.edges[0].to_side, None);
+        assert_eq!(v.edges[0].waypoints, vec![(120., 480.)]);
     }
 
     #[test]

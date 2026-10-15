@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 pub(crate) type Pt = (f32, f32);
 
 /// The side of a box a connector leaves or enters by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum Side {
     Top,
     Right,
@@ -17,6 +18,19 @@ pub(crate) enum Side {
 
 impl Side {
     pub(crate) const ALL: [Side; 4] = [Side::Top, Side::Right, Side::Bottom, Side::Left];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Side::Top => "Top",
+            Side::Right => "Right",
+            Side::Bottom => "Bottom",
+            Side::Left => "Left",
+        }
+    }
+
+    fn across(self) -> bool {
+        matches!(self, Side::Left | Side::Right)
+    }
 
     pub(crate) fn point(self, r: &Rect) -> Pt {
         let (cx, cy) = r.center();
@@ -175,6 +189,250 @@ pub(crate) fn seg_dist(p: Pt, a: Pt, b: Pt) -> f32 {
 
 /// The route of a connector from box `a` to box `b`.
 pub(crate) fn route(a: &Rect, b: &Rect, kind: Route) -> Wire {
+    route_with(a, b, kind, &Way::default())
+}
+
+/// What a connector's route respects beyond its two boxes: sides it is pinned to, bends the
+/// user placed, and boxes it should go around.
+#[derive(Default)]
+pub(crate) struct Way<'a> {
+    pub from: Option<Side>,
+    pub to: Option<Side>,
+    pub waypoints: &'a [Pt],
+    pub obstacles: &'a [Rect],
+}
+
+/// The side of `r` that faces `p`.
+fn side_toward(r: &Rect, p: Pt) -> Side {
+    let (cx, cy) = r.center();
+    let (dx, dy) = ((p.0 - cx) / r.w.max(1.), (p.1 - cy) / r.h.max(1.));
+    if dx.abs() >= dy.abs() {
+        if dx >= 0. {
+            Side::Right
+        } else {
+            Side::Left
+        }
+    } else if dy >= 0. {
+        Side::Bottom
+    } else {
+        Side::Top
+    }
+}
+
+/// Drop repeated points and bends that don't bend.
+fn simplify(points: &mut Vec<Pt>) {
+    points.dedup_by(|p, q| dist(*p, *q) < 0.5);
+    let mut i = 1;
+    while i + 1 < points.len() {
+        let (a, b, c) = (points[i - 1], points[i], points[i + 1]);
+        let straight = ((a.0 - b.0).abs() < 0.5 && (b.0 - c.0).abs() < 0.5)
+            || ((a.1 - b.1).abs() < 0.5 && (b.1 - c.1).abs() < 0.5);
+        if straight {
+            points.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Whether a straight axis-aligned segment passes through the inside of `r`.
+fn seg_hits(a: Pt, b: Pt, r: &Rect) -> bool {
+    let e = 0.5;
+    if (a.1 - b.1).abs() < e {
+        a.1 > r.y + e
+            && a.1 < r.bottom() - e
+            && a.0.max(b.0) > r.x + e
+            && a.0.min(b.0) < r.right() - e
+    } else if (a.0 - b.0).abs() < e {
+        a.0 > r.x + e
+            && a.0 < r.right() - e
+            && a.1.max(b.1) > r.y + e
+            && a.1.min(b.1) < r.bottom() - e
+    } else {
+        // A diagonal: test its box, which is enough to send it round.
+        Rect::span(a, b).intersects(r)
+    }
+}
+
+/// Room kept between a routed connector and the boxes it passes.
+const CLEARANCE: f32 = 14.;
+
+/// An orthogonal path from `start` (leaving by `sa`) to `end` (entering by `sb`) that keeps
+/// out of `obstacles`, with as few bends as it can. None if boxes wall it in.
+fn ortho_path(start: Pt, sa: Side, end: Pt, sb: Side, obstacles: &[Rect]) -> Option<Vec<Pt>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let stub = CLEARANCE + 2.;
+    let (na, nb) = (sa.normal(), sb.normal());
+    let s1 = (start.0 + na.0 * stub, start.1 + na.1 * stub);
+    let e1 = (end.0 + nb.0 * stub, end.1 + nb.1 * stub);
+    let walls: Vec<Rect> = obstacles.iter().map(|r| r.inflate(CLEARANCE)).collect();
+    let mut xs = vec![s1.0, e1.0, (s1.0 + e1.0) / 2.];
+    let mut ys = vec![s1.1, e1.1, (s1.1 + e1.1) / 2.];
+    for w in &walls {
+        xs.extend([w.x, w.right()]);
+        ys.extend([w.y, w.bottom()]);
+    }
+    let tidy = |v: &mut Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    };
+    tidy(&mut xs);
+    tidy(&mut ys);
+    let find = |v: &[f32], x: f32| v.iter().position(|y| (y - x).abs() < 0.5);
+    let (si, sj) = (find(&xs, s1.0)?, find(&ys, s1.1)?);
+    let (ei, ej) = (find(&xs, e1.0)?, find(&ys, e1.1)?);
+    let (nx, ny) = (xs.len(), ys.len());
+    let inside = |p: Pt| {
+        walls.iter().any(|w| {
+            p.0 > w.x + 0.5 && p.0 < w.right() - 0.5 && p.1 > w.y + 0.5 && p.1 < w.bottom() - 0.5
+        })
+    };
+    // State: grid point and the axis it was reached along (0 across, 1 up and down).
+    let idx = |i: usize, j: usize, d: usize| (j * nx + i) * 2 + d;
+    let mut best = vec![f32::INFINITY; nx * ny * 2];
+    let mut prev = vec![usize::MAX; nx * ny * 2];
+    let mut heap = BinaryHeap::new();
+    let d0 = usize::from(!sa.across());
+    best[idx(si, sj, d0)] = 0.;
+    heap.push((Reverse(0u64), idx(si, sj, d0)));
+    const BEND: f32 = 40.;
+    let key = |c: f32| Reverse((c * 16.) as u64);
+    let goal_dir = usize::from(!sb.across());
+    let mut found = None;
+    while let Some((Reverse(_), st)) = heap.pop() {
+        let (cell, d) = (st / 2, st % 2);
+        let (i, j) = (cell % nx, cell / nx);
+        let cost = best[st];
+        if i == ei && j == ej {
+            // Arriving along the axis we enter by saves a last bend.
+            let total = cost + if d == goal_dir { 0. } else { BEND };
+            if found.is_none_or(|(c, _)| total < c) {
+                found = Some((total, st));
+            }
+            continue;
+        }
+        if found.is_some_and(|(c, _)| cost >= c) {
+            break;
+        }
+        let here = (xs[i], ys[j]);
+        let steps: [(isize, isize, usize); 4] = [(1, 0, 0), (-1, 0, 0), (0, 1, 1), (0, -1, 1)];
+        for (di, dj, nd) in steps {
+            let (ni, nj) = (i as isize + di, j as isize + dj);
+            if ni < 0 || nj < 0 || ni >= nx as isize || nj >= ny as isize {
+                continue;
+            }
+            let (ni, nj) = (ni as usize, nj as usize);
+            let there = (xs[ni], ys[nj]);
+            let at_end = ni == ei && nj == ej;
+            if !at_end && inside(there) {
+                continue;
+            }
+            if walls.iter().any(|w| seg_hits(here, there, w)) {
+                continue;
+            }
+            let c = cost + dist(here, there) + if nd == d { 0. } else { BEND };
+            let ns = idx(ni, nj, nd);
+            if c < best[ns] {
+                best[ns] = c;
+                prev[ns] = st;
+                heap.push((key(c), ns));
+            }
+        }
+    }
+    let (_, mut st) = found?;
+    let mut pts = Vec::new();
+    loop {
+        let cell = st / 2;
+        pts.push((xs[cell % nx], ys[cell / nx]));
+        if prev[st] == usize::MAX {
+            break;
+        }
+        st = prev[st];
+    }
+    pts.reverse();
+    let mut out = vec![start];
+    out.extend(pts);
+    out.push(end);
+    simplify(&mut out);
+    Some(out)
+}
+
+/// Join points with right-angled steps, turning first across the way the last step went.
+fn orthogonal_through(points: &[Pt], first_across: bool) -> Vec<Pt> {
+    let mut out = vec![points[0]];
+    let mut across = first_across;
+    for w in points.windows(2) {
+        let (p, q) = (w[0], w[1]);
+        if (p.0 - q.0).abs() > 0.5 && (p.1 - q.1).abs() > 0.5 {
+            out.push(if across { (q.0, p.1) } else { (p.0, q.1) });
+        } else {
+            across = (p.1 - q.1).abs() < 0.5;
+        }
+        out.push(q);
+        across = !across;
+    }
+    simplify(&mut out);
+    out
+}
+
+/// Where a connector's bend handles sit: the middle of each segment.
+pub(crate) fn bend_handles(points: &[Pt]) -> Vec<Pt> {
+    points
+        .windows(2)
+        .map(|s| ((s[0].0 + s[1].0) / 2., (s[0].1 + s[1].1) / 2.))
+        .collect()
+}
+
+/// The bends a connector keeps after segment `seg` of `points` is dragged to `at`. A
+/// straight connector gains a bend there; an elbow's segment slides across, with a short
+/// step added where it leaves or reaches a box.
+pub(crate) fn bend(points: &[Pt], seg: usize, at: Pt, straight: bool) -> Vec<Pt> {
+    let n = points.len();
+    if n < 2 || seg + 1 >= n {
+        return points
+            .get(1..n.saturating_sub(1))
+            .unwrap_or_default()
+            .to_vec();
+    }
+    let mut inner: Vec<Pt> = points[1..n - 1].to_vec();
+    if straight {
+        inner.insert(seg, at);
+        return inner;
+    }
+    let (p, q) = (points[seg], points[seg + 1]);
+    let across = (p.1 - q.1).abs() < 0.5;
+    let shift = |pt: Pt| if across { (pt.0, at.1) } else { (at.0, pt.1) };
+    // A short step out of the box, so the end stays on its side.
+    const STEP: f32 = 20.;
+    let toward = |from: Pt, to: Pt| {
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let len = (dx * dx + dy * dy).sqrt().max(1.);
+        let k = STEP.min(len / 3.);
+        (from.0 + dx / len * k, from.1 + dy / len * k)
+    };
+    let mut out = Vec::new();
+    if seg == 0 {
+        let s = toward(p, q);
+        out.push(s);
+        out.push(shift(s));
+    } else {
+        out.extend_from_slice(&inner[..seg - 1]);
+        out.push(shift(p));
+    }
+    if seg + 1 == n - 1 {
+        let e = toward(q, p);
+        out.push(shift(e));
+        out.push(e);
+    } else {
+        out.push(shift(q));
+        out.extend_from_slice(&inner[seg + 1..]);
+    }
+    out
+}
+
+/// The route of a connector from box `a` to box `b`, keeping to `way`.
+pub(crate) fn route_with(a: &Rect, b: &Rect, kind: Route, way: &Way) -> Wire {
     if a == b {
         // A box that talks to itself: a loop off its right side.
         let (x, y) = (a.right(), a.y + a.h * 0.3);
@@ -184,17 +442,58 @@ pub(crate) fn route(a: &Rect, b: &Rect, kind: Route) -> Wire {
             curved: false,
         };
     }
+    let wps = way.waypoints;
+    let (auto_a, auto_b) = match (wps.first(), wps.last()) {
+        (Some(f), Some(l)) => (side_toward(a, *f), side_toward(b, *l)),
+        _ => sides(a, b),
+    };
+    let (sa, sb) = (way.from.unwrap_or(auto_a), way.to.unwrap_or(auto_b));
     match kind {
         Route::Straight => {
-            let start = clip(a, b.center());
-            let end = clip(b, a.center());
+            let start = match (way.from, wps.first()) {
+                (Some(s), _) => s.point(a),
+                (None, Some(f)) => clip(a, *f),
+                (None, None) => clip(a, b.center()),
+            };
+            let end = match (way.to, wps.last()) {
+                (Some(s), _) => s.point(b),
+                (None, Some(l)) => clip(b, *l),
+                (None, None) => clip(b, a.center()),
+            };
+            let mut points = vec![start];
+            points.extend_from_slice(wps);
+            points.push(end);
             Wire {
-                points: vec![start, end],
+                points,
+                curved: false,
+            }
+        }
+        Route::Elbow if !wps.is_empty() => {
+            let mut through = vec![sa.point(a)];
+            through.extend_from_slice(wps);
+            through.push(sb.point(b));
+            let mut points = orthogonal_through(&through, sa.across());
+            // Come into the end box square to its side.
+            let n = points.len();
+            if n >= 3 {
+                let (p, q) = (points[n - 3], points[n - 2]);
+                let end = points[n - 1];
+                let last_across = (q.1 - end.1).abs() < 0.5;
+                if last_across != sb.across() && (p.0 - q.0).abs() + (p.1 - q.1).abs() > 0.5 {
+                    points[n - 2] = if sb.across() {
+                        (q.0, end.1)
+                    } else {
+                        (end.0, q.1)
+                    };
+                    simplify(&mut points);
+                }
+            }
+            Wire {
+                points,
                 curved: false,
             }
         }
         Route::Elbow => {
-            let (sa, sb) = sides(a, b);
             let start = sa.point(a);
             let end = sb.point(b);
             let points = match sa {
@@ -208,17 +507,20 @@ pub(crate) fn route(a: &Rect, b: &Rect, kind: Route) -> Wire {
                 }
             };
             let mut points: Vec<Pt> = points;
-            points.dedup_by(|p, q| dist(*p, *q) < 0.5);
-            // Drop bends that don't bend.
-            let mut i = 1;
-            while i + 1 < points.len() {
-                let (a, b, c) = (points[i - 1], points[i], points[i + 1]);
-                let straight = ((a.0 - b.0).abs() < 0.5 && (b.0 - c.0).abs() < 0.5)
-                    || ((a.1 - b.1).abs() < 0.5 && (b.1 - c.1).abs() < 0.5);
-                if straight {
-                    points.remove(i);
-                } else {
-                    i += 1;
+            simplify(&mut points);
+            // Go round boxes in the way, when there are any.
+            let blocked = |pts: &[Pt]| {
+                pts.windows(2).any(|s| {
+                    way.obstacles
+                        .iter()
+                        .any(|r| seg_hits(s[0], s[1], &r.inflate(4.)))
+                })
+            };
+            if !way.obstacles.is_empty() && blocked(&points) {
+                let mut walls: Vec<Rect> = way.obstacles.to_vec();
+                walls.extend([*a, *b]);
+                if let Some(p) = ortho_path(start, sa, end, sb, &walls) {
+                    points = p;
                 }
             }
             Wire {
@@ -227,7 +529,6 @@ pub(crate) fn route(a: &Rect, b: &Rect, kind: Route) -> Wire {
             }
         }
         Route::Curved => {
-            let (sa, sb) = sides(a, b);
             let start = sa.point(a);
             let end = sb.point(b);
             let k = (dist(start, end) / 2.).clamp(30., 160.);
@@ -792,5 +1093,97 @@ mod tests {
         let on = cyclic_links(&links);
         assert_eq!(on.len(), 3);
         assert!(!on.contains(&("c".to_string(), "d".to_string())));
+    }
+
+    #[test]
+    fn elbows_go_round_boxes_in_the_way() {
+        let a = Rect::new(0., 0., 100., 60.);
+        let b = Rect::new(400., 0., 100., 60.);
+        let wall = Rect::new(200., -40., 100., 140.);
+        let plain = route(&a, &b, Route::Elbow);
+        assert!(plain.points.windows(2).any(|s| seg_hits(s[0], s[1], &wall)));
+        let w = route_with(
+            &a,
+            &b,
+            Route::Elbow,
+            &Way {
+                obstacles: &[wall],
+                ..Default::default()
+            },
+        );
+        assert!(
+            !w.points.windows(2).any(|s| seg_hits(s[0], s[1], &wall)),
+            "{:?}",
+            w.points
+        );
+        assert_eq!(w.points.first(), Some(&(100., 30.)));
+        assert_eq!(w.points.last(), Some(&(400., 30.)));
+        for s in w.points.windows(2) {
+            assert!((s[0].0 - s[1].0).abs() < 0.5 || (s[0].1 - s[1].1).abs() < 0.5);
+        }
+    }
+
+    #[test]
+    fn pinned_sides_and_waypoints_shape_the_route() {
+        let a = Rect::new(0., 0., 100., 60.);
+        let b = Rect::new(400., 0., 100., 60.);
+        let w = route_with(
+            &a,
+            &b,
+            Route::Elbow,
+            &Way {
+                from: Some(Side::Bottom),
+                to: Some(Side::Bottom),
+                ..Default::default()
+            },
+        );
+        assert_eq!(w.points.first(), Some(&(50., 60.)));
+        assert_eq!(w.points.last(), Some(&(450., 60.)));
+        let wps = [(250., 200.)];
+        let w = route_with(
+            &a,
+            &b,
+            Route::Elbow,
+            &Way {
+                waypoints: &wps,
+                ..Default::default()
+            },
+        );
+        let on = w
+            .points
+            .windows(2)
+            .any(|s| seg_dist((250., 200.), s[0], s[1]) < 0.5);
+        assert!(on, "{:?}", w.points);
+        for s in w.points.windows(2) {
+            assert!((s[0].0 - s[1].0).abs() < 0.5 || (s[0].1 - s[1].1).abs() < 0.5);
+        }
+        let s = route_with(
+            &a,
+            &b,
+            Route::Straight,
+            &Way {
+                waypoints: &wps,
+                ..Default::default()
+            },
+        );
+        assert_eq!(s.points.len(), 3);
+    }
+
+    #[test]
+    fn dragging_a_segment_bends_the_connector() {
+        // An elbow: right, down, right.
+        let pts = vec![(0., 0.), (50., 0.), (50., 100.), (100., 100.)];
+        let w = bend(&pts, 1, (70., 40.), false);
+        assert_eq!(w, vec![(70., 0.), (70., 100.)]);
+        // Its first segment gets a step out of the box.
+        let w = bend(&pts, 0, (20., -30.), false);
+        assert_eq!(w[0].1, 0.);
+        assert_eq!(w[1], (w[0].0, -30.));
+        assert_eq!(w[2], (50., -30.));
+        assert_eq!(w[3], (50., 100.));
+        // A straight connector gains a bend where it's dragged.
+        let w = bend(&[(0., 0.), (100., 0.)], 0, (50., 40.), true);
+        assert_eq!(w, vec![(50., 40.)]);
+        assert_eq!(bend_handles(&pts)[1], (50., 50.));
     }
 }

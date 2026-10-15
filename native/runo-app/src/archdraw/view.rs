@@ -15,7 +15,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-actions!(arch_editor, [CanvasEscape, CanvasTab, CanvasCopy]);
+actions!(
+    arch_editor,
+    [CanvasEscape, CanvasTab, CanvasCopy, CanvasFind]
+);
 
 /// Keys the canvas takes before the app's own bindings for them.
 pub(crate) fn bindings() -> Vec<KeyBinding> {
@@ -23,6 +26,7 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", CanvasEscape, Some("ArchEditor")),
         KeyBinding::new("tab", CanvasTab, Some("ArchEditor")),
         KeyBinding::new("secondary-c", CanvasCopy, Some("ArchEditor")),
+        KeyBinding::new("secondary-f", CanvasFind, Some("ArchEditor")),
     ]
 }
 
@@ -76,6 +80,15 @@ enum Drag {
     Place {
         preset: &'static Preset,
         at: Option<Point<Pixels>>,
+    },
+    /// Bending a connector by one of its segments.
+    Bend {
+        id: String,
+        seg: usize,
+        from: Pt,
+        start: Vec<Pt>,
+        straight: bool,
+        moved: bool,
     },
 }
 
@@ -154,6 +167,16 @@ pub(crate) struct ArchEditor {
     playing: Option<Playing>,
     /// A repaint is scheduled for the next animation frame.
     ticking: bool,
+    /// Find on the canvas: open, what matched, and which match is shown.
+    find_open: bool,
+    f_find: Entity<InputState>,
+    found: Vec<String>,
+    found_at: usize,
+    /// Renaming a layer.
+    f_layer: Entity<InputState>,
+    layer_edit: Option<usize>,
+    /// Diagrams opened by drilling into a shape, for the way back.
+    trail: Vec<String>,
     _subs: Vec<Subscription>,
 }
 
@@ -384,6 +407,37 @@ impl ArchEditor {
                 }
             }),
         );
+        let f_find =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Find by name, tech or #tag"));
+        subs.push(
+            cx.subscribe_in(&f_find, window, |this, state, ev, window, cx| match ev {
+                InputEvent::Change => {
+                    let q = state.read(cx).value().to_string();
+                    this.found = this.ed.find(&q);
+                    this.found_at = 0;
+                    this.show_found(cx);
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.step_found(1, cx);
+                    let _ = window;
+                }
+                _ => {}
+            }),
+        );
+        let f_layer = cx.new(|cx| InputState::new(window, cx).placeholder("Layer name"));
+        subs.push(
+            cx.subscribe_in(&f_layer, window, |this, state, ev, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let v = state.read(cx).value().to_string();
+                    if let Some(i) = this.layer_edit.take() {
+                        this.act(cx, |ed| ed.rename_layer(i, &v));
+                    }
+                    if matches!(ev, InputEvent::PressEnter { .. }) {
+                        window.focus(&this.focus, cx);
+                    }
+                }
+            }),
+        );
         Self {
             ed: Editor::new(doc),
             root,
@@ -437,6 +491,13 @@ impl ArchEditor {
             open_story: None,
             playing: None,
             ticking: false,
+            find_open: false,
+            f_find,
+            found: Vec::new(),
+            found_at: 0,
+            f_layer,
+            layer_edit: None,
+            trail: Vec::new(),
             _subs: subs,
         }
     }
@@ -463,6 +524,18 @@ impl ArchEditor {
     fn one_node(&self) -> Option<String> {
         (self.ed.sel.nodes.len() == 1 && self.ed.sel.edges.is_empty())
             .then(|| self.ed.sel.nodes[0].clone())
+    }
+
+    /// The one selected connector, when it can be bent by hand: its route, and whether
+    /// it's straight (curves can't be).
+    fn bendable(&self) -> Option<(String, geom::Wire, bool)> {
+        let id = self.one_edge()?;
+        let e = self.ed.cur().edge(&id)?;
+        if e.route == Route::Curved {
+            return None;
+        }
+        let (_, w) = self.ed.wires().into_iter().find(|(x, _)| *x == id)?;
+        Some((id, w, e.route == Route::Straight))
     }
 
     fn one_edge(&self) -> Option<String> {
@@ -553,6 +626,18 @@ impl ArchEditor {
         Rect::new(x, y, r.w * self.zoom, r.h * self.zoom)
     }
 
+    /// The part of the diagram on screen, with a margin for strokes and glows.
+    fn visible_world(&self) -> Rect {
+        let (w, h) = self.view_size();
+        Rect::new(
+            -self.pan.0 / self.zoom,
+            -self.pan.1 / self.zoom,
+            w / self.zoom,
+            h / self.zoom,
+        )
+        .inflate(40. / self.zoom)
+    }
+
     fn view_size(&self) -> Pt {
         let b = self.bounds.get();
         (f32::from(b.size.width), f32::from(b.size.height))
@@ -606,6 +691,30 @@ impl ArchEditor {
     // ---- Commands
 
     fn open_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.trail.clear();
+        self.go_to_view(id, cx);
+    }
+
+    /// Open the diagram a shape links to, remembering the way back.
+    fn drill(&mut self, id: &str, cx: &mut Context<Self>) {
+        let here = self.ed.view.clone();
+        if here != id {
+            self.trail.push(here);
+        }
+        self.go_to_view(id, cx);
+    }
+
+    /// Go back up the trail to the diagram at `i`.
+    fn back_to(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(id) = self.trail.get(i).cloned() {
+            self.trail.truncate(i);
+            self.go_to_view(&id, cx);
+        }
+    }
+
+    fn go_to_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.find_open = false;
+        self.found.clear();
         self.ed.open_view(id);
         self.fitted = false;
         self.menu = None;
@@ -719,6 +828,7 @@ impl ArchEditor {
 
     /// Run an editor command that changes the model.
     fn act(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Editor)) {
+        self.commit_layer_name(cx);
         f(&mut self.ed);
         self.menu = None;
         self.after_edit(cx);
@@ -958,6 +1068,10 @@ impl ArchEditor {
 
     fn on_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        if self.layer_edit.is_some() {
+            self.commit_layer_name(cx);
+            self.after_edit(cx);
+        }
         self.menu = None;
         self.export_open = false;
         if self.editing.is_some() {
@@ -977,9 +1091,31 @@ impl ArchEditor {
             return;
         }
         let tol = 6. / self.zoom;
+        // Bend handles of a single selected connector.
+        if let Some((id, w0, straight)) = self.bendable() {
+            for (seg, h) in geom::bend_handles(&w0.points).into_iter().enumerate() {
+                if geom::dist(h, w) <= tol * 1.4 {
+                    self.drag = Drag::Bend {
+                        id,
+                        seg,
+                        from: w,
+                        start: w0.points.clone(),
+                        straight,
+                        moved: false,
+                    };
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         // Resize handles of a single selected shape.
         if let Some(id) = self.one_node() {
-            if let Some(n) = self.ed.cur().node(&id).filter(|n| !n.locked) {
+            if let Some(n) = self
+                .ed
+                .cur()
+                .node(&id)
+                .filter(|n| !self.ed.is_locked(n) && !n.collapsed)
+            {
                 let r = n.rect();
                 for h in Handle::ALL {
                     if geom::dist(h.point(&r), w) <= tol * 1.4 {
@@ -1179,6 +1315,29 @@ impl ArchEditor {
                 }
                 self.ed.set_rects(&[(id, r)]);
             }
+            Drag::Bend {
+                id,
+                seg,
+                from,
+                start,
+                straight,
+                moved,
+            } => {
+                if !*moved && geom::dist(*from, w) * zoom < 3. {
+                    return;
+                }
+                if !*moved {
+                    *moved = true;
+                    self.ed.checkpoint();
+                }
+                let mut at = w;
+                if self.snap && self.grid && !e.modifiers.alt {
+                    at = ((at.0 / GRID).round() * GRID, (at.1 / GRID).round() * GRID);
+                }
+                let pts = geom::bend(start, *seg, at, *straight);
+                let id = id.clone();
+                self.ed.set_waypoints(&id, pts);
+            }
             Drag::Marquee { to, .. } => *to = w,
             Drag::Connect { to, .. } => *to = w,
             Drag::Place { at, .. } => *at = Some(e.position),
@@ -1237,6 +1396,11 @@ impl ArchEditor {
                     .map(|p| self.world(self.local(p)))
                     .unwrap_or_else(|| self.center_world());
                 self.add_preset(preset, at, cx);
+            }
+            Drag::Bend { moved, .. } => {
+                if moved {
+                    self.after_edit(cx);
+                }
             }
             Drag::Pan { .. } | Drag::None => {}
         }
@@ -1300,7 +1464,9 @@ impl ArchEditor {
         let mut handled = true;
         match (sec, m.shift, m.alt, key) {
             (_, _, _, "escape") => {
-                if !matches!(self.drag, Drag::None) {
+                if self.find_open {
+                    self.close_find(window, cx);
+                } else if !matches!(self.drag, Drag::None) {
                     self.drag = Drag::None;
                 } else if self.menu.is_some() || self.quick.is_some() || self.export_open {
                     self.menu = None;
@@ -1491,6 +1657,25 @@ struct Scene {
     t: f32,
     moving: bool,
     story: Option<StoryDraw>,
+    /// Connectors on a dependency cycle, for the status line.
+    cycles: usize,
+    /// Handles in the middle of each segment of the selected connector.
+    bends: Vec<Pt>,
+    /// Shapes matching the find bar, and the one shown now.
+    found: Vec<Rect>,
+    found_now: Option<Rect>,
+}
+
+/// Below this zoom connectors stop moving: the motion is too small to see.
+const MOTION_MIN_ZOOM: f32 = 0.25;
+/// Below this zoom a box shows only its name, not its kind, technology or description.
+const DETAIL_MIN_ZOOM: f32 = 0.4;
+
+/// The area a connector covers, for skipping the ones off screen.
+fn wire_box(w: &geom::Wire) -> Rect {
+    Rect::bounds(w.points.iter().map(|p| Rect::new(p.0, p.1, 0., 0.)))
+        .unwrap_or_default()
+        .inflate(1.)
 }
 
 fn col(c: u32, a: f32) -> Rgba {
@@ -1911,6 +2096,34 @@ fn paint_scene(b: Bounds<Pixels>, s: &Scene, window: &mut Window) {
             BorderStyle::Dashed,
         ));
     }
+    for (i, r) in s.found.iter().enumerate() {
+        let now = s.found_now.as_ref() == Some(r);
+        let p = tf((r.x, r.y));
+        let grow = if now { 6. } else { 4. };
+        window.paint_quad(quad(
+            Bounds::new(
+                point(p.x - px(grow), p.y - px(grow)),
+                size(px(r.w * zoom + 2. * grow), px(r.h * zoom + 2. * grow)),
+            ),
+            px(8.),
+            col(0xf59e0b, if now { 0.12 } else { 0.05 }),
+            px(if now { 2.5 } else { 1.5 }),
+            col(0xf59e0b, if now { 1. } else { 0.7 }),
+            BorderStyle::Solid,
+        ));
+        let _ = i;
+    }
+    for p in &s.bends {
+        let c = tf(*p);
+        window.paint_quad(quad(
+            Bounds::new(point(c.x - px(4.5), c.y - px(4.5)), size(px(9.), px(9.))),
+            px(1.5),
+            col(s.accent, 1.),
+            px(1.5),
+            rgb(0xffffff),
+            BorderStyle::Solid,
+        ));
+    }
     for p in &s.handles {
         let c = tf(*p);
         window.paint_quad(quad(
@@ -2139,13 +2352,33 @@ impl ArchEditor {
         });
         let mut under = Vec::new();
         let mut over = Vec::new();
+        let els = self.ed.elements();
+        let vis = self.visible_world();
+        let sight = self.ed.sight();
         for n in &v.nodes {
-            let Some(e) = self.ed.doc.element(&n.id) else {
+            if !n.rect().intersects(&vis) || !sight.shows(&n.id) {
+                continue;
+            }
+            let Some(e) = els.get(n.id.as_str()) else {
                 continue;
             };
             let o = shape::outline(e.kind, &n.rect(), &n.style);
             let p = shape::paint(e.kind, &n.style, theme);
             let dim = story.as_ref().is_some_and(|s| !s.1.contains(&n.id));
+            // A collapsed boundary is a solid box that stands for what it holds.
+            let p = if n.collapsed {
+                shape::Paint {
+                    fill: Some(shape::mix(
+                        p.stroke.unwrap_or(theme.muted),
+                        theme.canvas,
+                        0.18,
+                    )),
+                    dashed: false,
+                    ..p
+                }
+            } else {
+                p
+            };
             let sd = ShapeDraw {
                 fill: o.fill,
                 detail: o.detail,
@@ -2161,7 +2394,7 @@ impl ArchEditor {
                     .radius
                     .unwrap_or_else(|| shape::default_radius(e.kind)),
             };
-            if e.kind == Kind::Boundary {
+            if e.kind == Kind::Boundary && !n.collapsed {
                 under.push(sd);
             } else {
                 over.push(sd);
@@ -2169,12 +2402,15 @@ impl ArchEditor {
         }
         let cycles = self.ed.cycles();
         let line = shape::mix(theme.text, theme.canvas, 0.5);
+        let edges: std::collections::HashMap<&str, &Edge> =
+            v.edges.iter().map(|e| (e.id.as_str(), e)).collect();
         let wires = self
             .ed
             .wires()
             .into_iter()
+            .filter(|(_, w)| wire_box(w).intersects(&vis))
             .filter_map(|(id, w)| {
-                let e = v.edge(&id)?;
+                let e = *edges.get(id.as_str())?;
                 let selected = self.ed.sel.has_edge(&id);
                 let color = if selected {
                     accent
@@ -2205,7 +2441,7 @@ impl ArchEditor {
         let mut locked = Vec::new();
         for id in &self.ed.sel.nodes {
             if let Some(n) = v.node(id) {
-                if n.locked {
+                if self.ed.is_locked(n) {
                     locked.push(n.rect());
                 } else {
                     selected.push(n.rect());
@@ -2216,7 +2452,7 @@ impl ArchEditor {
         let handles = match (&self.drag, self.one_node()) {
             (Drag::None | Drag::Resize { .. }, Some(id)) => v
                 .node(&id)
-                .filter(|n| !n.locked)
+                .filter(|n| !self.ed.is_locked(n) && !n.collapsed)
                 .map(|n| Handle::ALL.iter().map(|h| h.point(&n.rect())).collect())
                 .unwrap_or_default(),
             _ => Vec::new(),
@@ -2297,8 +2533,29 @@ impl ArchEditor {
             connect,
             target,
             t,
-            moving: !v.still || self.playing.is_some(),
+            moving: self.animating(),
             story: self.story_draw(),
+            cycles: cycles.len(),
+            bends: match &self.drag {
+                Drag::None | Drag::Bend { .. } => self
+                    .bendable()
+                    .map(|(_, w, _)| geom::bend_handles(&w.points))
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            },
+            found: if self.find_open {
+                self.found
+                    .iter()
+                    .filter_map(|id| self.ed.rect(id))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            found_now: self
+                .find_open
+                .then(|| self.found.get(self.found_at))
+                .flatten()
+                .and_then(|id| self.ed.rect(id)),
         }
     }
 
@@ -2672,6 +2929,21 @@ impl ArchEditor {
             )
             .child(
                 icon_btn(
+                    "arch-find",
+                    IconName::Search,
+                    "Find on the canvas (⌘F)",
+                    self.find_open,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.find_open {
+                        this.close_find(window, cx);
+                    } else {
+                        this.open_find(window, cx);
+                    }
+                })),
+            )
+            .child(
+                icon_btn(
                     "arch-motion-toggle",
                     IconName::Activity,
                     "Motion: animate connectors and effects (saved with the diagram)",
@@ -2840,7 +3112,7 @@ impl ArchEditor {
     }
 
     /// Names and notes drawn over the shapes, and connector labels.
-    fn labels(&self, theme: &Theme) -> Vec<AnyElement> {
+    fn labels(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let v = self.ed.cur();
         let z = self.zoom;
         let mut out = Vec::new();
@@ -2848,12 +3120,61 @@ impl ArchEditor {
             Some(Hit::Node(id)) => Some(id.clone()),
             _ => None,
         };
+        let els = self.ed.elements();
+        let vis = self.visible_world();
+        let sight = self.ed.sight();
         for n in &v.nodes {
-            let Some(e) = self.ed.doc.element(&n.id) else {
+            if !n.rect().intersects(&vis) || !sight.shows(&n.id) {
+                continue;
+            }
+            let Some(e) = els.get(n.id.as_str()) else {
                 continue;
             };
             let p = shape::paint(e.kind, &n.style, theme);
-            let o = shape::outline(e.kind, &n.rect(), &n.style);
+            // Fold or open a boundary from its corner.
+            if e.kind == Kind::Boundary && z > 0.4 && self.playing.is_none() {
+                let nr = self.screen_rect(&n.rect());
+                let id = n.id.clone();
+                out.push(
+                    div()
+                        .id(SharedString::from(format!("arch-fold-{}", n.id)))
+                        .absolute()
+                        .left(px(nr.x + nr.w - 26.))
+                        .top(px(nr.y + 6.))
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|el| el.bg(tint(c_subtle())))
+                        .tooltip(tip(if n.collapsed {
+                            "Expand"
+                        } else {
+                            "Collapse to one box"
+                        }))
+                        .child(icon(
+                            if n.collapsed {
+                                IconName::Maximize
+                            } else {
+                                IconName::Minimize
+                            },
+                            12.,
+                            p.sub,
+                        ))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let id = id.clone();
+                            this.act(cx, |ed| ed.toggle_collapse(&id));
+                        }))
+                        .into_any_element(),
+                );
+            }
+            let o = shape::outline(
+                if n.collapsed { Kind::Container } else { e.kind },
+                &n.rect(),
+                &n.style,
+            );
             let fs = p.font * z;
             let nr = self.screen_rect(&n.rect());
             if !e.icon.is_empty() && e.kind.is_part() && nr.h > 34. && nr.w > 60. && z > 0.45 {
@@ -2887,7 +3208,7 @@ impl ArchEditor {
                 continue;
             }
             let tr = self.screen_rect(&o.text);
-            let top = e.kind == Kind::Boundary;
+            let top = e.kind == Kind::Boundary && !n.collapsed;
             let mut block = div()
                 .absolute()
                 .left(px(tr.x))
@@ -2928,7 +3249,9 @@ impl ArchEditor {
                         .child(format!("[{}]", e.tech)),
                 );
             }
-            if let Some(c4) = e.kind.c4() {
+            // Far out, a box shows only its name.
+            let detail = z >= DETAIL_MIN_ZOOM;
+            if let Some(c4) = e.kind.c4().filter(|_| detail) {
                 let line = if e.tech.is_empty() {
                     format!("[{c4}]")
                 } else {
@@ -2942,7 +3265,13 @@ impl ArchEditor {
                         .child(line),
                 );
             }
-            if !top && !e.description.is_empty() && tr.h > fs * 4.2 {
+            if n.collapsed {
+                let inside = v.descendants(&n.id).len();
+                block = block.child(div().text_size(px(fs * 0.78)).text_color(rgb(p.sub)).child(
+                    format!("{inside} part{} inside", if inside == 1 { "" } else { "s" }),
+                ));
+            }
+            if detail && !top && !e.description.is_empty() && tr.h > fs * 4.2 {
                 block = block.child(
                     div()
                         .mt(px(3. * z))
@@ -2968,11 +3297,15 @@ impl ArchEditor {
             Some(Hit::Edge(id)) => Some(id.clone()),
             _ => None,
         };
+        let rels = self.ed.relations();
         for (id, w) in self.ed.wires() {
-            if editing_edge.as_deref() == Some(id.as_str()) {
+            if editing_edge.as_deref() == Some(id.as_str()) || z < 0.35 {
                 continue;
             }
-            let Some(r) = self.ed.doc.relation(&id) else {
+            if !vis.contains(w.middle()) {
+                continue;
+            }
+            let Some(r) = rels.get(id.as_str()) else {
                 continue;
             };
             let label = [r.label.as_str(), r.tech.as_str()]
@@ -3062,7 +3395,7 @@ impl ArchEditor {
                     items.push((
                         "Open linked diagram",
                         "",
-                        Box::new(move |this, _, cx| this.open_view(&link, cx)),
+                        Box::new(move |this, _, cx| this.drill(&link, cx)),
                     ));
                 }
                 items.push((
@@ -3097,6 +3430,20 @@ impl ArchEditor {
                     }),
                 ));
                 if self.ed.kind_of(id) == Kind::Boundary {
+                    let folded = self.ed.cur().node(id).is_some_and(|n| n.collapsed);
+                    let fid = id.clone();
+                    items.push((
+                        if folded {
+                            "Expand"
+                        } else {
+                            "Collapse to one box"
+                        },
+                        "",
+                        Box::new(move |this, _, cx| {
+                            let fid = fid.clone();
+                            this.act(cx, |ed| ed.toggle_collapse(&fid))
+                        }),
+                    ));
                     items.push((
                         "Ungroup",
                         "⇧⌘G",
@@ -3128,6 +3475,11 @@ impl ArchEditor {
             }
             Menu::Edge => {
                 items.push(("Edit label", "Enter", edit));
+                items.push((
+                    "Reset path",
+                    "",
+                    Box::new(|this, _, cx| this.act(cx, |ed| ed.reset_paths())),
+                ));
                 items.push((
                     "Reverse direction",
                     "",
@@ -3375,25 +3727,48 @@ impl ArchEditor {
                     cx.notify();
                 }),
             );
-        for n in &v.nodes {
-            let kind = self.ed.kind_of(&n.id);
-            let r = map(&n.rect());
-            el = el.child(
-                div()
-                    .absolute()
-                    .left(px(r.x))
-                    .top(px(r.y))
-                    .w(px(r.w))
-                    .h(px(r.h))
-                    .rounded(px(1.5))
-                    .when(kind == Kind::Boundary, |d| {
-                        d.border_1().border_color(rgb(c_muted()))
-                    })
-                    .when(kind != Kind::Boundary, |d| {
-                        d.bg(rgb(shape::mix(shape::accent(kind), c_canvas(), 0.6)))
-                    }),
-            );
-        }
+        // Painted in one pass, so a diagram of thousands of shapes costs one element here.
+        let els = self.ed.elements();
+        let (muted, canvas_c) = (c_muted(), c_canvas());
+        let sight = self.ed.sight();
+        let boxes: Vec<(Rect, Kind)> = v
+            .nodes
+            .iter()
+            .filter(|n| sight.shows(&n.id))
+            .map(|n| {
+                let kind = els.get(n.id.as_str()).map(|e| e.kind).unwrap_or_default();
+                (map(&n.rect()), kind)
+            })
+            .collect();
+        el = el.child(
+            canvas(
+                |_, _, _| {},
+                move |b, _, window, _| {
+                    for (r, kind) in &boxes {
+                        let bounds = Bounds::new(
+                            point(b.origin.x + px(r.x), b.origin.y + px(r.y)),
+                            size(px(r.w), px(r.h)),
+                        );
+                        let boundary = *kind == Kind::Boundary;
+                        let fill = if boundary {
+                            col(0, 0.)
+                        } else {
+                            col(shape::mix(shape::accent(*kind), canvas_c, 0.6), 1.)
+                        };
+                        window.paint_quad(quad(
+                            bounds,
+                            px(1.5),
+                            fill,
+                            px(if boundary { 1. } else { 0. }),
+                            col(muted, 1.),
+                            BorderStyle::Solid,
+                        ));
+                    }
+                },
+            )
+            .absolute()
+            .size_full(),
+        );
         let r = map(&visible);
         el = el.child(
             div()
@@ -3459,7 +3834,7 @@ impl ArchEditor {
         let hand = self.tool == Tool::Hand || self.space;
         let status = {
             let v = self.ed.cur();
-            let cycles = self.ed.cycles().len();
+            let cycles = scene.cycles;
             let mut parts = vec![
                 format!("{} shapes", v.nodes.len()),
                 format!("{} connectors", v.edges.len()),
@@ -3516,11 +3891,13 @@ impl ArchEditor {
                 .left_0()
                 .size_full(),
             )
-            .children(self.labels(theme))
+            .children(self.labels(theme, cx))
             .children(self.inline_view())
             .children(self.empty_state(cx))
             .children(self.minimap(cx))
             .children(self.player(cx))
+            .children(self.breadcrumbs(cx))
+            .children(self.find_bar(cx))
             .child(
                 div()
                     .absolute()
@@ -3955,6 +4332,32 @@ impl ArchEditor {
                 }
                 body = body.child(label_row("Opens diagram (right-click it to open)", links));
             }
+            if e.kind == Kind::Boundary {
+                let collapsed = n.collapsed;
+                let id = n.id.clone();
+                body = body.child(label_row(
+                    "Contents",
+                    text_btn(
+                        "arch-fold",
+                        if collapsed {
+                            "Expand"
+                        } else {
+                            "Collapse to one box"
+                        },
+                        Some(if collapsed {
+                            IconName::Maximize
+                        } else {
+                            IconName::Minimize
+                        }),
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let id = id.clone();
+                        this.act(cx, |ed| ed.toggle_collapse(&id));
+                    })),
+                ));
+            }
+            body = body.child(self.layer_row(Some(n.layer.clone()), cx));
             body = body.child(self.effect_section(Some(n.effect), cx));
             body = body.child(self.style_section(&n.style.clone(), false, cx));
             body = body.child(section("Arrange")).child(
@@ -4067,8 +4470,67 @@ impl ArchEditor {
                     )),
                 );
             }
+            let ends = |from: bool, current: Option<Side>, cx: &mut Context<Self>| {
+                let mut row = div().flex().flex_wrap().gap_1();
+                let opts = std::iter::once(None).chain(Side::ALL.into_iter().map(Some));
+                for (i, side) in opts.enumerate() {
+                    let label = side.map(|s| s.label()).unwrap_or("Auto");
+                    row = row.child(
+                        chip_btn(
+                            (
+                                if from {
+                                    "arch-from-side"
+                                } else {
+                                    "arch-to-side"
+                                },
+                                i,
+                            ),
+                            label,
+                            current == side,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.act(cx, |ed| {
+                                if from {
+                                    ed.pin_sides(Some(side), None)
+                                } else {
+                                    ed.pin_sides(None, Some(side))
+                                }
+                            })
+                        })),
+                    );
+                }
+                row
+            };
+            let custom = !e.waypoints.is_empty() || e.from_side.is_some() || e.to_side.is_some();
             body = body
                 .child(label_row("Path", routes))
+                .child(label_row("Leaves from", ends(true, e.from_side, cx)))
+                .child(label_row("Enters at", ends(false, e.to_side, cx)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_secondary()))
+                                .child(if e.route == Route::Curved {
+                                    "Elbow and straight connectors can be bent by hand."
+                                } else {
+                                    "Drag a square on the line to bend it. Elbows go round boxes on their own."
+                                }),
+                        )
+                        .when(custom, |el| {
+                            el.child(
+                                text_btn("arch-reset-path", "Reset path", Some(IconName::Undo2), false)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.act(cx, |ed| ed.reset_paths())
+                                    })),
+                            )
+                        }),
+                )
                 .child(label_row("Arrows", arrows))
                 .child(self.motion_section(Some(e.motion), Some(e.speed), cx))
                 .child(self.style_section(&e.style.clone(), true, cx))
@@ -4243,6 +4705,14 @@ impl ArchEditor {
                     .and_then(|id| v.node(id))
                     .map(|n| n.effect);
                 body = body.child(self.effect_section(effect, cx));
+                let layer = self
+                    .ed
+                    .sel
+                    .nodes
+                    .first()
+                    .and_then(|id| v.node(id))
+                    .map(|n| n.layer.clone());
+                body = body.child(self.layer_row(layer, cx));
             }
             if m > 0 {
                 let e = self.ed.sel.edges.first().and_then(|id| v.edge(id));
@@ -4298,6 +4768,7 @@ impl ArchEditor {
                             el.child(text_btn("arch-del-view", "Delete diagram", Some(IconName::Trash), false).on_click(cx.listener(|this, _, _, cx| this.act(cx, |ed| ed.delete_view()))))
                         }),
                 )
+                .child(self.layers_section(cx))
                 .child(self.stories_section(cx))
                 .child(section("Shortcuts"))
                 .child(
@@ -4410,6 +4881,169 @@ impl ArchEditor {
     }
 
     /// How the selected shapes draw the eye.
+    /// Which layer the selected shapes are on, with a new one a click away.
+    fn layer_row(&self, current: Option<Option<String>>, cx: &mut Context<Self>) -> Div {
+        let v = self.ed.cur();
+        let mut row = div().flex().flex_wrap().gap_1().child(
+            chip_btn("arch-layer-base", "Base", current == Some(None))
+                .on_click(cx.listener(|this, _, _, cx| this.act(cx, |ed| ed.set_layer(None)))),
+        );
+        for (i, l) in v.layers.iter().enumerate() {
+            if self.layer_edit == Some(i) {
+                row = row.child(
+                    div()
+                        .w(px(140.))
+                        .child(Input::new(&self.f_layer).bordered(true).h(px(26.))),
+                );
+                continue;
+            }
+            let name = l.name.clone();
+            let on = current
+                .as_ref()
+                .is_some_and(|c| c.as_deref() == Some(name.as_str()));
+            row = row.child(
+                chip_btn(("arch-layer-pick", i), l.name.clone(), on).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        let name = name.clone();
+                        this.act(cx, |ed| ed.set_layer(Some(&name)))
+                    },
+                )),
+            );
+        }
+        row = row.child(
+            chip_btn("arch-layer-new", "+ New layer", false).on_click(cx.listener(
+                |this, _, window, cx| {
+                    let mut name = String::new();
+                    this.act(cx, |ed| name = ed.add_layer("Layer"));
+                    let i = this.ed.cur().layers.iter().position(|l| l.name == name);
+                    if let Some(i) = i {
+                        this.edit_layer(i, String::new(), window, cx);
+                    }
+                },
+            )),
+        );
+        div().v_flex().gap_2().child(section("Layer")).child(row)
+    }
+
+    /// The diagram's layers: show or hide, lock, rename, remove.
+    fn layers_section(&self, cx: &mut Context<Self>) -> Div {
+        let v = self.ed.cur();
+        let mut out = div().v_flex().gap_2().child(section("Layers"));
+        if v.layers.is_empty() {
+            return out.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_secondary()))
+                    .child("Put shapes on layers such as infra or data flows to hide or lock them together. Select shapes, then pick New layer."),
+            );
+        }
+        for (i, l) in v.layers.iter().enumerate() {
+            let count = v
+                .nodes
+                .iter()
+                .filter(|n| n.layer.as_deref() == Some(l.name.as_str()))
+                .count();
+            let (hidden, locked) = (l.hidden, l.locked);
+            let renaming = self.layer_edit == Some(i);
+            out = out.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        icon_btn(
+                            ("arch-layer-eye", i),
+                            if hidden {
+                                IconName::EyeOff
+                            } else {
+                                IconName::Eye
+                            },
+                            if hidden { "Show" } else { "Hide" },
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.act(cx, |ed| ed.layer_flags(i, Some(!hidden), None))
+                        })),
+                    )
+                    .child(
+                        icon_btn(
+                            ("arch-layer-lock", i),
+                            if locked {
+                                IconName::Lock
+                            } else {
+                                IconName::LockOpen
+                            },
+                            if locked { "Unlock" } else { "Lock" },
+                            locked,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.act(cx, |ed| ed.layer_flags(i, None, Some(!locked)))
+                        })),
+                    )
+                    .child(if renaming {
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.f_layer).bordered(true).h(px(26.)))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.5))
+                            .text_color(rgb(if hidden { c_muted() } else { c_text() }))
+                            .child(format!("{} · {count}", l.name))
+                            .into_any_element()
+                    })
+                    .child(
+                        icon_btn(("arch-layer-ren", i), IconName::Pencil, "Rename", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let name = this
+                                    .ed
+                                    .cur()
+                                    .layers
+                                    .get(i)
+                                    .map(|l| l.name.clone())
+                                    .unwrap_or_default();
+                                this.edit_layer(i, name, window, cx);
+                            })),
+                    )
+                    .child(
+                        icon_btn(
+                            ("arch-layer-del", i),
+                            IconName::Trash,
+                            "Remove layer (its shapes stay)",
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.layer_edit = None;
+                            this.act(cx, |ed| ed.delete_layer(i))
+                        })),
+                    ),
+            );
+        }
+        out
+    }
+
+    /// Keep a layer name being typed when something else is clicked.
+    fn commit_layer_name(&mut self, cx: &mut Context<Self>) {
+        if let Some(i) = self.layer_edit.take() {
+            let v = self.f_layer.read(cx).value().to_string();
+            self.ed.rename_layer(i, &v);
+        }
+    }
+
+    /// Rename a layer in place, starting from `name` (empty keeps the name it has).
+    fn edit_layer(&mut self, i: usize, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.layer_edit = Some(i);
+        self.f_layer
+            .update(cx, |s, cx| s.set_value(name, window, cx));
+        let input = self.f_layer.clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |s, cx| s.focus(window, cx))
+        });
+        cx.notify();
+    }
+
     fn effect_section(&self, effect: Option<Effect>, cx: &mut Context<Self>) -> Div {
         let mut row = div().flex().flex_wrap().gap_1();
         for (i, fx) in Effect::ALL.into_iter().enumerate() {
@@ -4611,6 +5245,187 @@ impl ArchEditor {
         cx.notify();
     }
 
+    /// Open the find bar with what's selected as the starting text.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = true;
+        let input = self.f_find.clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |s, cx| s.focus(window, cx))
+        });
+        cx.notify();
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = false;
+        self.found.clear();
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Show the current match: open what folds it away, select it and bring it into view.
+    fn show_found(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.found.get(self.found_at).cloned() else {
+            cx.notify();
+            return;
+        };
+        if !self.ed.sight().shows(&id) {
+            self.ed.reveal(&id);
+            self.changed(cx);
+        }
+        self.ed.sel = Sel {
+            nodes: vec![id.clone()],
+            edges: Vec::new(),
+        };
+        if let Some(r) = self.ed.rect(&id) {
+            let vis = self.visible_world().inflate(-40. / self.zoom);
+            if !vis.contains_rect(&r) {
+                if self.zoom < 0.6 {
+                    self.zoom = 0.8;
+                }
+                let (vw, vh) = self.view_size();
+                let (cx_, cy_) = r.center();
+                self.pan = (vw / 2. - cx_ * self.zoom, vh / 2. - cy_ * self.zoom);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Move to the next (or previous) match.
+    fn step_found(&mut self, by: i32, cx: &mut Context<Self>) {
+        let n = self.found.len() as i32;
+        if n == 0 {
+            return;
+        }
+        self.found_at = (self.found_at as i32 + by).rem_euclid(n) as usize;
+        self.show_found(cx);
+    }
+
+    /// The find bar over the canvas.
+    fn find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.find_open {
+            return None;
+        }
+        let q = self.f_find.read(cx).value().to_string();
+        let count = if q.trim().is_empty() {
+            String::new()
+        } else if self.found.is_empty() {
+            "No matches".into()
+        } else {
+            format!("{} of {}", self.found_at + 1, self.found.len())
+        };
+        Some(
+            div()
+                .absolute()
+                .top(px(10.))
+                .right(px(12.))
+                .w(px(360.))
+                .p_1()
+                .flex()
+                .items_center()
+                .gap_1()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(c_border()))
+                .bg(float(c_canvas()))
+                .shadow_lg()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div().flex_1().child(
+                        Input::new(&self.f_find)
+                            .bordered(false)
+                            .h(px(28.))
+                            .prefix(icon(IconName::Search, 13., c_muted())),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(count),
+                )
+                .child(
+                    icon_btn(
+                        "arch-find-prev",
+                        IconName::ChevronUp,
+                        "Previous match",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.step_found(-1, cx))),
+                )
+                .child(
+                    icon_btn(
+                        "arch-find-next",
+                        IconName::ChevronDown,
+                        "Next match (Enter)",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.step_found(1, cx))),
+                )
+                .child(
+                    icon_btn("arch-find-close", IconName::X, "Close (Esc)", false)
+                        .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The way back up from a diagram opened by drilling into a shape.
+    fn breadcrumbs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.trail.is_empty() {
+            return None;
+        }
+        let name = |id: &str| {
+            self.ed
+                .doc
+                .views
+                .iter()
+                .find(|v| v.id == id)
+                .map(|v| v.name.clone())
+                .unwrap_or_else(|| id.to_string())
+        };
+        let mut row = div()
+            .absolute()
+            .top(px(10.))
+            .left(px(12.))
+            .px_2()
+            .py_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(float(c_canvas()))
+            .text_size(px(12.))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        for (i, id) in self.trail.iter().enumerate() {
+            row = row
+                .child(
+                    div()
+                        .id(("arch-crumb", i))
+                        .px_1()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_color(rgb(c_secondary()))
+                        .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+                        .child(name(id))
+                        .on_click(cx.listener(move |this, _, _, cx| this.back_to(i, cx))),
+                )
+                .child(icon(IconName::ChevronRight, 12., c_muted()));
+        }
+        Some(
+            row.child(
+                div()
+                    .px_1()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(c_text()))
+                    .child(name(&self.ed.view)),
+            )
+            .into_any_element(),
+        )
+    }
+
     /// Start playing a story from its first step.
     fn play(&mut self, story: usize, cx: &mut Context<Self>) {
         self.playing = Some(Playing {
@@ -4785,7 +5600,9 @@ impl ArchEditor {
             return true;
         }
         let v = self.ed.cur();
+        // Far out, motion is too small to see and only costs frames.
         !v.still
+            && self.zoom >= MOTION_MIN_ZOOM
             && (v.edges.iter().any(|e| e.motion != Motion::None)
                 || v.nodes.iter().any(|n| n.effect != Effect::None))
     }
@@ -4939,6 +5756,7 @@ impl Render for ArchEditor {
             .on_action(cx.listener(|this, _: &CanvasCopy, window, cx| {
                 this.on_bound_key("c", Modifiers::secondary_key(), window, cx)
             }))
+            .on_action(cx.listener(|this, _: &CanvasFind, window, cx| this.open_find(window, cx)))
             .on_key_up(cx.listener(|this, e: &KeyUpEvent, _, cx| {
                 if e.keystroke.key == "space" {
                     this.space = false;
