@@ -194,7 +194,11 @@ pub(crate) struct DesignCanvas {
     new_device: Device,
     /// Clicking through the prototype: the screen shown and the way back.
     playing: Option<String>,
-    play_back: Vec<String>,
+    /// The screens played before, with how each was left, to go back the same way.
+    play_back: Vec<(String, Move)>,
+    /// The move under way in Play, and a count that tells one move's animation from the next.
+    play_move: Option<(String, Move, bool)>,
+    play_n: usize,
     f_text: Entity<InputState>,
     f_name: Entity<InputState>,
     f_inline: Entity<InputState>,
@@ -333,6 +337,8 @@ impl DesignCanvas {
             new_device: Device::Phone,
             playing: None,
             play_back: Vec::new(),
+            play_move: None,
+            play_n: 0,
             f_text,
             f_name,
             f_inline,
@@ -934,7 +940,9 @@ impl DesignCanvas {
              raw colours and sizes, so the theme keeps working. Name a screen with <title>, set \
              its device with <meta name=\"runo:device\" content=\"phone\"> (or tablet, \
              desktop), and link screens for the prototype with data-goto=\"<other screen id>\" \
-             on what's clicked. New screen files show up on the canvas by themselves. Make the \
+             on what's clicked (add data-transition=\"sheet\" for a screen that opens as a \
+             modal sheet; push, fade, axis and none also work, and the platform's own is used \
+             otherwise). New screen files show up on the canvas by themselves. Make the \
              change by editing these files directly: Runo shows it live and the user keeps or \
              undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for \
              this request.\n"
@@ -1961,6 +1969,13 @@ impl DesignCanvas {
 
     // ---- Prototype
 
+    /// Which platform's moves the prototype plays with, kept in the canvas file.
+    fn set_platform(&mut self, platform: &str, cx: &mut Context<Self>) {
+        self.canvas.platform = platform.to_string();
+        self.save_canvas();
+        cx.notify();
+    }
+
     fn play(&mut self, cx: &mut Context<Self>) {
         let first = self
             .screen
@@ -1976,19 +1991,57 @@ impl DesignCanvas {
             .or_else(|| self.canvas.screens.first().map(|s| s.id.clone()));
         self.playing = first;
         self.play_back.clear();
+        self.play_move = None;
         cx.notify();
     }
 
-    fn play_go(&mut self, to: &str, cx: &mut Context<Self>) {
-        if self.canvas.screen(to).is_none() {
+    fn play_go(&mut self, link: &dom::Link, cx: &mut Context<Self>) {
+        let to = link.goto.as_str();
+        let Some(screen) = self.canvas.screen(to) else {
             self.say(format!("{to}.html doesn't exist yet."));
             cx.notify();
             return;
-        }
+        };
+        let how = Move::of(link, screen.device, &self.canvas.platform);
         if let Some(now) = self.playing.replace(to.to_string()) {
-            self.play_back.push(now);
+            self.play_back.push((now.clone(), how));
+            self.animate_move(now, how, false, cx);
         }
         cx.notify();
+    }
+
+    /// Go back to the screen before, undoing the move that left it.
+    fn play_return(&mut self, cx: &mut Context<Self>) {
+        let Some((prev, how)) = self.play_back.pop() else {
+            return;
+        };
+        if let Some(now) = self.playing.replace(prev) {
+            self.animate_move(now, how, true, cx);
+        }
+        cx.notify();
+    }
+
+    /// Run a move from screen `from` to the one playing now, and drop it when it's done.
+    fn animate_move(&mut self, from: String, how: Move, back: bool, cx: &mut Context<Self>) {
+        if how.kind == MoveKind::None || !anim_on() {
+            self.play_move = None;
+            return;
+        }
+        self.play_n += 1;
+        let n = self.play_n;
+        self.play_move = Some((from, how, back));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(how.ms + 30))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.play_n == n {
+                    this.play_move = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     // ---- Input
@@ -3278,27 +3331,50 @@ impl DesignCanvas {
         let (w, h) = s.device.size();
         let scale = ((vh - 80.) / h).min((vw - 80.) / w).min(1.);
         let (dw, dh) = (w * scale, h * scale);
+        let radius = if s.device == Device::Phone { 28. } else { 10. } * scale;
         let mut frame = div()
             .relative()
             .w(px(dw))
             .h(px(dh))
-            .rounded(px(if s.device == Device::Phone { 28. } else { 10. } * scale))
+            .rounded(px(radius))
             .overflow_hidden()
             .bg(rgb(0xffffff))
             .shadow_lg();
-        if let Some(shot) = shot {
-            // Only the first screenful plays; the rest of a tall screen is cut off.
-            let full_h = shot.size.1 * scale;
-            frame = frame.child(
-                img(ImageSource::Render(shot.image.clone()))
+        // A screen's picture, the first screenful of it; the rest of a tall screen is cut off.
+        let picture = |id: &str| {
+            let shot = self.shots.get(id)?;
+            Some(
+                div()
                     .absolute()
                     .top_0()
                     .left_0()
                     .w(px(dw))
-                    .h(px(full_h)),
-            );
+                    .h(px(dh))
+                    .overflow_hidden()
+                    .bg(rgb(0xffffff))
+                    .child(
+                        img(ImageSource::Render(shot.image.clone()))
+                            .w(px(dw))
+                            .h(px(shot.size.1 * scale)),
+                    ),
+            )
+        };
+        let moving = self
+            .play_move
+            .as_ref()
+            .and_then(|(from, how, back)| Some((picture(from)?, *how, *back)));
+        match (moving, picture(&id)) {
+            (Some((old, how, back)), Some(new)) => {
+                for layer in how.layers(old, new, back, (dw, dh), self.play_n) {
+                    frame = frame.child(layer);
+                }
+            }
+            (_, Some(new)) => frame = frame.child(new),
+            _ => {}
+        }
+        if let Some(shot) = shot.filter(|_| self.play_move.is_none()) {
             for (i, l) in shot.links.iter().enumerate() {
-                let to = l.goto.clone();
+                let link = l.clone();
                 frame = frame.child(
                     div()
                         .id(("design-hot", i))
@@ -3315,7 +3391,7 @@ impl DesignCanvas {
                                 .bg(col(c_blue(), 0.1))
                         })
                         .hover(|el| el.bg(col(c_blue(), 0.2)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.play_go(&to, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| this.play_go(&link, cx))),
                 );
                 if self.hotspots {
                     let corner = ((l.rect.x + l.rect.w) * scale, l.rect.y * scale);
@@ -3325,6 +3401,24 @@ impl DesignCanvas {
                 }
             }
         }
+        let platform = self.canvas.platform.clone();
+        let platforms = div()
+            .flex()
+            .gap(px(4.))
+            .child(
+                chip_btn("design-ios", "iOS", platform != "android")
+                    .tooltip(tip(
+                        "Screens push in from the side and sheets slide up, as on iPhone",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.set_platform("", cx))),
+            )
+            .child(
+                chip_btn("design-android", "Android", platform == "android")
+                    .tooltip(tip(
+                        "Screens move along a shared axis and fade through, as in Material",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.set_platform("android", cx))),
+            );
         Some(
             div()
                 .absolute()
@@ -3348,9 +3442,7 @@ impl DesignCanvas {
                             icon_btn("design-play-back", IconName::ArrowLeft, "Back", false)
                                 .when(self.play_back.is_empty(), |el| el.opacity(0.4))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(prev) = this.play_back.pop() {
-                                        this.playing = Some(prev);
-                                    }
+                                    this.play_return(cx);
                                     cx.notify();
                                 })),
                         )
@@ -3363,7 +3455,8 @@ impl DesignCanvas {
                                     "{}  ·  click the linked parts to move through the design",
                                     s.name
                                 )),
-                        ),
+                        )
+                        .child(platforms),
                 )
                 .child(div().flex_1().flex().items_center().child(frame))
                 .into_any_element(),
@@ -4047,9 +4140,50 @@ impl DesignCanvas {
                         })),
                     );
                 }
+                let mut moves = div().flex().flex_wrap().gap(px(4.));
+                let mut speeds = div().flex().flex_wrap().gap(px(4.));
+                if el.goto.is_some() {
+                    let now = el.transition.clone().unwrap_or_default();
+                    for (i, (label, value)) in MOVES.iter().enumerate() {
+                        let value: &'static str = value;
+                        moves = moves.child(
+                            chip_btn(("design-move", i), *label, now == value).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.op(
+                                        "attr",
+                                        &[json!("data-transition"), json!(value)],
+                                        After::Same,
+                                        cx,
+                                    )
+                                }),
+                            ),
+                        );
+                    }
+                    let now = el.speed.clone().unwrap_or_default();
+                    for (i, (label, value)) in SPEEDS.iter().enumerate() {
+                        let value: &'static str = value;
+                        speeds = speeds.child(
+                            chip_btn(("design-speed", i), *label, now == value).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.op(
+                                        "attr",
+                                        &[json!("data-speed"), json!(value)],
+                                        After::Same,
+                                        cx,
+                                    )
+                                }),
+                            ),
+                        );
+                    }
+                }
+                let linked = el.goto.is_some();
                 out = out
                     .child(section("Prototype"))
                     .child(label_row("Opens", opens))
+                    .when(linked, |el| {
+                        el.child(label_row("Moves", moves))
+                            .child(label_row("Speed", speeds))
+                    })
                     .child(section("Arrange"))
                     .child(
                         div()
@@ -4724,5 +4858,210 @@ mod tests {
         assert!(dir.join("screens/home.html").exists());
         assert!(!dir.join("screens/new.html").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// How the prototype moves from one screen to the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MoveKind {
+    /// The new screen slides in from the side over the old one, as on iPhone.
+    Push,
+    /// The new screen slides up as a sheet over the old one.
+    Sheet,
+    /// The new screen fades in over the old one.
+    Fade,
+    /// The old screen slips back and fades out as the new one slips in, as in Material.
+    Axis,
+    None,
+}
+
+/// The moves a link can pick, with their `data-transition` values; empty for the
+/// platform's own.
+pub(crate) const MOVES: [(&str, &str); 6] = [
+    ("Platform", ""),
+    ("Push", "push"),
+    ("Sheet", "sheet"),
+    ("Fade", "fade"),
+    ("Shared axis", "axis"),
+    ("None", "none"),
+];
+
+/// How fast, as `data-speed`.
+pub(crate) const SPEEDS: [(&str, &str); 3] = [("Quick", "fast"), ("Normal", ""), ("Slow", "slow")];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Move {
+    pub kind: MoveKind,
+    pub ms: u64,
+}
+
+impl Move {
+    /// The move a link makes: its own, else the platform's for the screen it opens.
+    pub(crate) fn of(link: &dom::Link, device: Device, platform: &str) -> Self {
+        let kind = match link.transition.as_str() {
+            "push" => MoveKind::Push,
+            "sheet" | "modal" => MoveKind::Sheet,
+            "fade" => MoveKind::Fade,
+            "axis" => MoveKind::Axis,
+            "none" => MoveKind::None,
+            _ if device == Device::Desktop => MoveKind::Fade,
+            _ if platform == "android" => MoveKind::Axis,
+            _ => MoveKind::Push,
+        };
+        let base: f32 = match kind {
+            MoveKind::Push => 350.,
+            MoveKind::Sheet => 400.,
+            MoveKind::Fade => 220.,
+            MoveKind::Axis => 300.,
+            MoveKind::None => 0.,
+        };
+        let speed = match link.speed.as_str() {
+            "fast" => 0.6,
+            "slow" => 1.7,
+            _ => 1.,
+        };
+        Self {
+            kind,
+            ms: (base * speed) as u64,
+        }
+    }
+
+    /// The old and new screens (and a shade between them) as they move. `back` plays the
+    /// move in reverse, from the screen that was left to the one it came from: `new` is
+    /// then the screen being gone back to.
+    pub(crate) fn layers(
+        self,
+        old: Div,
+        new: Div,
+        back: bool,
+        (w, h): (f32, f32),
+        n: usize,
+    ) -> Vec<AnyElement> {
+        let anim = || {
+            Animation::new(Duration::from_millis(self.ms.max(1)))
+                .with_easing(|t: f32| 1. - (1. - t).powi(3))
+        };
+        let shade = |most: f32, rising: bool| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(w))
+                .h(px(h))
+                .bg(rgb(0x000000))
+                .with_animation(("design-move-shade", n), anim(), move |el, d| {
+                    el.opacity(most * if rising { d } else { 1. - d })
+                })
+                .into_any_element()
+        };
+        // `under` stays behind and `over` comes in (or, going back, leaves).
+        let id = |part: &'static str| (part, n);
+        match (self.kind, back) {
+            (MoveKind::Push, false) => vec![
+                old.with_animation(id("design-move-old"), anim(), move |el, d| {
+                    el.left(px(-0.3 * w * d))
+                })
+                .into_any_element(),
+                shade(0.12, true),
+                new.shadow_lg()
+                    .with_animation(id("design-move-new"), anim(), move |el, d| {
+                        el.left(px(w * (1. - d)))
+                    })
+                    .into_any_element(),
+            ],
+            (MoveKind::Push, true) => vec![
+                new.with_animation(id("design-move-new"), anim(), move |el, d| {
+                    el.left(px(-0.3 * w * (1. - d)))
+                })
+                .into_any_element(),
+                shade(0.12, false),
+                old.shadow_lg()
+                    .with_animation(id("design-move-old"), anim(), move |el, d| {
+                        el.left(px(w * d))
+                    })
+                    .into_any_element(),
+            ],
+            (MoveKind::Sheet, false) => vec![
+                old.into_any_element(),
+                shade(0.3, true),
+                new.rounded_t(px(12.))
+                    .shadow_lg()
+                    .with_animation(id("design-move-new"), anim(), move |el, d| {
+                        el.top(px(h * (1. - d)))
+                    })
+                    .into_any_element(),
+            ],
+            (MoveKind::Sheet, true) => vec![
+                new.into_any_element(),
+                shade(0.3, false),
+                old.rounded_t(px(12.))
+                    .shadow_lg()
+                    .with_animation(id("design-move-old"), anim(), move |el, d| {
+                        el.top(px(h * d))
+                    })
+                    .into_any_element(),
+            ],
+            (MoveKind::Axis, back) => {
+                let dir = if back { -1. } else { 1. };
+                vec![
+                    old.with_animation(id("design-move-old"), anim(), move |el, d| {
+                        el.left(px(-30. * dir * d))
+                            .opacity((1. - d / 0.35).clamp(0., 1.))
+                    })
+                    .into_any_element(),
+                    new.with_animation(id("design-move-new"), anim(), move |el, d| {
+                        el.left(px(30. * dir * (1. - d)))
+                            .opacity(((d - 0.35) / 0.65).clamp(0., 1.))
+                    })
+                    .into_any_element(),
+                ]
+            }
+            (MoveKind::Fade, _) => vec![
+                old.into_any_element(),
+                new.with_animation(id("design-move-new"), anim(), |el, d| el.opacity(d))
+                    .into_any_element(),
+            ],
+            (MoveKind::None, _) => vec![new.into_any_element()],
+        }
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    fn link(transition: &str, speed: &str) -> dom::Link {
+        dom::Link {
+            goto: "next".into(),
+            rect: dom::Box::default(),
+            path: Vec::new(),
+            transition: transition.into(),
+            speed: speed.into(),
+        }
+    }
+
+    #[test]
+    fn links_move_like_their_platform_unless_told() {
+        let m = Move::of(&link("", ""), Device::Phone, "");
+        assert_eq!((m.kind, m.ms), (MoveKind::Push, 350));
+        assert_eq!(
+            Move::of(&link("", ""), Device::Phone, "android").kind,
+            MoveKind::Axis
+        );
+        assert_eq!(
+            Move::of(&link("", ""), Device::Desktop, "").kind,
+            MoveKind::Fade
+        );
+        assert_eq!(
+            Move::of(&link("sheet", ""), Device::Phone, "android").kind,
+            MoveKind::Sheet
+        );
+        assert_eq!(
+            Move::of(&link("none", ""), Device::Phone, "").kind,
+            MoveKind::None
+        );
+        assert_eq!(Move::of(&link("push", "slow"), Device::Phone, "").ms, 595);
+        assert_eq!(Move::of(&link("fade", "fast"), Device::Phone, "").ms, 132);
     }
 }

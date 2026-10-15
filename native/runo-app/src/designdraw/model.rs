@@ -65,6 +65,9 @@ pub(crate) struct Screen {
 pub(crate) struct Canvas {
     #[serde(default, rename = "screen", skip_serializing_if = "Vec::is_empty")]
     pub screens: Vec<Screen>,
+    /// The platform the prototype moves like: "ios" (the default) or "android".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub platform: String,
 }
 
 impl Canvas {
