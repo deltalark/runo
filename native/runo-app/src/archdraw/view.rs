@@ -3339,6 +3339,21 @@ fn kind_icon(kind: Kind) -> IconName {
         Kind::Note => "sticky-note",
         Kind::Text => "type",
         Kind::Icon => "image",
+        Kind::Actor => "user-round",
+        Kind::Users => "users",
+        Kind::Browser => "app-window",
+        Kind::Phone => "smartphone",
+        Kind::Desktop => "monitor",
+        Kind::Server => "server",
+        Kind::Document => "file-text",
+        Kind::Folder => "folder",
+        Kind::Hexagon => "hexagon",
+        Kind::Triangle => "triangle",
+        Kind::Parallelogram => "square",
+        Kind::Terminator => "pill",
+        Kind::Shield => "shield",
+        Kind::Callout => "message-square",
+        Kind::Arrow => "arrow-right",
     };
     icon_named(name).unwrap_or(IconName::Square)
 }
@@ -4705,8 +4720,9 @@ impl ArchEditor {
             if e.image.is_empty()
                 && !e.icon.is_empty()
                 && e.kind.is_part()
-                // A person's avatar already says what it is.
-                && e.kind != Kind::Person
+                // A picture of the thing already says what it is.
+                && !e.kind.pictured()
+                && !e.kind.name_below()
                 && nr.h > 34.
                 && nr.w > 60.
                 && z > 0.45
@@ -7489,6 +7505,89 @@ fn thinking_line(secs: Option<u64>, scanning: bool) -> &'static str {
     }
 }
 
+/// A shape's picture in the panel: its outline and marks at the size of `b`, kept to
+/// their proportions and centred, without text.
+fn paint_preview(kind: Kind, theme: &Theme, b: Bounds<Pixels>, window: &mut Window) {
+    let (w, h) = kind.size();
+    let style = super::model::Style::default();
+    let o = shape::outline(kind, &Rect::new(0., 0., w, h), &style);
+    let pt = shape::paint(kind, &style, theme);
+    // Fit what's drawn, not the whole element: a figure's name area stays out.
+    let mut pts: Vec<Pt> = Vec::new();
+    let mut collect = |segs: &[Seg]| {
+        for s in segs {
+            match *s {
+                Seg::Move(x, y) | Seg::Line(x, y) | Seg::Cubic(_, _, _, _, x, y) => {
+                    pts.push((x, y))
+                }
+                Seg::Close => {}
+            }
+        }
+    };
+    if pt.fill.is_some() || pt.stroke.is_some() {
+        collect(&o.fill);
+    }
+    for m in &o.marks {
+        collect(&m.segs);
+    }
+    if kind == Kind::Text {
+        // Text has no outline: show a few lines of it.
+        let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+        for (i, f) in [0.8_f32, 0.55].iter().enumerate() {
+            let lw = bw * f * 0.7;
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(
+                        b.origin.x + px((bw - lw) / 2.),
+                        b.origin.y + px(bh / 2. - 5. + i as f32 * 7.),
+                    ),
+                    size(px(lw), px(3.)),
+                ),
+                px(1.5),
+                col(theme.muted, 0.8),
+                px(0.),
+                col(0, 0.),
+                BorderStyle::default(),
+            ));
+        }
+        return;
+    }
+    if pts.is_empty() {
+        return;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (x, y) in &pts {
+        x0 = x0.min(*x);
+        y0 = y0.min(*y);
+        x1 = x1.max(*x);
+        y1 = y1.max(*y);
+    }
+    let (bw, bh) = (f32::from(b.size.width) - 4., f32::from(b.size.height) - 4.);
+    let scale = (bw / (x1 - x0).max(1.)).min(bh / (y1 - y0).max(1.));
+    let ox = f32::from(b.origin.x) + (f32::from(b.size.width) - (x1 - x0) * scale) / 2.;
+    let oy = f32::from(b.origin.y) + (f32::from(b.size.height) - (y1 - y0) * scale) / 2.;
+    let tf = move |(x, y): Pt| point(px(ox + (x - x0) * scale), px(oy + (y - y0) * scale));
+    let sd = ShapeDraw {
+        fill: o.fill,
+        detail: o.detail,
+        marks: o
+            .marks
+            .into_iter()
+            .map(|m| (m.segs, pt.ink(m.ink)))
+            .collect(),
+        shadow: false,
+        fill_c: pt.fill,
+        stroke: pt.stroke,
+        opacity: 1.,
+        dashed: pt.dashed,
+        width: 1.2,
+        rect: Rect::new(0., 0., w, h),
+        effect: Effect::default(),
+        radius: 0.,
+    };
+    paint_shape(&sd, &tf, 1., window);
+}
+
 /// One shape in the panel: a tile with its picture over its name, or a row. Pressing it
 /// starts dragging it onto the canvas; letting go without moving adds it in the middle.
 fn preset_item(
@@ -7497,22 +7596,37 @@ fn preset_item(
     grid: bool,
     cx: &mut Context<ArchEditor>,
 ) -> AnyElement {
-    let glyph = icon_named(p.icon).unwrap_or_else(|| kind_icon(p.kind));
-    let accent = shape::accent(p.kind);
-    let badge = |size: f32, glyph_size: f32| {
+    let theme = Theme {
+        canvas: c_canvas(),
+        text: c_text(),
+        muted: c_muted(),
+        dark: is_dark(),
+    };
+    // A picture of the shape itself, drawn the way the canvas draws it, with the preset's
+    // icon on the C4 kinds that carry one, so a web app and a worker tell apart.
+    let glyph = (p.kind.c4().is_some() && !p.kind.pictured())
+        .then(|| icon_named(p.icon))
+        .flatten();
+    let badge = move |w: f32, h: f32, glyph_size: f32| {
         div()
-            .size(px(size))
+            .relative()
+            .w(px(w))
+            .h(px(h))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(size * 0.24))
-            .bg(rgb(shape::mix(
-                accent,
-                c_canvas(),
-                if is_dark() { 0.25 } else { 0.12 },
-            )))
-            .child(icon(glyph, glyph_size, accent))
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |b, _, window, _| paint_preview(p.kind, &theme, b, window),
+                )
+                .absolute()
+                .size_full(),
+            )
+            .when_some(glyph, |el, g| {
+                el.child(icon(g, glyph_size, shape::accent(p.kind)))
+            })
     };
     let base = div()
         .id(id)
@@ -7537,8 +7651,8 @@ fn preset_item(
         } else {
             format!("{} · {}", p.label, p.tech).into()
         };
-        base.w(px(64.))
-            .h(px(66.))
+        base.w(px(66.))
+            .h(px(72.))
             .v_flex()
             .items_center()
             .justify_center()
@@ -7546,7 +7660,7 @@ fn preset_item(
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)
             })
-            .child(badge(28., 15.))
+            .child(badge(52., 34., 12.))
             .child(
                 div()
                     .w_full()
@@ -7568,7 +7682,7 @@ fn preset_item(
             .gap_2()
             .text_size(px(12.5))
             .text_color(rgb(c_text()))
-            .child(badge(22., 13.))
+            .child(badge(30., 20., 9.))
             .child(div().flex_1().min_w_0().truncate().child(p.label))
             .into_any_element()
     }

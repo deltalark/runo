@@ -44,6 +44,11 @@ Kinds: `person`, `system`, `container`, `component`, `database`, `queue`, `exter
 (an external system), `boundary` (a group such as a VPC, region or team, drawn behind
 what it holds), `box`, `rounded`, `ellipse`, `diamond` (a decision), `cloud`, `note`
 (a sticky note), `text` and `icon` (a logo or picture with its name under it).
+Pictures of things: `actor` (a standing figure, its name under it), `users` (a group of
+people), `browser`, `phone`, `desktop`, `server`, `document`, `folder` and `shield`
+(security, a firewall). More outlines: `hexagon`, `triangle`, `parallelogram` (data in
+or out), `terminator` (a flowchart's start or end), `callout` (a speech bubble) and
+`arrow` (a block arrow).
 
 Pictures live in `icons/` next to these files, as SVG, PNG, JPG, WebP or GIF. To use a
 brand or technology logo, save it there first: Simple Icons has one-colour logos at
