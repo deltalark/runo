@@ -1704,7 +1704,7 @@ impl RunoApp {
         let pid = project.id;
         if !self.arch.code_map {
             if let Some(editor) = self.arch.editors.get(&pid) {
-                return self.arch_diagram(editor.clone(), cx);
+                return self.arch_diagram(pid, editor.clone(), cx);
             }
         }
         let scanning = self.arch.scanning.contains(&pid);
@@ -1999,7 +1999,12 @@ impl RunoApp {
     }
 
     /// The diagram editor, edge to edge under a slim header.
-    fn arch_diagram(&self, editor: Entity<ArchEditor>, cx: &mut Context<Self>) -> AnyElement {
+    fn arch_diagram(
+        &self,
+        pid: u64,
+        editor: Entity<ArchEditor>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .flex_1()
             .min_w_0()
@@ -2024,6 +2029,7 @@ impl RunoApp {
                     )
                     .child(self.mode_project_chip(cx))
                     .child(div().flex_1())
+                    .children(self.canvas_chats(pid, View::Architecture, cx))
                     .child(self.arch_tabs(cx)),
             )
             .child(div().flex_1().min_h_0().child(editor))
