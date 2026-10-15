@@ -555,7 +555,7 @@ const TOKENS_CSS: &str = r#"/* The design's theme. Every screen uses these, so c
   --bg: #ffffff;
   --surface: #f4f5f7;
   --text: #0f172a;
-  --muted: #64748b;
+  --muted: #5b6577;
   --border: #e2e8f0;
   --radius: 12px;
   --space: 8px;
