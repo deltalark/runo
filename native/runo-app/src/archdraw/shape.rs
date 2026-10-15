@@ -320,6 +320,19 @@ pub(crate) const SWATCHES: [u32; 12] = [
     0xdc2626, 0xf59e0b, 0x111827,
 ];
 
+/// Where a shape's picture goes: all of an icon above its name, a badge in the corner of
+/// anything else.
+pub(crate) fn picture_rect(kind: Kind, r: &Rect) -> Rect {
+    match kind {
+        Kind::Icon => Rect::new(r.x + 10., r.y + 6., r.w - 20., (r.h - 36.).max(8.)),
+        Kind::Boundary => Rect::new(r.x + 10., r.y + 8., 18., 18.),
+        _ => {
+            let s = (r.h * 0.3).clamp(16., 26.);
+            Rect::new(r.x + 7., r.y + 7., s, s)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,18 +377,5 @@ mod tests {
         rounded(&mut segs, &Rect::new(0., 0., 10., 10.), 0.);
         assert_eq!(svg_d(&segs), "M0.0 0.0 L10.0 0.0 L10.0 10.0 L0.0 10.0 Z");
         assert_eq!(mix(0xffffff, 0x000000, 0.5), 0x808080);
-    }
-}
-
-/// Where a shape's picture goes: all of an icon above its name, a badge in the corner of
-/// anything else.
-pub(crate) fn picture_rect(kind: Kind, r: &Rect) -> Rect {
-    match kind {
-        Kind::Icon => Rect::new(r.x + 10., r.y + 6., r.w - 20., (r.h - 36.).max(8.)),
-        Kind::Boundary => Rect::new(r.x + 10., r.y + 8., 18., 18.),
-        _ => {
-            let s = (r.h * 0.3).clamp(16., 26.);
-            Rect::new(r.x + 7., r.y + 7., s, s)
-        }
     }
 }
