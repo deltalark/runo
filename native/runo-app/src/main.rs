@@ -6,6 +6,7 @@ mod applog;
 mod approvals;
 mod archdraw;
 mod architecture;
+mod askbar;
 mod assistant;
 mod browser;
 mod browser_engine;

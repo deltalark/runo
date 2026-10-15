@@ -249,6 +249,8 @@ struct Waiting {
     broken: Option<String>,
     /// When the agent was asked, to show how long it has been working.
     started: Instant,
+    /// What it was asked, shortened.
+    task: String,
 }
 
 /// An agent's change on the canvas, waiting to be accepted or rejected.
@@ -1384,6 +1386,7 @@ impl ArchEditor {
             stamp: stamp(&self.root),
             broken: None,
             started: Instant::now(),
+            task: task.chars().take(120).collect(),
         });
         window.focus(&self.focus, cx);
         cx.emit(ArchEvent::Ask {
@@ -1918,16 +1921,13 @@ impl ArchEditor {
                 .items_center()
                 .gap_1()
                 .child(
-                    bar.border_color(col(c_blue(), 0.5))
-                        .child(icon(IconName::LoaderCircle, 14., c_blue()).animated(
+                    askbar::composer("arch-ask-bar", true).child(
+                        askbar::working_row(
                             "arch-wait-spin",
-                            Animation::new(Duration::from_millis(900)).repeat(),
-                            |i, d| i.rotate(percentage(d)),
-                        ))
-                        .child(div().px_1().text_color(rgb(c_secondary())).child(format!(
-                            "The agent is changing the diagram… {}s",
-                            w.started.elapsed().as_secs()
-                        )))
+                            thinking_line(self.working_for(), false).to_string(),
+                            w.task.clone(),
+                            w.started.elapsed().as_secs(),
+                        )
                         .when(w.broken.is_some(), |el| {
                             el.child(
                                 text_btn("arch-restore", "Restore", Some(IconName::Undo2), false)
@@ -1935,13 +1935,50 @@ impl ArchEditor {
                             )
                         })
                         .child(
-                            text_btn("arch-stop-wait", "Stop waiting", None, false)
+                            text_btn("arch-stop-wait", "Stop", None, false)
                                 .on_click(cx.listener(|this, _, _, cx| this.stop_waiting(cx))),
                         ),
+                    ),
                 )
                 .children(broken_note(&w.broken))
         } else {
-            let picked = self.ed.sel.nodes.len() + self.ed.sel.edges.len();
+            let empty = self.f_ask.read(cx).value().trim().is_empty();
+            let target = self.ask_target();
+            let ideas: &[&'static str] = if target.is_some() {
+                &[
+                    "Add what this talks to",
+                    "Split this into services",
+                    "Put these in a boundary",
+                ]
+            } else if self.ed.cur().nodes.is_empty() {
+                &[
+                    "Draw a web app with an API and a database",
+                    "Draw an event-driven system",
+                ]
+            } else {
+                &[
+                    "Add a cache and a queue",
+                    "Group the parts by layer",
+                    "Add monitoring",
+                ]
+            };
+            let mut footer = div().flex().items_center().gap_1();
+            let mut row = div().flex_1().min_w_0().flex().gap_1().overflow_hidden();
+            if empty {
+                for (i, idea) in ideas.iter().enumerate() {
+                    let idea: &'static str = idea;
+                    row = row.child(askbar::suggestion(("arch-idea", i), idea).on_click(
+                        cx.listener(move |this, _, window, cx| this.fill_ask(idea, window, cx)),
+                    ));
+                }
+            }
+            footer = footer
+                .child(row)
+                .child(self.pick.chip("arch-ask", cx, |t: &mut Self| &mut t.pick))
+                .child(
+                    askbar::send_button("arch-ask-send", !empty)
+                        .on_click(cx.listener(|this, _, window, cx| this.send_ask(window, cx))),
+                );
             div()
                 .v_flex()
                 .items_end()
@@ -1953,33 +1990,32 @@ impl ArchEditor {
                     |t: &mut Self| &mut t.pick,
                 ))
                 .child(
-                    bar.w(px(520.))
-                        .border_color(rgb(c_border()))
-                        .when(picked > 0, |el| {
+                    askbar::composer("arch-ask-bar", target.is_some())
+                        .when_some(target, |el, text| {
                             el.child(
-                                div()
-                                    .flex_none()
-                                    .px_2()
-                                    .py(px(2.))
-                                    .rounded_md()
-                                    .bg(col(c_blue(), 0.12))
-                                    .text_size(px(11.5))
-                                    .text_color(rgb(c_blue()))
-                                    .child(format!("{picked} selected")),
+                                div().flex().child(
+                                    askbar::target_chip(
+                                        "arch-ask-target",
+                                        IconName::Crosshair,
+                                        text,
+                                    )
+                                    .tooltip(tip("AI changes what's selected. Click to clear."))
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.ed.sel = Sel::default();
+                                            cx.notify();
+                                        },
+                                    )),
+                                ),
                             )
                         })
                         .child(
-                            div().flex_1().child(
-                                Input::new(&self.f_ask)
-                                    .bordered(false)
-                                    .h(px(28.))
-                                    .prefix(icon(IconName::Sparkles, 13., c_blue())),
-                            ),
+                            Input::new(&self.f_ask)
+                                .bordered(false)
+                                .h(px(32.))
+                                .prefix(icon(IconName::Sparkles, 14., c_blue())),
                         )
-                        .child(self.pick.chip("arch-ask", cx, |t: &mut Self| &mut t.pick))
-                        .child(text_btn("arch-ask-send", "Send", None, true).on_click(
-                            cx.listener(|this, _, window, cx| this.send_ask(window, cx)),
-                        )),
+                        .child(footer),
                 )
         };
         // A change under review sits at the top, clear of the status line and the map.
@@ -5271,177 +5307,61 @@ impl ArchEditor {
         if !self.working() {
             return None;
         }
-        let line = thinking_line(self.working_for(), self.scanning);
-        let secs = self.working_for().map(|s| format!("{s}s"));
-        let spinner = || {
-            icon(IconName::LoaderCircle, 14., c_blue()).animated(
-                "arch-think-spin",
-                Animation::new(Duration::from_millis(900)).repeat(),
-                |i, d| i.rotate(percentage(d)),
+        let line = thinking_line(self.working_for(), self.scanning).to_string();
+        Some(if self.ed.cur().nodes.is_empty() {
+            askbar::busy_card(
+                if self.scanning {
+                    "Reading your code"
+                } else {
+                    "Drawing your architecture"
+                },
+                line,
+                self.working_for(),
             )
-        };
-        if !self.ed.cur().nodes.is_empty() {
-            return Some(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .border_2()
-                            .border_color(col(c_blue(), 0.5))
-                            .animated(
-                                "arch-think-glow",
-                                Animation::new(Duration::from_millis(1800)).repeat(),
-                                |el, d| el.opacity(0.25 + 0.75 * pulse(d)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(12.))
-                            .left_0()
-                            .w_full()
-                            .flex()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_3()
-                                    .py(px(6.))
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(col(c_blue(), 0.4))
-                                    .bg(float(c_canvas()))
-                                    .shadow_md()
-                                    .text_size(px(12.))
-                                    .child(spinner())
-                                    .child(div().text_color(rgb(c_text())).child(line))
-                                    .children(
-                                        secs.map(|s| div().text_color(rgb(c_muted())).child(s)),
-                                    ),
-                            ),
-                    )
-                    .into_any_element(),
-            );
+        } else {
+            askbar::busy_edge(line, self.working_for())
+        })
+    }
+
+    /// What an ask is about, for the chip on the ask bar: the selection by name.
+    fn ask_target(&self) -> Option<String> {
+        let sel = &self.ed.sel;
+        let mut names: Vec<String> = sel
+            .nodes
+            .iter()
+            .filter_map(|id| self.ed.doc.element(id).map(|e| e.name.clone()))
+            .chain(sel.edges.iter().filter_map(|id| {
+                let r = self.ed.doc.relation(id)?;
+                let name = |e: &str| {
+                    self.ed
+                        .doc
+                        .element(e)
+                        .map(|e| e.name.clone())
+                        .unwrap_or_default()
+                };
+                Some(format!("{} to {}", name(&r.from), name(&r.to)))
+            }))
+            .filter(|n| !n.is_empty())
+            .collect();
+        let total = sel.nodes.len() + sel.edges.len();
+        if total == 0 {
+            return None;
         }
-        // A sketch of boxes and lines that light up in turn, like a diagram being drawn.
-        const BOXES: [(f32, f32); 5] = [(0., 0.), (104., 0.), (208., 0.), (52., 78.), (156., 78.)];
-        const LINES: [(f32, f32, f32, f32); 4] = [
-            (72., 19., 32., 2.),
-            (176., 19., 32., 2.),
-            (87., 40., 2., 38.),
-            (191., 40., 2., 38.),
-        ];
-        let mut sketch = div().relative().w(px(280.)).h(px(118.));
-        for (i, (x, y, w, h)) in LINES.into_iter().enumerate() {
-            sketch = sketch.child(
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(y))
-                    .w(px(w))
-                    .h(px(h))
-                    .bg(rgb(c_blue()))
-                    .animated(
-                        ("arch-think-line", i),
-                        Animation::new(Duration::from_millis(2400)).repeat(),
-                        move |el, d| {
-                            el.opacity(0.15 + 0.6 * pulse((d + 0.1 + i as f32 * 0.2).fract()))
-                        },
-                    ),
-            );
-        }
-        for (i, (x, y)) in BOXES.into_iter().enumerate() {
-            sketch = sketch.child(
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(y))
-                    .w(px(72.))
-                    .h(px(40.))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(c_blue()))
-                    .bg(col(c_blue(), 0.14))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .w(px(36.))
-                            .h(px(5.))
-                            .rounded_full()
-                            .bg(col(c_blue(), 0.6)),
-                    )
-                    .animated(
-                        ("arch-think-box", i),
-                        Animation::new(Duration::from_millis(2400)).repeat(),
-                        move |el, d| el.opacity(0.25 + 0.75 * pulse((d + i as f32 * 0.2).fract())),
-                    ),
-            );
-        }
-        Some(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .w(px(400.))
-                        .p_5()
-                        .v_flex()
-                        .items_center()
-                        .gap_4()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(rgb(c_border()))
-                        .bg(float(c_canvas()))
-                        .shadow_lg()
-                        .child(sketch)
-                        .child(
-                            div()
-                                .v_flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .text_size(px(15.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(spinner())
-                                        .child(if self.scanning {
-                                            "Reading your code"
-                                        } else {
-                                            "Drawing your architecture"
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .text_color(rgb(c_secondary()))
-                                        .child(match &secs {
-                                            Some(s) => format!("{line} · {s}"),
-                                            None => line.to_string(),
-                                        }),
-                                ),
-                        ),
-                )
-                .into_any_element(),
-        )
+        Some(match names.len() {
+            0 => format!("{total} selected"),
+            _ if total == 1 => names.remove(0),
+            _ => format!("{} and {} more", names.remove(0), total - 1),
+        })
+    }
+
+    /// Put a suggestion in the ask bar, ready to send or change.
+    fn fill_ask(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.f_ask.update(cx, |s, cx| s.set_value(text, window, cx));
+        let input = self.f_ask.clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |s, cx| s.focus(window, cx))
+        });
+        cx.notify();
     }
 
     fn canvas_area(&self, scene: Scene, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -7458,9 +7378,4 @@ fn thinking_line(secs: Option<u64>, scanning: bool) -> &'static str {
         Some(31..=60) => "Laying out the shapes",
         Some(_) => "Still working. Bigger diagrams take a little longer",
     }
-}
-
-/// 0 to 1 and back again over one turn of an animation.
-fn pulse(d: f32) -> f32 {
-    1. - (d * 2. - 1.).abs()
 }
