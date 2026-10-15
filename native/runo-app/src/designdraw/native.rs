@@ -62,12 +62,39 @@ pub(crate) fn draw(
     let file = screen_path(root, id);
     let html = std::fs::read_to_string(&file).map_err(|e| format!("{id}.html didn't load: {e}"))?;
     let url = super::render::file_url(&file);
-    let font_ctx = fonts.get_or_insert_with(FontContext::default).clone();
+    let font_ctx = fonts.get_or_insert_with(font_context).clone();
     // Blitz is young: a page it can't handle shouldn't take the app down with it.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         render(&html, &url, device, dark, font_ctx)
     }))
     .map_err(|_| format!("Couldn't draw {id}.html."))?
+}
+
+/// The system's fonts plus Runo's own Inter, which screens ask for by name and which stands
+/// in for the system font, so a screen looks the same on every machine.
+fn font_context() -> FontContext {
+    use parley::fontique::{Blob, GenericFamily};
+    static INTER: &[u8] = include_bytes!("../../assets/fonts/InterVariable.ttf");
+    static INTER_ITALIC: &[u8] = include_bytes!("../../assets/fonts/InterVariable-Italic.ttf");
+    let mut fonts = FontContext::default();
+    let mut inter = Vec::new();
+    for data in [INTER, INTER_ITALIC] {
+        for (family, _) in fonts
+            .collection
+            .register_fonts(Blob::new(Arc::new(data)), None)
+        {
+            if !inter.contains(&family) {
+                inter.push(family);
+            }
+        }
+    }
+    for generic in [GenericFamily::SansSerif, GenericFamily::SystemUi] {
+        let rest: Vec<_> = fonts.collection.generic_families(generic).collect();
+        fonts
+            .collection
+            .set_generic_families(generic, inter.iter().copied().chain(rest));
+    }
+    fonts
 }
 
 fn render(
@@ -102,6 +129,7 @@ fn render(
     doc.handle_messages();
     doc.resolve(0.);
     let page = Page::read(&doc, w);
+    show_placeholders(&mut doc);
     let height = page.bottom.clamp(h, h * MAX_SCREENS_TALL);
     let (pw, ph) = ((w * SCALE).round() as u32, (height * SCALE).round() as u32);
     let mut rgba = render_to_buffer::<VelloCpuImageRenderer, _>(
@@ -122,6 +150,46 @@ fn render(
         facts: Some(page.facts),
         boxes: page.boxes,
     })
+}
+
+/// Blitz doesn't draw an empty field's placeholder, so write it in as the field's text, in a
+/// fainter colour, the way a browser shows it. This happens after the page is read, so the
+/// checks still see the field as empty.
+fn show_placeholders(doc: &mut BaseDocument) {
+    fn empty_fields(doc: &BaseDocument, id: NodeId, out: &mut Vec<(NodeId, String, String)>) {
+        let Some(node) = doc.get_node(id) else {
+            return;
+        };
+        if matches!(tag(node).as_deref(), Some("input" | "textarea"))
+            && attr(node, "value").is_none_or(str::is_empty)
+            && !matches!(
+                attr(node, "type"),
+                Some("checkbox" | "radio" | "hidden" | "range" | "color" | "file")
+            )
+        {
+            if let Some(text) = attr(node, "placeholder").filter(|t| !t.is_empty()) {
+                let style = attr(node, "style").unwrap_or_default().to_string();
+                out.push((id, text.to_string(), style));
+            }
+        }
+        for &child in &node.children {
+            empty_fields(doc, child, out);
+        }
+    }
+    let mut fields = Vec::new();
+    empty_fields(doc, doc.root_element().id, &mut fields);
+    if fields.is_empty() {
+        return;
+    }
+    {
+        let mut edit = doc.mutate();
+        for (id, text, style) in fields {
+            edit.set_attribute(id, blitz_dom::qual_name!("value"), &text);
+            let faint = format!("{style};color:color-mix(in srgb,currentColor 55%,transparent)");
+            edit.set_attribute(id, blitz_dom::qual_name!("style"), &faint);
+        }
+    }
+    doc.resolve(0.);
 }
 
 /// What the canvas reads from a laid-out page.
@@ -184,6 +252,15 @@ impl Page {
             if !br {
                 fact_path.push(fi);
                 fi += 1;
+            }
+            // Inside something hidden, Stylo gives no style: nothing here is drawn, and
+            // asking for its style anyway trips Stylo's checks.
+            if el.primary_styles().is_none() {
+                path.pop();
+                if !br {
+                    fact_path.pop();
+                }
+                continue;
             }
             let style = |k: &str| doc.resolved_style_value(child, k);
             let display = style("display");
@@ -412,5 +489,27 @@ mod tests {
         let px = shot.image.as_bytes(0).unwrap();
         assert!(px.chunks(4).any(|p| p != &px[..4]));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_empty_fields_placeholder_is_drawn() {
+        let page = |input: &str| format!("<!doctype html><body style=\"margin:0\">{input}</body>");
+        let draw_page = |html: String| {
+            render(
+                &html,
+                "file:///x.html",
+                Device::Phone,
+                false,
+                font_context(),
+            )
+            .unwrap()
+        };
+        let blank = draw_page(page("<input style=\"width:300px\">"));
+        let hinted = draw_page(page("<input style=\"width:300px\" placeholder=\"Search\">"));
+        assert_ne!(
+            blank.image.as_bytes(0).unwrap(),
+            hinted.image.as_bytes(0).unwrap(),
+            "the placeholder shows"
+        );
     }
 }

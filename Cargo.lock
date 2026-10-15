@@ -6271,6 +6271,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "libc",
+ "parley",
  "portable-pty",
  "qrcode",
  "resvg 0.45.1",
