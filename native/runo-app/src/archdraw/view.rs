@@ -1,7 +1,9 @@
 //! The architecture editor on screen: a shape palette, the canvas, and a properties panel.
 //! You draw; nothing changes the diagram behind your back.
 
-use super::editor::{search as search_presets, Editor, Hit, Preset, Sel, GROUPS, PRESETS};
+use super::editor::{
+    changes, search as search_presets, Changes, Editor, Hit, Preset, Sel, GROUPS, PRESETS,
+};
 use super::geom::{self, Align, Guide, Handle, Pt, Side};
 use super::io;
 use super::model::Style as DStyle;
@@ -33,7 +35,12 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
 /// What the editor asks of the app around it.
 pub(crate) enum ArchEvent {
     /// Start an agent session with this task and context.
-    Ask { task: String, context: String },
+    /// `edit`: the agent changes the diagram's files where the editor reads them.
+    Ask {
+        task: String,
+        context: String,
+        edit: bool,
+    },
     /// Show a file of the project.
     Open(PathBuf),
 }
@@ -177,7 +184,34 @@ pub(crate) struct ArchEditor {
     layer_edit: Option<usize>,
     /// Diagrams opened by drilling into a shape, for the way back.
     trail: Vec<String>,
+    /// Asking an agent to change the diagram, and its change while it's being reviewed.
+    f_ask: Entity<InputState>,
+    waiting: Option<Waiting>,
+    review: Option<Review>,
+    /// Bumped to stop watching the files for an agent's edit.
+    poll_gen: u64,
     _subs: Vec<Subscription>,
+}
+
+/// An agent asked to change the diagram that hasn't yet.
+struct Waiting {
+    /// The diagram's files and model as they were, to compare with and go back to.
+    snap: Snapshot,
+    before: Doc,
+    stamp: u64,
+    /// The agent's files don't read (yet): why.
+    broken: Option<String>,
+}
+
+/// An agent's change on the canvas, waiting to be accepted or rejected.
+struct Review {
+    snap: Snapshot,
+    before: Doc,
+    stamp: u64,
+    broken: Option<String>,
+    /// What changed on the diagram open now, and for which diagram and edit it was worked out.
+    changes: Changes,
+    seen: (String, u64),
 }
 
 #[derive(Clone, Copy)]
@@ -424,6 +458,15 @@ impl ArchEditor {
                 _ => {}
             }),
         );
+        let f_ask =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Ask AI to change the diagram…"));
+        subs.push(
+            cx.subscribe_in(&f_ask, window, |this, _, ev, window, cx| match ev {
+                InputEvent::PressEnter { .. } => this.send_ask(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            }),
+        );
         let f_layer = cx.new(|cx| InputState::new(window, cx).placeholder("Layer name"));
         subs.push(
             cx.subscribe_in(&f_layer, window, |this, state, ev, window, cx| {
@@ -498,6 +541,10 @@ impl ArchEditor {
             f_layer,
             layer_edit: None,
             trail: Vec::new(),
+            f_ask,
+            waiting: None,
+            review: None,
+            poll_gen: 0,
             _subs: subs,
         }
     }
@@ -505,7 +552,7 @@ impl ArchEditor {
     /// Read the files again if nothing is waiting to be saved (an agent or git may have
     /// changed them).
     pub(crate) fn reload_if_clean(&mut self, cx: &mut Context<Self>) {
-        if self.ed.dirty || !exists(&self.root) {
+        if self.ed.dirty || !exists(&self.root) || self.waiting.is_some() || self.review.is_some() {
             return;
         }
         match load(&self.root) {
@@ -1061,7 +1108,399 @@ impl ArchEditor {
                 e.name
             ),
             context,
+            edit: false,
         });
+    }
+
+    // ---- Asking an agent to change the diagram
+
+    /// Hand the request in the ask bar to an agent that edits the diagram's files, and
+    /// watch them for its change.
+    fn send_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let task = self.f_ask.read(cx).value().trim().to_string();
+        if task.is_empty() || self.waiting.is_some() {
+            return;
+        }
+        if self.review.is_some() {
+            self.note("Accept or reject the last change first.".into(), false);
+            cx.notify();
+            return;
+        }
+        // The agent works from the files, so they must hold what's on screen, with the
+        // guide to them alongside.
+        if let Err(e) = save(&self.root, &self.ed.doc) {
+            self.note(format!("Couldn't save the diagram: {e}"), true);
+            cx.notify();
+            return;
+        }
+        self.ed.dirty = false;
+        self.saved_at = Some(Instant::now());
+        let context = self.ask_context();
+        self.waiting = Some(Waiting {
+            snap: snapshot(&self.root),
+            before: self.ed.doc.clone(),
+            stamp: stamp(&self.root),
+            broken: None,
+        });
+        self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
+        window.focus(&self.focus, cx);
+        cx.emit(ArchEvent::Ask {
+            task,
+            context,
+            edit: true,
+        });
+        self.watch(cx);
+        cx.notify();
+    }
+
+    /// What an agent needs to change the diagram: where the files are, which diagram is
+    /// open and what's selected on it.
+    fn ask_context(&self) -> String {
+        let v = self.ed.cur();
+        let mut out = format!(
+            "## Change the architecture diagram\n\
+             The diagram is in {FOLDER}/. Read {FOLDER}/README.md for the file format, then make \
+             the change by editing {FOLDER}/model.toml and {FOLDER}/views/*.toml directly. Runo \
+             shows your edit on the canvas as a preview the user accepts or rejects, so don't ask \
+             before editing. Change no other files for this request.\n\n\
+             The diagram open now is \"{}\" ({FOLDER}/views/{}.toml); change that one unless the \
+             request says otherwise.\n",
+            v.name, v.id
+        );
+        let name = |id: &str| {
+            self.ed
+                .doc
+                .element(id)
+                .map(|e| {
+                    format!(
+                        "{} (id {id}, {})",
+                        e.name.replace('\n', " "),
+                        e.kind.label()
+                    )
+                })
+                .unwrap_or_else(|| id.to_string())
+        };
+        if !self.ed.sel.nodes.is_empty() || !self.ed.sel.edges.is_empty() {
+            out.push_str("\nSelected on the canvas (\"this\" or \"these\" means them):\n");
+            for id in &self.ed.sel.nodes {
+                out.push_str(&format!("- {}\n", name(id)));
+            }
+            for id in &self.ed.sel.edges {
+                if let Some(r) = self.ed.doc.relation(id) {
+                    out.push_str(&format!(
+                        "- the connector {} → {} (id {id})\n",
+                        name(&r.from),
+                        name(&r.to)
+                    ));
+                }
+            }
+        }
+        out.push_str(&format!(
+            "\nThe diagram has {} shapes and {} connectors.\n",
+            v.nodes.len(),
+            v.edges.len()
+        ));
+        out
+    }
+
+    /// Check the diagram's files for an agent's edit every so often, while one is awaited
+    /// or under review.
+    fn watch(&mut self, cx: &mut Context<Self>) {
+        self.poll_gen += 1;
+        let gen = self.poll_gen;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(1200))
+                .await;
+            let more = this
+                .update(cx, |this, cx| this.check_files(gen, cx))
+                .unwrap_or(false);
+            if !more {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// Show an agent's edit if the files changed. Returns whether to keep watching.
+    fn check_files(&mut self, gen: u64, cx: &mut Context<Self>) -> bool {
+        if gen != self.poll_gen || (self.waiting.is_none() && self.review.is_none()) {
+            return false;
+        }
+        // Unsaved edits on the canvas win; look again once they're saved.
+        if self.ed.dirty {
+            return true;
+        }
+        let now = stamp(&self.root);
+        let (seen, broken) = match (&mut self.waiting, &mut self.review) {
+            (Some(w), _) => (&mut w.stamp, &mut w.broken),
+            (None, Some(r)) => (&mut r.stamp, &mut r.broken),
+            _ => return false,
+        };
+        if *seen == now {
+            return true;
+        }
+        *seen = now;
+        match load(&self.root) {
+            Ok(doc) => {
+                *broken = None;
+                if doc != self.ed.doc {
+                    let view = self.ed.view.clone();
+                    self.ed.replace_doc(doc);
+                    self.ed.open_view(&view);
+                    if let Some(w) = self.waiting.take() {
+                        self.review = Some(Review {
+                            snap: w.snap,
+                            before: w.before,
+                            stamp: w.stamp,
+                            broken: None,
+                            changes: Changes::default(),
+                            seen: (String::new(), u64::MAX),
+                        });
+                    }
+                    self.generation += 1;
+                    self.text_loaded = None;
+                    self.load_error = None;
+                }
+            }
+            Err(e) => *broken = Some(e),
+        }
+        cx.notify();
+        true
+    }
+
+    /// Keep what the agent did.
+    fn accept(&mut self, cx: &mut Context<Self>) {
+        self.review = None;
+        self.poll_gen += 1;
+        cx.notify();
+    }
+
+    /// Put the diagram's files back exactly as they were before the agent's edit.
+    fn reject(&mut self, cx: &mut Context<Self>) {
+        let (snap, before) = match (self.review.take(), self.waiting.take()) {
+            (Some(r), _) => (r.snap, r.before),
+            (None, Some(w)) => (w.snap, w.before),
+            _ => return,
+        };
+        self.poll_gen += 1;
+        if let Err(e) = restore(&self.root, &snap) {
+            self.note(format!("Couldn't put the diagram back: {e}"), true);
+        }
+        let view = self.ed.view.clone();
+        self.ed.replace_doc(load(&self.root).unwrap_or(before));
+        self.ed.open_view(&view);
+        self.generation += 1;
+        self.text_loaded = None;
+        cx.notify();
+    }
+
+    fn stop_waiting(&mut self, cx: &mut Context<Self>) {
+        self.waiting = None;
+        self.poll_gen += 1;
+        cx.notify();
+    }
+
+    /// Work out again what the agent changed when the diagram or the model moved on.
+    fn refresh_review(&mut self) {
+        let key = (self.ed.view.clone(), self.generation);
+        let Some(r) = &mut self.review else {
+            return;
+        };
+        if r.seen != key {
+            r.changes = changes(&r.before, &self.ed.doc, &self.ed.view);
+            r.seen = key;
+        }
+    }
+
+    /// The agent's change drawn over the diagram.
+    fn review_draw(&self) -> Option<ReviewDraw> {
+        let r = self.review.as_ref()?;
+        let c = &r.changes;
+        let rects = |ids: &mut dyn Iterator<Item = &String>| -> Vec<Rect> {
+            ids.filter_map(|id| self.ed.rect(id)).collect()
+        };
+        let wires: std::collections::HashMap<String, geom::Wire> = if c.edges_added.is_empty() {
+            Default::default()
+        } else {
+            self.ed.wires().into_iter().collect()
+        };
+        Some(ReviewDraw {
+            added: rects(&mut c.added.iter()),
+            edited: rects(&mut c.edited.iter().filter(|id| !c.added.contains(id))),
+            removed: c.removed.iter().map(|(r, _)| *r).collect(),
+            moved: c.moved.iter().map(|(_, r)| *r).collect(),
+            wires_added: c
+                .edges_added
+                .iter()
+                .filter_map(|id| wires.get(id))
+                .map(|w| motion::flatten(&w.points, w.curved))
+                .collect(),
+            wires_removed: c
+                .edges_removed
+                .iter()
+                .map(|w| motion::flatten(&w.points, w.curved))
+                .collect(),
+        })
+    }
+
+    /// The bar at the foot of the canvas: ask an agent for a change, wait for it, or
+    /// accept or reject it.
+    fn ask_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let bar = div()
+            .id("arch-ask")
+            .max_w(px(640.))
+            .p_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded_lg()
+            .border_1()
+            .bg(float(c_canvas()))
+            .shadow_lg()
+            .text_size(px(12.5))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        let broken_note = |b: &Option<String>| {
+            b.as_ref().map(|e| {
+                div()
+                    .max_w(px(520.))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(float(c_canvas()))
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_red()))
+                    .child(format!(
+                        "The files don't read yet, so this is the last good diagram. {}",
+                        e.lines().next().unwrap_or_default()
+                    ))
+            })
+        };
+        let body = if let Some(r) = &self.review {
+            let text = if r.changes.is_empty() {
+                "The agent's change leaves this diagram as it was".to_string()
+            } else {
+                format!("AI change: {}", r.changes.summary())
+            };
+            div()
+                .v_flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    bar.border_color(rgb(c_blue()))
+                        .child(icon(IconName::Sparkles, 14., c_blue()))
+                        .child(
+                            div()
+                                .px_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(rgb(c_text()))
+                                .child(text),
+                        )
+                        .child(
+                            text_btn("arch-reject", "Reject", Some(IconName::Undo2), false)
+                                .on_click(cx.listener(|this, _, _, cx| this.reject(cx))),
+                        )
+                        .child(
+                            text_btn("arch-accept", "Accept", Some(IconName::Check), true)
+                                .on_click(cx.listener(|this, _, _, cx| this.accept(cx))),
+                        ),
+                )
+                .children(broken_note(&r.broken))
+        } else if let Some(w) = &self.waiting {
+            div()
+                .v_flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    bar.border_color(rgb(c_border()))
+                        .child(icon(IconName::Sparkles, 14., c_blue()))
+                        .child(
+                            div()
+                                .px_1()
+                                .text_color(rgb(c_secondary()))
+                                .child("Waiting for the agent to change the diagram…"),
+                        )
+                        .when(w.broken.is_some(), |el| {
+                            el.child(
+                                text_btn("arch-restore", "Restore", Some(IconName::Undo2), false)
+                                    .on_click(cx.listener(|this, _, _, cx| this.reject(cx))),
+                            )
+                        })
+                        .child(
+                            text_btn("arch-stop-wait", "Stop waiting", None, false)
+                                .on_click(cx.listener(|this, _, _, cx| this.stop_waiting(cx))),
+                        ),
+                )
+                .children(broken_note(&w.broken))
+        } else {
+            let picked = self.ed.sel.nodes.len() + self.ed.sel.edges.len();
+            div().child(
+                bar.w(px(460.))
+                    .border_color(rgb(c_border()))
+                    .when(picked > 0, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .px_2()
+                                .py(px(2.))
+                                .rounded_md()
+                                .bg(col(c_blue(), 0.12))
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_blue()))
+                                .child(format!("{picked} selected")),
+                        )
+                    })
+                    .child(
+                        div().flex_1().child(
+                            Input::new(&self.f_ask)
+                                .bordered(false)
+                                .h(px(28.))
+                                .prefix(icon(IconName::Sparkles, 13., c_blue())),
+                        ),
+                    )
+                    .child(
+                        text_btn("arch-ask-send", "Send", None, true)
+                            .on_click(cx.listener(|this, _, window, cx| this.send_ask(window, cx))),
+                    ),
+            )
+        };
+        // A change under review sits at the top, clear of the status line and the map.
+        div()
+            .absolute()
+            .when(self.review.is_some(), |el| el.top(px(10.)))
+            .when(self.review.is_none(), |el| el.bottom(px(10.)))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(body)
+            .into_any_element()
+    }
+
+    /// Names on the shapes the agent's change took away.
+    fn removed_labels(&self) -> Vec<AnyElement> {
+        let Some(r) = &self.review else {
+            return Vec::new();
+        };
+        r.changes
+            .removed
+            .iter()
+            .map(|(rect, name)| {
+                let s = self.screen_rect(rect);
+                div()
+                    .absolute()
+                    .left(px(s.x))
+                    .top(px(s.y))
+                    .w(px(s.w))
+                    .h(px(s.h))
+                    .p(px(6.))
+                    .text_size(px(11.))
+                    .text_color(col(c_red(), 0.9))
+                    .child(format!("Removed: {}", name.replace('\n', " ")))
+                    .into_any_element()
+            })
+            .collect()
     }
 
     // ---- Input
@@ -1664,6 +2103,19 @@ struct Scene {
     /// Shapes matching the find bar, and the one shown now.
     found: Vec<Rect>,
     found_now: Option<Rect>,
+    review: Option<ReviewDraw>,
+}
+
+/// An agent's change marked on the canvas: new shapes green, changed ones amber, the
+/// ones it took away and where moved ones were as dashed ghosts.
+#[derive(Clone)]
+struct ReviewDraw {
+    added: Vec<Rect>,
+    edited: Vec<Rect>,
+    removed: Vec<Rect>,
+    moved: Vec<Rect>,
+    wires_added: Vec<Vec<Pt>>,
+    wires_removed: Vec<Vec<Pt>>,
 }
 
 /// Below this zoom connectors stop moving: the motion is too small to see.
@@ -2096,6 +2548,9 @@ fn paint_scene(b: Bounds<Pixels>, s: &Scene, window: &mut Window) {
             BorderStyle::Dashed,
         ));
     }
+    if let Some(rv) = &s.review {
+        paint_review(rv, &tf, zoom, window);
+    }
     for (i, r) in s.found.iter().enumerate() {
         let now = s.found_now.as_ref() == Some(r);
         let p = tf((r.x, r.y));
@@ -2173,6 +2628,83 @@ fn paint_scene(b: Bounds<Pixels>, s: &Scene, window: &mut Window) {
             col(s.accent, 0.7),
             BorderStyle::Solid,
         ));
+    }
+}
+
+fn paint_review(rv: &ReviewDraw, tf: &dyn Fn(Pt) -> Point<Pixels>, zoom: f32, window: &mut Window) {
+    const GREEN: u32 = 0x16a34a;
+    const AMBER: u32 = 0xf59e0b;
+    const RED: u32 = 0xdc2626;
+    for line in &rv.wires_removed {
+        let mut segs = Vec::with_capacity(line.len());
+        for (i, p) in line.iter().enumerate() {
+            segs.push(if i == 0 {
+                Seg::Move(p.0, p.1)
+            } else {
+                Seg::Line(p.0, p.1)
+            });
+        }
+        if let Some(p) = build_path(&segs, tf, stroke_builder(2., true, zoom)) {
+            window.paint_path(p, col(RED, 0.75));
+        }
+    }
+    for line in &rv.wires_added {
+        paint_line(line, tf, (6. * zoom).max(3.), col(GREEN, 0.3), window);
+    }
+    let ring =
+        |r: &Rect, grow: f32, fill_: Rgba, line: Rgba, style: BorderStyle, window: &mut Window| {
+            let p = tf((r.x, r.y));
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(p.x - px(grow), p.y - px(grow)),
+                    size(px(r.w * zoom + 2. * grow), px(r.h * zoom + 2. * grow)),
+                ),
+                px(8.),
+                fill_,
+                px(2.),
+                line,
+                style,
+            ));
+        };
+    for r in &rv.moved {
+        ring(
+            r,
+            0.,
+            col(0x94a3b8, 0.04),
+            col(0x94a3b8, 0.9),
+            BorderStyle::Dashed,
+            window,
+        );
+    }
+    for r in &rv.removed {
+        ring(
+            r,
+            0.,
+            col(RED, 0.06),
+            col(RED, 0.8),
+            BorderStyle::Dashed,
+            window,
+        );
+    }
+    for r in &rv.edited {
+        ring(
+            r,
+            5.,
+            col(AMBER, 0.),
+            col(AMBER, 1.),
+            BorderStyle::Solid,
+            window,
+        );
+    }
+    for r in &rv.added {
+        ring(
+            r,
+            5.,
+            col(GREEN, 0.06),
+            col(GREEN, 1.),
+            BorderStyle::Solid,
+            window,
+        );
     }
 }
 
@@ -2556,6 +3088,7 @@ impl ArchEditor {
                 .then(|| self.found.get(self.found_at))
                 .flatten()
                 .and_then(|id| self.ed.rect(id)),
+            review: self.review_draw(),
         }
     }
 
@@ -3898,6 +4431,8 @@ impl ArchEditor {
             .children(self.player(cx))
             .children(self.breadcrumbs(cx))
             .children(self.find_bar(cx))
+            .children(self.removed_labels())
+            .child(self.ask_bar(cx))
             .child(
                 div()
                     .absolute()
@@ -5494,7 +6029,7 @@ impl ArchEditor {
         Some(
             div()
                 .absolute()
-                .bottom(px(44.))
+                .bottom(px(56.))
                 .left_0()
                 .right_0()
                 .flex()
@@ -5732,6 +6267,7 @@ impl Render for ArchEditor {
         if self.animating() {
             self.tick(cx);
         }
+        self.refresh_review();
         let theme = self.theme();
         let scene = self.scene(&theme);
         let ghost = match &self.drag {

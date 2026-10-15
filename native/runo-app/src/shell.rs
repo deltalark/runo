@@ -2154,6 +2154,9 @@ impl RunoApp {
         self.new_project = Some(pid);
         self.new_task
             .update(cx, |t, cx| t.set_value(task, window, cx));
+        if context.in_place {
+            self.new_isolated = false;
+        }
         self.new_context = Some(context);
         self.open_new_session();
         cx.notify();
@@ -2438,6 +2441,9 @@ pub(crate) struct StartContext {
     pub label: String,
     pub text: String,
     pub images: Vec<String>,
+    /// Run in the project folder rather than a worktree, so the edits show where they
+    /// were asked for (the architecture canvas previews them).
+    pub in_place: bool,
 }
 
 /// The Design and Architecture pages' frame: the mode's mark and title over the body.

@@ -1359,13 +1359,18 @@ impl RunoApp {
         let pid = project.id;
         let sub = cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {
             match event {
-                ArchEvent::Ask { task, context } => this.start_with_context(
+                ArchEvent::Ask {
+                    task,
+                    context,
+                    edit,
+                } => this.start_with_context(
                     pid,
                     task,
                     shell::StartContext {
                         label: "Architecture diagram".into(),
                         text: context.clone(),
                         images: Vec::new(),
+                        in_place: *edit,
                     },
                     window,
                     cx,
@@ -1468,6 +1473,7 @@ impl RunoApp {
                 label: "Architecture map and notes".into(),
                 text,
                 images: Vec::new(),
+                in_place: false,
             },
             window,
             cx,

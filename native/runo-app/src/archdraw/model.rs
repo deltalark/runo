@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 pub(crate) const FOLDER: &str = "architecture";
 const MODEL: &str = "model.toml";
 const VIEWS: &str = "views";
+const README_FILE: &str = "README.md";
+/// The guide to the format written next to the files.
+pub(crate) const README: &str = include_str!("README.md");
+const README_MARK: &str = "<!-- Written by Runo.";
 
 /// What an element is. Decides its default shape, colour and size.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -200,7 +204,7 @@ pub(crate) struct Node {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub collapsed: bool,
     /// A collapsed boundary's size when open.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, rename = "open-size", skip_serializing_if = "Option::is_none")]
     pub open_size: Option<(f32, f32)>,
 }
 
@@ -634,6 +638,13 @@ pub(crate) fn save(root: &Path, doc: &Doc) -> std::io::Result<()> {
     let views_dir = dir.join(VIEWS);
     std::fs::create_dir_all(&views_dir)?;
     write_if_changed(&dir.join(MODEL), &doc.model_text())?;
+    // The guide to these files, for people and agents; kept current unless it's been
+    // replaced by one of the project's own.
+    let readme = dir.join(README_FILE);
+    let ours = std::fs::read_to_string(&readme).map_or(true, |t| t.starts_with(README_MARK));
+    if ours {
+        write_if_changed(&readme, README)?;
+    }
     let mut keep = std::collections::HashSet::new();
     for (i, v) in doc.views.iter().enumerate() {
         let mut v = v.clone();
@@ -653,6 +664,70 @@ pub(crate) fn save(root: &Path, doc: &Doc) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Every file under the diagram folder with its bytes, to put back exactly later.
+pub(crate) type Snapshot = Vec<(PathBuf, Vec<u8>)>;
+
+fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+pub(crate) fn snapshot(root: &Path) -> Snapshot {
+    let mut files = Vec::new();
+    files_under(&folder(root), &mut files);
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|p| Some((p.clone(), std::fs::read(&p).ok()?)))
+        .collect()
+}
+
+/// Put the diagram folder back as it was in `snap`, removing files made since.
+pub(crate) fn restore(root: &Path, snap: &Snapshot) -> std::io::Result<()> {
+    let keep: std::collections::HashSet<&PathBuf> = snap.iter().map(|(p, _)| p).collect();
+    let mut now = Vec::new();
+    files_under(&folder(root), &mut now);
+    for p in now {
+        if !keep.contains(&p) {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    for (p, bytes) in snap {
+        if std::fs::read(p).ok().as_deref() != Some(bytes.as_slice()) {
+            if let Some(dir) = p.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(p, bytes)?;
+        }
+    }
+    Ok(())
+}
+
+/// A fingerprint of the diagram folder's files (names, sizes and times), to notice edits.
+pub(crate) fn stamp(root: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut files = Vec::new();
+    files_under(&folder(root), &mut files);
+    files.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for p in files {
+        p.hash(&mut h);
+        if let Ok(m) = std::fs::metadata(&p) {
+            m.len().hash(&mut h);
+            if let Ok(t) = m.modified() {
+                t.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
 }
 
 fn write_if_changed(path: &Path, text: &str) -> std::io::Result<()> {
@@ -909,5 +984,84 @@ mod tests {
         let mut d = v.descendants("vpc");
         d.sort();
         assert_eq!(d, vec!["api", "subnet"]);
+    }
+
+    #[test]
+    fn the_format_guide_matches_the_format() {
+        assert!(README.starts_with(README_MARK));
+        let blocks: Vec<&str> = README
+            .split("```toml")
+            .skip(1)
+            .map(|b| b.split("```").next().unwrap())
+            .collect();
+        assert_eq!(blocks.len(), 2);
+        let model: ModelFile = toml::from_str(blocks[0]).expect("model example reads");
+        assert_eq!(model.elements[0].kind, Kind::Container);
+        assert_eq!(model.relations[0].to, "orders-api");
+        let view: View = toml::from_str(blocks[1]).expect("view example reads");
+        let n = &view.nodes[0];
+        assert_eq!(n.effect, Effect::Pulse);
+        assert_eq!(n.open_size, Some((620., 420.)));
+        assert_eq!(n.style.radius, Some(8.));
+        let e = &view.edges[0];
+        assert_eq!(e.to_side, Some(super::super::geom::Side::Top));
+        assert_eq!(e.waypoints, vec![(600., 380.)]);
+        assert_eq!(view.layers[0].name, "Services");
+        assert_eq!(view.stories[0].steps[0].edge, "web-to-orders-api");
+        for k in Kind::ALL {
+            let name = toml::to_string(&ModelFile {
+                elements: vec![Element {
+                    kind: k,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            let word = name
+                .split("kind = \"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            assert!(README.contains(&format!("`{word}`")), "{word} is described");
+        }
+    }
+
+    #[test]
+    fn saving_writes_the_guide_but_keeps_a_projects_own() {
+        let dir = std::env::temp_dir().join(format!("runo-guide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        save(&dir, &sample()).unwrap();
+        let readme = folder(&dir).join(README_FILE);
+        assert_eq!(std::fs::read_to_string(&readme).unwrap(), README);
+        std::fs::write(&readme, "# Our notes").unwrap();
+        save(&dir, &sample()).unwrap();
+        assert_eq!(std::fs::read_to_string(&readme).unwrap(), "# Our notes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_puts_files_back_exactly() {
+        let dir = std::env::temp_dir().join(format!("runo-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        save(&dir, &sample()).unwrap();
+        let model = folder(&dir).join(MODEL);
+        std::fs::write(
+            &model,
+            "# hand formatted\n[[element]]\nid = \"web\"\nname = \"Web\"\n",
+        )
+        .unwrap();
+        let snap = snapshot(&dir);
+        let before = stamp(&dir);
+        std::fs::write(&model, "broken = [").unwrap();
+        std::fs::write(folder(&dir).join(VIEWS).join("new.toml"), "name = \"New\"").unwrap();
+        assert_ne!(stamp(&dir), before);
+        restore(&dir, &snap).unwrap();
+        assert!(std::fs::read_to_string(&model)
+            .unwrap()
+            .starts_with("# hand formatted"));
+        assert!(!folder(&dir).join(VIEWS).join("new.toml").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

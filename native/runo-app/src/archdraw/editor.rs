@@ -506,6 +506,22 @@ impl Editor {
     }
 
     /// Open another diagram.
+    /// Take a model changed outside the editor (an agent's edit), as one undoable step.
+    /// Its files are already on disk, so nothing is waiting to be saved.
+    pub(crate) fn replace_doc(&mut self, doc: Doc) {
+        self.checkpoint();
+        self.doc = doc;
+        if self.doc.views.is_empty() {
+            self.doc.views.push(View {
+                id: "main".into(),
+                name: "Main".into(),
+                ..Default::default()
+            });
+        }
+        self.after_history();
+        self.dirty = false;
+    }
+
     pub(crate) fn open_view(&mut self, id: &str) {
         if self.doc.views.iter().any(|v| v.id == id) {
             self.view = id.to_string();
@@ -1937,6 +1953,128 @@ impl Editor {
     }
 }
 
+/// How a diagram changed between two versions of the model, for previewing an agent's edit.
+#[derive(Default)]
+pub(crate) struct Changes {
+    /// Shapes new on the diagram.
+    pub added: Vec<String>,
+    /// Shapes gone from it: where they were and what they were called.
+    pub removed: Vec<(Rect, String)>,
+    /// Shapes moved or resized: where they were.
+    pub moved: Vec<(String, Rect)>,
+    /// Shapes whose part was renamed or redescribed.
+    pub edited: Vec<String>,
+    pub edges_added: Vec<String>,
+    /// Connectors gone: the routes they took.
+    pub edges_removed: Vec<Wire>,
+    /// Diagrams added or removed elsewhere in the model.
+    pub views_added: usize,
+    pub views_removed: usize,
+}
+
+impl Changes {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.moved.is_empty()
+            && self.edited.is_empty()
+            && self.edges_added.is_empty()
+            && self.edges_removed.is_empty()
+            && self.views_added == 0
+            && self.views_removed == 0
+    }
+
+    /// A short account: "2 added, 1 removed, 3 moved".
+    pub(crate) fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        let mut say = |n: usize, what: &str| {
+            if n > 0 {
+                parts.push(format!("{n} {what}"));
+            }
+        };
+        say(self.added.len(), "added");
+        say(self.removed.len(), "removed");
+        say(self.moved.len(), "moved");
+        say(self.edited.len(), "edited");
+        let edges = self.edges_added.len() + self.edges_removed.len();
+        say(
+            edges,
+            if edges == 1 {
+                "connector changed"
+            } else {
+                "connectors changed"
+            },
+        );
+        say(
+            self.views_added,
+            if self.views_added == 1 {
+                "new diagram"
+            } else {
+                "new diagrams"
+            },
+        );
+        say(self.views_removed, "diagrams removed");
+        if parts.is_empty() {
+            "nothing visible on this diagram".into()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+/// What changed on diagram `view` from `before` to `after`.
+pub(crate) fn changes(before: &Doc, after: &Doc, view: &str) -> Changes {
+    let mut out = Changes::default();
+    let ids = |d: &Doc| -> HashSet<String> { d.views.iter().map(|v| v.id.clone()).collect() };
+    let (bv, av) = (ids(before), ids(after));
+    out.views_added = av.difference(&bv).count();
+    out.views_removed = bv.difference(&av).count();
+    let empty = View::default();
+    let b = before.views.iter().find(|v| v.id == view).unwrap_or(&empty);
+    let a = after.views.iter().find(|v| v.id == view).unwrap_or(&empty);
+    let bn: HashMap<&str, &Node> = b.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let an: HashMap<&str, &Node> = a.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let name = |d: &Doc, id: &str| d.element(id).map(|e| e.name.clone()).unwrap_or_default();
+    for n in &a.nodes {
+        match bn.get(n.id.as_str()) {
+            None => out.added.push(n.id.clone()),
+            Some(old) => {
+                if old.rect() != n.rect() {
+                    out.moved.push((n.id.clone(), old.rect()));
+                }
+                let (e0, e1) = (before.element(&n.id), after.element(&n.id));
+                if let (Some(e0), Some(e1)) = (e0, e1) {
+                    if e0 != e1 || old.style != n.style || old.effect != n.effect {
+                        out.edited.push(n.id.clone());
+                    }
+                }
+            }
+        }
+    }
+    for n in &b.nodes {
+        if !an.contains_key(n.id.as_str()) {
+            out.removed.push((n.rect(), name(before, &n.id)));
+        }
+    }
+    let be: HashSet<&str> = b.edges.iter().map(|e| e.id.as_str()).collect();
+    let ae: HashSet<&str> = a.edges.iter().map(|e| e.id.as_str()).collect();
+    out.edges_added = a
+        .edges
+        .iter()
+        .filter(|e| !be.contains(e.id.as_str()))
+        .map(|e| e.id.clone())
+        .collect();
+    let gone: HashSet<&str> = be.difference(&ae).copied().collect();
+    if !gone.is_empty() {
+        out.edges_removed = view_wires(before, b, &view_sight(b))
+            .into_iter()
+            .filter(|(id, _)| gone.contains(id.as_str()))
+            .map(|(_, w)| w)
+            .collect();
+    }
+    out
+}
+
 /// What's out of sight on a diagram.
 pub(crate) fn view_sight(v: &View) -> Sight {
     let mut sight = Sight::default();
@@ -2451,5 +2589,42 @@ mod tests {
         };
         ed.reset_paths();
         assert!(ed.cur().edge(&r).unwrap().waypoints.is_empty());
+    }
+
+    #[test]
+    fn changes_between_versions_are_counted() {
+        let mut ed = Editor::new(Doc::default());
+        let a = ed.add(preset("Service"), (0., 0.));
+        let b = ed.add(preset("Database"), (0., 300.));
+        ed.connect(&a, &b).unwrap();
+        let before = ed.doc.clone();
+        let c = ed.add(preset("Service"), (400., 0.));
+        ed.sel = Sel {
+            nodes: vec![b.clone()],
+            edges: vec![],
+        };
+        ed.delete();
+        ed.sel = Sel {
+            nodes: vec![a.clone()],
+            edges: vec![],
+        };
+        ed.nudge((30., 0.));
+        ed.doc.element_mut(&a).unwrap().name = "Orders".into();
+        let view = ed.view.clone();
+        let ch = changes(&before, &ed.doc, &view);
+        assert_eq!(ch.added, vec![c]);
+        assert_eq!(ch.removed.len(), 1);
+        assert_eq!(ch.moved.len(), 1);
+        assert_eq!(ch.edited, vec![a]);
+        assert_eq!(ch.edges_removed.len(), 1);
+        assert_eq!(
+            ch.summary(),
+            "1 added, 1 removed, 1 moved, 1 edited, 1 connector changed"
+        );
+        let mut undo = Editor::new(before.clone());
+        undo.replace_doc(ed.doc.clone());
+        assert!(!undo.dirty);
+        assert!(undo.undo());
+        assert_eq!(undo.doc, before);
     }
 }

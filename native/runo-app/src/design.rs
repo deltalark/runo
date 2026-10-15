@@ -569,6 +569,7 @@ impl RunoApp {
                 },
                 text,
                 images: picked.into_iter().map(|(path, _)| path).collect(),
+                in_place: false,
             },
             window,
             cx,

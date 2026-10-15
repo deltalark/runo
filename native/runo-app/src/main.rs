@@ -3046,10 +3046,16 @@ impl RunoApp {
             }
             self.save();
         }
+        // An agent editing a diagram in place is watched from the canvas it was asked on.
+        let mut stay = None;
         if let Some(context) = self.new_context.take() {
             for &id in &created {
                 self.apply_context(id, &context);
             }
+            stay = context
+                .in_place
+                .then_some(self.new_back)
+                .filter(|v| matches!(v, View::Architecture | View::Design));
         }
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
@@ -3064,6 +3070,9 @@ impl RunoApp {
             self.launch(id, task.clone(), cx);
         }
         self.select(first);
+        if let Some(view) = stay {
+            self.view = view;
+        }
     }
 
     /// Whether the New session form will race several agents.
