@@ -31,6 +31,7 @@ impl RunoApp {
             project: self.project,
             sidebar_width: self.sidebar_width,
             panel_width: self.panel_width,
+            term_height: self.term_h,
             home_all: self.home_all,
             window: self.window_place,
         };
@@ -74,6 +75,12 @@ impl RunoApp {
         }
         if layout.panel_width > 0. {
             self.panel_width = layout.panel_width.clamp(PANEL_MIN, PANEL_MAX);
+        }
+        if layout.term_height > 0. {
+            self.term_h = layout
+                .term_height
+                .clamp(crate::terminal::TERM_MIN, crate::terminal::TERM_MAX);
+            self.term_from = self.term_h;
         }
         self.home_all = layout.home_all;
         self.window_place = layout.window;
@@ -179,43 +186,6 @@ impl RunoApp {
             }
         }
         col
-    }
-
-    /// Saved commands shown as buttons over the Terminal.
-    pub(crate) fn quick_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let commands = settings::parse_quick_commands(&cx.global::<AppSettings>().quick_commands);
-        if commands.is_empty() {
-            return None;
-        }
-        let mut row = div().flex().items_center().gap_1().overflow_hidden();
-        for (i, (name, command)) in commands.into_iter().enumerate().take(6) {
-            let tip = command.clone();
-            row = row.child(
-                div()
-                    .id(("quick", i))
-                    .h(px(22.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.cli_tab = false;
-                        this.run_terminal(command.clone(), cx);
-                        cx.notify();
-                    }))
-                    .child(icon(IconName::Play, 10., c_muted()))
-                    .child(name),
-            );
-        }
-        Some(row.into_any_element())
     }
 
     // ---------- Notes ----------

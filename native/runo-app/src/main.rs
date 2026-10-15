@@ -200,12 +200,13 @@ struct RunoApp {
     /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
     browser_open: bool,
     browser_main: bool,
-    cli_tab: bool,
     /// Interactive shells, across all sessions.
     shells: Vec<pty::Shell>,
     /// The shell tab shown in the terminal panel, when one is selected.
     shell_tab: Option<u64>,
     next_shell: u64,
+    /// Quick commands run in their own terminal tabs: shell id → the run.
+    tasks: HashMap<u64, terminal::Task>,
     /// Agent CLIs open in the CLI view, by session.
     cli_runs: HashMap<u64, cliview::CliRun>,
     /// The agent whose install confirm card is open.
@@ -230,7 +231,13 @@ struct RunoApp {
     /// The session whose view last switched between Chat and CLI, and when.
     view_changed: Option<(u64, std::time::Instant)>,
     term_focus: FocusHandle,
+    /// Flips each time Expand is pressed, so the panel animates.
     term_tall: bool,
+    /// The terminal panel's height, and the height it is easing from.
+    term_h: f32,
+    term_from: f32,
+    /// While the panel's top edge is dragged: the pointer's y and the height at the start.
+    term_drag: Option<(f32, f32)>,
     cell_w: f32,
     /// Font family and size the terminal cell width was measured for.
     cell_key: Option<(SharedString, u32)>,
@@ -288,7 +295,6 @@ struct RunoApp {
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
     branch: Entity<InputState>,
-    term_input: Entity<InputState>,
     address: Entity<InputState>,
     browser_recent: Vec<String>,
     browser_ports: Vec<u16>,
@@ -1135,15 +1141,7 @@ impl RunoApp {
                     cx.notify();
                 }
             });
-        let term_input = cx.new(|cx| InputState::new(window, cx).placeholder("Run a command…"));
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
-        let term_sub = cx.subscribe_in(&term_input, window, |this, input, event, window, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                let line = input.read(cx).value().to_string();
-                input.update(cx, |input, cx| input.set_value("", window, cx));
-                this.run_terminal(line, cx);
-            }
-        });
         let file_editor = Self::new_file_editor(window, cx);
         let file_sub = cx.subscribe_in(&file_editor, window, |this, _, event, _, cx| {
             if matches!(event, InputEvent::Change) {
@@ -1292,10 +1290,10 @@ impl RunoApp {
             right_tab: RightTab::Changes,
             browser_open: false,
             browser_main: false,
-            cli_tab: false,
             shells: Vec::new(),
             shell_tab: None,
             next_shell: 0,
+            tasks: HashMap::new(),
             cli_runs: HashMap::new(),
             install_confirm: None,
             remove_copy: None,
@@ -1314,6 +1312,9 @@ impl RunoApp {
             view_changed: None,
             term_focus: cx.focus_handle(),
             term_tall: false,
+            term_h: terminal::TERM_HEIGHT,
+            term_from: terminal::TERM_HEIGHT,
+            term_drag: None,
             cell_w: 7.2,
             cell_key: None,
             focus_shell: 0,
@@ -1362,7 +1363,6 @@ impl RunoApp {
             branch: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("Branch (optional, named after the task)")
             }),
-            term_input,
             address,
             browser_recent: Vec::new(),
             browser_ports: Vec::new(),
@@ -1509,7 +1509,6 @@ impl RunoApp {
             diff_expanded: Default::default(),
             _subscriptions: vec![
                 search_sub,
-                term_sub,
                 prompt_sub,
                 settings_search_sub,
                 commit_sub,
@@ -2305,8 +2304,10 @@ impl RunoApp {
                 if self.setups.contains_key(&id) {
                     self.setup_exited(id, cx);
                 }
+                // A quick command's tab says how it went in its own words.
+                self.task_exited(id);
                 if let Some(shell) = self.shells.iter().find(|s| s.id == id && s.exited()) {
-                    if self.shell_tab == Some(id) {
+                    if self.shell_tab == Some(id) && !self.tasks.contains_key(&id) {
                         self.info = Some((
                             format!("{} exited.", shell.title),
                             std::time::Instant::now(),
@@ -2876,52 +2877,6 @@ impl RunoApp {
             }
             Err(error) => self.fail("session", format!("Could not discard {path}: {error}")),
         }
-    }
-
-    fn run_terminal(&mut self, line: String, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
-        let Some(id) = self.current().map(|s| s.id) else {
-            return;
-        };
-        self.run_terminal_in(id, line, cx);
-    }
-
-    /// Run a command in a session's Terminal, whether or not it is the one on screen.
-    fn run_terminal_in(&mut self, id: u64, line: String, cx: &mut Context<Self>) {
-        let line = line.trim().to_string();
-        let Some(session) = self.state.session(id) else {
-            return;
-        };
-        if line.is_empty() {
-            return;
-        }
-        let (dir, sandbox) = (session.dir.clone(), session.sandbox());
-        if self.handles.contains_key(&Target::Terminal(id)) {
-            self.fail(
-                "session",
-                "A command is already running in this terminal.".into(),
-            );
-            return;
-        }
-        self.terminal
-            .entry(id)
-            .or_default()
-            .push(format!("$ {line}"));
-        match agent::run_shell(
-            Target::Terminal(id),
-            &line,
-            &dir,
-            sandbox.as_ref(),
-            self.tx.clone(),
-        ) {
-            Ok(handle) => {
-                self.handles.insert(Target::Terminal(id), handle);
-            }
-            Err(error) => self.terminal.entry(id).or_default().push(error),
-        }
-        cx.notify();
     }
 
     fn add_project(
@@ -7813,23 +7768,16 @@ impl RunoApp {
             .into_any_element()
     }
 
-    fn terminal_tab(
-        &self,
-        label: &'static str,
-        cli: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let selected = if cli {
-            self.cli_tab
-        } else {
-            !self.cli_tab && self.active_shell().is_none()
-        };
+    /// The Output tab: what Runo itself printed for the session, such as setup and push logs.
+    fn output_tab(&self, selected: bool, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id(label)
+            .id("term-output")
+            .flex_none()
             .h(px(22.))
             .px_2()
             .flex()
             .items_center()
+            .gap(px(5.))
             .rounded_md()
             .cursor_pointer()
             .text_size(px(12.))
@@ -7841,88 +7789,113 @@ impl RunoApp {
                 el.text_color(rgb(c_muted()))
                     .hover(|el| el.text_color(rgb(c_text())))
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.cli_tab = cli;
+            .on_click(cx.listener(|this, _, _, cx| {
                 this.shell_tab = None;
                 cx.notify();
             }))
-            .gap(px(5.))
             .child(icon(
-                if cli {
-                    IconName::Bot
-                } else {
-                    IconName::SquareTerminal
-                },
+                IconName::FileText,
                 12.,
                 if selected { c_text() } else { c_muted() },
             ))
-            .child(label)
+            .child("Output")
+    }
+
+    /// Nothing open yet: start a shell, or one of the quick commands.
+    fn terminal_empty(&self, cx: &mut Context<Self>) -> AnyElement {
+        let folder = self
+            .current()
+            .and_then(|s| {
+                std::path::Path::new(&s.dir)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "the session folder".into());
+        let commands = settings::parse_quick_commands(&cx.global::<AppSettings>().quick_commands);
+        let mut actions = div().flex().flex_wrap().justify_center().gap_2().child(
+            self.button("term-empty-shell", "New shell", true)
+                .h(px(26.))
+                .text_size(px(12.))
+                .on_click(cx.listener(|this, _, _, cx| this.new_shell(cx))),
+        );
+        for (i, (name, command)) in commands.into_iter().enumerate().take(4) {
+            actions = actions.child(
+                self.button(("term-empty-run", i), format!("Run {name}"), false)
+                    .h(px(26.))
+                    .text_size(px(12.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.run_task(name.clone(), command.clone(), cx)
+                    })),
+            );
+        }
+        div()
+            .flex_1()
+            .min_h_0()
+            .v_flex()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .px_4()
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(rgb(c_muted()))
+                    .text_center()
+                    .child(format!("Terminals here open in {folder}.")),
+            )
+            .child(actions)
+            .into_any_element()
     }
 
     fn terminal_panel(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.selected.unwrap_or(0);
-        let shell = if self.cli_tab {
-            None
-        } else {
-            self.active_shell()
-        };
-        let running = shell.is_none() && self.handles.contains_key(&Target::Terminal(id));
-        let has_output = self.terminal.get(&id).is_some_and(|l| !l.is_empty());
-        let mut log = div()
-            .v_flex()
-            .font_family(self.mono_font.clone())
-            .text_xs()
-            .p_3()
-            .gap(px(2.));
-        if self.cli_tab {
-            for p in agent::PROVIDERS.iter() {
-                let ok = agent::available(p.bin, &cx.global::<AppSettings>().agent(p.id).binary);
-                let version = caps::get(p.id).version;
-                log = log.child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(div().w(px(90.)).child(p.bin))
-                        .child(
-                            div()
-                                .w(px(90.))
-                                .text_color(rgb(if ok { c_green() } else { c_red() }))
-                                .child(if ok { "installed" } else { "not found" }),
-                        )
-                        .child(div().text_color(rgb(c_muted())).child(version)),
-                );
-            }
-        } else if !has_output {
-            let dir = self
-                .current()
-                .map(|s| s.dir.clone())
-                .filter(|d| !d.is_empty())
-                .unwrap_or_else(|| "the session folder".into());
-            log = log.child(
-                div()
-                    .text_color(rgb(c_muted()))
-                    .child(format!("Commands run in {dir}. Output streams here.")),
-            );
-        } else if let Some(lines) = self.terminal.get(&id) {
-            let text: Vec<&str> = lines
-                .iter()
-                .rev()
-                .take(300)
-                .rev()
-                .map(String::as_str)
-                .collect();
-            log = log.child(
-                TextView::markdown(
-                    SharedString::from(format!("term-{id}")),
-                    format!("```text\n{}\n```", text.join("\n").replace("```", "'''")),
-                )
-                .selectable(true),
-            );
-        }
+        let shell = self.active_shell();
+        let has_output = self.has_output(id);
+        let has_commands =
+            !settings::parse_quick_commands(&cx.global::<AppSettings>().quick_commands).is_empty();
+        // A quick command still going in the tab on screen can be stopped from the header.
+        let running_task = shell
+            .filter(|sh| !sh.exited() && self.tasks.contains_key(&sh.id))
+            .map(|sh| sh.id);
         let shell_tabs: Vec<Div> = self
             .session_shells(id)
             .map(|sh| self.shell_tab_button(sh, cx))
             .collect();
+        let body = match shell {
+            Some(sh) => self.shell_view(sh, window, cx),
+            None if has_output => {
+                let text: Vec<&str> = self.terminal[&id]
+                    .iter()
+                    .rev()
+                    .take(300)
+                    .rev()
+                    .map(String::as_str)
+                    .collect();
+                fade(
+                    div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                        div()
+                            .v_flex()
+                            .font_family(self.mono_font.clone())
+                            .text_xs()
+                            .p_3()
+                            .child(
+                                TextView::markdown(
+                                    SharedString::from(format!("term-{id}")),
+                                    format!(
+                                        "```text\n{}\n```",
+                                        text.join("\n").replace("```", "'''")
+                                    ),
+                                )
+                                .selectable(true),
+                            ),
+                    ),
+                    SharedString::from(format!("termbody-{id}")),
+                    220,
+                )
+                .into_any_element()
+            }
+            None => self.terminal_empty(cx),
+        };
         let panel = div()
             .h(px(self.term_height()))
             .flex_none()
@@ -7935,17 +7908,25 @@ impl RunoApp {
             .child(
                 div()
                     .h(px(32.))
+                    .flex_none()
                     .px_2()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .gap_1()
                     .child(
+                        // Tabs scroll sideways rather than push the buttons out of a narrow panel.
                         div()
+                            .id("term-tabs")
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(self.terminal_tab("Terminal", false, cx))
-                            .child(self.terminal_tab("CLI", true, cx))
+                            .overflow_x_scroll()
+                            .when(has_output, |el| {
+                                el.child(self.output_tab(shell.is_none(), cx))
+                            })
                             .children(shell_tabs)
                             .child(
                                 self.ghost_button_sized(
@@ -7955,123 +7936,127 @@ impl RunoApp {
                                     22.,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| this.new_shell(cx))),
-                            )
-                            .when(!self.cli_tab && shell.is_none(), |el| {
-                                el.child(div().w(px(1.)).h(px(14.)).mx_1().bg(rgb(c_border())))
-                                    .children(self.quick_bar(cx))
-                            }),
+                            ),
                     )
                     .child(
                         div()
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .text_xs()
-                            .text_color(rgb(c_secondary()))
-                            .when(running, |el| {
-                                el.child(self.status_dot(Status::Working, "term-running", 6.))
-                                    .child("Running")
-                                    .child(
-                                        self.button("term-stop", "Stop", false)
-                                            .h(px(26.))
-                                            .px_2()
-                                            .text_xs()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(h) =
-                                                    this.handles.get(&Target::Terminal(id))
-                                                {
-                                                    h.kill();
-                                                }
-                                                cx.notify();
-                                            })),
-                                    )
+                            .gap_1()
+                            .when_some(running_task, |el, sid| {
+                                el.child(
+                                    self.button("term-stop", "Stop", false)
+                                        .h(px(22.))
+                                        .px_2()
+                                        .text_size(px(12.))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(sh) =
+                                                this.shells.iter().find(|s| s.id == sid)
+                                            {
+                                                sh.write(b"\x03");
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
                             })
-                            .when(
-                                !running && !self.cli_tab && shell.is_none() && has_output,
-                                |el| {
-                                    el.child(
-                                        self.ghost_button_sized(
-                                            "term-clear",
-                                            IconName::Eraser,
-                                            "Clear output",
-                                            22.,
+                            .when(has_commands, |el| {
+                                el.child(
+                                    div()
+                                        .id("term-run")
+                                        .h(px(22.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(c_secondary()))
+                                        .hover(|el| {
+                                            el.bg(tint(c_active())).text_color(rgb(c_text()))
+                                        })
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            self.on_context(ctxmenu::CtxTarget::Run, cx),
                                         )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.terminal.remove(&id);
-                                                cx.notify();
-                                            }),
-                                        ),
+                                        .child(icon(IconName::Play, 10., c_secondary()))
+                                        .child("Run")
+                                        .child(icon(IconName::ChevronDown, 10., c_muted())),
+                                )
+                            })
+                            .when(shell.is_none() && has_output, |el| {
+                                el.child(
+                                    self.ghost_button_sized(
+                                        "term-clear",
+                                        IconName::Eraser,
+                                        "Clear output",
+                                        22.,
                                     )
-                                },
-                            )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.terminal.remove(&id);
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            })
                             .child(
                                 self.ghost_button_sized(
                                     "term-tall",
                                     IconName::ChevronsUpDown,
-                                    if self.term_tall {
-                                        "Shrink terminal"
-                                    } else {
+                                    if self.term_h < terminal::TERM_TALL - 1. {
                                         "Expand terminal"
+                                    } else {
+                                        "Shrink terminal"
                                     },
                                     22.,
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
-                                        this.term_tall = !this.term_tall;
-                                        if !this.cli_tab && this.active_shell().is_some() {
-                                            this.focus_shell = 1;
-                                        }
+                                        this.toggle_term_size();
                                         cx.notify();
                                     },
                                 )),
                             ),
                     ),
             )
-            .map(|el| match shell {
-                Some(sh) => el.child(self.shell_view(sh, window, cx)),
-                None => el.child(fade(
-                    div().flex_1().min_h_0().overflow_y_scrollbar().child(log),
-                    SharedString::from(format!("termbody-{}-{}", self.cli_tab, id)),
-                    220,
-                )),
-            })
-            .when(!self.cli_tab && shell.is_none(), |el| {
-                el.child(
-                    div()
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .border_t_1()
-                        .border_color(rgb(c_border()))
-                        .child(
-                            div()
-                                .font_family(self.mono_font.clone())
-                                .text_size(px(12.))
-                                .text_color(rgb(c_green()))
-                                .child("❯"),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(12.5))
-                                .child(Input::new(&self.term_input).appearance(false).h(px(30.))),
-                        ),
-                )
-            });
-        // Growing or shrinking the terminal eases between the two heights.
+            .child(body)
+            .child(
+                // Drag the top edge to make the panel taller or shorter.
+                div()
+                    .id("term-edge")
+                    .absolute()
+                    .top(px(-2.))
+                    .left_0()
+                    .right_0()
+                    .h(px(5.))
+                    .cursor_row_resize()
+                    .when(self.term_drag.is_some(), |el| el.bg(rgb(c_blue())))
+                    .hover(|el| el.bg(tint(c_active())))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                            this.term_drag = Some((f32::from(ev.position.y), this.term_h));
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    ),
+            );
+        // Expand and shrink ease between the two heights.
         match self.panel_motion("term") {
-            Some((tall, at)) => panel
-                .animated(
-                    SharedString::from(format!("term-size-{tall}-{at:?}")),
-                    Animation::new(Duration::from_millis(PANEL_MS)).with_easing(ease_in_out_cubic),
-                    move |el, d| {
-                        let (from, to) = if tall { (230., 560.) } else { (560., 230.) };
-                        el.h(px(from + (to - from) * d))
-                    },
-                )
-                .into_any_element(),
+            Some((tall, at)) => {
+                let (from, to) = (self.term_from, self.term_h);
+                panel
+                    .animated(
+                        SharedString::from(format!("term-size-{tall}-{at:?}")),
+                        Animation::new(Duration::from_millis(PANEL_MS))
+                            .with_easing(ease_in_out_cubic),
+                        move |el, d| el.h(px(from + (to - from) * d)),
+                    )
+                    .into_any_element()
+            }
             None => panel.into_any_element(),
         }
     }
@@ -8633,6 +8618,20 @@ impl Render for RunoApp {
                 }
             }))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+                if let Some((y0, h0)) = this.term_drag {
+                    if e.pressed_button == Some(MouseButton::Left) {
+                        // Leave the Changes and Files tabs above it some room.
+                        let max = (f32::from(window.viewport_size().height) - 260.)
+                            .clamp(terminal::TERM_MIN, terminal::TERM_MAX);
+                        this.term_h = (h0 + y0 - f32::from(e.position.y))
+                            .clamp(terminal::TERM_MIN, max)
+                            .round();
+                    } else {
+                        this.term_drag = None;
+                        this.save();
+                    }
+                    cx.notify();
+                }
                 if this.resizing_panel {
                     if e.pressed_button == Some(MouseButton::Left) {
                         let total = f32::from(window.viewport_size().width);
@@ -8662,9 +8661,10 @@ impl Render for RunoApp {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.resizing_sidebar || this.resizing_panel {
+                    if this.resizing_sidebar || this.resizing_panel || this.term_drag.is_some() {
                         this.resizing_sidebar = false;
                         this.resizing_panel = false;
+                        this.term_drag = None;
                         this.save();
                         cx.notify();
                     }

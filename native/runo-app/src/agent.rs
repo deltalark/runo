@@ -1398,6 +1398,7 @@ pub fn run_agent(
 }
 
 /// Run a shell command, inside the session's Cove VM when `sandbox` is given.
+#[cfg(test)]
 pub fn run_shell(
     target: Target,
     line: &str,
