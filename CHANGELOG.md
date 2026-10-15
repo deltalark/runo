@@ -6,6 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
+- The Browser tab uses your default browser when it's built on Chromium, such as Brave, instead of always picking Chrome first. Arc, Vivaldi, Opera, Dia and Comet now work too, and Settings > General > Browser lets you pick one yourself.
 - Delete screens on the Design canvas more easily. Right-click a screen to duplicate it, play from it or delete it, or select a screen and press Delete. A deleted screen can be brought back with Undo on the bar at the bottom.
 - Controls work in Play on the Design canvas. Tapping a switch flips it, tabs and segmented buttons select, and elements with `data-toggle` or `data-show` change a class or show and hide a part of the screen, so a prototype feels real without any code. What Play does is never saved to the screen's file. Designs made before this get the new `prototype.js` unless it was edited by hand, and AI knows how to wire controls this way.
 - Play moves between Design screens the way phones do. On iOS a screen pushes in from the side over the last one, which slips back and dims; on Android screens move along a shared axis and fade through; desktop screens fade. Back plays the move in reverse. Pick the platform at the top of Play, and give any link its own move (push, sheet, fade, shared axis or none) and speed under Prototype in the inspector. AI uses a sheet for screens that open as modals.
