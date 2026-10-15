@@ -2223,10 +2223,17 @@ impl DesignCanvas {
                 )),
             )
             .child(sep())
-            .child(
+            .child(if self.playing.is_some() {
+                text_btn("design-play", "Stop", Some(IconName::Square), true).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.playing = None;
+                        cx.notify();
+                    },
+                ))
+            } else {
                 text_btn("design-play", "Play", Some(IconName::Play), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-            )
+                    .on_click(cx.listener(|this, _, _, cx| this.play(cx)))
+            })
             .into_any_element()
     }
 
@@ -3018,29 +3025,6 @@ impl DesignCanvas {
                                     "{}  ·  click the linked parts to move through the design",
                                     s.name
                                 )),
-                        )
-                        .child(
-                            text_btn(
-                                "design-play-hotspots",
-                                if self.hotspots {
-                                    "Hide hotspots"
-                                } else {
-                                    "Show hotspots"
-                                },
-                                Some(IconName::MousePointerClick),
-                                false,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.hotspots = !this.hotspots;
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            text_btn("design-play-stop", "Stop", Some(IconName::X), false)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.playing = None;
-                                    cx.notify();
-                                })),
                         ),
                 )
                 .child(div().flex_1().flex().items_center().child(frame))
