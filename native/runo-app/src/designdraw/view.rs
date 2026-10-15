@@ -199,6 +199,9 @@ pub(crate) struct DesignCanvas {
     /// The move under way in Play, and a count that tells one move's animation from the next.
     play_move: Option<(String, Move, bool)>,
     play_n: usize,
+    /// Screens as tapping in Play left them, shown over their drawings until Play stops.
+    play_shots: HashMap<String, Shot>,
+    play_tapping: bool,
     f_text: Entity<InputState>,
     f_name: Entity<InputState>,
     f_inline: Entity<InputState>,
@@ -339,6 +342,8 @@ impl DesignCanvas {
             play_back: Vec::new(),
             play_move: None,
             play_n: 0,
+            play_shots: HashMap::new(),
+            play_tapping: false,
             f_text,
             f_name,
             f_inline,
@@ -942,7 +947,11 @@ impl DesignCanvas {
              desktop), and link screens for the prototype with data-goto=\"<other screen id>\" \
              on what's clicked (add data-transition=\"sheet\" for a screen that opens as a \
              modal sheet; push, fade, axis and none also work, and the platform's own is used \
-             otherwise). New screen files show up on the canvas by themselves. Make the \
+             otherwise). Make controls work when tapped in Play: a .switch flips its .on class, \
+             a .tab, or any child of an element with data-select, becomes the one with .on, \
+             data-toggle=\"class\" toggles that class on the element, data-show=\"#id\" \
+             shows or hides another element (menus, accordions, sheets), and checkboxes, \
+             radios and inputs work as they are. New screen files show up on the canvas by themselves. Make the \
              change by editing these files directly: Runo shows it live and the user keeps or \
              undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for \
              this request.\n"
@@ -1969,6 +1978,56 @@ impl DesignCanvas {
 
     // ---- Prototype
 
+    /// A tap in Play that missed every link: the screen's own controls answer it.
+    fn play_tap(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(id) = self.playing.clone() else {
+            return;
+        };
+        let Some(s) = self.canvas.screen(&id) else {
+            return;
+        };
+        if self.play_tapping || self.play_move.is_some() {
+            return;
+        }
+        let device = s.device;
+        let (vw, vh) = self.view_size();
+        let (w, h) = device.size();
+        let scale = ((vh - 80.) / h).min((vw - 80.) / w).min(1.);
+        let (dw, dh) = (w * scale, h * scale);
+        let (x, y) = self.local(pos);
+        let at = (
+            (x - (vw - dw) / 2.) / scale,
+            (y - 40. - (vh - 40. - dh) / 2.) / scale,
+        );
+        if at.0 < 0. || at.1 < 0. || at.0 > w || at.1 > h {
+            return;
+        }
+        // Links are Play's to follow.
+        let shot = self.play_shots.get(&id).or_else(|| self.shots.get(&id));
+        if shot.is_some_and(|s| {
+            s.links.iter().any(|l| {
+                let r = &l.rect;
+                at.0 >= r.x && at.0 <= r.x + r.w && at.1 >= r.y && at.1 <= r.y + r.h
+            })
+        }) {
+            return;
+        }
+        self.play_tapping = true;
+        let tapped = id.clone();
+        self.run(
+            cx,
+            move |r| r.tap(&id, device, at),
+            move |this, out, _| {
+                this.play_tapping = false;
+                if let Ok(shot) = out {
+                    if this.playing.as_deref() == Some(tapped.as_str()) {
+                        this.play_shots.insert(tapped, shot);
+                    }
+                }
+            },
+        );
+    }
+
     /// Which platform's moves the prototype plays with, kept in the canvas file.
     fn set_platform(&mut self, platform: &str, cx: &mut Context<Self>) {
         self.canvas.platform = platform.to_string();
@@ -1992,6 +2051,7 @@ impl DesignCanvas {
         self.playing = first;
         self.play_back.clear();
         self.play_move = None;
+        self.play_shots.clear();
         cx.notify();
     }
 
@@ -2003,6 +2063,7 @@ impl DesignCanvas {
             return;
         };
         let how = Move::of(link, screen.device, &self.canvas.platform);
+        self.play_shots.remove(to);
         if let Some(now) = self.playing.replace(to.to_string()) {
             self.play_back.push((now.clone(), how));
             self.animate_move(now, how, false, cx);
@@ -2015,6 +2076,7 @@ impl DesignCanvas {
         let Some((prev, how)) = self.play_back.pop() else {
             return;
         };
+        self.play_shots.remove(&prev);
         if let Some(now) = self.playing.replace(prev) {
             self.animate_move(now, how, true, cx);
         }
@@ -3326,7 +3388,7 @@ impl DesignCanvas {
     fn player(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = self.playing.clone()?;
         let s = self.canvas.screen(&id)?;
-        let shot = self.shots.get(&id);
+        let shot = self.play_shots.get(&id).or_else(|| self.shots.get(&id));
         let (vw, vh) = self.view_size();
         let (w, h) = s.device.size();
         let scale = ((vh - 80.) / h).min((vw - 80.) / w).min(1.);
@@ -3342,7 +3404,7 @@ impl DesignCanvas {
             .shadow_lg();
         // A screen's picture, the first screenful of it; the rest of a tall screen is cut off.
         let picture = |id: &str| {
-            let shot = self.shots.get(id)?;
+            let shot = self.play_shots.get(id).or_else(|| self.shots.get(id))?;
             Some(
                 div()
                     .absolute()
@@ -3373,6 +3435,20 @@ impl DesignCanvas {
             _ => {}
         }
         if let Some(shot) = shot.filter(|_| self.play_move.is_none()) {
+            frame = frame.child(
+                div()
+                    .id("design-play-tap")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            this.play_tap(e.position, cx);
+                        }),
+                    ),
+            );
             for (i, l) in shot.links.iter().enumerate() {
                 let link = l.clone();
                 frame = frame.child(

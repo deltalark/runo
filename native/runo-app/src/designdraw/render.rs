@@ -38,6 +38,8 @@ pub(crate) struct Renderer {
     /// The screen loaded in the page, and whether the page shows it as saved.
     current: Option<String>,
     dark: bool,
+    /// Play tapped the page, so it no longer shows the file as saved.
+    played: bool,
 }
 
 impl Renderer {
@@ -47,6 +49,7 @@ impl Renderer {
             engine: None,
             current: None,
             dark: false,
+            played: false,
         }
     }
 
@@ -75,6 +78,12 @@ impl Renderer {
 
     /// Load the screen unless it's loaded already (or `fresh`, to read the file again).
     fn open(&mut self, id: &str, device: Device, fresh: bool) -> Result<Arc<Engine>, String> {
+        let fresh = fresh || std::mem::take(&mut self.played);
+        self.open_as_is(id, device, fresh)
+    }
+
+    /// Load the screen unless it's loaded already, keeping what Play did to it.
+    fn open_as_is(&mut self, id: &str, device: Device, fresh: bool) -> Result<Arc<Engine>, String> {
         let engine = self.engine()?;
         if !fresh && self.current.as_deref() == Some(id) {
             return Ok(engine);
@@ -98,6 +107,32 @@ impl Renderer {
     /// Draw the screen from its file.
     pub(crate) fn shoot(&mut self, id: &str, device: Device) -> Result<Shot, String> {
         let engine = self.open(id, device, true)?;
+        self.capture(&engine, id, device)
+    }
+
+    /// Tap the screen at a point in Play, as a person would, and draw what it shows then.
+    /// The page keeps its state between taps on the same screen; anything else that
+    /// reads the page loads the file again first, so Play never ends up saved.
+    pub(crate) fn tap(&mut self, id: &str, device: Device, at: (f32, f32)) -> Result<Shot, String> {
+        let fresh = self.current.as_deref() != Some(id) || !self.played;
+        let engine = self.open_as_is(id, device, fresh)?;
+        self.played = true;
+        engine.eval(PAGE, super::model::UI_JS);
+        engine.eval(
+            PAGE,
+            &format!(
+                "(() => {{ const el = document.elementFromPoint({}, {}); \
+                 if (!el || el.closest('[data-goto]')) return false; \
+                 if (el.focus) el.focus(); el.click(); return true; }})()",
+                at.0, at.1
+            ),
+        );
+        // Let CSS transitions settle.
+        std::thread::sleep(Duration::from_millis(200));
+        self.capture(&engine, id, device)
+    }
+
+    fn capture(&mut self, engine: &Engine, id: &str, device: Device) -> Result<Shot, String> {
         let (w, h) = device.size();
         let page_h = engine
             .eval(PAGE, &dom::call("size", &[]))
