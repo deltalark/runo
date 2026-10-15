@@ -1026,6 +1026,15 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
         } else {
             ""
         };
+        if p.shadow && !o.fill.is_empty() {
+            let _ = writeln!(
+                out,
+                "<path d=\"{}\" transform=\"translate(0 {})\" fill=\"#0f172a\" opacity=\"{}\"/>",
+                segs_d(&o.fill),
+                shape::SHADOW_DROP,
+                shape::SHADOW_ALPHA * p.opacity
+            );
+        }
         if !o.fill.is_empty() {
             let _ = writeln!(
                 out,
@@ -1042,6 +1051,15 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
                 "<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"/>",
                 segs_d(&o.detail),
                 p.stroke.map(hex).unwrap_or_else(|| "none".into())
+            );
+        }
+        for m in &o.marks {
+            let _ = writeln!(
+                out,
+                "<path d=\"{}\" fill=\"{}\" opacity=\"{}\"/>",
+                segs_d(&m.segs),
+                hex(p.ink(m.ink)),
+                p.opacity
             );
         }
         let mut lines = Vec::new();
@@ -1378,6 +1396,46 @@ mod tests {
         ed.doc.relation_mut(&r).unwrap().label = "reads & writes".into();
         ed.doc.element_mut(&g).unwrap().name = "Prod VPC".into();
         ed.doc
+    }
+
+    /// Writes a PNG of every kind for eyeballing: `SHAPES_PNG=/tmp/x.png cargo test shapes_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn shapes_preview() {
+        let mut ed = Editor::new(Doc::default());
+        let labels = [
+            "Person",
+            "Software system",
+            "Container",
+            "Component",
+            "Database",
+            "Queue",
+            "External system",
+            "Box",
+            "Rounded box",
+            "Ellipse",
+            "Decision",
+            "Cloud",
+            "Sticky note",
+            "Web app",
+        ];
+        for (i, l) in labels.iter().enumerate() {
+            let pr = super::super::editor::PRESETS
+                .iter()
+                .find(|p| p.label == *l)
+                .unwrap();
+            let id = ed.add(
+                pr,
+                (160. + (i % 4) as f32 * 280., 120. + (i / 4) as f32 * 200.),
+            );
+            let e = ed.doc.element_mut(&id).unwrap();
+            if e.kind.c4().is_some() {
+                e.description = "Places and tracks orders".into();
+            }
+        }
+        let doc = ed.doc;
+        let png = png(&doc, &doc.views[0]).unwrap();
+        std::fs::write(std::env::var("SHAPES_PNG").unwrap(), png).unwrap();
     }
 
     #[test]

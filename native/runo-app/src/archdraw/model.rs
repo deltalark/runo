@@ -84,7 +84,7 @@ impl Kind {
     /// The size a new element of this kind gets.
     pub(crate) fn size(self) -> (f32, f32) {
         match self {
-            Kind::Person => (160., 120.),
+            Kind::Person => (180., 150.),
             Kind::Boundary => (420., 280.),
             Kind::Database | Kind::Queue => (180., 100.),
             Kind::Ellipse | Kind::Diamond => (160., 100.),
