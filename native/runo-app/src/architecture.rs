@@ -68,6 +68,8 @@ pub(crate) struct ProjectMap {
     pub files: usize,
     /// The file limit was reached; the map covers part of the project.
     pub partial: bool,
+    /// Folders holding Runo's own design screens and diagrams, left out of the code.
+    pub runo: Vec<String>,
 }
 
 /// The language of a source file, by extension.
@@ -798,10 +800,27 @@ pub(crate) fn scan(root: &Path) -> ProjectMap {
         partial,
         ..Default::default()
     };
+    // Runo's own folders: the Design canvas's screens and the Architecture diagrams.
+    for (folder, marker) in [
+        (crate::designdraw::model::FOLDER, "canvas.toml"),
+        (crate::archdraw::model::FOLDER, "model.toml"),
+    ] {
+        if root.join(folder).join(marker).is_file() {
+            map.runo.push(folder.to_string());
+        }
+    }
+    let runo = |file: &Path| {
+        file.components().count() > 1
+            && file.components().next().is_some_and(|c| {
+                map.runo
+                    .iter()
+                    .any(|r| *r == c.as_os_str().to_string_lossy())
+            })
+    };
     let mut languages: BTreeMap<&str, usize> = BTreeMap::new();
     let mut folders: BTreeMap<String, usize> = BTreeMap::new();
     for file in &files {
-        if let Some(lang) = language(file) {
+        if let Some(lang) = language(file).filter(|_| !runo(file)) {
             *languages.entry(lang).or_default() += 1;
         }
         let top = match file.components().count() {
@@ -912,7 +931,87 @@ pub(crate) fn scan(root: &Path) -> ProjectMap {
             modules,
         });
     }
+    // Without a manifest, the project is mapped by its files and what they load: a
+    // plain site, scripts or a folder of sources.
+    if map.packages.is_empty() {
+        let theirs: Vec<&PathBuf> = files
+            .iter()
+            .filter(|f| language(f).is_some() && !runo(f))
+            .collect();
+        if !theirs.is_empty() {
+            let kind = if theirs.iter().any(|f| language(f) == Some("HTML")) {
+                "Web project"
+            } else {
+                "Source folder"
+            };
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".into());
+            let modules = modules_of(root, "", kind, &theirs);
+            map.packages.push(Package {
+                name,
+                path: String::new(),
+                kind,
+                files: theirs.len(),
+                modules,
+                ..Default::default()
+            });
+        }
+    }
     map
+}
+
+/// The part a file of a project without a manifest belongs to. A small project shows
+/// each file by its path; a bigger one groups files by their top folder, with files at the
+/// top keeping their extension so `app.js` and `app.css` stay apart.
+fn file_unit(inside: &str, each_file: bool) -> String {
+    if each_file {
+        return inside.to_string();
+    }
+    let inside = inside.strip_prefix("src/").unwrap_or(inside);
+    match inside.split_once('/') {
+        Some((dir, _)) => dir.to_string(),
+        None => inside.to_string(),
+    }
+}
+
+/// Source files up to which a project without a manifest is shown file by file.
+const EACH_FILE: usize = 40;
+
+/// The local files an HTML or CSS file loads or links to: `src`, `href` and `url(…)`,
+/// and `@import`. Web addresses, anchors and data are left out.
+pub(crate) fn web_refs(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for key in ["src=", "href=", "url(", "@import "] {
+        let mut rest = text;
+        while let Some(at) = rest.find(key) {
+            rest = &rest[at + key.len()..];
+            let r = rest.trim_start();
+            let (quote, r) = match r.chars().next() {
+                Some(q @ ('"' | '\'')) => (Some(q), &r[1..]),
+                _ => (None, r),
+            };
+            let end = r
+                .find(|c: char| match quote {
+                    Some(q) => c == q,
+                    None => c == ')' || c == ';' || c.is_whitespace() || c == '>',
+                })
+                .unwrap_or(r.len());
+            let spec = r[..end].split(['?', '#']).next().unwrap_or("").trim();
+            let remote = spec.contains("://")
+                || spec.starts_with("//")
+                || spec.starts_with("data:")
+                || spec.starts_with("mailto:")
+                || spec.starts_with("javascript:")
+                || spec.starts_with('{')
+                || spec.starts_with('$');
+            if !spec.is_empty() && !remote && !out.iter().any(|s| s == spec) {
+                out.push(spec.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// The modules of one package and which of them refer to which.
@@ -922,6 +1021,7 @@ fn modules_of(root: &Path, dir: &str, kind: &str, files: &[&PathBuf]) -> Vec<Mod
     } else {
         format!("{dir}/")
     };
+    let each_file = files.len() <= EACH_FILE;
     // (unit, path inside the package, text) for each source file of its language.
     let mut sources: Vec<(String, String, String)> = Vec::new();
     for file in files {
@@ -981,6 +1081,9 @@ fn modules_of(root: &Path, dir: &str, kind: &str, files: &[&PathBuf]) -> Vec<Mod
             }
             "Dart package" if file.extension().is_some_and(|e| e == "dart") => {
                 folder_unit(&inside, &["lib/src/", "lib/"])
+            }
+            "Web project" | "Source folder" if language(file).is_some() => {
+                file_unit(&inside, each_file)
             }
             "Go module" if file.extension().is_some_and(|e| e == "go") => {
                 let d = rel_dir(Path::new(&inside));
@@ -1042,6 +1145,50 @@ fn modules_of(root: &Path, dir: &str, kind: &str, files: &[&PathBuf]) -> Vec<Mod
                     }
                 }
             }
+            "Web project" | "Source folder" => {
+                let from = rel_dir(Path::new(inside));
+                let path = Path::new(inside);
+                let specs: Vec<String> = match language(path) {
+                    Some("HTML" | "CSS") => web_refs(text),
+                    Some("Python") => {
+                        for name in py_imports(text) {
+                            let candidates = [
+                                file_unit(&format!("{name}.py"), each_file),
+                                file_unit(&format!("{name}/__init__.py"), each_file),
+                                name,
+                            ];
+                            if let Some(o) = candidates.into_iter().find(|o| units.contains(o)) {
+                                if &o != unit {
+                                    found.insert(o);
+                                }
+                            }
+                        }
+                        Vec::new()
+                    }
+                    _ if is_js(path) => js_imports(text),
+                    _ => Vec::new(),
+                };
+                for spec in specs {
+                    let target = match spec.strip_prefix('/') {
+                        Some(abs) => normalize(abs),
+                        None => normalize(&format!("{from}/{spec}")),
+                    };
+                    let mut other = file_unit(&target, each_file);
+                    // `import './util'` names `util.js`.
+                    if !units.contains(&other) {
+                        if let Some(o) = ["js", "ts", "mjs", "jsx", "tsx"]
+                            .iter()
+                            .map(|e| format!("{other}.{e}"))
+                            .find(|o| units.contains(o))
+                        {
+                            other = o;
+                        }
+                    }
+                    if &other != unit && units.contains(&other) {
+                        found.insert(other);
+                    }
+                }
+            }
             "Go module" => {
                 for other in &units {
                     let tail = format!("/{other}\"");
@@ -1084,6 +1231,14 @@ pub(crate) fn mermaid(map: &ProjectMap) -> String {
             }
         }
     } else if let Some(p) = map.packages.first() {
+        // Each part by its own name, where its id had to drop dots and slashes.
+        for m in &p.modules {
+            if id(&m.name) != m.name
+                && (!m.uses.is_empty() || p.modules.iter().any(|o| o.uses.contains(&m.name)))
+            {
+                out.push_str(&format!("  {}[\"{}\"]\n", id(&m.name), m.name));
+            }
+        }
         for m in &p.modules {
             for dep in &m.uses {
                 if edges >= 80 {
@@ -1122,6 +1277,16 @@ pub(crate) fn summary(map: &ProjectMap) -> String {
             langs.join(", ")
         }
     ));
+    if !map.runo.is_empty() {
+        out.push_str(&format!(
+            "{} hold Runo's design screens and architecture diagrams, not the code.\n",
+            map.runo
+                .iter()
+                .map(|f| format!("{f}/"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ));
+    }
     for p in &map.packages {
         let at = if p.path.is_empty() { "." } else { &p.path };
         out.push_str(&format!("\n### {} ({}, {at})\n", p.name, p.kind));
@@ -1365,21 +1530,22 @@ impl RunoApp {
                     edit,
                     images,
                     agent,
-                } => {
-                    this.new_provider = *agent;
-                    this.start_with_context(
-                        pid,
-                        task,
-                        shell::StartContext {
-                            label: "Architecture diagram".into(),
-                            text: context.clone(),
-                            images: images.clone(),
-                            in_place: *edit,
-                        },
-                        window,
-                        cx,
-                    )
-                }
+                    model,
+                } => this.ask_from_canvas(
+                    pid,
+                    View::Architecture,
+                    task,
+                    shell::StartContext {
+                        label: "Architecture diagram".into(),
+                        text: context.clone(),
+                        images: images.clone(),
+                        in_place: *edit,
+                    },
+                    *agent,
+                    model.clone(),
+                    window,
+                    cx,
+                ),
                 ArchEvent::Open(path) => {
                     this.view = View::Session;
                     this.show_panel = true;
@@ -1390,6 +1556,9 @@ impl RunoApp {
             cx.notify();
         });
         self.arch.editor_subs.push(sub);
+        if let Some((agent, model)) = self.canvas_agent(project.id, View::Architecture) {
+            editor.update(cx, |e, _| e.use_agent(agent, model));
+        }
         self.arch.editors.insert(project.id, editor);
     }
 
@@ -1483,6 +1652,15 @@ impl RunoApp {
             window,
             cx,
         );
+    }
+}
+
+/// "1 line", "2 lines".
+fn plural(n: usize, one: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {one}s")
     }
 }
 
@@ -1583,7 +1761,7 @@ impl RunoApp {
                                         if p.path.is_empty() { "." } else { &p.path },
                                         p.files,
                                         if lines > 0 {
-                                            format!(" · {lines} lines")
+                                            format!(" · {}", plural(lines, "line"))
                                         } else {
                                             String::new()
                                         }
@@ -1649,7 +1827,7 @@ impl RunoApp {
                                 .w(px(70.))
                                 .flex_none()
                                 .text_color(rgb(c_muted()))
-                                .child(format!("{} lines", m.lines)),
+                                .child(plural(m.lines, "line")),
                         )
                         .child(
                             div()
@@ -1737,12 +1915,26 @@ impl RunoApp {
                             .child(div().text_size(px(12.)).text_color(rgb(c_muted())).child(
                                 match map {
                                     _ if scanning => "Reading the project…".to_string(),
-                                    Some(m) => format!(
-                                        "{} packages, {} files{}. From the manifests and imports.",
-                                        m.packages.len(),
-                                        m.files,
-                                        if m.partial { " (partly read)" } else { "" }
-                                    ),
+                                    Some(m) => {
+                                        let partial = if m.partial { " (partly read)" } else { "" };
+                                        let manifests = m
+                                            .packages
+                                            .iter()
+                                            .filter(|p| !matches!(p.kind, "Web project" | "Source folder"))
+                                            .count();
+                                        match (manifests, m.packages.len()) {
+                                            (0, 0) => format!("{} files{partial}, none of them code.", m.files),
+                                            (0, _) => format!(
+                                                "{} files{partial}. No package manifest, so the parts come from the files and what each one loads.",
+                                                m.files
+                                            ),
+                                            (n, _) => format!(
+                                                "{n} {}, {} files{partial}. From the manifests and imports.",
+                                                if n == 1 { "package" } else { "packages" },
+                                                m.files
+                                            ),
+                                        }
+                                    }
                                     None => "Not read yet.".to_string(),
                                 },
                             )),
@@ -1781,13 +1973,29 @@ impl RunoApp {
                 }
                 structure = structure.child(row);
             }
+            if !map.runo.is_empty() {
+                let folders: Vec<String> = map.runo.iter().map(|f| format!("{f}/")).collect();
+                structure =
+                    structure.child(div().text_size(px(12.)).text_color(rgb(c_muted())).child(
+                        format!(
+                            "{} {} Runo's design screens and diagrams, so {} out of the code map.",
+                            folders.join(" and "),
+                            if folders.len() == 1 { "holds" } else { "hold" },
+                            if folders.len() == 1 {
+                                "it's left"
+                            } else {
+                                "they're left"
+                            },
+                        ),
+                    ));
+            }
             if map.packages.is_empty() {
-                structure = structure.child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_muted()))
-                        .child("No package manifest found (Cargo.toml, package.json, pyproject.toml, go.mod, Package.swift, pom.xml, build.gradle, Gemfile, .csproj, composer.json or pubspec.yaml)."),
-                );
+                structure = structure.child(empty_hint(
+                    "arch-no-code",
+                    IconName::FileCode,
+                    "No code to map yet",
+                    "Once the project has source files, such as pages, scripts or a package manifest (package.json, Cargo.toml, pyproject.toml, go.mod and the like), its parts and what each one uses show here.",
+                ));
             }
             for (i, p) in map.packages.iter().enumerate() {
                 structure = structure.child(self.package_card(i, p, cx));
@@ -1911,7 +2119,7 @@ impl RunoApp {
                                     .child(file),
                             ),
                     )
-                    .when(map.is_some(), |el| {
+                    .when(map.is_some_and(|m| !m.packages.is_empty()), |el| {
                         el.child(
                             self.button("arch-diagram", "Insert diagram", false)
                                 .child(icon(IconName::Network, 13., c_secondary()))
@@ -2356,6 +2564,72 @@ dependencies {
         assert!(text.contains("Depends on: core"));
         assert!(text.contains("uses db, ui"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_maps_a_project_without_a_manifest() {
+        let root = temp("site");
+        write(
+            &root,
+            "index.html",
+            "<link rel=\"stylesheet\" href=\"css/site.css\">\n<script src=\"app.js\"></script>\n<a href=\"about.html#team\">About</a>\n<img src=\"https://x.test/a.png\">\n",
+        );
+        write(&root, "about.html", "<script src=\"./app.js\"></script>\n");
+        write(&root, "app.js", "import { fmt } from './util';\n");
+        write(&root, "util.js", "export const fmt = 1;\n");
+        write(
+            &root,
+            "css/site.css",
+            "@import 'base.css';\nbody { background: url(../img/bg.png) }\n",
+        );
+        write(&root, "css/base.css", "html {}\n");
+        write(&root, "design/canvas.toml", "");
+        write(
+            &root,
+            "design/screens/home.html",
+            "<a href=\"x.html\">x</a>",
+        );
+        write(&root, "architecture/model.toml", "");
+
+        let map = scan(&root);
+        assert_eq!(map.runo, vec!["design", "architecture"]);
+        assert_eq!(map.packages.len(), 1);
+        let site = &map.packages[0];
+        assert_eq!(site.kind, "Web project");
+        assert_eq!(site.files, 6);
+        let uses = |m: &str| {
+            site.modules
+                .iter()
+                .find(|x| x.name == m)
+                .map(|x| x.uses.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            uses("index.html"),
+            vec!["about.html", "app.js", "css/site.css"]
+        );
+        assert_eq!(uses("about.html"), vec!["app.js"]);
+        assert_eq!(uses("app.js"), vec!["util.js"]);
+        assert_eq!(uses("css/site.css"), vec!["css/base.css"]);
+        assert!(!site.modules.iter().any(|m| m.name.starts_with("design")));
+        let graph = mermaid(&map);
+        assert!(graph.contains("index_html --> app_js"));
+        assert!(graph.contains("css_site_css[\"css/site.css\"]"));
+        // Bigger projects are grouped by folder.
+        assert_eq!(file_unit("css/site.css", false), "css");
+        assert_eq!(file_unit("src/lib/a.js", false), "lib");
+        assert_eq!(file_unit("app.js", false), "app.js");
+        assert!(summary(&map).contains("design/ and architecture/ hold Runo's"));
+
+        // Only Runo's own folders: nothing to map.
+        let bare = temp("bare");
+        write(&bare, "design/canvas.toml", "");
+        write(&bare, "design/screens/home.html", "");
+        let map = scan(&bare);
+        assert!(map.packages.is_empty());
+        assert_eq!(map.runo, vec!["design"]);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 
     #[test]

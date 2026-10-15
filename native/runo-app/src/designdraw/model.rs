@@ -65,6 +65,9 @@ pub(crate) struct Screen {
 pub(crate) struct Canvas {
     #[serde(default, rename = "screen", skip_serializing_if = "Vec::is_empty")]
     pub screens: Vec<Screen>,
+    /// The platform the prototype moves like: "ios" (the default) or "android".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub platform: String,
 }
 
 impl Canvas {
@@ -244,12 +247,14 @@ pub(crate) fn seed(root: &Path) -> std::io::Result<()> {
     let dir = folder(root);
     std::fs::create_dir_all(dir.join(SCREENS))?;
     for (name, text) in [
-        (TOKENS, TOKENS_CSS),
-        (COMPONENTS, COMPONENTS_CSS),
-        (PROTOTYPE, PROTOTYPE_JS),
+        (TOKENS, TOKENS_CSS.to_string()),
+        (COMPONENTS, COMPONENTS_CSS.to_string()),
+        (PROTOTYPE, prototype_js()),
     ] {
         let file = dir.join(name);
-        if !file.exists() {
+        let old =
+            name == PROTOTYPE && std::fs::read_to_string(&file).is_ok_and(|t| t == PROTOTYPE_JS_V1);
+        if !file.exists() || old {
             std::fs::write(file, text)?;
         }
     }
@@ -621,7 +626,8 @@ h3 { font-size: 15px; }
 [data-goto] { cursor: pointer; }
 "#;
 
-const PROTOTYPE_JS: &str = r#"// Clicking an element with data-goto="other-screen" opens that screen, so the design
+/// What `prototype.js` was before controls worked, replaced when a design still has it.
+const PROTOTYPE_JS_V1: &str = r#"// Clicking an element with data-goto="other-screen" opens that screen, so the design
 // can be clicked through in any browser.
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-goto]');
@@ -630,6 +636,51 @@ document.addEventListener('click', (e) => {
   location.href = el.dataset.goto.replace(/\.html$/, '') + '.html';
 });
 "#;
+
+/// The controls' behaviour, in `prototype.js` and run in Play for designs without it.
+pub(crate) const UI_JS: &str = r#"// Controls work when clicked: a .switch flips, a .tab (or a child of [data-select])
+// becomes the one that's on, [data-toggle] toggles a class on itself, and [data-show]
+// shows or hides what its selector names, for menus, accordions and sheets.
+(() => {
+  if (window.__runoUi) return;
+  window.__runoUi = true;
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    const sw = t.closest('.switch');
+    if (sw) {
+      sw.classList.toggle('on');
+      sw.setAttribute('aria-checked', String(sw.classList.contains('on')));
+    }
+    const pick = t.closest('.tab, [role="tab"], [data-select] > *');
+    if (pick && pick.parentElement) {
+      for (const s of pick.parentElement.children) s.classList.toggle('on', s === pick);
+    }
+    const tg = t.closest('[data-toggle]');
+    if (tg) tg.classList.toggle(tg.dataset.toggle || 'on');
+    const sh = t.closest('[data-show]');
+    if (sh) {
+      for (const el of document.querySelectorAll(sh.dataset.show)) el.hidden = !el.hidden;
+    }
+  });
+})();
+"#;
+
+/// Clicking through links, then the controls' behaviour.
+fn prototype_js() -> String {
+    format!(
+        r#"// Clicking an element with data-goto="other-screen" opens that screen, so the design
+// can be clicked through in any browser.
+document.addEventListener('click', (e) => {{
+  const el = e.target.closest('[data-goto]');
+  if (!el) return;
+  e.preventDefault();
+  location.href = el.dataset.goto.replace(/\.html$/, '') + '.html';
+}});
+
+{UI_JS}"#
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -640,6 +691,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn an_old_prototype_script_is_upgraded_but_an_edited_one_is_kept() {
+        let root = temp("proto");
+        seed(&root).unwrap();
+        let file = folder(&root).join(PROTOTYPE);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("__runoUi"));
+        std::fs::write(&file, PROTOTYPE_JS_V1).unwrap();
+        seed(&root).unwrap();
+        assert!(std::fs::read_to_string(&file).unwrap().contains("__runoUi"));
+        std::fs::write(&file, "// mine").unwrap();
+        seed(&root).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "// mine");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

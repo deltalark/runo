@@ -37,12 +37,25 @@ pub(crate) enum DesignEvent {
         images: Vec<String>,
         /// The agent to hand it to, by index into `agent::PROVIDERS`.
         agent: usize,
+        /// The model picked for it; empty for its default.
+        model: String,
     },
 }
 
 type Pt = (f32, f32);
 /// From one point to another, for a link arrow.
-type Arrow = (Pt, Pt);
+/// A link's arrow on screen: from, to, and whether it's faded because it doesn't touch
+/// the picked screen.
+type Arrow = (Pt, Pt, bool);
+
+/// A prototype link between screens, in canvas units.
+struct LinkLine {
+    screen: String,
+    path: dom::Path,
+    from: Pt,
+    to: Pt,
+    faint: bool,
+}
 
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 3.;
@@ -71,6 +84,13 @@ enum Drag {
     },
     /// Linking the selected element to another screen.
     Link {
+        from: Pt,
+        to: Pt,
+    },
+    /// Dragging the end of a link's arrow onto another screen.
+    Relink {
+        screen: String,
+        path: dom::Path,
         from: Pt,
         to: Pt,
     },
@@ -132,6 +152,13 @@ impl Render for DraggedLayer {
 
 pub(crate) struct DesignCanvas {
     root: PathBuf,
+    /// Pictures to design from, kept in `.runo/design`, and the ones going with the next ask.
+    refs: Vec<crate::design::Reference>,
+    refs_picked: Vec<String>,
+    refs_open: bool,
+    /// The project's design notes: rules every AI change follows.
+    f_rules: Entity<TextareaState>,
+    rules_loading: bool,
     canvas: Canvas,
     renderer: Arc<Mutex<Renderer>>,
     shots: HashMap<String, Shot>,
@@ -164,10 +191,19 @@ pub(crate) struct DesignCanvas {
     /// Links between screens drawn on the canvas and outlined in Play.
     hotspots: bool,
     new_open: bool,
+    /// The right-click menu of a screen: where it opened on the canvas, and the screen.
+    menu: Option<(Pt, String)>,
     new_device: Device,
     /// Clicking through the prototype: the screen shown and the way back.
     playing: Option<String>,
-    play_back: Vec<String>,
+    /// The screens played before, with how each was left, to go back the same way.
+    play_back: Vec<(String, Move)>,
+    /// The move under way in Play, and a count that tells one move's animation from the next.
+    play_move: Option<(String, Move, bool)>,
+    play_n: usize,
+    /// Screens as tapping in Play left them, shown over their drawings until Play stops.
+    play_shots: HashMap<String, Shot>,
+    play_tapping: bool,
     f_text: Entity<InputState>,
     f_name: Entity<InputState>,
     f_inline: Entity<InputState>,
@@ -262,7 +298,20 @@ impl DesignCanvas {
                 _ => {}
             }),
         );
+        let f_rules = cx.new(|cx| {
+            TextareaState::new(window, cx).placeholder("Look and feel, spacing, type, colour…")
+        });
+        subs.push(cx.subscribe_in(&f_rules, window, |this, _, ev, _, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.save_rules(cx);
+            }
+        }));
         let mut this = Self {
+            refs: crate::design::load(&root),
+            refs_picked: Vec::new(),
+            refs_open: false,
+            f_rules,
+            rules_loading: false,
             renderer: Arc::new(Mutex::new(Renderer::new(root.clone()))),
             root,
             canvas,
@@ -290,9 +339,14 @@ impl DesignCanvas {
             dark: false,
             hotspots: true,
             new_open: false,
+            menu: None,
             new_device: Device::Phone,
             playing: None,
             play_back: Vec::new(),
+            play_move: None,
+            play_n: 0,
+            play_shots: HashMap::new(),
+            play_tapping: false,
             f_text,
             f_name,
             f_inline,
@@ -306,6 +360,7 @@ impl DesignCanvas {
             pick: crate::agent_pick::AgentPick::new(cx),
             _subs: subs,
         };
+        this.load_rules(window, cx);
         this.seen = this.file_times();
         let ids: Vec<String> = this.canvas.screens.iter().map(|s| s.id.clone()).collect();
         for id in ids {
@@ -410,8 +465,155 @@ impl DesignCanvas {
     }
 
     /// Pick up changes made while the page was away.
+    /// Start the AI bar on this agent, such as the one the canvas's chat used last.
+    pub(crate) fn use_agent(&mut self, agent: usize, model: String) {
+        self.pick.agent = agent;
+        self.pick.model = model;
+    }
+
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.check_files(cx);
+        self.refs = crate::design::load(&self.root);
+        let refs = &self.refs;
+        self.refs_picked
+            .retain(|f| refs.iter().any(|r| &r.file == f));
+    }
+
+    /// Fill the design notes box from its file.
+    pub(crate) fn load_rules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text =
+            std::fs::read_to_string(crate::design::notes_path(&self.root)).unwrap_or_default();
+        self.rules_loading = true;
+        self.f_rules
+            .update(cx, |s, cx| s.set_value(text, window, cx));
+        self.rules_loading = false;
+    }
+
+    fn save_rules(&mut self, cx: &mut Context<Self>) {
+        if self.rules_loading {
+            return;
+        }
+        let file = crate::design::notes_path(&self.root);
+        let text = self.f_rules.read(cx).value().to_string();
+        if let Err(e) = crate::architecture::save_notes(&file, &text) {
+            self.error = Some(format!("Couldn't save {}: {e}", file.display()));
+            cx.notify();
+        }
+    }
+
+    /// The design notes file, relative to the project, when it has something in it.
+    fn rules_file(&self) -> Option<String> {
+        let file = crate::design::notes_path(&self.root);
+        let text = std::fs::read_to_string(&file).ok()?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(
+            file.strip_prefix(&self.root)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    }
+
+    /// Add pictures to design from: what's on the clipboard, else files picked.
+    fn add_refs(&mut self, cx: &mut Context<Self>) {
+        let mut added = Vec::new();
+        if let Some(item) = cx.read_from_clipboard() {
+            for entry in item.entries() {
+                match entry {
+                    ClipboardEntry::Image(image) => {
+                        let ext = match image.format {
+                            ImageFormat::Jpeg => "jpg",
+                            ImageFormat::Gif => "gif",
+                            ImageFormat::Webp => "webp",
+                            ImageFormat::Bmp => "bmp",
+                            _ => "png",
+                        };
+                        added.extend(crate::design::add_bytes(
+                            &self.root,
+                            &image.bytes,
+                            &format!("paste.{ext}"),
+                            "",
+                        ));
+                    }
+                    ClipboardEntry::ExternalPaths(paths) => {
+                        for path in paths.paths().iter().filter(|p| crate::turns::is_image(p)) {
+                            added.extend(crate::design::add_file(&self.root, path));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !added.is_empty() {
+            self.took_refs(added, cx);
+            return;
+        }
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add pictures to design from".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                let _ = this.update(cx, |this, cx| {
+                    let added: Vec<_> = paths
+                        .iter()
+                        .filter(|p| crate::turns::is_image(p))
+                        .filter_map(|p| crate::design::add_file(&this.root, p))
+                        .collect();
+                    this.took_refs(added, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// New references join the list and go with the next ask.
+    fn took_refs(&mut self, added: Vec<crate::design::Reference>, cx: &mut Context<Self>) {
+        if added.is_empty() {
+            return;
+        }
+        for r in &added {
+            self.refs_picked.push(r.file.clone());
+        }
+        self.refs.extend(added);
+        let _ = crate::design::save(&self.root, &self.refs);
+        cx.notify();
+    }
+
+    fn remove_ref(&mut self, file: &str, cx: &mut Context<Self>) {
+        let _ = std::fs::remove_file(crate::design::folder(&self.root).join(file));
+        self.refs.retain(|r| r.file != file);
+        self.refs_picked.retain(|f| f != file);
+        let _ = crate::design::save(&self.root, &self.refs);
+        cx.notify();
+    }
+
+    fn toggle_ref(&mut self, file: &str, cx: &mut Context<Self>) {
+        if self.refs_picked.iter().any(|f| f == file) {
+            self.refs_picked.retain(|f| f != file);
+        } else {
+            self.refs_picked.push(file.to_string());
+        }
+        cx.notify();
+    }
+
+    /// The picked references, as full paths with their notes.
+    fn picked_refs(&self) -> Vec<(String, String)> {
+        let dir = crate::design::folder(&self.root);
+        self.refs_picked
+            .iter()
+            .filter_map(|f| self.refs.iter().find(|r| &r.file == f))
+            .map(|r| {
+                (
+                    dir.join(&r.file).to_string_lossy().into_owned(),
+                    r.note.clone(),
+                )
+            })
+            .collect()
     }
 
     fn check_files(&mut self, cx: &mut Context<Self>) {
@@ -576,7 +778,24 @@ impl DesignCanvas {
             return false;
         }
         self.save_canvas();
-        let context = self.ask_context();
+        let mut context = self.ask_context();
+        let picked = self.picked_refs();
+        if !picked.is_empty() {
+            context.push_str(
+                "\nPictures to design from are attached. Match their layout, look and feel, \
+                 using the theme's tokens and components:\n",
+            );
+            for (path, note) in &picked {
+                if note.trim().is_empty() {
+                    context.push_str(&format!("- {path}\n"));
+                } else {
+                    context.push_str(&format!("- {path}: {}\n", note.trim()));
+                }
+            }
+        }
+        let images: Vec<String> = picked.into_iter().map(|(p, _)| p).collect();
+        self.refs_picked.clear();
+        self.refs_open = false;
         self.ai = Some(AiChange {
             task: summary(&task),
             before: snapshot(&folder(&self.root)),
@@ -590,8 +809,9 @@ impl DesignCanvas {
             task,
             context,
             edit: true,
-            images: Vec::new(),
+            images,
             agent: self.pick.agent,
+            model: self.pick.model.clone(),
         });
         self.pick.open = false;
         cx.notify();
@@ -728,7 +948,13 @@ impl DesignCanvas {
              raw colours and sizes, so the theme keeps working. Name a screen with <title>, set \
              its device with <meta name=\"runo:device\" content=\"phone\"> (or tablet, \
              desktop), and link screens for the prototype with data-goto=\"<other screen id>\" \
-             on what's clicked. New screen files show up on the canvas by themselves. Make the \
+             on what's clicked (add data-transition=\"sheet\" for a screen that opens as a \
+             modal sheet; push, fade, axis and none also work, and the platform's own is used \
+             otherwise). Make controls work when tapped in Play: a .switch flips its .on class, \
+             a .tab, or any child of an element with data-select, becomes the one with .on, \
+             data-toggle=\"class\" toggles that class on the element, data-show=\"#id\" \
+             shows or hides another element (menus, accordions, sheets), and checkboxes, \
+             radios and inputs work as they are. New screen files show up on the canvas by themselves. Make the \
              change by editing these files directly: Runo shows it live and the user keeps or \
              undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for \
              this request.\n"
@@ -777,6 +1003,13 @@ impl DesignCanvas {
                      right after it.\n",
                 );
             }
+        } else {
+            out.push_str("\nNothing is selected on the canvas.\n");
+        }
+        if let Some(file) = self.rules_file() {
+            out.push_str(&format!(
+                "\nFollow the project's design rules in {file}: who it's for, the look and feel, and its rules for spacing, type and colour.\n"
+            ));
         }
         out
     }
@@ -921,6 +1154,37 @@ impl DesignCanvas {
                             })),
                     );
                 }
+                for (i, (path, _)) in self.picked_refs().into_iter().enumerate() {
+                    any = true;
+                    let file = self.refs_picked[i].clone();
+                    chips = chips.child(
+                        div()
+                            .id(("design-ref-chip", i))
+                            .h(px(26.))
+                            .pl(px(3.))
+                            .pr_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(c_border()))
+                            .cursor_pointer()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_secondary()))
+                            .hover(|el| el.bg(tint(c_subtle())))
+                            .tooltip(tip("AI designs from this picture. Click to leave it out."))
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_ref(&file, cx)))
+                            .child(
+                                img(PathBuf::from(&path))
+                                    .size(px(20.))
+                                    .rounded(px(3.))
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                            .child("Reference")
+                            .child(icon(IconName::X, 10., c_muted())),
+                    );
+                }
                 let ideas: &[&'static str] = if self.ask_new.is_some() {
                     &["A sign-in screen", "A profile with stats", "A checkout"]
                 } else if self.element.is_some() {
@@ -975,6 +1239,25 @@ impl DesignCanvas {
                             .items_center()
                             .gap_1()
                             .child(row)
+                            .child(
+                                icon_btn(
+                                    "design-refs",
+                                    IconName::ImagePlus,
+                                    "Design from a picture: a mockup, screenshot or sketch",
+                                    self.refs_open,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        if this.refs.is_empty() {
+                                            this.add_refs(cx);
+                                        } else {
+                                            this.refs_open = !this.refs_open;
+                                            this.pick.open = false;
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
+                            )
                             .child(self.pick.chip("design-ask", cx, |t: &mut Self| &mut t.pick))
                             .child(askbar::send_button("design-ask-send", !empty).on_click(
                                 cx.listener(|this, _, window, cx| this.send_ask(window, cx)),
@@ -995,6 +1278,9 @@ impl DesignCanvas {
                         .v_flex()
                         .items_end()
                         .gap_1()
+                        .when(self.ai.is_none() && self.refs_open, |el| {
+                            el.child(self.refs_menu(cx))
+                        })
                         .when(self.ai.is_none(), |el| {
                             el.children(self.pick.menu(
                                 "design-ask",
@@ -1007,6 +1293,107 @@ impl DesignCanvas {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The pictures to design from, to pick for the next ask or add to.
+    fn refs_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let dir = crate::design::folder(&self.root);
+        let mut grid = div().flex().flex_wrap().gap(px(6.));
+        for (i, r) in self.refs.iter().enumerate().rev().take(24) {
+            let picked = self.refs_picked.contains(&r.file);
+            let (f1, f2) = (r.file.clone(), r.file.clone());
+            grid = grid.child(
+                div()
+                    .id(("design-ref", i))
+                    .relative()
+                    .size(px(88.))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .border_2()
+                    .border_color(rgb(if picked { c_blue() } else { c_border() }))
+                    .cursor_pointer()
+                    .bg(rgb(c_canvas()))
+                    .tooltip(tip("Click to design from it, again to leave it out"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_ref(&f1, cx)))
+                    .child(
+                        img(dir.join(&r.file))
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    )
+                    .when(picked, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top(px(4.))
+                                .left(px(4.))
+                                .size(px(16.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(rgb(c_blue()))
+                                .child(icon(IconName::Check, 10., 0xffffff)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("design-ref-remove", i))
+                            .absolute()
+                            .top(px(4.))
+                            .right(px(4.))
+                            .size(px(18.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(col(0x000000, 0.55))
+                            .opacity(0.8)
+                            .hover(|el| el.opacity(1.))
+                            .tooltip(tip("Remove this picture"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_ref(&f2, cx);
+                            }))
+                            .child(icon(IconName::X, 10., 0xffffff)),
+                    ),
+            );
+        }
+        div()
+            .id("design-refs-menu")
+            .w(px(420.))
+            .max_h(px(360.))
+            .overflow_y_scroll()
+            .p_3()
+            .v_flex()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(rgb(c_raised()))
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .whitespace_normal()
+                            .child("Pick pictures for AI to design from: mockups, screenshots or sketches. They go with your next ask."),
+                    )
+                    .child(
+                        text_btn("design-refs-add", "Add", Some(IconName::Plus), false)
+                            .tooltip(tip("Paste an image you copied, or pick files"))
+                            .on_click(cx.listener(|this, _, _, cx| this.add_refs(cx))),
+                    ),
+            )
+            .child(grid)
+            .into_any_element()
     }
 
     /// Put a suggestion in the ask bar, ready to send or change.
@@ -1436,23 +1823,36 @@ impl DesignCanvas {
         cx.notify();
     }
 
+    /// Delete the selected screen, with Undo on the ask bar to bring it back.
     fn delete_screen(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.screen.clone() else {
             return;
         };
-        let file = screen_path(&self.root, &id);
-        let html = std::fs::read_to_string(&file).unwrap_or_default();
-        if std::fs::remove_file(&file).is_err() {
+        let name = self
+            .canvas
+            .screen(&id)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| id.clone());
+        let before = match self.ai.take() {
+            Some(ai) => ai.before,
+            None => snapshot(&folder(&self.root)),
+        };
+        if let Err(e) = std::fs::remove_file(screen_path(&self.root, &id)) {
+            self.error = Some(format!("Couldn't delete {id}.html: {e}"));
+            cx.notify();
             return;
         }
         self.canvas.screens.retain(|s| s.id != id);
         self.shots.remove(&id);
         self.save_canvas();
         self.select_screen(None);
-        self.say(format!(
-            "Deleted {id}.html. It's in git if you need it back."
-        ));
-        let _ = html;
+        self.ai = Some(AiChange {
+            task: format!("Deleted {name}"),
+            before,
+            changed: true,
+            by_ai: false,
+            started: Instant::now(),
+        });
         cx.notify();
     }
 
@@ -1594,6 +1994,63 @@ impl DesignCanvas {
 
     // ---- Prototype
 
+    /// A tap in Play that missed every link: the screen's own controls answer it.
+    fn play_tap(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(id) = self.playing.clone() else {
+            return;
+        };
+        let Some(s) = self.canvas.screen(&id) else {
+            return;
+        };
+        if self.play_tapping || self.play_move.is_some() {
+            return;
+        }
+        let device = s.device;
+        let (vw, vh) = self.view_size();
+        let (w, h) = device.size();
+        let scale = ((vh - 80.) / h).min((vw - 80.) / w).min(1.);
+        let (dw, dh) = (w * scale, h * scale);
+        let (x, y) = self.local(pos);
+        let at = (
+            (x - (vw - dw) / 2.) / scale,
+            (y - 40. - (vh - 40. - dh) / 2.) / scale,
+        );
+        if at.0 < 0. || at.1 < 0. || at.0 > w || at.1 > h {
+            return;
+        }
+        // Links are Play's to follow.
+        let shot = self.play_shots.get(&id).or_else(|| self.shots.get(&id));
+        if shot.is_some_and(|s| {
+            s.links.iter().any(|l| {
+                let r = &l.rect;
+                at.0 >= r.x && at.0 <= r.x + r.w && at.1 >= r.y && at.1 <= r.y + r.h
+            })
+        }) {
+            return;
+        }
+        self.play_tapping = true;
+        let tapped = id.clone();
+        self.run(
+            cx,
+            move |r| r.tap(&id, device, at),
+            move |this, out, _| {
+                this.play_tapping = false;
+                if let Ok(shot) = out {
+                    if this.playing.as_deref() == Some(tapped.as_str()) {
+                        this.play_shots.insert(tapped, shot);
+                    }
+                }
+            },
+        );
+    }
+
+    /// Which platform's moves the prototype plays with, kept in the canvas file.
+    fn set_platform(&mut self, platform: &str, cx: &mut Context<Self>) {
+        self.canvas.platform = platform.to_string();
+        self.save_canvas();
+        cx.notify();
+    }
+
     fn play(&mut self, cx: &mut Context<Self>) {
         let first = self
             .screen
@@ -1609,19 +2066,60 @@ impl DesignCanvas {
             .or_else(|| self.canvas.screens.first().map(|s| s.id.clone()));
         self.playing = first;
         self.play_back.clear();
+        self.play_move = None;
+        self.play_shots.clear();
         cx.notify();
     }
 
-    fn play_go(&mut self, to: &str, cx: &mut Context<Self>) {
-        if self.canvas.screen(to).is_none() {
+    fn play_go(&mut self, link: &dom::Link, cx: &mut Context<Self>) {
+        let to = link.goto.as_str();
+        let Some(screen) = self.canvas.screen(to) else {
             self.say(format!("{to}.html doesn't exist yet."));
             cx.notify();
             return;
-        }
+        };
+        let how = Move::of(link, screen.device, &self.canvas.platform);
+        self.play_shots.remove(to);
         if let Some(now) = self.playing.replace(to.to_string()) {
-            self.play_back.push(now);
+            self.play_back.push((now.clone(), how));
+            self.animate_move(now, how, false, cx);
         }
         cx.notify();
+    }
+
+    /// Go back to the screen before, undoing the move that left it.
+    fn play_return(&mut self, cx: &mut Context<Self>) {
+        let Some((prev, how)) = self.play_back.pop() else {
+            return;
+        };
+        self.play_shots.remove(&prev);
+        if let Some(now) = self.playing.replace(prev) {
+            self.animate_move(now, how, true, cx);
+        }
+        cx.notify();
+    }
+
+    /// Run a move from screen `from` to the one playing now, and drop it when it's done.
+    fn animate_move(&mut self, from: String, how: Move, back: bool, cx: &mut Context<Self>) {
+        if how.kind == MoveKind::None || !anim_on() {
+            self.play_move = None;
+            return;
+        }
+        self.play_n += 1;
+        let n = self.play_n;
+        self.play_move = Some((from, how, back));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(how.ms + 30))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.play_n == n {
+                    this.play_move = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     // ---- Input
@@ -1637,6 +2135,22 @@ impl DesignCanvas {
                 start: self.pan,
             };
             return;
+        }
+        // The end of a link's arrow: drag it onto another screen to send the link there.
+        if self.hotspots && e.button == MouseButton::Left {
+            let hit = self.link_lines().into_iter().find(|l| {
+                let p = self.screen_pt(l.to);
+                (local.0 - p.0).abs() < 10. && (local.1 - p.1).abs() < 10.
+            });
+            if let Some(l) = hit {
+                self.drag = Drag::Relink {
+                    screen: l.screen,
+                    path: l.path,
+                    from: l.from,
+                    to: w,
+                };
+                return;
+            }
         }
         // The link handle on the selected element.
         if let Some(h) = self.link_handle() {
@@ -1756,7 +2270,7 @@ impl DesignCanvas {
                     s.y = y;
                 }
             }
-            Drag::Link { to, .. } => *to = w,
+            Drag::Link { to, .. } | Drag::Relink { to, .. } => *to = w,
         }
         cx.notify();
     }
@@ -1810,6 +2324,25 @@ impl DesignCanvas {
                     }
                 }
             }
+            Drag::Relink {
+                screen, path, to, ..
+            } => match self.screen_at(to) {
+                Some((target, _)) if target != screen => {
+                    let name = self
+                        .canvas
+                        .screen(&target)
+                        .map(|s| s.name.clone())
+                        .unwrap_or(target.clone());
+                    self.screen = Some(screen);
+                    self.edit(
+                        dom::op(&path, "attr", &[json!("data-goto"), json!(target)]),
+                        After::Path(path),
+                        cx,
+                    );
+                    self.say(format!("The link now goes to {name}."));
+                }
+                _ => self.say("Drop the arrow on another screen to send the link there."),
+            },
             Drag::Link { to, .. } => {
                 if let Some((target, _)) = self.screen_at(to) {
                     if Some(&target) != self.screen.as_ref() {
@@ -1831,6 +2364,78 @@ impl DesignCanvas {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Right-click a screen for what can be done to it.
+    fn on_right(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        self.new_open = false;
+        let local = self.local(e.position);
+        self.menu = self.screen_at(self.world(local)).map(|(id, _)| {
+            self.select_screen(Some(id.clone()));
+            (local, id)
+        });
+        cx.notify();
+    }
+
+    fn screen_menu(&self, at: Pt, cx: &mut Context<Self>) -> AnyElement {
+        type Act = fn(&mut DesignCanvas, &mut Context<DesignCanvas>);
+        let items: [(&str, &str, Act); 3] = [
+            ("Duplicate", "⌘D", |this, cx| this.duplicate_screen(cx)),
+            ("Play from here", "", |this, cx| this.play(cx)),
+            ("Delete", "⌫", |this, cx| this.delete_screen(cx)),
+        ];
+        // Keep the whole menu on the canvas.
+        let (vw, vh) = self.view_size();
+        let tall = items.len() as f32 * 28. + 10.;
+        let left = at.0.min(vw - 208.).max(4.);
+        let top = at.1.min(vh - tall - 4.).max(4.);
+        let mut list = div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(200.))
+            .p_1()
+            .v_flex()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(float(c_canvas()))
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.menu = None;
+                cx.notify();
+            }));
+        for (i, (label, keys, act)) in items.into_iter().enumerate() {
+            list = list.child(
+                div()
+                    .id(("design-menu", i))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .text_color(rgb(if label == "Delete" { c_red() } else { c_text() }))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.menu = None;
+                        act(this, cx);
+                        cx.notify();
+                    }))
+                    .child(div().flex_1().child(label))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(c_muted()))
+                            .child(keys),
+                    ),
+            );
+        }
+        list.into_any_element()
     }
 
     fn on_scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -1873,6 +2478,8 @@ impl DesignCanvas {
             (false, _, _, "backspace" | "delete") => {
                 if self.element.is_some() {
                     self.delete_element(cx);
+                } else if self.screen.is_some() && self.playing.is_none() {
+                    self.delete_screen(cx);
                 }
                 true
             }
@@ -1910,6 +2517,8 @@ impl DesignCanvas {
             self.inline_open = false;
         } else if self.new_open {
             self.new_open = false;
+        } else if self.menu.is_some() {
+            self.menu = None;
         } else if !self.focus.is_focused(window) {
             window.focus(&self.focus, cx);
         } else if let Some(el) = &self.element {
@@ -2159,10 +2768,17 @@ impl DesignCanvas {
                 )),
             )
             .child(sep())
-            .child(
+            .child(if self.playing.is_some() {
+                text_btn("design-play", "Stop", Some(IconName::Square), true).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.playing = None;
+                        cx.notify();
+                    },
+                ))
+            } else {
                 text_btn("design-play", "Play", Some(IconName::Play), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-            )
+                    .on_click(cx.listener(|this, _, _, cx| this.play(cx)))
+            })
             .into_any_element()
     }
 
@@ -2328,25 +2944,29 @@ impl DesignCanvas {
         }
         // What opens another screen, outlined where it sits.
         if self.hotspots {
+            let mut n = 0;
             for s in &self.canvas.screens {
                 let Some(shot) = self.shots.get(&s.id) else {
                     continue;
                 };
                 for l in &shot.links {
                     let (x, y) = self.screen_pt((s.x + l.rect.x, s.y + l.rect.y));
+                    let (w, h) = (l.rect.w * z, l.rect.h * z);
                     out.push(
                         div()
                             .absolute()
                             .left(px(x - 1.))
                             .top(px(y - 1.))
-                            .w(px(l.rect.w * z + 2.))
-                            .h(px(l.rect.h * z + 2.))
+                            .w(px(w + 2.))
+                            .h(px(h + 2.))
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(col(c_blue(), 0.85))
-                            .bg(col(c_blue(), 0.1))
+                            .border_color(col(c_blue(), 0.6))
+                            .bg(col(c_blue(), 0.08))
                             .into_any_element(),
                     );
+                    out.extend(hot_dot(("design-hot-dot", n), (x + w, y), n));
+                    n += 1;
                 }
             }
         }
@@ -2783,28 +3403,75 @@ impl DesignCanvas {
         out
     }
 
-    /// Arrows for the links between screens, and the one being dragged.
-    fn paint_links(&self) -> (Vec<Arrow>, Option<Arrow>) {
+    /// The links between screens. Each leaves its element on the side facing the screen
+    /// it goes to, and arrows into the same side of a screen are spread down it rather
+    /// than meeting at one point. Links that don't touch the picked screen are faded.
+    fn link_lines(&self) -> Vec<LinkLine> {
         let mut out = Vec::new();
-        for s in self.canvas.screens.iter().filter(|_| self.hotspots) {
+        let mut into: HashMap<(String, bool), usize> = HashMap::new();
+        for s in &self.canvas.screens {
             let Some(shot) = self.shots.get(&s.id) else {
                 continue;
             };
+            let sw = self.size_of(s).0;
             for l in &shot.links {
                 let Some(t) = self.canvas.screen(&l.goto) else {
                     continue;
                 };
-                let from = (s.x + l.rect.x + l.rect.w, s.y + l.rect.y + l.rect.h / 2.);
-                let to = if t.x >= s.x {
-                    (t.x, t.y + 40.)
+                if t.id == s.id {
+                    continue;
+                }
+                let (tw, th) = self.size_of(t);
+                // Forward when the target is to the right, else back into its right side.
+                let forward = t.x + tw / 2. >= s.x + sw / 2.;
+                let y = s.y + l.rect.y + l.rect.h / 2.;
+                let from = if forward {
+                    (s.x + l.rect.x + l.rect.w, y)
                 } else {
-                    (t.x + self.size_of(t).0, t.y + 40.)
+                    (s.x + l.rect.x, y)
                 };
-                out.push((self.screen_pt(from), self.screen_pt(to)));
+                // Level with where it starts when the target is that tall, so arrows run
+                // straight across, then spread from others arriving on the same side.
+                let k = into.entry((t.id.clone(), forward)).or_insert(0);
+                let level = (y - t.y).clamp(28., (th - 12.).max(28.));
+                let ty = t.y + (level + *k as f32 * 18.).min((th - 12.).max(28.));
+                *k += 1;
+                let to = if forward { (t.x, ty) } else { (t.x + tw, ty) };
+                let faint = self
+                    .screen
+                    .as_ref()
+                    .is_some_and(|p| *p != s.id && *p != t.id);
+                out.push(LinkLine {
+                    screen: s.id.clone(),
+                    path: l.path.clone(),
+                    from,
+                    to,
+                    faint,
+                });
             }
         }
+        out
+    }
+
+    /// Arrows for the links between screens, and the one being dragged.
+    fn paint_links(&self) -> (Vec<Arrow>, Option<Arrow>) {
+        if !self.hotspots {
+            return (Vec::new(), None);
+        }
+        let moving = match &self.drag {
+            Drag::Relink { screen, path, .. } => Some((screen, path)),
+            _ => None,
+        };
+        let out = self
+            .link_lines()
+            .into_iter()
+            .filter(|l| moving != Some((&l.screen, &l.path)))
+            .map(|l| (self.screen_pt(l.from), self.screen_pt(l.to), l.faint))
+            .collect();
         let dragging = match &self.drag {
-            Drag::Link { from, to } => Some((self.screen_pt(*from), self.screen_pt(*to))),
+            Drag::Link { from, to } | Drag::Relink { from, to, .. } => {
+                Some((self.screen_pt(*from), self.screen_pt(*to), false))
+            }
             _ => None,
         };
         (out, dragging)
@@ -2813,32 +3480,69 @@ impl DesignCanvas {
     fn player(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let id = self.playing.clone()?;
         let s = self.canvas.screen(&id)?;
-        let shot = self.shots.get(&id);
+        let shot = self.play_shots.get(&id).or_else(|| self.shots.get(&id));
         let (vw, vh) = self.view_size();
         let (w, h) = s.device.size();
         let scale = ((vh - 80.) / h).min((vw - 80.) / w).min(1.);
         let (dw, dh) = (w * scale, h * scale);
+        let radius = if s.device == Device::Phone { 28. } else { 10. } * scale;
         let mut frame = div()
             .relative()
             .w(px(dw))
             .h(px(dh))
-            .rounded(px(if s.device == Device::Phone { 28. } else { 10. } * scale))
+            .rounded(px(radius))
             .overflow_hidden()
             .bg(rgb(0xffffff))
             .shadow_lg();
-        if let Some(shot) = shot {
-            // Only the first screenful plays; the rest of a tall screen is cut off.
-            let full_h = shot.size.1 * scale;
-            frame = frame.child(
-                img(ImageSource::Render(shot.image.clone()))
+        // A screen's picture, the first screenful of it; the rest of a tall screen is cut off.
+        let picture = |id: &str| {
+            let shot = self.play_shots.get(id).or_else(|| self.shots.get(id))?;
+            Some(
+                div()
                     .absolute()
                     .top_0()
                     .left_0()
                     .w(px(dw))
-                    .h(px(full_h)),
+                    .h(px(dh))
+                    .overflow_hidden()
+                    .bg(rgb(0xffffff))
+                    .child(
+                        img(ImageSource::Render(shot.image.clone()))
+                            .w(px(dw))
+                            .h(px(shot.size.1 * scale)),
+                    ),
+            )
+        };
+        let moving = self
+            .play_move
+            .as_ref()
+            .and_then(|(from, how, back)| Some((picture(from)?, *how, *back)));
+        match (moving, picture(&id)) {
+            (Some((old, how, back)), Some(new)) => {
+                for layer in how.layers(old, new, back, (dw, dh), self.play_n) {
+                    frame = frame.child(layer);
+                }
+            }
+            (_, Some(new)) => frame = frame.child(new),
+            _ => {}
+        }
+        if let Some(shot) = shot.filter(|_| self.play_move.is_none()) {
+            frame = frame.child(
+                div()
+                    .id("design-play-tap")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            this.play_tap(e.position, cx);
+                        }),
+                    ),
             );
             for (i, l) in shot.links.iter().enumerate() {
-                let to = l.goto.clone();
+                let link = l.clone();
                 frame = frame.child(
                     div()
                         .id(("design-hot", i))
@@ -2855,10 +3559,34 @@ impl DesignCanvas {
                                 .bg(col(c_blue(), 0.1))
                         })
                         .hover(|el| el.bg(col(c_blue(), 0.2)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.play_go(&to, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| this.play_go(&link, cx))),
                 );
+                if self.hotspots {
+                    let corner = ((l.rect.x + l.rect.w) * scale, l.rect.y * scale);
+                    for dot in hot_dot(("design-play-dot", i), corner, i) {
+                        frame = frame.child(dot);
+                    }
+                }
             }
         }
+        let platform = self.canvas.platform.clone();
+        let platforms = div()
+            .flex()
+            .gap(px(4.))
+            .child(
+                chip_btn("design-ios", "iOS", platform != "android")
+                    .tooltip(tip(
+                        "Screens push in from the side and sheets slide up, as on iPhone",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.set_platform("", cx))),
+            )
+            .child(
+                chip_btn("design-android", "Android", platform == "android")
+                    .tooltip(tip(
+                        "Screens move along a shared axis and fade through, as in Material",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.set_platform("android", cx))),
+            );
         Some(
             div()
                 .absolute()
@@ -2882,9 +3610,7 @@ impl DesignCanvas {
                             icon_btn("design-play-back", IconName::ArrowLeft, "Back", false)
                                 .when(self.play_back.is_empty(), |el| el.opacity(0.4))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(prev) = this.play_back.pop() {
-                                        this.playing = Some(prev);
-                                    }
+                                    this.play_return(cx);
                                     cx.notify();
                                 })),
                         )
@@ -2898,29 +3624,7 @@ impl DesignCanvas {
                                     s.name
                                 )),
                         )
-                        .child(
-                            text_btn(
-                                "design-play-hotspots",
-                                if self.hotspots {
-                                    "Hide hotspots"
-                                } else {
-                                    "Show hotspots"
-                                },
-                                Some(IconName::MousePointerClick),
-                                false,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.hotspots = !this.hotspots;
-                                cx.notify();
-                            })),
-                        )
-                        .child(
-                            text_btn("design-play-stop", "Stop", Some(IconName::X), false)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.playing = None;
-                                    cx.notify();
-                                })),
-                        ),
+                        .child(platforms),
                 )
                 .child(div().flex_1().flex().items_center().child(frame))
                 .into_any_element(),
@@ -3042,6 +3746,7 @@ impl DesignCanvas {
             .bg(rgb(c_subtle()))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_pinch(cx.listener(|this, e: &PinchEvent, _, cx| {
                 let local = this.local(e.position);
@@ -3071,10 +3776,11 @@ impl DesignCanvas {
                     move |b, _, window, _| {
                         let o = (f32::from(b.origin.x), f32::from(b.origin.y));
                         let tf = |p: Pt| point(px(o.0 + p.0), px(o.1 + p.1));
-                        for (a, z) in &links {
-                            paint_arrow(*a, *z, &tf, col(c_blue(), 0.55), window);
+                        for (a, z, faint) in &links {
+                            let alpha = if *faint { 0.15 } else { 0.6 };
+                            paint_arrow(*a, *z, &tf, col(c_blue(), alpha), window);
                         }
-                        if let Some((a, z)) = dragging {
+                        if let Some((a, z, _)) = dragging {
                             paint_arrow(a, z, &tf, col(c_blue(), 1.), window);
                         }
                     },
@@ -3132,6 +3838,9 @@ impl DesignCanvas {
         }
         if self.new_open {
             area = area.child(self.new_menu(cx));
+        }
+        if let Some((at, _)) = &self.menu {
+            area = area.child(self.screen_menu(*at, cx));
         }
         area = area.children(self.player(cx));
         // The status sits in a strip under the canvas, so nothing drawn over the canvas covers it.
@@ -3603,9 +4312,50 @@ impl DesignCanvas {
                         })),
                     );
                 }
+                let mut moves = div().flex().flex_wrap().gap(px(4.));
+                let mut speeds = div().flex().flex_wrap().gap(px(4.));
+                if el.goto.is_some() {
+                    let now = el.transition.clone().unwrap_or_default();
+                    for (i, (label, value)) in MOVES.iter().enumerate() {
+                        let value: &'static str = value;
+                        moves = moves.child(
+                            chip_btn(("design-move", i), *label, now == value).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.op(
+                                        "attr",
+                                        &[json!("data-transition"), json!(value)],
+                                        After::Same,
+                                        cx,
+                                    )
+                                }),
+                            ),
+                        );
+                    }
+                    let now = el.speed.clone().unwrap_or_default();
+                    for (i, (label, value)) in SPEEDS.iter().enumerate() {
+                        let value: &'static str = value;
+                        speeds = speeds.child(
+                            chip_btn(("design-speed", i), *label, now == value).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.op(
+                                        "attr",
+                                        &[json!("data-speed"), json!(value)],
+                                        After::Same,
+                                        cx,
+                                    )
+                                }),
+                            ),
+                        );
+                    }
+                }
+                let linked = el.goto.is_some();
                 out = out
                     .child(section("Prototype"))
                     .child(label_row("Opens", opens))
+                    .when(linked, |el| {
+                        el.child(label_row("Moves", moves))
+                            .child(label_row("Speed", speeds))
+                    })
                     .child(section("Arrange"))
                     .child(
                         div()
@@ -3966,6 +4716,25 @@ impl DesignCanvas {
             .child(label_row("Corner radius", radius))
             .child(label_row("Density", density))
             .child(label_row("Preview", mode))
+            .child(section("Design rules"))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .child(format!(
+                        "Saved to {}. AI reads them before every change.",
+                        crate::design::notes_path(&self.root)
+                            .strip_prefix(&self.root)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| "docs/design.md".into())
+                    )),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_size(px(12.5))
+                    .child(Textarea::new(&self.f_rules).bordered(true).h(px(200.))),
+            )
     }
 
     fn render_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -4181,6 +4950,43 @@ fn dom_px(css: &str) -> Option<f32> {
     css.trim().strip_suffix("px")?.trim().parse().ok()
 }
 
+/// A hotspot's dot at `at`, with a ring that pings out of it so links catch the eye.
+/// Neighbouring dots ping out of step, so a screen of links twinkles rather than flashes.
+fn hot_dot(id: impl Into<ElementId>, at: (f32, f32), n: usize) -> Vec<AnyElement> {
+    let (x, y) = at;
+    let phase = (n as f32 * 0.37).fract();
+    let ring = div()
+        .absolute()
+        .rounded_full()
+        .border_2()
+        .border_color(rgb(c_blue()))
+        .animated(
+            id,
+            Animation::new(Duration::from_millis(1600)).repeat(),
+            move |el, d| {
+                let t = (d + phase).fract();
+                let size = 8. + 18. * t;
+                el.left(px(x - size / 2.))
+                    .top(px(y - size / 2.))
+                    .w(px(size))
+                    .h(px(size))
+                    .opacity(0.75 * (1. - t) * (1. - t))
+            },
+        );
+    let dot = div()
+        .absolute()
+        .left(px(x - 4.5))
+        .top(px(y - 4.5))
+        .size(px(9.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(0xffffff))
+        .bg(rgb(c_blue()))
+        .shadow_sm()
+        .into_any_element();
+    vec![ring, dot]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4224,5 +5030,210 @@ mod tests {
         assert!(dir.join("screens/home.html").exists());
         assert!(!dir.join("screens/new.html").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// How the prototype moves from one screen to the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MoveKind {
+    /// The new screen slides in from the side over the old one, as on iPhone.
+    Push,
+    /// The new screen slides up as a sheet over the old one.
+    Sheet,
+    /// The new screen fades in over the old one.
+    Fade,
+    /// The old screen slips back and fades out as the new one slips in, as in Material.
+    Axis,
+    None,
+}
+
+/// The moves a link can pick, with their `data-transition` values; empty for the
+/// platform's own.
+pub(crate) const MOVES: [(&str, &str); 6] = [
+    ("Platform", ""),
+    ("Push", "push"),
+    ("Sheet", "sheet"),
+    ("Fade", "fade"),
+    ("Shared axis", "axis"),
+    ("None", "none"),
+];
+
+/// How fast, as `data-speed`.
+pub(crate) const SPEEDS: [(&str, &str); 3] = [("Quick", "fast"), ("Normal", ""), ("Slow", "slow")];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Move {
+    pub kind: MoveKind,
+    pub ms: u64,
+}
+
+impl Move {
+    /// The move a link makes: its own, else the platform's for the screen it opens.
+    pub(crate) fn of(link: &dom::Link, device: Device, platform: &str) -> Self {
+        let kind = match link.transition.as_str() {
+            "push" => MoveKind::Push,
+            "sheet" | "modal" => MoveKind::Sheet,
+            "fade" => MoveKind::Fade,
+            "axis" => MoveKind::Axis,
+            "none" => MoveKind::None,
+            _ if device == Device::Desktop => MoveKind::Fade,
+            _ if platform == "android" => MoveKind::Axis,
+            _ => MoveKind::Push,
+        };
+        let base: f32 = match kind {
+            MoveKind::Push => 350.,
+            MoveKind::Sheet => 400.,
+            MoveKind::Fade => 220.,
+            MoveKind::Axis => 300.,
+            MoveKind::None => 0.,
+        };
+        let speed = match link.speed.as_str() {
+            "fast" => 0.6,
+            "slow" => 1.7,
+            _ => 1.,
+        };
+        Self {
+            kind,
+            ms: (base * speed) as u64,
+        }
+    }
+
+    /// The old and new screens (and a shade between them) as they move. `back` plays the
+    /// move in reverse, from the screen that was left to the one it came from: `new` is
+    /// then the screen being gone back to.
+    pub(crate) fn layers(
+        self,
+        old: Div,
+        new: Div,
+        back: bool,
+        (w, h): (f32, f32),
+        n: usize,
+    ) -> Vec<AnyElement> {
+        let anim = || {
+            Animation::new(Duration::from_millis(self.ms.max(1)))
+                .with_easing(|t: f32| 1. - (1. - t).powi(3))
+        };
+        let shade = |most: f32, rising: bool| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(w))
+                .h(px(h))
+                .bg(rgb(0x000000))
+                .with_animation(("design-move-shade", n), anim(), move |el, d| {
+                    el.opacity(most * if rising { d } else { 1. - d })
+                })
+                .into_any_element()
+        };
+        // `under` stays behind and `over` comes in (or, going back, leaves).
+        let id = |part: &'static str| (part, n);
+        match (self.kind, back) {
+            (MoveKind::Push, false) => vec![
+                old.with_animation(id("design-move-old"), anim(), move |el, d| {
+                    el.left(px(-0.3 * w * d))
+                })
+                .into_any_element(),
+                shade(0.12, true),
+                new.shadow_lg()
+                    .with_animation(id("design-move-new"), anim(), move |el, d| {
+                        el.left(px(w * (1. - d)))
+                    })
+                    .into_any_element(),
+            ],
+            (MoveKind::Push, true) => vec![
+                new.with_animation(id("design-move-new"), anim(), move |el, d| {
+                    el.left(px(-0.3 * w * (1. - d)))
+                })
+                .into_any_element(),
+                shade(0.12, false),
+                old.shadow_lg()
+                    .with_animation(id("design-move-old"), anim(), move |el, d| {
+                        el.left(px(w * d))
+                    })
+                    .into_any_element(),
+            ],
+            (MoveKind::Sheet, false) => vec![
+                old.into_any_element(),
+                shade(0.3, true),
+                new.rounded_t(px(12.))
+                    .shadow_lg()
+                    .with_animation(id("design-move-new"), anim(), move |el, d| {
+                        el.top(px(h * (1. - d)))
+                    })
+                    .into_any_element(),
+            ],
+            (MoveKind::Sheet, true) => vec![
+                new.into_any_element(),
+                shade(0.3, false),
+                old.rounded_t(px(12.))
+                    .shadow_lg()
+                    .with_animation(id("design-move-old"), anim(), move |el, d| {
+                        el.top(px(h * d))
+                    })
+                    .into_any_element(),
+            ],
+            (MoveKind::Axis, back) => {
+                let dir = if back { -1. } else { 1. };
+                vec![
+                    old.with_animation(id("design-move-old"), anim(), move |el, d| {
+                        el.left(px(-30. * dir * d))
+                            .opacity((1. - d / 0.35).clamp(0., 1.))
+                    })
+                    .into_any_element(),
+                    new.with_animation(id("design-move-new"), anim(), move |el, d| {
+                        el.left(px(30. * dir * (1. - d)))
+                            .opacity(((d - 0.35) / 0.65).clamp(0., 1.))
+                    })
+                    .into_any_element(),
+                ]
+            }
+            (MoveKind::Fade, _) => vec![
+                old.into_any_element(),
+                new.with_animation(id("design-move-new"), anim(), |el, d| el.opacity(d))
+                    .into_any_element(),
+            ],
+            (MoveKind::None, _) => vec![new.into_any_element()],
+        }
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    fn link(transition: &str, speed: &str) -> dom::Link {
+        dom::Link {
+            goto: "next".into(),
+            rect: dom::Box::default(),
+            path: Vec::new(),
+            transition: transition.into(),
+            speed: speed.into(),
+        }
+    }
+
+    #[test]
+    fn links_move_like_their_platform_unless_told() {
+        let m = Move::of(&link("", ""), Device::Phone, "");
+        assert_eq!((m.kind, m.ms), (MoveKind::Push, 350));
+        assert_eq!(
+            Move::of(&link("", ""), Device::Phone, "android").kind,
+            MoveKind::Axis
+        );
+        assert_eq!(
+            Move::of(&link("", ""), Device::Desktop, "").kind,
+            MoveKind::Fade
+        );
+        assert_eq!(
+            Move::of(&link("sheet", ""), Device::Phone, "android").kind,
+            MoveKind::Sheet
+        );
+        assert_eq!(
+            Move::of(&link("none", ""), Device::Phone, "").kind,
+            MoveKind::None
+        );
+        assert_eq!(Move::of(&link("push", "slow"), Device::Phone, "").ms, 595);
+        assert_eq!(Move::of(&link("fade", "fast"), Device::Phone, "").ms, 132);
     }
 }

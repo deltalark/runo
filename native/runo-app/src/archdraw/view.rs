@@ -47,6 +47,8 @@ pub(crate) enum ArchEvent {
         images: Vec<String>,
         /// The agent to hand it to, by index into `agent::PROVIDERS`.
         agent: usize,
+        /// The model picked for it; empty for its default.
+        model: String,
     },
     /// Show a file of the project.
     Open(PathBuf),
@@ -169,6 +171,8 @@ pub(crate) struct ArchEditor {
     fitted: bool,
     side: SideTab,
     search: Entity<InputState>,
+    /// How the shapes panel is laid out, and the shapes used lately.
+    palette: PaletteState,
     f_name: Entity<InputState>,
     f_tech: Entity<InputState>,
     f_owner: Entity<InputState>,
@@ -452,8 +456,7 @@ impl ArchEditor {
             },
             &mut subs,
         );
-        let search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search shapes and logos"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Shapes and logos"));
         subs.push(cx.subscribe_in(&search, window, |this, _, ev, _, cx| {
             if matches!(ev, InputEvent::Change) {
                 this.icons_for_search(cx);
@@ -563,6 +566,7 @@ impl ArchEditor {
             fitted: false,
             side: SideTab::Properties,
             search,
+            palette: PaletteState::load(),
             f_name,
             f_tech,
             f_owner,
@@ -619,6 +623,12 @@ impl ArchEditor {
 
     /// Read the files again if nothing is waiting to be saved (an agent or git may have
     /// changed them).
+    /// Start the AI bar on this agent, such as the one the canvas's chat used last.
+    pub(crate) fn use_agent(&mut self, agent: usize, model: String) {
+        self.pick.agent = agent;
+        self.pick.model = model;
+    }
+
     pub(crate) fn reload_if_clean(&mut self, cx: &mut Context<Self>) {
         if self.ed.dirty || !exists(&self.root) || self.waiting.is_some() || self.review.is_some() {
             return;
@@ -857,6 +867,7 @@ impl ArchEditor {
     }
 
     fn add_preset(&mut self, preset: &Preset, at: Pt, cx: &mut Context<Self>) -> String {
+        self.palette.used(preset.label);
         let id = self.ed.add(preset, at);
         self.after_edit(cx);
         id
@@ -1334,6 +1345,7 @@ impl ArchEditor {
             edit: false,
             images: Vec::new(),
             agent: self.pick.agent,
+            model: self.pick.model.clone(),
         });
     }
 
@@ -1395,6 +1407,7 @@ impl ArchEditor {
             edit: true,
             images,
             agent: self.pick.agent,
+            model: self.pick.model.clone(),
         });
         self.pick.open = false;
         self.watch(cx);
@@ -1686,6 +1699,8 @@ impl ArchEditor {
                     ));
                 }
             }
+        } else {
+            out.push_str("\nNothing is selected on the canvas.\n");
         }
         out.push_str(&format!(
             "\nThe diagram has {} shapes and {} connectors.\n",
@@ -3734,68 +3749,59 @@ impl ArchEditor {
 
     fn palette(&self, cx: &mut Context<Self>) -> AnyElement {
         let q = self.search.read(cx).value().trim().to_string();
-        let row = |i: usize, p: &'static Preset, cx: &mut Context<Self>| {
-            let glyph = icon_named(p.icon).unwrap_or_else(|| kind_icon(p.kind));
-            div()
-                .id(("arch-preset", i))
-                .h(px(28.))
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .rounded_md()
-                .cursor_grab()
-                .text_size(px(12.5))
-                .text_color(rgb(c_text()))
-                .hover(|el| el.bg(tint(c_subtle())))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                        this.drag = Drag::Place {
-                            preset: p,
-                            at: None,
-                        };
-                        window.focus(&this.focus, cx);
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .size(px(22.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(5.))
-                        .bg(rgb(shape::mix(
-                            shape::accent(p.kind),
-                            c_canvas(),
-                            if is_dark() { 0.25 } else { 0.12 },
-                        )))
-                        .child(icon(glyph, 13., shape::accent(p.kind))),
-                )
-                .child(div().flex_1().min_w_0().truncate().child(p.label))
-        };
+        let grid = !self.palette.list;
         let mut list = div().v_flex().gap(px(1.));
+        // A run of shapes, as tiles or rows.
+        let shapes = |key: &'static str, presets: Vec<&'static Preset>, cx: &mut Context<Self>| {
+            let mut out = if grid {
+                div().flex().flex_wrap().gap(px(2.))
+            } else {
+                div().v_flex().gap(px(1.))
+            };
+            for p in presets {
+                let idx = PRESETS.iter().position(|x| std::ptr::eq(x, p)).unwrap_or(0);
+                out = out.child(preset_item((key, idx), p, grid, cx));
+            }
+            out
+        };
         if q.is_empty() {
-            let mut i = 0;
-            for g in GROUPS {
-                list = list.child(section(g));
-                for p in PRESETS.iter().filter(|p| p.group == g) {
-                    let idx = PRESETS.iter().position(|x| std::ptr::eq(x, p)).unwrap_or(i);
-                    list = list.child(row(idx, p, cx));
-                    i += 1;
+            let recent: Vec<&'static Preset> = self
+                .palette
+                .recent
+                .iter()
+                .filter_map(|l| PRESETS.iter().find(|p| p.label == *l))
+                .take(if grid { 6 } else { 5 })
+                .collect();
+            if !recent.is_empty() {
+                list = list.child(self.group_head("Recent", recent.len(), cx));
+                if !self.palette.closed("Recent") {
+                    list = list.child(shapes("arch-recent", recent, cx));
                 }
+            }
+            for g in GROUPS {
+                let presets: Vec<&'static Preset> =
+                    PRESETS.iter().filter(|p| p.group == g).collect();
+                list = list.child(self.group_head(g, presets.len(), cx));
+                if !self.palette.closed(g) {
+                    list = list.child(shapes("arch-preset", presets, cx));
+                }
+            }
+            list = list.child(self.group_head("Logos and icons", 0, cx));
+            if !self.palette.closed("Logos and icons") {
+                list = list.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child("Search above for thousands of brand and tech logos, such as Postgres, Kafka or Stripe."),
+                );
             }
         } else {
             let hits = search_presets(&q);
             if !hits.is_empty() {
                 list = list.child(section("Shapes"));
-            }
-            for p in hits {
-                let idx = PRESETS.iter().position(|x| std::ptr::eq(x, p)).unwrap_or(0);
-                list = list.child(row(idx, p, cx));
+                list = list.child(shapes("arch-preset", hits, cx));
             }
             list = list
                 .child(section("Logos and icons"))
@@ -3877,11 +3883,47 @@ impl ArchEditor {
                     .p_2()
                     .border_b_1()
                     .border_color(rgb(c_border()))
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .child(
-                        Input::new(&self.search)
-                            .bordered(true)
-                            .h(px(30.))
-                            .prefix(icon(IconName::Search, 13., c_muted())),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.search)
+                                .bordered(true)
+                                .h(px(30.))
+                                .prefix(icon(IconName::Search, 13., c_muted())),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .id("arch-palette-layout")
+                            .size(px(30.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|el| el.bg(tint(c_subtle())))
+                            .tooltip(tip(if grid {
+                                "Show as a list"
+                            } else {
+                                "Show as a grid"
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.palette.list = !this.palette.list;
+                                this.palette.save();
+                                cx.notify();
+                            }))
+                            .child(icon(
+                                if grid {
+                                    IconName::List
+                                } else {
+                                    IconName::LayoutGrid
+                                },
+                                14.,
+                                c_secondary(),
+                            )),
                     ),
             )
             .child(
@@ -3904,6 +3946,48 @@ impl ArchEditor {
                     .text_color(rgb(c_muted()))
                     .child("Drag a shape onto the canvas, or click it to add it in the middle."),
             )
+            .into_any_element()
+    }
+
+    /// A section of the shapes panel that folds away, with how many it holds.
+    fn group_head(&self, name: &'static str, count: usize, cx: &mut Context<Self>) -> AnyElement {
+        let closed = self.palette.closed(name);
+        div()
+            .id(SharedString::from(format!("arch-group-{name}")))
+            .mt_2()
+            .mb(px(2.))
+            .px_1()
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(c_muted()))
+            .hover(|el| el.text_color(rgb(c_text())))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.palette.toggle(name);
+                cx.notify();
+            }))
+            .child(icon(
+                if closed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                },
+                11.,
+                c_muted(),
+            ))
+            .child(div().flex_1().child(name.to_uppercase()))
+            .when(count > 0, |el| {
+                el.child(
+                    div()
+                        .font_weight(FontWeight::NORMAL)
+                        .child(count.to_string()),
+                )
+            })
             .into_any_element()
     }
 
@@ -7377,5 +7461,142 @@ fn thinking_line(secs: Option<u64>, scanning: bool) -> &'static str {
         Some(13..=30) => "Working out the parts and how they connect",
         Some(31..=60) => "Laying out the shapes",
         Some(_) => "Still working. Bigger diagrams take a little longer",
+    }
+}
+
+/// One shape in the panel: a tile with its picture over its name, or a row. Pressing it
+/// starts dragging it onto the canvas; letting go without moving adds it in the middle.
+fn preset_item(
+    id: (&'static str, usize),
+    p: &'static Preset,
+    grid: bool,
+    cx: &mut Context<ArchEditor>,
+) -> AnyElement {
+    let glyph = icon_named(p.icon).unwrap_or_else(|| kind_icon(p.kind));
+    let accent = shape::accent(p.kind);
+    let badge = |size: f32, glyph_size: f32| {
+        div()
+            .size(px(size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(size * 0.24))
+            .bg(rgb(shape::mix(
+                accent,
+                c_canvas(),
+                if is_dark() { 0.25 } else { 0.12 },
+            )))
+            .child(icon(glyph, glyph_size, accent))
+    };
+    let base = div()
+        .id(id)
+        .rounded_md()
+        .cursor_grab()
+        .hover(|el| el.bg(tint(c_subtle())))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                this.drag = Drag::Place {
+                    preset: p,
+                    at: None,
+                };
+                window.focus(&this.focus, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        );
+    if grid {
+        let hint: SharedString = if p.tech.is_empty() {
+            p.label.into()
+        } else {
+            format!("{} · {}", p.label, p.tech).into()
+        };
+        base.w(px(64.))
+            .h(px(66.))
+            .v_flex()
+            .items_center()
+            .justify_center()
+            .gap(px(4.))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)
+            })
+            .child(badge(28., 15.))
+            .child(
+                div()
+                    .w_full()
+                    .px_1()
+                    .text_center()
+                    .whitespace_normal()
+                    .line_clamp(2)
+                    .text_size(px(10.5))
+                    .line_height(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .child(p.label),
+            )
+            .into_any_element()
+    } else {
+        base.h(px(28.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(12.5))
+            .text_color(rgb(c_text()))
+            .child(badge(22., 13.))
+            .child(div().flex_1().min_w_0().truncate().child(p.label))
+            .into_any_element()
+    }
+}
+
+/// How the shapes panel is laid out and what was used lately, kept between runs.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct PaletteState {
+    /// Shown as rows rather than tiles.
+    pub list: bool,
+    /// Sections folded away.
+    pub closed: Vec<String>,
+    /// Shapes added lately, newest first, by name.
+    pub recent: Vec<String>,
+}
+
+impl PaletteState {
+    fn file() -> PathBuf {
+        crate::store::data_dir().join("arch-palette.json")
+    }
+
+    fn load() -> Self {
+        std::fs::read_to_string(Self::file())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self) {
+        if let Ok(text) = serde_json::to_string(self) {
+            let _ = std::fs::write(Self::file(), text);
+        }
+    }
+
+    fn closed(&self, name: &str) -> bool {
+        self.closed.iter().any(|c| c == name)
+    }
+
+    fn toggle(&mut self, name: &str) {
+        if self.closed(name) {
+            self.closed.retain(|c| c != name);
+        } else {
+            self.closed.push(name.to_string());
+        }
+        self.save();
+    }
+
+    /// Note a shape as just used.
+    pub(crate) fn used(&mut self, label: &str) {
+        self.recent.retain(|l| l != label);
+        self.recent.insert(0, label.to_string());
+        self.recent.truncate(12);
+        self.save();
     }
 }

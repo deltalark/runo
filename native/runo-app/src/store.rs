@@ -332,6 +332,10 @@ pub struct Session {
     /// and stays out of the session lists, with its chat a click away on that canvas.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub canvas: String,
+    /// The canvas context last sent with an ask, so the next ask in the same conversation
+    /// sends only what changed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub canvas_context: String,
     /// The newest snapshot of the folder Runo took (end of a turn, an undo or a redo),
     /// so Undo can leave alone what changed after it.
     #[serde(default, skip_serializing_if = "String::is_empty")]

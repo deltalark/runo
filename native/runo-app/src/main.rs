@@ -438,6 +438,8 @@ struct RunoApp {
     launch_images: HashMap<u64, Vec<String>>,
     /// Context from Design or Architecture for the session the New session dialog starts.
     new_context: Option<shell::StartContext>,
+    /// The model for the next session made, picked on a canvas's AI bar.
+    new_model: Option<String>,
     /// The Design and Architecture pages.
     design: design::DesignPage,
     /// The Runo assistant in the corner, when turned on in Settings.
@@ -1430,6 +1432,7 @@ impl RunoApp {
             attachments: HashMap::new(),
             launch_images: HashMap::new(),
             new_context: None,
+            new_model: None,
             design,
             assistant,
             arch,
@@ -2982,6 +2985,11 @@ impl RunoApp {
                 cx,
             ) {
                 Ok(id) => {
+                    if let Some(model) = self.new_model.clone().filter(|m| !m.is_empty()) {
+                        if let Some(session) = self.state.session_mut(id) {
+                            session.set_model(model);
+                        }
+                    }
                     if self.new_connection != connections::LOCAL
                         && connections::get(self.new_connection).is_some()
                     {
@@ -8224,7 +8232,7 @@ impl Render for RunoApp {
             self.browser_open = false;
             self.browser_main = false;
         }
-        if self.browser_main || self.design_page_key().is_some() {
+        if self.browser_main {
             self.sync_browser_address(window, cx);
         }
         // Design and Architecture follow the project in the top bar.

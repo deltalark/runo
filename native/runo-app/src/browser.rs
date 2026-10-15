@@ -381,9 +381,9 @@ impl RunoApp {
         true
     }
 
-    /// The page shown for the selected session, or the Design page's preview.
+    /// The page shown for the selected session.
     fn browser_key(&self) -> u64 {
-        self.design_page_key().unwrap_or(self.selected.unwrap_or(0))
+        self.selected.unwrap_or(0)
     }
 
     /// The running engine, starting Chromium the first time.
@@ -461,8 +461,7 @@ impl RunoApp {
             return;
         };
         let key = self.browser_key();
-        let shown =
-            self.design_page_key().is_some() || (self.browser_main && self.view == View::Session);
+        let shown = self.browser_main && self.view == View::Session;
         let visible = shown
             && self.browser_view.pages.contains(&key)
             && cx.global::<AppSettings>().browser_enabled;
@@ -969,8 +968,7 @@ impl RunoApp {
             );
         }
         // A session on a connection: its dev servers there, forwarded here to open.
-        let design = self.design_page_key().is_some();
-        if let Some(session) = self.current().filter(|s| s.sandbox().is_some() && !design) {
+        if let Some(session) = self.current().filter(|s| s.sandbox().is_some()) {
             let place = connections::name(session.connection);
             body = body.child(
                 div()
