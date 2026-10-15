@@ -37,7 +37,14 @@ const fn p(
     }
 }
 
-pub(crate) const GROUPS: [&str; 4] = ["C4", "Shapes", "Cloud and infra", "Groups"];
+pub(crate) const GROUPS: [&str; 6] = [
+    "C4",
+    "People and things",
+    "Shapes",
+    "Flowchart",
+    "Cloud and infra",
+    "Groups",
+];
 
 pub(crate) const PRESETS: &[Preset] = &[
     p(
@@ -96,6 +103,70 @@ pub(crate) const PRESETS: &[Preset] = &[
         "",
         "third party saas",
     ),
+    p(
+        "People and things",
+        "Actor",
+        Kind::Actor,
+        "user-round",
+        "",
+        "person user human figure customer stick",
+    ),
+    p(
+        "People and things",
+        "Users",
+        Kind::Users,
+        "users",
+        "",
+        "people group team audience customers",
+    ),
+    p(
+        "People and things",
+        "Browser",
+        Kind::Browser,
+        "app-window",
+        "",
+        "web page window site",
+    ),
+    p(
+        "People and things",
+        "Phone",
+        Kind::Phone,
+        "smartphone",
+        "",
+        "mobile ios android device",
+    ),
+    p(
+        "People and things",
+        "Desktop",
+        Kind::Desktop,
+        "monitor",
+        "",
+        "computer screen pc mac laptop",
+    ),
+    p(
+        "People and things",
+        "Server",
+        Kind::Server,
+        "server",
+        "",
+        "machine host rack vm",
+    ),
+    p(
+        "People and things",
+        "Folder",
+        Kind::Folder,
+        "folder",
+        "",
+        "files directory storage",
+    ),
+    p(
+        "People and things",
+        "Security",
+        Kind::Shield,
+        "shield",
+        "",
+        "shield firewall policy auth waf",
+    ),
     p("Shapes", "Box", Kind::Box, "square", "", "rectangle"),
     p(
         "Shapes",
@@ -115,13 +186,37 @@ pub(crate) const PRESETS: &[Preset] = &[
     ),
     p(
         "Shapes",
-        "Decision",
-        Kind::Diamond,
-        "diamond",
+        "Hexagon",
+        Kind::Hexagon,
+        "hexagon",
         "",
-        "diamond rhombus if",
+        "hex polygon",
+    ),
+    p(
+        "Shapes",
+        "Triangle",
+        Kind::Triangle,
+        "triangle",
+        "",
+        "warning pyramid",
     ),
     p("Shapes", "Cloud", Kind::Cloud, "cloud", "", "internet"),
+    p(
+        "Shapes",
+        "Callout",
+        Kind::Callout,
+        "message-square",
+        "",
+        "speech bubble comment say",
+    ),
+    p(
+        "Shapes",
+        "Arrow",
+        Kind::Arrow,
+        "arrow-right",
+        "",
+        "block arrow next flow",
+    ),
     p(
         "Shapes",
         "Sticky note",
@@ -131,6 +226,46 @@ pub(crate) const PRESETS: &[Preset] = &[
         "note comment",
     ),
     p("Shapes", "Text", Kind::Text, "type", "", "label title"),
+    p(
+        "Flowchart",
+        "Start or end",
+        Kind::Terminator,
+        "pill",
+        "",
+        "terminator begin finish stop pill",
+    ),
+    p(
+        "Flowchart",
+        "Process",
+        Kind::Rounded,
+        "square",
+        "",
+        "step action task",
+    ),
+    p(
+        "Flowchart",
+        "Decision",
+        Kind::Diamond,
+        "diamond",
+        "",
+        "diamond rhombus if branch",
+    ),
+    p(
+        "Flowchart",
+        "Data",
+        Kind::Parallelogram,
+        "square",
+        "",
+        "input output io parallelogram",
+    ),
+    p(
+        "Flowchart",
+        "Document",
+        Kind::Document,
+        "file-text",
+        "",
+        "page report file paper",
+    ),
     p(
         "Cloud and infra",
         "Web app",
@@ -550,7 +685,12 @@ impl Editor {
             name,
             kind: preset.kind,
             tech: preset.tech.to_string(),
-            icon: preset.icon.to_string(),
+            // Plain shapes and pictures carry no icon on top; the C4 kinds show theirs.
+            icon: if preset.kind.c4().is_some() && !preset.kind.pictured() {
+                preset.icon.to_string()
+            } else {
+                String::new()
+            },
             ..Default::default()
         });
         let (w, h) = preset.kind.size();

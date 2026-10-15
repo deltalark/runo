@@ -41,7 +41,10 @@ pub(crate) fn mermaid(doc: &Doc, view: &View) -> String {
         let (open, close) = match e.kind {
             Kind::Database => ("[(", ")]"),
             Kind::Queue => ("[[", "]]"),
-            Kind::Person => ("([", "])"),
+            Kind::Person | Kind::Actor | Kind::Users | Kind::Terminator => ("([", "])"),
+            Kind::Hexagon => ("{{", "}}"),
+            Kind::Parallelogram => ("[/", "/]"),
+            Kind::Document | Kind::Folder => ("[", "]"),
             Kind::Ellipse => ("((", "))"),
             Kind::Diamond => ("{", "}"),
             Kind::Cloud | Kind::Rounded | Kind::Container | Kind::Component | Kind::System => {
@@ -118,7 +121,19 @@ fn drawio_style(kind: Kind, n: &Node, edge_like: bool) -> String {
         Kind::Diamond => "rhombus;whiteSpace=wrap;html=1;",
         Kind::Database => "shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;size=12;",
         Kind::Queue => "shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;direction=south;size=12;",
-        Kind::Person => "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;",
+        Kind::Person | Kind::Actor | Kind::Users => {
+            "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;"
+        }
+        Kind::Hexagon => "shape=hexagon;perimeter=hexagonPerimeter2;whiteSpace=wrap;html=1;size=0.2;",
+        Kind::Triangle => "triangle;direction=north;whiteSpace=wrap;html=1;",
+        Kind::Parallelogram => {
+            "shape=parallelogram;perimeter=parallelogramPerimeter;whiteSpace=wrap;html=1;"
+        }
+        Kind::Terminator => "rounded=1;arcSize=50;whiteSpace=wrap;html=1;",
+        Kind::Document => "shape=document;whiteSpace=wrap;html=1;boundedLbl=1;",
+        Kind::Folder => "shape=folder;tabWidth=50;tabHeight=14;tabPosition=left;whiteSpace=wrap;html=1;",
+        Kind::Callout => "shape=callout;whiteSpace=wrap;html=1;perimeter=calloutPerimeter;",
+        Kind::Arrow => "shape=singleArrow;whiteSpace=wrap;html=1;arrowWidth=0.56;arrowSize=0.3;",
         Kind::Cloud => "ellipse;shape=cloud;whiteSpace=wrap;html=1;",
         Kind::Note => "shape=note;whiteSpace=wrap;html=1;size=14;",
         Kind::Text => "text;html=1;align=center;verticalAlign=middle;",
@@ -364,6 +379,13 @@ fn kind_from_style(s: &HashMap<String, String>) -> Kind {
         "cloud" => Kind::Cloud,
         "note" | "card" => Kind::Note,
         "process" => Kind::Box,
+        "hexagon" => Kind::Hexagon,
+        "parallelogram" => Kind::Parallelogram,
+        "document" => Kind::Document,
+        "folder" => Kind::Folder,
+        "callout" => Kind::Callout,
+        "singleArrow" => Kind::Arrow,
+        _ if has("triangle") => Kind::Triangle,
         _ if shape.contains("person") => Kind::Person,
         _ if has("ellipse") => Kind::Ellipse,
         _ if has("rhombus") => Kind::Diamond,
@@ -1026,6 +1048,15 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
         } else {
             ""
         };
+        if p.shadow && !o.fill.is_empty() {
+            let _ = writeln!(
+                out,
+                "<path d=\"{}\" transform=\"translate(0 {})\" fill=\"#0f172a\" opacity=\"{}\"/>",
+                segs_d(&o.fill),
+                shape::SHADOW_DROP,
+                shape::SHADOW_ALPHA * p.opacity
+            );
+        }
         if !o.fill.is_empty() {
             let _ = writeln!(
                 out,
@@ -1042,6 +1073,15 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
                 "<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"/>",
                 segs_d(&o.detail),
                 p.stroke.map(hex).unwrap_or_else(|| "none".into())
+            );
+        }
+        for m in &o.marks {
+            let _ = writeln!(
+                out,
+                "<path d=\"{}\" fill=\"{}\" opacity=\"{}\"/>",
+                segs_d(&m.segs),
+                hex(p.ink(m.ink)),
+                p.opacity
             );
         }
         let mut lines = Vec::new();
@@ -1378,6 +1418,30 @@ mod tests {
         ed.doc.relation_mut(&r).unwrap().label = "reads & writes".into();
         ed.doc.element_mut(&g).unwrap().name = "Prod VPC".into();
         ed.doc
+    }
+
+    /// Writes a PNG of every kind for eyeballing: `SHAPES_PNG=/tmp/x.png cargo test shapes_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn shapes_preview() {
+        let mut ed = Editor::new(Doc::default());
+        let presets: Vec<_> = super::super::editor::PRESETS
+            .iter()
+            .filter(|p| p.group != "Groups" && p.group != "Cloud and infra")
+            .collect();
+        for (i, pr) in presets.iter().enumerate() {
+            let id = ed.add(
+                pr,
+                (150. + (i % 6) as f32 * 260., 130. + (i / 6) as f32 * 240.),
+            );
+            let e = ed.doc.element_mut(&id).unwrap();
+            if e.kind.c4().is_some() {
+                e.description = "Places and tracks orders".into();
+            }
+        }
+        let doc = ed.doc;
+        let png = png(&doc, &doc.views[0]).unwrap();
+        std::fs::write(std::env::var("SHAPES_PNG").unwrap(), png).unwrap();
     }
 
     #[test]

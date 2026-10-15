@@ -38,10 +38,38 @@ pub(crate) enum Kind {
     Text,
     /// A logo or picture with its name under it, like a cloud provider's service icon.
     Icon,
+    /// A standing figure with the name under it.
+    Actor,
+    /// A group of people.
+    Users,
+    /// A browser window.
+    Browser,
+    /// A phone.
+    Phone,
+    /// A desktop computer's screen on its stand.
+    Desktop,
+    /// A server.
+    Server,
+    /// A page with a wavy foot.
+    Document,
+    /// A folder.
+    Folder,
+    Hexagon,
+    Triangle,
+    /// Data in or out, as flowcharts draw it.
+    Parallelogram,
+    /// A flowchart's start or end.
+    Terminator,
+    /// Security, a firewall or a policy.
+    Shield,
+    /// A speech bubble.
+    Callout,
+    /// A block arrow pointing right.
+    Arrow,
 }
 
 impl Kind {
-    pub(crate) const ALL: [Kind; 16] = [
+    pub(crate) const ALL: [Kind; 31] = [
         Kind::Person,
         Kind::System,
         Kind::Container,
@@ -58,6 +86,21 @@ impl Kind {
         Kind::Note,
         Kind::Text,
         Kind::Icon,
+        Kind::Actor,
+        Kind::Users,
+        Kind::Browser,
+        Kind::Phone,
+        Kind::Desktop,
+        Kind::Server,
+        Kind::Document,
+        Kind::Folder,
+        Kind::Hexagon,
+        Kind::Triangle,
+        Kind::Parallelogram,
+        Kind::Terminator,
+        Kind::Shield,
+        Kind::Callout,
+        Kind::Arrow,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -78,13 +121,28 @@ impl Kind {
             Kind::Note => "Sticky note",
             Kind::Text => "Text",
             Kind::Icon => "Icon",
+            Kind::Actor => "Actor",
+            Kind::Users => "Users",
+            Kind::Browser => "Browser",
+            Kind::Phone => "Phone",
+            Kind::Desktop => "Desktop",
+            Kind::Server => "Server",
+            Kind::Document => "Document",
+            Kind::Folder => "Folder",
+            Kind::Hexagon => "Hexagon",
+            Kind::Triangle => "Triangle",
+            Kind::Parallelogram => "Data",
+            Kind::Terminator => "Start or end",
+            Kind::Shield => "Shield",
+            Kind::Callout => "Callout",
+            Kind::Arrow => "Arrow",
         }
     }
 
     /// The size a new element of this kind gets.
     pub(crate) fn size(self) -> (f32, f32) {
         match self {
-            Kind::Person => (160., 120.),
+            Kind::Person => (180., 150.),
             Kind::Boundary => (420., 280.),
             Kind::Database | Kind::Queue => (180., 100.),
             Kind::Ellipse | Kind::Diamond => (160., 100.),
@@ -93,13 +151,50 @@ impl Kind {
             Kind::Text => (180., 40.),
             Kind::Icon => (96., 104.),
             Kind::Component => (180., 80.),
+            Kind::Actor => (90., 140.),
+            Kind::Users => (130., 120.),
+            Kind::Browser => (220., 140.),
+            Kind::Phone => (110., 190.),
+            Kind::Desktop => (190., 150.),
+            Kind::Server => (140., 150.),
+            Kind::Document | Kind::Folder => (170., 110.),
+            Kind::Hexagon => (170., 100.),
+            Kind::Triangle => (150., 120.),
+            Kind::Parallelogram => (190., 80.),
+            Kind::Terminator => (170., 64.),
+            Kind::Shield => (130., 150.),
+            Kind::Callout => (190., 110.),
+            Kind::Arrow => (190., 90.),
             _ => (200., 90.),
         }
     }
 
+    /// Kinds drawn as a picture of what they are, which need no icon on top to say so.
+    pub(crate) fn pictured(self) -> bool {
+        matches!(
+            self,
+            Kind::Person
+                | Kind::Actor
+                | Kind::Users
+                | Kind::Browser
+                | Kind::Phone
+                | Kind::Desktop
+                | Kind::Server
+                | Kind::Shield
+        )
+    }
+
+    /// Kinds whose name sits under the picture instead of inside it.
+    pub(crate) fn name_below(self) -> bool {
+        matches!(self, Kind::Icon | Kind::Actor | Kind::Users)
+    }
+
     /// Kinds that stand for real parts of the system, as opposed to drawing aids.
     pub(crate) fn is_part(self) -> bool {
-        !matches!(self, Kind::Note | Kind::Text | Kind::Boundary)
+        !matches!(
+            self,
+            Kind::Note | Kind::Text | Kind::Boundary | Kind::Callout | Kind::Arrow
+        )
     }
 
     /// The C4 word shown under the name, e.g. "[Container: Go]".
