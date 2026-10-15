@@ -2392,25 +2392,29 @@ impl DesignCanvas {
         }
         // What opens another screen, outlined where it sits.
         if self.hotspots {
+            let mut n = 0;
             for s in &self.canvas.screens {
                 let Some(shot) = self.shots.get(&s.id) else {
                     continue;
                 };
                 for l in &shot.links {
                     let (x, y) = self.screen_pt((s.x + l.rect.x, s.y + l.rect.y));
+                    let (w, h) = (l.rect.w * z, l.rect.h * z);
                     out.push(
                         div()
                             .absolute()
                             .left(px(x - 1.))
                             .top(px(y - 1.))
-                            .w(px(l.rect.w * z + 2.))
-                            .h(px(l.rect.h * z + 2.))
+                            .w(px(w + 2.))
+                            .h(px(h + 2.))
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(col(c_blue(), 0.85))
-                            .bg(col(c_blue(), 0.1))
+                            .border_color(col(c_blue(), 0.6))
+                            .bg(col(c_blue(), 0.08))
                             .into_any_element(),
                     );
+                    out.extend(hot_dot(("design-hot-dot", n), (x + w, y), n));
+                    n += 1;
                 }
             }
         }
@@ -2968,6 +2972,12 @@ impl DesignCanvas {
                         .hover(|el| el.bg(col(c_blue(), 0.2)))
                         .on_click(cx.listener(move |this, _, _, cx| this.play_go(&to, cx))),
                 );
+                if self.hotspots {
+                    let corner = ((l.rect.x + l.rect.w) * scale, l.rect.y * scale);
+                    for dot in hot_dot(("design-play-dot", i), corner, i) {
+                        frame = frame.child(dot);
+                    }
+                }
             }
         }
         Some(
@@ -4291,6 +4301,43 @@ fn kind_of(tag: &str) -> &'static str {
 /// A pixel length as a number: `12px` gives 12.
 fn dom_px(css: &str) -> Option<f32> {
     css.trim().strip_suffix("px")?.trim().parse().ok()
+}
+
+/// A hotspot's dot at `at`, with a ring that pings out of it so links catch the eye.
+/// Neighbouring dots ping out of step, so a screen of links twinkles rather than flashes.
+fn hot_dot(id: impl Into<ElementId>, at: (f32, f32), n: usize) -> Vec<AnyElement> {
+    let (x, y) = at;
+    let phase = (n as f32 * 0.37).fract();
+    let ring = div()
+        .absolute()
+        .rounded_full()
+        .border_2()
+        .border_color(rgb(c_blue()))
+        .animated(
+            id,
+            Animation::new(Duration::from_millis(1600)).repeat(),
+            move |el, d| {
+                let t = (d + phase).fract();
+                let size = 8. + 18. * t;
+                el.left(px(x - size / 2.))
+                    .top(px(y - size / 2.))
+                    .w(px(size))
+                    .h(px(size))
+                    .opacity(0.75 * (1. - t) * (1. - t))
+            },
+        );
+    let dot = div()
+        .absolute()
+        .left(px(x - 4.5))
+        .top(px(y - 4.5))
+        .size(px(9.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(0xffffff))
+        .bg(rgb(c_blue()))
+        .shadow_sm()
+        .into_any_element();
+    vec![ring, dot]
 }
 
 #[cfg(test)]
