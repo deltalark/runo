@@ -77,18 +77,135 @@ pub(crate) fn default_radius(kind: Kind) -> f32 {
     }
 }
 
-/// A shape's filled outline, and extra lines drawn on top (a cylinder's rim, a note's fold).
+/// The colour a mark is filled with, taken from the shape's paint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ink {
+    /// The kind's accent: a container's spine, a person's avatar.
+    Accent,
+    /// A light wash of the accent: a cylinder's top.
+    Tint,
+    /// The page colour, for a glyph drawn on an accent mark.
+    Paper,
+}
+
+/// A filled area drawn over a shape's outline: what tells the kinds apart at a glance.
+pub(crate) struct Mark {
+    pub segs: Vec<Seg>,
+    pub ink: Ink,
+}
+
+/// A shape's filled outline, extra lines drawn on top (a cylinder's rim, a note's fold),
+/// and filled marks over both.
 pub(crate) struct Outline {
     pub fill: Vec<Seg>,
     pub detail: Vec<Seg>,
+    pub marks: Vec<Mark>,
     /// Where the text goes.
     pub text: Rect,
+}
+
+/// How wide a container's accent spine is.
+pub(crate) const SPINE: f32 = 5.;
+
+/// The left `w` of a rounded rectangle, following its corners.
+fn left_band(out: &mut Vec<Seg>, r: &Rect, radius: f32, w: f32) {
+    let rad = radius.min(r.w / 2.).min(r.h / 2.).max(0.);
+    let (x0, y0, y1) = (r.x, r.y, r.bottom());
+    // How far a corner pulls the edge in at `dx` from the left.
+    let dip = |dx: f32| {
+        let off = (rad - dx).max(0.);
+        rad - (rad * rad - off * off).max(0.).sqrt()
+    };
+    const STEPS: usize = 6;
+    out.push(Seg::Move(x0, y1 - dip(0.)));
+    out.push(Seg::Line(x0, y0 + dip(0.)));
+    for i in 1..=STEPS {
+        let dx = w * i as f32 / STEPS as f32;
+        out.push(Seg::Line(x0 + dx, y0 + dip(dx)));
+    }
+    for i in (1..=STEPS).rev() {
+        let dx = w * i as f32 / STEPS as f32;
+        out.push(Seg::Line(x0 + dx, y1 - dip(dx)));
+    }
+    out.push(Seg::Close);
+}
+
+/// A person's avatar: a filled disc with a head-and-shoulders glyph cut out of it.
+fn avatar(marks: &mut Vec<Mark>, cx: f32, cy: f32, rad: f32) {
+    let mut disc = Vec::new();
+    ellipse(&mut disc, cx, cy, rad, rad);
+    marks.push(Mark {
+        segs: disc,
+        ink: Ink::Accent,
+    });
+    let mut glyph = Vec::new();
+    let head = rad * 0.27;
+    ellipse(&mut glyph, cx, cy - rad * 0.2, head, head);
+    // Shoulders: a dome whose foot follows the disc's lower edge.
+    let (sx, sy) = (rad * 0.6, rad * 0.72);
+    glyph.push(Seg::Move(cx - sx, cy + sy));
+    glyph.push(Seg::Cubic(
+        cx - sx,
+        cy + rad * 0.2,
+        cx - rad * 0.3,
+        cy + rad * 0.14,
+        cx,
+        cy + rad * 0.14,
+    ));
+    glyph.push(Seg::Cubic(
+        cx + rad * 0.3,
+        cy + rad * 0.14,
+        cx + sx,
+        cy + rad * 0.2,
+        cx + sx,
+        cy + sy,
+    ));
+    glyph.push(Seg::Cubic(
+        cx + sx * 0.55,
+        cy + rad * 0.88,
+        cx - sx * 0.55,
+        cy + rad * 0.88,
+        cx - sx,
+        cy + sy,
+    ));
+    glyph.push(Seg::Close);
+    marks.push(Mark {
+        segs: glyph,
+        ink: Ink::Paper,
+    });
+}
+
+/// The size of a person's avatar in a shape of this size.
+pub(crate) fn avatar_radius(r: &Rect) -> f32 {
+    (r.h * 0.17).min(r.w * 0.16).clamp(8., 22.)
+}
+
+/// A cloud filling `r`, flat along the bottom.
+fn cloud(out: &mut Vec<Seg>, r: &Rect) {
+    // Drawn on a 100 by 64 grid, then stretched to the rectangle.
+    let p = |x: f32, y: f32| (r.x + r.w * x / 100., r.y + r.h * y / 64.);
+    let c = |a: (f32, f32), b: (f32, f32), e: (f32, f32)| {
+        let (a, b, e) = (p(a.0, a.1), p(b.0, b.1), p(e.0, e.1));
+        Seg::Cubic(a.0, a.1, b.0, b.1, e.0, e.1)
+    };
+    let (sx, sy) = p(22., 64.);
+    out.push(Seg::Move(sx, sy));
+    out.push(c((9., 64.), (0., 56.), (0., 46.)));
+    out.push(c((0., 36.), (8., 28.), (19., 28.)));
+    out.push(c((19., 14.), (30., 6.), (43., 6.)));
+    out.push(c((51., 6.), (57., 9.), (61., 15.)));
+    out.push(c((65., 11.), (70., 10.), (74., 10.)));
+    out.push(c((84., 10.), (91., 18.), (91., 28.)));
+    out.push(c((97., 31.), (100., 38.), (100., 45.)));
+    out.push(c((100., 56.), (92., 64.), (81., 64.)));
+    out.push(Seg::Close);
 }
 
 pub(crate) fn outline(kind: Kind, r: &Rect, style: &Style) -> Outline {
     let radius = style.radius.unwrap_or_else(|| default_radius(kind));
     let mut fill = Vec::new();
     let mut detail = Vec::new();
+    let mut marks = Vec::new();
     let mut text = r.inflate(-8.);
     match kind {
         Kind::Ellipse => ellipse(
@@ -121,10 +238,18 @@ pub(crate) fn outline(kind: Kind, r: &Rect, style: &Style) -> Outline {
             fill.push(Seg::Cubic(x1, y1 + ky, cx + kx, y1 + ry, cx, y1 + ry));
             fill.push(Seg::Cubic(cx - kx, y1 + ry, x0, y1 + ky, x0, y1));
             fill.push(Seg::Close);
-            // The near rim of the top.
+            // The top, washed with the accent, and its near rim.
+            let mut top = Vec::new();
+            ellipse(&mut top, cx, y0, rx, ry);
+            marks.push(Mark {
+                segs: top,
+                ink: Ink::Tint,
+            });
             detail.push(Seg::Move(x0, y0));
             detail.push(Seg::Cubic(x0, y0 + ky, cx - kx, y0 + ry, cx, y0 + ry));
             detail.push(Seg::Cubic(cx + kx, y0 + ry, x1, y0 + ky, x1, y0));
+            detail.push(Seg::Cubic(x1, y0 - ky, cx + kx, y0 - ry, cx, y0 - ry));
+            detail.push(Seg::Cubic(cx - kx, y0 - ry, x0, y0 - ky, x0, y0));
             text = Rect::new(r.x + 8., r.y + ry * 2. + 2., r.w - 16., r.h - ry * 3. - 4.);
         }
         Kind::Queue => {
@@ -140,37 +265,55 @@ pub(crate) fn outline(kind: Kind, r: &Rect, style: &Style) -> Outline {
             fill.push(Seg::Cubic(x0 - kx, y1, x0 - rx, cy + ky, x0 - rx, cy));
             fill.push(Seg::Cubic(x0 - rx, cy - ky, x0 - kx, y0, x0, y0));
             fill.push(Seg::Close);
-            // The near rim of the right end.
+            // The open right end, washed with the accent, and its near rim.
+            let mut end = Vec::new();
+            ellipse(&mut end, x1, cy, rx, ry);
+            marks.push(Mark {
+                segs: end,
+                ink: Ink::Tint,
+            });
             detail.push(Seg::Move(x1, y0));
             detail.push(Seg::Cubic(x1 - kx, y0, x1 - rx, cy - ky, x1 - rx, cy));
             detail.push(Seg::Cubic(x1 - rx, cy + ky, x1 - kx, y1, x1, y1));
             text = Rect::new(r.x + rx + 6., r.y + 6., r.w - rx * 3. - 12., r.h - 12.);
         }
         Kind::Person => {
-            let head = (r.h * 0.34).min(r.w * 0.4);
-            let body_top = r.y + head * 0.8;
-            ellipse(
-                &mut fill,
-                r.x + r.w / 2.,
-                r.y + head / 2.,
-                head / 2.,
-                head / 2.,
-            );
-            rounded(
-                &mut fill,
-                &Rect::new(r.x, body_top, r.w, r.bottom() - body_top),
-                radius.max(head * 0.45),
-            );
-            text = Rect::new(
-                r.x + 8.,
-                body_top + head * 0.2 + 4.,
-                r.w - 16.,
-                r.bottom() - body_top - head * 0.2 - 8.,
-            );
+            // A card with an avatar at the top and the name under it.
+            rounded(&mut fill, r, radius.max(14.));
+            let rad = avatar_radius(r);
+            let cy = r.y + 14. + rad;
+            avatar(&mut marks, r.x + r.w / 2., cy, rad);
+            let top = cy + rad + 4.;
+            text = Rect::new(r.x + 8., top, r.w - 16., (r.bottom() - 6. - top).max(1.));
+        }
+        Kind::Container | Kind::External => {
+            rounded(&mut fill, r, radius);
+            let mut spine = Vec::new();
+            left_band(&mut spine, r, radius, SPINE);
+            marks.push(Mark {
+                segs: spine,
+                ink: Ink::Accent,
+            });
+            text = Rect::new(r.x + SPINE + 8., r.y + 8., r.w - SPINE - 16., r.h - 16.);
+        }
+        Kind::Component => {
+            // The UML component's two tabs across the left edge.
+            rounded(&mut fill, r, radius);
+            let (tw, th) = (14_f32.min(r.w * 0.12), 7_f32.min(r.h * 0.14));
+            for f in [0.28, 0.56] {
+                let y = r.y + r.h * f;
+                let mut tab = Vec::new();
+                rounded(&mut tab, &Rect::new(r.x - tw / 2., y, tw, th), 2.);
+                marks.push(Mark {
+                    segs: tab,
+                    ink: Ink::Accent,
+                });
+            }
+            text = Rect::new(r.x + tw / 2. + 8., r.y + 8., r.w - tw / 2. - 16., r.h - 16.);
         }
         Kind::Cloud => {
-            rounded(&mut fill, r, r.h / 2.);
-            text = Rect::new(r.x + r.h * 0.3, r.y + 6., r.w - r.h * 0.6, r.h - 12.);
+            cloud(&mut fill, r);
+            text = Rect::new(r.x + r.w * 0.16, r.y + r.h * 0.3, r.w * 0.7, r.h * 0.62);
         }
         Kind::Note => {
             let f = (r.w.min(r.h) * 0.16).clamp(8., 20.);
@@ -204,7 +347,12 @@ pub(crate) fn outline(kind: Kind, r: &Rect, style: &Style) -> Outline {
         }
         _ => rounded(&mut fill, r, radius),
     }
-    Outline { fill, detail, text }
+    Outline {
+        fill,
+        detail,
+        marks,
+        text,
+    }
 }
 
 /// The accent colour of a kind: its stroke, and the hue of its fill.
@@ -261,7 +409,27 @@ pub(crate) struct Paint {
     pub dashed: bool,
     pub font: f32,
     pub bold: bool,
+    /// What marks are filled with: see [`Ink`].
+    pub accent: u32,
+    pub tint: u32,
+    pub paper: u32,
+    /// A soft shadow under the shape lifts it off the page.
+    pub shadow: bool,
 }
+
+impl Paint {
+    pub(crate) fn ink(&self, ink: Ink) -> u32 {
+        match ink {
+            Ink::Accent => self.accent,
+            Ink::Tint => self.tint,
+            Ink::Paper => self.paper,
+        }
+    }
+}
+
+/// How far a shape's shadow drops, and how dark it is.
+pub(crate) const SHADOW_DROP: f32 = 2.;
+pub(crate) const SHADOW_ALPHA: f32 = 0.08;
 
 pub(crate) fn paint(kind: Kind, style: &Style, theme: &Theme) -> Paint {
     let acc = accent(kind);
@@ -269,12 +437,15 @@ pub(crate) fn paint(kind: Kind, style: &Style, theme: &Theme) -> Paint {
         Kind::Text | Kind::Icon => None,
         Kind::Note => Some(if theme.dark { 0x4a3f12 } else { 0xfef3c7 }),
         Kind::Boundary => Some(mix(acc, theme.canvas, if theme.dark { 0.08 } else { 0.05 })),
-        Kind::Person | Kind::System => {
-            Some(mix(acc, theme.canvas, if theme.dark { 0.45 } else { 0.85 }))
+        // The system in focus stands out solid, as C4 draws it.
+        Kind::System => Some(mix(acc, theme.canvas, if theme.dark { 0.55 } else { 0.9 })),
+        // Cards: the page, barely washed with the kind's colour.
+        Kind::Person | Kind::Container | Kind::Component | Kind::External => {
+            Some(mix(acc, theme.canvas, if theme.dark { 0.14 } else { 0.04 }))
         }
-        _ => Some(mix(acc, theme.canvas, if theme.dark { 0.22 } else { 0.10 })),
+        _ => Some(mix(acc, theme.canvas, if theme.dark { 0.2 } else { 0.08 })),
     };
-    let strong = matches!(kind, Kind::Person | Kind::System) && style.fill.is_none();
+    let strong = kind == Kind::System && style.fill.is_none();
     let text_default = if strong && !theme.dark {
         0xffffff
     } else if kind == Kind::Note && !theme.dark {
@@ -291,8 +462,18 @@ pub(crate) fn paint(kind: Kind, style: &Style, theme: &Theme) -> Paint {
         Some("none") => None,
         Some(s) => parse_hex(s).or(Some(acc)),
         None if kind == Kind::Text || kind == Kind::Icon => None,
+        // A card's edge is quiet; its spine, tabs or avatar carry the colour.
+        None if matches!(
+            kind,
+            Kind::Person | Kind::Container | Kind::Component | Kind::External
+        ) =>
+        {
+            Some(mix(acc, theme.canvas, if theme.dark { 0.6 } else { 0.5 }))
+        }
         None => Some(acc),
     };
+    // Marks follow a stroke the user picked, else the kind.
+    let mark = style.stroke.as_deref().and_then(parse_hex).unwrap_or(acc);
     let text = style
         .text
         .as_deref()
@@ -311,6 +492,16 @@ pub(crate) fn paint(kind: Kind, style: &Style, theme: &Theme) -> Paint {
             _ => 14.,
         }),
         bold: style.bold || kind == Kind::Text && style.font.is_some_and(|f| f >= 20.),
+        accent: mark,
+        tint: mix(
+            mark,
+            fill.unwrap_or(theme.canvas),
+            if theme.dark { 0.4 } else { 0.22 },
+        ),
+        paper: if theme.dark { theme.canvas } else { 0xffffff },
+        shadow: fill.is_some()
+            && !matches!(kind, Kind::Text | Kind::Icon | Kind::Boundary)
+            && style.opacity.is_none_or(|o| o > 0.6),
     }
 }
 
@@ -328,7 +519,12 @@ pub(crate) fn picture_rect(kind: Kind, r: &Rect) -> Rect {
         Kind::Boundary => Rect::new(r.x + 10., r.y + 8., 18., 18.),
         _ => {
             let s = (r.h * 0.3).clamp(16., 26.);
-            Rect::new(r.x + 7., r.y + 7., s, s)
+            let x = match kind {
+                Kind::Container | Kind::External => r.x + SPINE + 7.,
+                Kind::Component => r.x + 13.,
+                _ => r.x + 7.,
+            };
+            Rect::new(x, r.y + 7., s, s)
         }
     }
 }

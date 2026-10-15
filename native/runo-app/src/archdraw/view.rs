@@ -2619,6 +2619,9 @@ fn port(side: Side, r: &Rect, zoom: f32) -> Pt {
 struct ShapeDraw {
     fill: Vec<Seg>,
     detail: Vec<Seg>,
+    /// Filled marks over the outline, with their colours.
+    marks: Vec<(Vec<Seg>, u32)>,
+    shadow: bool,
     fill_c: Option<u32>,
     stroke: Option<u32>,
     opacity: f32,
@@ -2759,6 +2762,12 @@ fn stroke_builder(width: f32, dashed: bool, zoom: f32) -> PathBuilder {
 }
 
 fn paint_shape(s: &ShapeDraw, tf: &dyn Fn(Pt) -> Point<Pixels>, zoom: f32, window: &mut Window) {
+    if s.shadow && s.fill_c.is_some() {
+        let drop = |p: Pt| tf((p.0, p.1 + shape::SHADOW_DROP));
+        if let Some(p) = build_path(&s.fill, &drop, PathBuilder::fill()) {
+            window.paint_path(p, col(0x0f172a, shape::SHADOW_ALPHA * s.opacity));
+        }
+    }
     if let Some(c) = s.fill_c {
         if let Some(p) = build_path(&s.fill, tf, PathBuilder::fill()) {
             window.paint_path(p, col(c, s.opacity));
@@ -2771,6 +2780,11 @@ fn paint_shape(s: &ShapeDraw, tf: &dyn Fn(Pt) -> Point<Pixels>, zoom: f32, windo
         }
         if let Some(p) = build_path(&s.detail, tf, stroke_builder(w, false, zoom)) {
             window.paint_path(p, col(c, s.opacity));
+        }
+    }
+    for (segs, c) in &s.marks {
+        if let Some(p) = build_path(segs, tf, PathBuilder::fill()) {
+            window.paint_path(p, col(*c, s.opacity));
         }
     }
 }
@@ -3498,6 +3512,12 @@ impl ArchEditor {
             let sd = ShapeDraw {
                 fill: o.fill,
                 detail: o.detail,
+                marks: o
+                    .marks
+                    .into_iter()
+                    .map(|m| (m.segs, p.ink(m.ink)))
+                    .collect(),
+                shadow: p.shadow && !dim,
                 fill_c: p.fill,
                 stroke: p.stroke,
                 opacity: if dim { p.opacity * 0.3 } else { p.opacity },
@@ -4685,6 +4705,8 @@ impl ArchEditor {
             if e.image.is_empty()
                 && !e.icon.is_empty()
                 && e.kind.is_part()
+                // A person's avatar already says what it is.
+                && e.kind != Kind::Person
                 && nr.h > 34.
                 && nr.w > 60.
                 && z > 0.45
@@ -4692,7 +4714,10 @@ impl ArchEditor {
                 if let Some(glyph) = icon_named(&e.icon) {
                     let (ix, iy) = match e.kind {
                         Kind::Database => (nr.x + 8. * z, nr.y + nr.h * 0.25),
-                        Kind::Person => (nr.x + 8. * z, nr.y + nr.h * 0.4),
+                        Kind::Container | Kind::External => {
+                            (nr.x + (shape::SPINE + 8.) * z, nr.y + 8. * z)
+                        }
+                        Kind::Component => (nr.x + 14. * z, nr.y + 8. * z),
                         _ => (nr.x + 8. * z, nr.y + 8. * z),
                     };
                     out.push(
