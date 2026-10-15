@@ -730,20 +730,6 @@ impl Engine {
         decode_image(reply["data"].as_str()?, image::ImageFormat::Png)
     }
 
-    /// A PNG of the page as it shows now. Blocks for the reply.
-    pub fn screenshot(&self, key: u64) -> Option<Vec<u8>> {
-        use base64::Engine as _;
-        let session = self.session_of(key)?;
-        let reply = self.call(
-            "Page.captureScreenshot",
-            json!({"format": "png"}),
-            Some(&session),
-        )?;
-        base64::engine::general_purpose::STANDARD
-            .decode(reply["data"].as_str()?)
-            .ok()
-    }
-
     /// `kind` is mouseMoved, mousePressed, mouseReleased or mouseWheel.
     #[allow(clippy::too_many_arguments)]
     pub fn mouse(

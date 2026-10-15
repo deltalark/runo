@@ -152,6 +152,13 @@ impl Render for DraggedLayer {
 
 pub(crate) struct DesignCanvas {
     root: PathBuf,
+    /// Pictures to design from, kept in `.runo/design`, and the ones going with the next ask.
+    refs: Vec<crate::design::Reference>,
+    refs_picked: Vec<String>,
+    refs_open: bool,
+    /// The project's design notes: rules every AI change follows.
+    f_rules: Entity<TextareaState>,
+    rules_loading: bool,
     canvas: Canvas,
     renderer: Arc<Mutex<Renderer>>,
     shots: HashMap<String, Shot>,
@@ -282,7 +289,20 @@ impl DesignCanvas {
                 _ => {}
             }),
         );
+        let f_rules = cx.new(|cx| {
+            TextareaState::new(window, cx).placeholder("Look and feel, spacing, type, colour…")
+        });
+        subs.push(cx.subscribe_in(&f_rules, window, |this, _, ev, _, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.save_rules(cx);
+            }
+        }));
         let mut this = Self {
+            refs: crate::design::load(&root),
+            refs_picked: Vec::new(),
+            refs_open: false,
+            f_rules,
+            rules_loading: false,
             renderer: Arc::new(Mutex::new(Renderer::new(root.clone()))),
             root,
             canvas,
@@ -326,6 +346,7 @@ impl DesignCanvas {
             pick: crate::agent_pick::AgentPick::new(cx),
             _subs: subs,
         };
+        this.load_rules(window, cx);
         this.seen = this.file_times();
         let ids: Vec<String> = this.canvas.screens.iter().map(|s| s.id.clone()).collect();
         for id in ids {
@@ -438,6 +459,147 @@ impl DesignCanvas {
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.check_files(cx);
+        self.refs = crate::design::load(&self.root);
+        let refs = &self.refs;
+        self.refs_picked
+            .retain(|f| refs.iter().any(|r| &r.file == f));
+    }
+
+    /// Fill the design notes box from its file.
+    pub(crate) fn load_rules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text =
+            std::fs::read_to_string(crate::design::notes_path(&self.root)).unwrap_or_default();
+        self.rules_loading = true;
+        self.f_rules
+            .update(cx, |s, cx| s.set_value(text, window, cx));
+        self.rules_loading = false;
+    }
+
+    fn save_rules(&mut self, cx: &mut Context<Self>) {
+        if self.rules_loading {
+            return;
+        }
+        let file = crate::design::notes_path(&self.root);
+        let text = self.f_rules.read(cx).value().to_string();
+        if let Err(e) = crate::architecture::save_notes(&file, &text) {
+            self.error = Some(format!("Couldn't save {}: {e}", file.display()));
+            cx.notify();
+        }
+    }
+
+    /// The design notes file, relative to the project, when it has something in it.
+    fn rules_file(&self) -> Option<String> {
+        let file = crate::design::notes_path(&self.root);
+        let text = std::fs::read_to_string(&file).ok()?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(
+            file.strip_prefix(&self.root)
+                .unwrap_or(&file)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    }
+
+    /// Add pictures to design from: what's on the clipboard, else files picked.
+    fn add_refs(&mut self, cx: &mut Context<Self>) {
+        let mut added = Vec::new();
+        if let Some(item) = cx.read_from_clipboard() {
+            for entry in item.entries() {
+                match entry {
+                    ClipboardEntry::Image(image) => {
+                        let ext = match image.format {
+                            ImageFormat::Jpeg => "jpg",
+                            ImageFormat::Gif => "gif",
+                            ImageFormat::Webp => "webp",
+                            ImageFormat::Bmp => "bmp",
+                            _ => "png",
+                        };
+                        added.extend(crate::design::add_bytes(
+                            &self.root,
+                            &image.bytes,
+                            &format!("paste.{ext}"),
+                            "",
+                        ));
+                    }
+                    ClipboardEntry::ExternalPaths(paths) => {
+                        for path in paths.paths().iter().filter(|p| crate::turns::is_image(p)) {
+                            added.extend(crate::design::add_file(&self.root, path));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !added.is_empty() {
+            self.took_refs(added, cx);
+            return;
+        }
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Add pictures to design from".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                let _ = this.update(cx, |this, cx| {
+                    let added: Vec<_> = paths
+                        .iter()
+                        .filter(|p| crate::turns::is_image(p))
+                        .filter_map(|p| crate::design::add_file(&this.root, p))
+                        .collect();
+                    this.took_refs(added, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// New references join the list and go with the next ask.
+    fn took_refs(&mut self, added: Vec<crate::design::Reference>, cx: &mut Context<Self>) {
+        if added.is_empty() {
+            return;
+        }
+        for r in &added {
+            self.refs_picked.push(r.file.clone());
+        }
+        self.refs.extend(added);
+        let _ = crate::design::save(&self.root, &self.refs);
+        cx.notify();
+    }
+
+    fn remove_ref(&mut self, file: &str, cx: &mut Context<Self>) {
+        let _ = std::fs::remove_file(crate::design::folder(&self.root).join(file));
+        self.refs.retain(|r| r.file != file);
+        self.refs_picked.retain(|f| f != file);
+        let _ = crate::design::save(&self.root, &self.refs);
+        cx.notify();
+    }
+
+    fn toggle_ref(&mut self, file: &str, cx: &mut Context<Self>) {
+        if self.refs_picked.iter().any(|f| f == file) {
+            self.refs_picked.retain(|f| f != file);
+        } else {
+            self.refs_picked.push(file.to_string());
+        }
+        cx.notify();
+    }
+
+    /// The picked references, as full paths with their notes.
+    fn picked_refs(&self) -> Vec<(String, String)> {
+        let dir = crate::design::folder(&self.root);
+        self.refs_picked
+            .iter()
+            .filter_map(|f| self.refs.iter().find(|r| &r.file == f))
+            .map(|r| {
+                (
+                    dir.join(&r.file).to_string_lossy().into_owned(),
+                    r.note.clone(),
+                )
+            })
+            .collect()
     }
 
     fn check_files(&mut self, cx: &mut Context<Self>) {
@@ -602,7 +764,24 @@ impl DesignCanvas {
             return false;
         }
         self.save_canvas();
-        let context = self.ask_context();
+        let mut context = self.ask_context();
+        let picked = self.picked_refs();
+        if !picked.is_empty() {
+            context.push_str(
+                "\nPictures to design from are attached. Match their layout, look and feel, \
+                 using the theme's tokens and components:\n",
+            );
+            for (path, note) in &picked {
+                if note.trim().is_empty() {
+                    context.push_str(&format!("- {path}\n"));
+                } else {
+                    context.push_str(&format!("- {path}: {}\n", note.trim()));
+                }
+            }
+        }
+        let images: Vec<String> = picked.into_iter().map(|(p, _)| p).collect();
+        self.refs_picked.clear();
+        self.refs_open = false;
         self.ai = Some(AiChange {
             task: summary(&task),
             before: snapshot(&folder(&self.root)),
@@ -616,7 +795,7 @@ impl DesignCanvas {
             task,
             context,
             edit: true,
-            images: Vec::new(),
+            images,
             agent: self.pick.agent,
             model: self.pick.model.clone(),
         });
@@ -807,6 +986,11 @@ impl DesignCanvas {
         } else {
             out.push_str("\nNothing is selected on the canvas.\n");
         }
+        if let Some(file) = self.rules_file() {
+            out.push_str(&format!(
+                "\nFollow the project's design rules in {file}: who it's for, the look and feel, and its rules for spacing, type and colour.\n"
+            ));
+        }
         out
     }
 
@@ -950,6 +1134,37 @@ impl DesignCanvas {
                             })),
                     );
                 }
+                for (i, (path, _)) in self.picked_refs().into_iter().enumerate() {
+                    any = true;
+                    let file = self.refs_picked[i].clone();
+                    chips = chips.child(
+                        div()
+                            .id(("design-ref-chip", i))
+                            .h(px(26.))
+                            .pl(px(3.))
+                            .pr_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(c_border()))
+                            .cursor_pointer()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_secondary()))
+                            .hover(|el| el.bg(tint(c_subtle())))
+                            .tooltip(tip("AI designs from this picture. Click to leave it out."))
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_ref(&file, cx)))
+                            .child(
+                                img(PathBuf::from(&path))
+                                    .size(px(20.))
+                                    .rounded(px(3.))
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                            .child("Reference")
+                            .child(icon(IconName::X, 10., c_muted())),
+                    );
+                }
                 let ideas: &[&'static str] = if self.ask_new.is_some() {
                     &["A sign-in screen", "A profile with stats", "A checkout"]
                 } else if self.element.is_some() {
@@ -1004,6 +1219,25 @@ impl DesignCanvas {
                             .items_center()
                             .gap_1()
                             .child(row)
+                            .child(
+                                icon_btn(
+                                    "design-refs",
+                                    IconName::ImagePlus,
+                                    "Design from a picture: a mockup, screenshot or sketch",
+                                    self.refs_open,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        if this.refs.is_empty() {
+                                            this.add_refs(cx);
+                                        } else {
+                                            this.refs_open = !this.refs_open;
+                                            this.pick.open = false;
+                                        }
+                                        cx.notify();
+                                    },
+                                )),
+                            )
                             .child(self.pick.chip("design-ask", cx, |t: &mut Self| &mut t.pick))
                             .child(askbar::send_button("design-ask-send", !empty).on_click(
                                 cx.listener(|this, _, window, cx| this.send_ask(window, cx)),
@@ -1024,6 +1258,9 @@ impl DesignCanvas {
                         .v_flex()
                         .items_end()
                         .gap_1()
+                        .when(self.ai.is_none() && self.refs_open, |el| {
+                            el.child(self.refs_menu(cx))
+                        })
                         .when(self.ai.is_none(), |el| {
                             el.children(self.pick.menu(
                                 "design-ask",
@@ -1036,6 +1273,107 @@ impl DesignCanvas {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The pictures to design from, to pick for the next ask or add to.
+    fn refs_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let dir = crate::design::folder(&self.root);
+        let mut grid = div().flex().flex_wrap().gap(px(6.));
+        for (i, r) in self.refs.iter().enumerate().rev().take(24) {
+            let picked = self.refs_picked.contains(&r.file);
+            let (f1, f2) = (r.file.clone(), r.file.clone());
+            grid = grid.child(
+                div()
+                    .id(("design-ref", i))
+                    .relative()
+                    .size(px(88.))
+                    .rounded_md()
+                    .overflow_hidden()
+                    .border_2()
+                    .border_color(rgb(if picked { c_blue() } else { c_border() }))
+                    .cursor_pointer()
+                    .bg(rgb(c_canvas()))
+                    .tooltip(tip("Click to design from it, again to leave it out"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_ref(&f1, cx)))
+                    .child(
+                        img(dir.join(&r.file))
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    )
+                    .when(picked, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .top(px(4.))
+                                .left(px(4.))
+                                .size(px(16.))
+                                .rounded_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(rgb(c_blue()))
+                                .child(icon(IconName::Check, 10., 0xffffff)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("design-ref-remove", i))
+                            .absolute()
+                            .top(px(4.))
+                            .right(px(4.))
+                            .size(px(18.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(col(0x000000, 0.55))
+                            .opacity(0.8)
+                            .hover(|el| el.opacity(1.))
+                            .tooltip(tip("Remove this picture"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_ref(&f2, cx);
+                            }))
+                            .child(icon(IconName::X, 10., 0xffffff)),
+                    ),
+            );
+        }
+        div()
+            .id("design-refs-menu")
+            .w(px(420.))
+            .max_h(px(360.))
+            .overflow_y_scroll()
+            .p_3()
+            .v_flex()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(rgb(c_raised()))
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .whitespace_normal()
+                            .child("Pick pictures for AI to design from: mockups, screenshots or sketches. They go with your next ask."),
+                    )
+                    .child(
+                        text_btn("design-refs-add", "Add", Some(IconName::Plus), false)
+                            .tooltip(tip("Paste an image you copied, or pick files"))
+                            .on_click(cx.listener(|this, _, _, cx| this.add_refs(cx))),
+                    ),
+            )
+            .child(grid)
+            .into_any_element()
     }
 
     /// Put a suggestion in the ask bar, ready to send or change.
@@ -4072,6 +4410,25 @@ impl DesignCanvas {
             .child(label_row("Corner radius", radius))
             .child(label_row("Density", density))
             .child(label_row("Preview", mode))
+            .child(section("Design rules"))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .child(format!(
+                        "Saved to {}. AI reads them before every change.",
+                        crate::design::notes_path(&self.root)
+                            .strip_prefix(&self.root)
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| "docs/design.md".into())
+                    )),
+            )
+            .child(
+                div()
+                    .mt_1()
+                    .text_size(px(12.5))
+                    .child(Textarea::new(&self.f_rules).bordered(true).h(px(200.))),
+            )
     }
 
     fn render_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
