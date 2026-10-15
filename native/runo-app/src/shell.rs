@@ -317,14 +317,16 @@ impl RunoApp {
             .state
             .sessions
             .iter()
+            .filter(|s| s.canvas.is_empty())
             .filter_map(|s| self.need(s).map(|n| (s, n)))
             .collect();
         out.sort_by_key(|(s, n)| (*n != Need::Blocked, std::cmp::Reverse(s.id)));
         out
     }
 
+    /// Where a session sits on Home and in the counts. Canvas chats sit on their canvas.
     pub(crate) fn bucket(&self, s: &Session) -> Option<Bucket> {
-        if s.archived {
+        if s.archived || !s.canvas.is_empty() {
             None
         } else if self.need(s).is_some() {
             Some(Bucket::NeedsYou)

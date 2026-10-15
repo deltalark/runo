@@ -4232,22 +4232,34 @@ impl RunoApp {
                             .mt_1()
                             .v_flex()
                             .relative()
-                            .child(self.nav_item(
-                                "all-sessions",
-                                IconName::Layers,
-                                "All sessions",
-                                self.state.sessions.len(),
-                                View::AllSessions,
-                                cx,
-                            ))
-                            .child(self.nav_item(
-                                "worktrees",
-                                IconName::GitBranch,
-                                "Isolated",
-                                self.state.sessions.iter().filter(|s| s.isolated).count(),
-                                View::Worktrees,
-                                cx,
-                            ))
+                            .child(
+                                self.nav_item(
+                                    "all-sessions",
+                                    IconName::Layers,
+                                    "All sessions",
+                                    self.state
+                                        .sessions
+                                        .iter()
+                                        .filter(|s| s.canvas.is_empty())
+                                        .count(),
+                                    View::AllSessions,
+                                    cx,
+                                ),
+                            )
+                            .child(
+                                self.nav_item(
+                                    "worktrees",
+                                    IconName::GitBranch,
+                                    "Isolated",
+                                    self.state
+                                        .sessions
+                                        .iter()
+                                        .filter(|s| s.isolated && s.canvas.is_empty())
+                                        .count(),
+                                    View::Worktrees,
+                                    cx,
+                                ),
+                            )
                             .child(self.nav_item(
                                 "needs-you",
                                 IconName::Inbox,
