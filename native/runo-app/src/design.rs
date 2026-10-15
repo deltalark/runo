@@ -3,7 +3,9 @@
 //! references attached.
 
 use super::*;
+use crate::designdraw::view::{DesignCanvas, DesignEvent};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use workspace::unix_now;
 
@@ -202,6 +204,10 @@ pub(crate) struct DesignPage {
     /// The app's dev server is shown beside the references.
     pub preview: bool,
     pub capturing: bool,
+    /// The design canvas of each project, and whether the page shows it or the references.
+    pub canvases: HashMap<u64, Entity<DesignCanvas>>,
+    pub references: bool,
+    pub canvas_subs: Vec<Subscription>,
 }
 
 impl DesignPage {
@@ -255,6 +261,9 @@ impl DesignPage {
                 saved: None,
                 preview: false,
                 capturing: false,
+                canvases: HashMap::new(),
+                references: false,
+                canvas_subs: Vec::new(),
             },
             subs,
         )
@@ -290,6 +299,7 @@ impl RunoApp {
             return;
         };
         let back = !std::mem::replace(&mut self.design.shown, true);
+        self.ensure_design_canvas(&project, back, window, cx);
         let same = self.design.project == Some(project.id);
         if same && !back {
             return;
@@ -324,6 +334,103 @@ impl RunoApp {
             .notes
             .update(cx, |input, cx| input.set_value(text, window, cx));
         self.design.loading = false;
+    }
+
+    /// Make the project's design canvas, or read its files again when the page comes back.
+    fn ensure_design_canvas(
+        &mut self,
+        project: &Project,
+        back: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(canvas) = self.design.canvases.get(&project.id) {
+            if back {
+                canvas.update(cx, |c, cx| c.reload(cx));
+            }
+            return;
+        }
+        let root = PathBuf::from(&project.path);
+        let canvas = cx.new(|cx| DesignCanvas::new(root, window, cx));
+        let pid = project.id;
+        let sub = cx.subscribe_in(&canvas, window, move |this, _, event, window, cx| {
+            match event {
+                DesignEvent::Ask {
+                    task,
+                    context,
+                    edit,
+                    images,
+                } => this.start_with_context(
+                    pid,
+                    task,
+                    shell::StartContext {
+                        label: "Design canvas".into(),
+                        text: context.clone(),
+                        images: images.clone(),
+                        in_place: *edit,
+                    },
+                    window,
+                    cx,
+                ),
+            }
+            cx.notify();
+        });
+        self.design.canvas_subs.push(sub);
+        self.design.canvases.insert(project.id, canvas);
+    }
+
+    fn design_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let refs = self.design.references;
+        crate::github::segmented()
+            .child(
+                crate::github::segment(("design-tab", 0), "Canvas", !refs).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.design.references = false;
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                crate::github::segment(("design-tab", 1), "References", refs).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.design.references = true;
+                        cx.notify();
+                    }),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The design canvas, edge to edge under a slim header.
+    fn design_canvas(&self, canvas: Entity<DesignCanvas>, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .v_flex()
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(48.))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(rgb(c_border()))
+                    .child(icon(Mode::Design.glyph(), 16., c_blue()))
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Design"),
+                    )
+                    .child(self.mode_project_chip(cx))
+                    .child(div().flex_1())
+                    .child(self.design_tabs(cx)),
+            )
+            .child(div().flex_1().min_h_0().child(canvas))
+            .into_any_element()
     }
 
     fn design_notes_changed(&mut self, cx: &mut Context<Self>) {
@@ -569,6 +676,7 @@ impl RunoApp {
                 },
                 text,
                 images: picked.into_iter().map(|(path, _)| path).collect(),
+                in_place: false,
             },
             window,
             cx,
@@ -586,7 +694,7 @@ impl RunoApp {
                 None,
             );
         }
-        let Some((_, _, root)) = self.design_root() else {
+        let Some((pid, _, root)) = self.design_root() else {
             return shell::mode_frame(
                 Mode::Design,
                 "Design",
@@ -601,6 +709,11 @@ impl RunoApp {
                 None,
             );
         };
+        if !self.design.references {
+            if let Some(canvas) = self.design.canvases.get(&pid) {
+                return self.design_canvas(canvas.clone(), cx);
+            }
+        }
         let dir = folder(&root);
         let browser_on = cx.global::<AppSettings>().browser_enabled;
         let page_open = self
@@ -1042,7 +1155,15 @@ impl RunoApp {
             Some(self.mode_project_chip(cx)),
             "Collect references, keep design notes, see the running app beside them, and start agents with the references attached.",
             body,
-            Some(preview_toggle.into_any_element()),
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(preview_toggle)
+                    .child(self.design_tabs(cx))
+                    .into_any_element(),
+            ),
         )
     }
 }
