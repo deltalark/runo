@@ -1691,6 +1691,8 @@ impl ArchEditor {
                     ));
                 }
             }
+        } else {
+            out.push_str("\nNothing is selected on the canvas.\n");
         }
         out.push_str(&format!(
             "\nThe diagram has {} shapes and {} connectors.\n",

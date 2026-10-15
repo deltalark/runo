@@ -782,6 +782,8 @@ impl DesignCanvas {
                      right after it.\n",
                 );
             }
+        } else {
+            out.push_str("\nNothing is selected on the canvas.\n");
         }
         out
     }

@@ -2589,6 +2589,34 @@ pub(crate) fn project_mark(project: &Project, size: f32) -> Div {
         .child(initial)
 }
 
+/// The canvas context for an ask in a conversation that already has `prev`: the parts
+/// it hasn't seen, such as a new selection or changed screens, without repeating the
+/// rules and anything else unchanged. Parts are the paragraphs between blank lines.
+pub(crate) fn lean_context(prev: &str, now: &str) -> String {
+    let parts = |text: &str| -> Vec<String> {
+        text.split("\n\n")
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect()
+    };
+    let seen = parts(prev);
+    let all = parts(now);
+    let fresh: Vec<&String> = all.iter().filter(|p| !seen.contains(p)).collect();
+    if prev.is_empty() || fresh.len() == all.len() {
+        return now.to_string();
+    }
+    let mut out = String::from(
+        "## The canvas\nThe rules for this canvas and anything not repeated here are as in your \
+         earlier requests in this conversation.",
+    );
+    for p in fresh {
+        out.push_str("\n\n");
+        out.push_str(p);
+    }
+    out.push('\n');
+    out
+}
+
 /// What a session asked from a canvas stores to say which: see `Session::canvas`.
 pub(crate) fn canvas_name(view: View) -> &'static str {
     match view {
@@ -2640,12 +2668,24 @@ impl RunoApp {
             let busy = self.is_running(s) && s.provider != same;
             (s.id, busy)
         });
+        let full = context.text.clone();
         if let Some((id, false)) = chat {
+            // An agent resuming its own conversation already has the rules and the canvas
+            // as they were; it gets only what changed. A new agent gets it all.
+            let resumes = self
+                .state
+                .session(id)
+                .is_some_and(|s| s.provider == same && !s.agent_session.is_empty());
             self.carry_to(id, agent);
-            self.apply_context(id, &context);
+            let mut context = context;
             if let Some(session) = self.state.session_mut(id) {
+                if resumes {
+                    context.text = lean_context(&session.canvas_context, &full);
+                }
+                session.canvas_context = full;
                 session.unread = false;
             }
+            self.apply_context(id, &context);
             let provider = agent::PROVIDERS[agent].id;
             let opts = cx.global::<AppSettings>().agent(provider);
             self.start_agent(id, task.to_string(), &opts);
@@ -2663,8 +2703,15 @@ impl RunoApp {
         self.branch.update(cx, |b, cx| b.set_value("", window, cx));
         self.new_connection = self.project_connection(pid);
         let race = std::mem::replace(&mut self.race_mode, false);
+        let before = self.state.next_id;
         self.create_session(window, cx);
         self.race_mode = race;
+        let name = canvas_name(view);
+        for s in self.state.sessions.iter_mut() {
+            if s.id > before && s.project_id == pid && s.canvas == name {
+                s.canvas_context = full.clone();
+            }
+        }
         if matches!(self.view, View::NewSession) {
             self.view = view;
         }
@@ -2869,6 +2916,19 @@ impl RunoApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canvas_context_sends_only_what_changed() {
+        let first = "## Rules\nEdit the files.\n\nScreens now:\n- Home\n\nNothing is selected on the canvas.\n";
+        let next = "## Rules\nEdit the files.\n\nScreens now:\n- Home\n\nSelected: the button.\n";
+        let lean = lean_context(first, next);
+        assert!(lean.contains("Selected: the button."));
+        assert!(!lean.contains("Edit the files."));
+        assert!(!lean.contains("- Home"));
+        // Nothing sent before, or nothing in common: all of it.
+        assert_eq!(lean_context("", next), next);
+        assert_eq!(lean_context("Other.", next), next);
+    }
+
     use super::*;
     use std::prelude::v1::test;
     use store::Message;
