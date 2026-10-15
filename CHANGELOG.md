@@ -83,6 +83,7 @@ All notable changes to Runo are documented here.
 
 ### Fixed
 
+- The Design canvas no longer fails with "The browser that draws the screens didn't start" when a second project's Design page opens, or after Runo was force-quit or crashed and left its browser running. Each project's screens now draw in a browser with its own profile for every run, it gets more time to start, and profiles from earlier runs are cleaned up.
 - Agents: permission modes now match what each CLI can do. Plan is read-only everywhere it is offered, Grok runs in full access only, and Amp, Copilot and Cursor respect Edit vs Full.
 - Agents: Runo's memory server and shared MCP servers reach every CLI that takes servers by flag or env (Claude, Codex, OpenCode, Qwen, Copilot, Amp), and local servers are skipped for sandboxed or remote runs.
 - Agents: Codex, Cursor, Droid, Gemini, Qwen, Copilot and OpenCode turns stream as structured JSON, with live steps, conversation ids, resume and token usage.
