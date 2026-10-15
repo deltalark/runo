@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["native/runo-app"]
-exclude = ["vendor/portable-pty", "vendor/gpui-pre-apple", "vendor/vt100"]
+exclude = ["vendor/portable-pty", "vendor/gpui-pre-apple", "vendor/vt100", "vendor/stylo_derive"]
 
 [workspace.package]
 version = "0.1.0"
@@ -41,4 +41,8 @@ strip = "none"
 # gpui's macOS renderer with one blending fix for translucent (glass) windows; see
 # vendor/gpui-pre-apple/src/metal_renderer.rs.
 [patch.crates-io]
+# stylo_derive 0.22 writes `expr?` in its ToCss derive, which no longer infers its error type
+# once gpui's log features bring in serde_fmt (`impl From<serde_fmt::Error> for fmt::Error`).
+# Vendored with that one expression typed; see vendor/stylo_derive/to_css.rs.
+stylo_derive = { path = "vendor/stylo_derive" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }

@@ -4,5 +4,6 @@
 pub(crate) mod checks;
 pub(crate) mod dom;
 pub(crate) mod model;
+pub(crate) mod native;
 pub(crate) mod render;
 pub(crate) mod view;

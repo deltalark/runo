@@ -75,6 +75,8 @@ pub(crate) struct Renderer {
     dark: bool,
     /// Play tapped the page, so it no longer shows the file as saved.
     played: bool,
+    /// The system's fonts, loaded once for screens Runo draws itself.
+    fonts: Option<blitz_dom::FontContext>,
 }
 
 impl Renderer {
@@ -85,6 +87,7 @@ impl Renderer {
             current: None,
             dark: false,
             played: false,
+            fonts: None,
         }
     }
 
@@ -140,6 +143,13 @@ impl Renderer {
 
     /// Draw the screen from its file.
     pub(crate) fn shoot(&mut self, id: &str, device: Device) -> Result<Shot, String> {
+        if super::native::enabled() {
+            match super::native::draw(&self.root, id, device, self.dark, &mut self.fonts) {
+                Ok(shot) => return Ok(shot),
+                // Fall back to a browser, if there is one, for what Runo can't draw yet.
+                Err(e) => eprintln!("design: {e} Trying the browser."),
+            }
+        }
         let engine = self.open(id, device, true)?;
         self.capture(&engine, id, device)
     }
