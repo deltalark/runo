@@ -165,10 +165,21 @@ impl AgentPick {
                 .child(icon(IconName::ChevronRight, 12., c_muted())),
             );
         }
+        // The models column keeps the height of the longest list, so hovering an agent
+        // with fewer models doesn't resize the menu under the pointer.
+        let rows = |agent: usize| -> f32 {
+            Self::models(agent)
+                .iter()
+                .map(|c| if c.desc.is_empty() { 28. } else { 44. })
+                .sum::<f32>()
+        };
+        let tallest = self.choices(cx).into_iter().map(rows).fold(0., f32::max);
         let mut models = div()
             .id(SharedString::from(format!("{key}-models")))
             .p_1()
             .w(px(240.))
+            .h(px((tallest + 34.).clamp(150., 330.)))
+            .overflow_y_scroll()
             .v_flex()
             .child(
                 div()

@@ -18,14 +18,18 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-actions!(design_canvas, [DesignEscape]);
+actions!(design_canvas, [DesignEscape, DesignUndo, DesignRedo]);
 
+/// Keys the canvas takes before the app's own bindings for them. A text box inside the
+/// canvas keeps its own undo, since its bindings sit deeper.
 pub(crate) fn bindings() -> Vec<KeyBinding> {
-    vec![KeyBinding::new(
-        "escape",
-        DesignEscape,
-        Some("DesignCanvas"),
-    )]
+    let canvas = Some("DesignCanvas");
+    vec![
+        KeyBinding::new("escape", DesignEscape, canvas),
+        KeyBinding::new("secondary-z", DesignUndo, canvas),
+        KeyBinding::new("secondary-shift-z", DesignRedo, canvas),
+        KeyBinding::new("secondary-y", DesignRedo, canvas),
+    ]
 }
 
 /// What the canvas asks of the app around it.
@@ -183,6 +187,9 @@ pub(crate) struct DesignCanvas {
     screen: Option<String>,
     element: Option<Element>,
     layers: Vec<Layer>,
+    /// The screen the layers were read from, or are being read from.
+    layers_of: Option<String>,
+    layers_loading: bool,
     /// Each screen's HTML before a change, for undo and redo.
     undo: Vec<(String, String)>,
     redo: Vec<(String, String)>,
@@ -333,6 +340,8 @@ impl DesignCanvas {
             screen: None,
             element: None,
             layers: Vec::new(),
+            layers_of: None,
+            layers_loading: false,
             undo: Vec::new(),
             redo: Vec::new(),
             panel: Panel::Inspect,
@@ -1515,6 +1524,7 @@ impl DesignCanvas {
         if self.screen != id {
             self.element = None;
             self.layers.clear();
+            self.layers_of = None;
         }
         self.screen = id;
         self.inline_open = false;
@@ -1570,11 +1580,14 @@ impl DesignCanvas {
             return;
         };
         let id2 = id.clone();
+        self.layers_of = Some(id.clone());
+        self.layers_loading = true;
         self.run(
             cx,
             move |r| r.eval(&id, device, &dom::call("tree", &[])),
             move |this, out, _| {
                 if this.screen.as_deref() == Some(id2.as_str()) {
+                    this.layers_loading = false;
                     this.layers = out
                         .ok()
                         .and_then(|v| serde_json::from_value(v).ok())
@@ -1712,6 +1725,12 @@ impl DesignCanvas {
     }
 
     fn undo(&mut self, cx: &mut Context<Self>) {
+        // Past the canvas's own edits, undo takes back an AI change that isn't kept yet,
+        // as the Undo on the ask bar does.
+        if self.undo.is_empty() && self.ai.as_ref().is_some_and(|ai| ai.changed) {
+            self.undo_ai(cx);
+            return;
+        }
         self.history(true, cx);
     }
 
@@ -2460,14 +2479,6 @@ impl DesignCanvas {
         let m = &k.modifiers;
         let sec = m.secondary();
         let handled = match (sec, m.shift, m.alt, k.key.as_str()) {
-            (true, false, _, "z") => {
-                self.undo(cx);
-                true
-            }
-            (true, true, _, "z") | (true, _, _, "y") => {
-                self.redo(cx);
-                true
-            }
             (true, _, _, "d") => {
                 if self.element.is_some() {
                     self.duplicate_element(cx);
@@ -2689,7 +2700,10 @@ impl DesignCanvas {
             .child(div().flex_1())
             .child(
                 icon_btn("design-undo", IconName::Undo2, "Undo (⌘Z)", false)
-                    .when(self.undo.is_empty(), |el| el.opacity(0.4))
+                    .when(
+                        self.undo.is_empty() && !self.ai.as_ref().is_some_and(|ai| ai.changed),
+                        |el| el.opacity(0.4),
+                    )
                     .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
             )
             .child(
@@ -3870,26 +3884,58 @@ impl DesignCanvas {
     // ---- The side panel
 
     fn side_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tab = |id: &'static str, label: SharedString, p: Panel, cx: &mut Context<Self>| {
+        // The tabs share the width evenly, as one segmented control.
+        let tab = |id: &'static str,
+                   label: &'static str,
+                   count: usize,
+                   p: Panel,
+                   cx: &mut Context<Self>| {
             let on = self.panel == p;
             div()
                 .id(id)
-                .h(px(28.))
-                .px_3()
+                .flex_1()
+                .min_w_0()
+                .h(px(26.))
                 .flex()
                 .items_center()
-                .rounded_md()
+                .justify_center()
+                .gap(px(5.))
+                .rounded(px(6.))
                 .cursor_pointer()
-                .text_size(px(12.5))
+                .text_size(px(12.))
                 .when(on, |el| {
-                    el.bg(tint(c_selected())).font_weight(FontWeight::MEDIUM)
+                    el.bg(tint(c_raised()))
+                        .shadow_xs()
+                        .font_weight(FontWeight::MEDIUM)
                 })
                 .text_color(rgb(if on { c_text() } else { c_secondary() }))
+                .hover(|el| el.text_color(rgb(c_text())))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.panel = p;
                     cx.notify();
                 }))
                 .child(label)
+                .when(count > 0, |el| {
+                    el.child(
+                        div()
+                            .h(px(15.))
+                            .min_w(px(15.))
+                            .px(px(4.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(col(c_amber(), 0.2))
+                            .text_size(px(10.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_amber()))
+                            .child(if count > 99 {
+                                "99+".to_string()
+                            } else {
+                                count.to_string()
+                            }),
+                    )
+                })
         };
         let body = match self.panel {
             Panel::Inspect => self.inspector(cx),
@@ -3913,27 +3959,27 @@ impl DesignCanvas {
                     .px_2()
                     .flex()
                     .items_center()
-                    .gap_1()
                     .border_b_1()
                     .border_color(rgb(c_border()))
-                    .child(tab(
-                        "design-tab-inspect",
-                        "Inspect".into(),
-                        Panel::Inspect,
-                        cx,
-                    ))
-                    .child(tab("design-tab-layers", "Layers".into(), Panel::Layers, cx))
-                    .child(tab("design-tab-theme", "Theme".into(), Panel::Theme, cx))
-                    .child(tab(
-                        "design-tab-checks",
-                        if issues == 0 {
-                            "Checks".into()
-                        } else {
-                            format!("Checks {issues}").into()
-                        },
-                        Panel::Checks,
-                        cx,
-                    )),
+                    .child(
+                        div()
+                            .flex_1()
+                            .p(px(2.))
+                            .flex()
+                            .gap(px(2.))
+                            .rounded(px(8.))
+                            .bg(tint(c_subtle()))
+                            .child(tab("design-tab-inspect", "Inspect", 0, Panel::Inspect, cx))
+                            .child(tab("design-tab-layers", "Layers", 0, Panel::Layers, cx))
+                            .child(tab("design-tab-theme", "Theme", 0, Panel::Theme, cx))
+                            .child(tab(
+                                "design-tab-checks",
+                                "Checks",
+                                issues,
+                                Panel::Checks,
+                                cx,
+                            )),
+                    ),
             )
             .child(
                 div()
@@ -4452,16 +4498,47 @@ impl DesignCanvas {
             );
         }
         if self.layers.is_empty() {
-            return out.child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(rgb(c_muted()))
-                    .child("Reading the screen…"),
-            );
+            return out.child(div().text_size(px(12.5)).text_color(rgb(c_muted())).child(
+                if self.layers_loading {
+                    "Reading the screen…"
+                } else {
+                    "Nothing on this screen yet."
+                },
+            ));
         }
         let picked = self.element.as_ref().map(|e| e.path.clone());
+        let name = self
+            .screen
+            .as_ref()
+            .and_then(|id| self.canvas.screen(id))
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        out = out.child(
+            div()
+                .pb_1()
+                .flex()
+                .items_center()
+                .justify_between()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(c_muted()))
+                .child(name.to_uppercase())
+                .child(
+                    div()
+                        .font_weight(FontWeight::NORMAL)
+                        .child(format!("{} layers", self.layers.len())),
+                ),
+        );
         for (i, l) in self.layers.iter().enumerate() {
             let on = picked.as_ref() == Some(&l.path);
+            let (tag, classes) = l.label.split_once('.').unwrap_or((l.label.as_str(), ""));
+            // What a person would call it: its text, else its class, else its tag.
+            let title: SharedString = match &l.text {
+                Some(t) if !t.is_empty() => t.clone().into(),
+                _ if !classes.is_empty() => classes.replace('.', " ").into(),
+                _ => tag.to_string().into(),
+            };
+            let glyph = layer_icon(tag);
             let (p1, p2, p3) = (l.path.clone(), l.path.clone(), l.path.clone());
             let dragged = DraggedLayer {
                 path: l.path.clone(),
@@ -4470,18 +4547,20 @@ impl DesignCanvas {
             out = out.child(
                 div()
                     .id(("design-layer", i))
-                    .h(px(24.))
-                    .pl(px(6. + l.depth as f32 * 12.))
+                    .group("design-layer")
+                    .h(px(26.))
+                    .pl(px(6. + l.depth.min(8) as f32 * 14.))
                     .pr_1()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap(px(6.))
                     .rounded_md()
                     .cursor_pointer()
                     .text_size(px(12.))
                     .when(on, |el| el.bg(tint(c_selected())))
                     .hover(|el| el.bg(tint(c_subtle())))
-                    .text_color(rgb(if l.hidden { c_muted() } else { c_text() }))
+                    .when(l.hidden, |el| el.opacity(0.5))
+                    .text_color(rgb(c_text()))
                     .on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
                     .drag_over::<DraggedLayer>(|el, _, _, _| {
                         el.border_t_2().border_color(rgb(c_blue()))
@@ -4497,31 +4576,40 @@ impl DesignCanvas {
                         let id = this.screen.clone().unwrap_or_default();
                         this.select_path(&id, p1.clone(), cx);
                     }))
-                    .child(div().flex_1().truncate().child(l.label.clone()))
-                    .when_some(l.text.clone(), |el, t| {
-                        el.child(
-                            div()
-                                .max_w(px(90.))
-                                .truncate()
-                                .text_color(rgb(c_muted()))
-                                .child(t),
-                        )
-                    })
+                    .child(icon(glyph, 12., if on { c_blue() } else { c_muted() }))
+                    .child(div().flex_1().min_w_0().truncate().child(title))
                     .child(
-                        icon_btn(
-                            ("design-layer-eye", i),
-                            if l.hidden {
-                                IconName::EyeOff
-                            } else {
-                                IconName::Eye
-                            },
-                            "Hide or show",
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.edit(dom::op(&p2, "hide", &[]), After::Same, cx);
-                        })),
+                        div()
+                            .flex_none()
+                            .text_size(px(10.5))
+                            .text_color(rgb(c_muted()))
+                            .child(tag.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .when(!l.hidden && !on, |el| {
+                                el.invisible()
+                                    .group_hover("design-layer", |el| el.visible())
+                            })
+                            .child(
+                                icon_btn(
+                                    ("design-layer-eye", i),
+                                    if l.hidden {
+                                        IconName::EyeOff
+                                    } else {
+                                        IconName::Eye
+                                    },
+                                    "Hide or show",
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.edit(dom::op(&p2, "hide", &[]), After::Same, cx);
+                                    },
+                                )),
+                            ),
                     ),
             );
         }
@@ -4740,6 +4828,10 @@ impl DesignCanvas {
 
     fn render_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.load_fields(window, cx);
+        // The Layers tab reads the selected screen when it shows, however it was selected.
+        if self.panel == Panel::Layers && self.screen.is_some() && self.layers_of != self.screen {
+            self.load_layers(cx);
+        }
         if !self.fitted && self.view_size().0 > 10. {
             if !self.canvas.screens.is_empty() {
                 self.fit();
@@ -4761,6 +4853,8 @@ impl DesignCanvas {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_action(cx.listener(|this, _: &DesignEscape, window, cx| this.escape(window, cx)))
+            .on_action(cx.listener(|this, _: &DesignUndo, _, cx| this.undo(cx)))
+            .on_action(cx.listener(|this, _: &DesignRedo, _, cx| this.redo(cx)))
             .on_mouse_move(cx.listener(Self::on_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_up))
@@ -5237,4 +5331,22 @@ mod move_tests {
         assert_eq!(Move::of(&link("push", "slow"), Device::Phone, "").ms, 595);
         assert_eq!(Move::of(&link("fade", "fast"), Device::Phone, "").ms, 132);
     }
+}
+
+/// The icon of an element in the Layers tab, by its tag.
+fn layer_icon(tag: &str) -> IconName {
+    let name = match tag {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "heading",
+        "p" | "span" | "label" | "strong" | "em" | "small" | "b" | "i" => "type",
+        "img" | "picture" | "svg" | "video" | "canvas" => "image",
+        "button" => "mouse-pointer-click",
+        "a" => "link",
+        "input" | "textarea" | "select" => "text-cursor-input",
+        "ul" | "ol" | "li" => "list",
+        "form" => "clipboard-list",
+        "nav" | "header" | "footer" => "panel-top",
+        "section" | "main" | "article" | "aside" => "layout-template",
+        _ => "square",
+    };
+    crate::archdraw::view::icon_named(name).unwrap_or(IconName::Square)
 }
