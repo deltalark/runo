@@ -1423,7 +1423,7 @@ struct Scene {
     target: Option<Rect>,
 }
 
-fn col(c: u32, a: f32) -> Rgba {
+pub(crate) fn col(c: u32, a: f32) -> Rgba {
     rgba((c << 8) | ((a.clamp(0., 1.) * 255.) as u32))
 }
 
@@ -1730,11 +1730,11 @@ fn kind_icon(kind: Kind) -> IconName {
     icon_named(name).unwrap_or(IconName::Square)
 }
 
-fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {
+pub(crate) fn tip(text: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView {
     move |window, cx| gpui_kit::component::tooltip::Tooltip::new(text).build(window, cx)
 }
 
-fn icon_btn(
+pub(crate) fn icon_btn(
     id: impl Into<ElementId>,
     name: IconName,
     tooltip: &'static str,
@@ -1755,7 +1755,7 @@ fn icon_btn(
         .child(icon(name, 15., if on { c_text() } else { c_secondary() }))
 }
 
-fn text_btn(
+pub(crate) fn text_btn(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     name: Option<IconName>,
@@ -1789,7 +1789,7 @@ fn text_btn(
         .child(label.into())
 }
 
-fn chip_btn(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+pub(crate) fn chip_btn(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(24.))
@@ -1811,7 +1811,7 @@ fn chip_btn(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) 
         .child(label.into())
 }
 
-fn section(title: &'static str) -> Div {
+pub(crate) fn section(title: &'static str) -> Div {
     div()
         .pt_3()
         .pb_1()
@@ -1821,7 +1821,7 @@ fn section(title: &'static str) -> Div {
         .child(title.to_uppercase())
 }
 
-fn label_row(label: &'static str, body: impl IntoElement) -> Div {
+pub(crate) fn label_row(label: &'static str, body: impl IntoElement) -> Div {
     div()
         .v_flex()
         .gap(px(3.))

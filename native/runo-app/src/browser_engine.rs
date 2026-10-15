@@ -650,6 +650,82 @@ impl Engine {
             .map(str::to_string)
     }
 
+    /// Whether the page is attached and takes commands.
+    pub fn ready(&self, key: u64) -> bool {
+        self.session_of(key).is_some()
+    }
+
+    /// Run JavaScript in the page and return its value, after any promise it returns
+    /// settles. None when it threw or the page didn't answer. Blocks for the reply.
+    pub fn eval(&self, key: u64, js: &str) -> Option<Value> {
+        let session = self.session_of(key)?;
+        let reply = self.call(
+            "Runtime.evaluate",
+            json!({"expression": js, "returnByValue": true, "awaitPromise": true}),
+            Some(&session),
+        )?;
+        if reply.get("exceptionDetails").is_some() {
+            return None;
+        }
+        Some(reply["result"]["value"].clone())
+    }
+
+    /// Load `url` at this CSS size and scale, in front so it renders, and wait until it
+    /// and its fonts have loaded. False when it didn't within `wait`.
+    pub fn load(&self, key: u64, url: &str, viewport: (u32, u32, f32), wait: Duration) -> bool {
+        let Some(session) = self.session_of(key) else {
+            return false;
+        };
+        if let Some(page) = self.shared.lock().unwrap().pages.get_mut(&key) {
+            page.viewport = viewport;
+        }
+        self.call("Page.bringToFront", json!({}), Some(&session));
+        self.metrics(&session, viewport);
+        if self
+            .call("Page.navigate", json!({"url": url}), Some(&session))
+            .is_none()
+        {
+            return false;
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed() < wait {
+            let done = self.eval(
+                key,
+                "document.readyState === 'complete' ? document.fonts.ready.then(() => true) : false",
+            );
+            if done.and_then(|v| v.as_bool()) == Some(true) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        false
+    }
+
+    /// Show the page with the dark or the light colour scheme preferred.
+    pub fn color_scheme(&self, key: u64, dark: bool) {
+        if let Some(session) = self.session_of(key) {
+            self.call(
+                "Emulation.setEmulatedMedia",
+                json!({"features": [{"name": "prefers-color-scheme",
+                    "value": if dark { "dark" } else { "light" }}]}),
+                Some(&session),
+            );
+        }
+    }
+
+    /// The top `width` by `height` CSS pixels of the page, past the viewport if need be,
+    /// as an image GPUI can draw. Blocks for the reply.
+    pub fn capture(&self, key: u64, width: f32, height: f32) -> Option<Arc<RenderImage>> {
+        let session = self.session_of(key)?;
+        let reply = self.call(
+            "Page.captureScreenshot",
+            json!({"format": "png", "captureBeyondViewport": true,
+                "clip": {"x": 0, "y": 0, "width": width, "height": height, "scale": 1}}),
+            Some(&session),
+        )?;
+        decode_image(reply["data"].as_str()?, image::ImageFormat::Png)
+    }
+
     /// A PNG of the page as it shows now. Blocks for the reply.
     pub fn screenshot(&self, key: u64) -> Option<Vec<u8>> {
         use base64::Engine as _;
@@ -959,11 +1035,16 @@ fn adopt_popup(
 
 /// A base64 JPEG as a BGRA image GPUI can draw.
 fn decode_frame(data: &str) -> Option<Arc<RenderImage>> {
+    decode_image(data, image::ImageFormat::Jpeg)
+}
+
+/// A base64 image as a BGRA image GPUI can draw.
+fn decode_image(data: &str, format: image::ImageFormat) -> Option<Arc<RenderImage>> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .ok()?;
-    let mut rgba = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
+    let mut rgba = image::load_from_memory_with_format(&bytes, format)
         .ok()?
         .into_rgba8();
     if std::env::var_os("RUNO_CDP_LOG").is_some() {
