@@ -4,6 +4,7 @@
 use super::editor::Editor;
 use super::geom;
 use super::model::*;
+use super::motion;
 use super::shape::{self, Seg, Theme};
 use crate::architecture::ProjectMap;
 use std::collections::HashMap;
@@ -220,6 +221,9 @@ pub(crate) fn drawio(doc: &Doc) -> String {
             }
             if let Some(c) = e.style.stroke.as_deref().and_then(parse_hex) {
                 let _ = write!(style, "strokeColor={};", hex(c));
+            }
+            if !v.still && e.motion != Motion::None {
+                style.push_str("flowAnimation=1;");
             }
             let label = [r.label.as_str(), r.tech.as_str()]
                 .iter()
@@ -472,6 +476,7 @@ pub(crate) fn import_drawio(text: &str) -> Result<Doc, String> {
                     parent: ids.get(parent).cloned(),
                     locked: style.get("movable").is_some_and(|v| v == "0"),
                     style: st,
+                    ..Default::default()
                 });
                 abs.insert(cell_id.clone(), (x, y));
                 ids.insert(cell_id, id);
@@ -516,6 +521,7 @@ pub(crate) fn import_drawio(text: &str) -> Result<Doc, String> {
                     stroke: style.get("strokeColor").and_then(|v| parse_hex(v)).map(hex),
                     ..Default::default()
                 },
+                ..Default::default()
             });
         }
         doc.views.push(view);
@@ -778,6 +784,122 @@ fn segs_d(segs: &[Seg]) -> String {
 
 /// The diagram as a standalone SVG in the light theme.
 pub(crate) fn svg(doc: &Doc, view: &View) -> String {
+    render_svg(doc, view, false)
+}
+
+/// The diagram as an SVG whose connectors and effects move, as on the canvas. Plays in any
+/// browser and in most slide and docs tools that show SVG.
+pub(crate) fn animated_svg(doc: &Doc, view: &View) -> String {
+    render_svg(doc, view, !view.still)
+}
+
+/// How the moving parts of an animated SVG move, shared by every connector and shape.
+const MOTION_CSS: &str = "<style>\
+@keyframes flow{to{stroke-dashoffset:-16}}\
+@keyframes glow{0%,100%{opacity:0}50%{opacity:.35}}\
+@keyframes breathe{0%,100%{opacity:.1}50%{opacity:.65}}\
+@keyframes blink{0%{opacity:1}55%{opacity:0}}\
+@keyframes orbit{to{stroke-dashoffset:-100}}\
+</style>\n";
+
+/// A connector's path data, and its length along the line.
+fn wire_d(w: &geom::Wire) -> (String, f32) {
+    let d = if w.curved && w.points.len() == 4 {
+        let p = &w.points;
+        format!(
+            "M{} {} C{} {} {} {} {} {}",
+            p[0].0, p[0].1, p[1].0, p[1].1, p[2].0, p[2].1, p[3].0, p[3].1
+        )
+    } else {
+        w.points
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("{}{} {}", if i == 0 { "M" } else { "L" }, p.0, p.1))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    (d, motion::length(&motion::flatten(&w.points, w.curved)))
+}
+
+/// What moves on a connector in an animated SVG, drawn over its still line.
+fn svg_motion(out: &mut String, e: &Edge, d: &str, len: f32, color: &str) {
+    let rate = e.speed.rate();
+    match e.motion {
+        Motion::Flow => {
+            let _ = writeln!(
+                out,
+                "<path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2.3\" stroke-dasharray=\"{} {}\" style=\"animation:flow {:.3}s linear infinite\"/>",
+                motion::DASH,
+                motion::GAP,
+                (motion::DASH + motion::GAP) / rate
+            );
+        }
+        Motion::Packets => {
+            let count = (len / motion::PACKET_SPACING).ceil().max(1.) as usize;
+            let dur = len / rate;
+            let both = e.arrow == Arrow::Both;
+            for i in 0..count {
+                let begin = -(i as f32) * dur / count as f32;
+                let _ = writeln!(
+                    out,
+                    "<circle r=\"4.2\" fill=\"{color}\"><animateMotion dur=\"{dur:.3}s\" begin=\"{begin:.3}s\" repeatCount=\"indefinite\" path=\"{d}\"/></circle>"
+                );
+                if both {
+                    let _ = writeln!(
+                        out,
+                        "<circle r=\"4.2\" fill=\"{color}\" opacity=\"0.8\"><animateMotion dur=\"{dur:.3}s\" begin=\"{:.3}s\" repeatCount=\"indefinite\" keyPoints=\"1;0\" keyTimes=\"0;1\" calcMode=\"linear\" path=\"{d}\"/></circle>",
+                        begin - dur / count as f32 / 2.
+                    );
+                }
+            }
+        }
+        Motion::Pulse => {
+            let _ = writeln!(
+                out,
+                "<path d=\"{d}\" fill=\"none\" stroke=\"{color}\" stroke-width=\"6\" opacity=\"0\" style=\"animation:glow {:.3}s ease-in-out infinite\"/>",
+                motion::PULSE_SECS * Speed::Normal.rate() / rate
+            );
+        }
+        Motion::None => {}
+    }
+}
+
+/// A shape's effect in an animated SVG: a breathing glow, a blinking ring, a spinning comet.
+fn svg_effect(out: &mut String, n: &Node, color: &str) {
+    let r = n.rect();
+    let ring = |grow: f32| {
+        format!(
+            "x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\"",
+            r.x - grow,
+            r.y - grow,
+            r.w + 2. * grow,
+            r.h + 2. * grow,
+            8. + grow
+        )
+    };
+    let _ = match n.effect {
+        Effect::Pulse => writeln!(
+            out,
+            "<rect {} fill=\"none\" stroke=\"{color}\" stroke-width=\"3\" style=\"animation:breathe {}s ease-in-out infinite\"/>",
+            ring(6.),
+            motion::PULSE_SECS
+        ),
+        Effect::Blink => writeln!(
+            out,
+            "<rect {} fill=\"none\" stroke=\"#ef4444\" stroke-width=\"2.5\" style=\"animation:blink 0.625s steps(1) infinite\"/>",
+            ring(5.)
+        ),
+        Effect::Spin => writeln!(
+            out,
+            "<rect {} fill=\"none\" stroke=\"{color}\" stroke-width=\"2.5\" stroke-linecap=\"round\" pathLength=\"100\" stroke-dasharray=\"18 82\" style=\"animation:orbit {:.3}s linear infinite\"/>",
+            ring(5.),
+            1. / 1.4
+        ),
+        Effect::None => Ok(()),
+    };
+}
+
+fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
     let theme = Theme::LIGHT;
     let area = Rect::bounds(view.nodes.iter().map(|n| n.rect()))
         .unwrap_or(Rect::new(0., 0., 400., 300.))
@@ -786,6 +908,9 @@ pub(crate) fn svg(doc: &Doc, view: &View) -> String {
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\" width=\"{}\" height=\"{}\" font-family=\"Inter, Helvetica, Arial, sans-serif\">\n<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n",
         area.x, area.y, area.w, area.h, area.w.round(), area.h.round(), area.x, area.y, area.w, area.h
     );
+    if animated {
+        out.push_str(MOTION_CSS);
+    }
     let kind = |id: &str| doc.element(id).map(|e| e.kind).unwrap_or_default();
     let text_block = |out: &mut String, r: &Rect, lines: &[(String, f32, u32, bool)], top: bool| {
         let total: f32 = lines.iter().map(|l| l.1 * 1.3).sum();
@@ -808,6 +933,7 @@ pub(crate) fn svg(doc: &Doc, view: &View) -> String {
     // Boundaries first, then connectors, then shapes, as on the canvas.
     let draw_node = |out: &mut String, n: &Node| {
         let Some(e) = doc.element(&n.id) else { return };
+        let _ = writeln!(out, "<g data-node=\"{}\">", esc(&n.id));
         let o = shape::outline(e.kind, &n.rect(), &n.style);
         let p = shape::paint(e.kind, &n.style, &theme);
         let dash = if p.dashed {
@@ -857,6 +983,14 @@ pub(crate) fn svg(doc: &Doc, view: &View) -> String {
             }
         }
         text_block(out, &o.text, &lines, e.kind == Kind::Boundary);
+        if animated && n.effect != Effect::None {
+            svg_effect(
+                out,
+                n,
+                &hex(p.stroke.unwrap_or_else(|| shape::accent(e.kind))),
+            );
+        }
+        out.push_str("</g>\n");
     };
     for n in view.nodes.iter().filter(|n| kind(&n.id) == Kind::Boundary) {
         draw_node(&mut out, n);
@@ -876,20 +1010,7 @@ pub(crate) fn svg(doc: &Doc, view: &View) -> String {
             continue;
         };
         let w = geom::route(&a.rect(), &b.rect(), e.route);
-        let d = if w.curved && w.points.len() == 4 {
-            let p = &w.points;
-            format!(
-                "M{} {} C{} {} {} {} {} {}",
-                p[0].0, p[0].1, p[1].0, p[1].1, p[2].0, p[2].1, p[3].0, p[3].1
-            )
-        } else {
-            w.points
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("{}{} {}", if i == 0 { "M" } else { "L" }, p.0, p.1))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
+        let (d, len) = wire_d(&w);
         let color = e
             .style
             .stroke
@@ -903,7 +1024,8 @@ pub(crate) fn svg(doc: &Doc, view: &View) -> String {
         };
         let _ = writeln!(
             out,
-            "<path d=\"{d}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"{}{marks}/>",
+            "<g data-edge=\"{}\"><path class=\"wire\" d=\"{d}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"{}{marks}/>",
+            esc(&e.id),
             hex(color),
             if e.style.dashed {
                 " stroke-dasharray=\"6 4\""
@@ -911,6 +1033,10 @@ pub(crate) fn svg(doc: &Doc, view: &View) -> String {
                 ""
             }
         );
+        if animated {
+            svg_motion(&mut out, e, &d, len, &hex(color));
+        }
+        out.push_str("</g>\n");
         let label = [r.label.as_str(), r.tech.as_str()]
             .iter()
             .filter(|s| !s.is_empty())
@@ -937,6 +1063,144 @@ pub(crate) fn svg(doc: &Doc, view: &View) -> String {
     out.push_str(&labels);
     out.push_str("</svg>\n");
     out
+}
+
+/// A web page that plays the diagram's stories: the animated diagram, and controls that walk
+/// a request through it step by step with captions, as the canvas does.
+pub(crate) fn story_html(doc: &Doc, view: &View) -> String {
+    let stories: Vec<_> = view
+        .stories
+        .iter()
+        .map(|st| {
+            let steps: Vec<_> = st
+                .steps
+                .iter()
+                .filter_map(|step| {
+                    let r = doc.relation(&step.edge)?;
+                    let caption = if step.caption.is_empty() {
+                        r.label.clone()
+                    } else {
+                        step.caption.clone()
+                    };
+                    Some(serde_json::json!({
+                        "edge": step.edge, "from": r.from, "to": r.to, "caption": caption,
+                    }))
+                })
+                .collect();
+            serde_json::json!({ "name": st.name, "steps": steps })
+        })
+        .collect();
+    let data = serde_json::to_string(&stories)
+        .unwrap_or_else(|_| "[]".into())
+        .replace("</", "<\\/");
+    let title = esc(&view.name);
+    let svg = render_svg(doc, view, !view.still);
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
+<style>
+body{{margin:0;font-family:Inter,Helvetica,Arial,sans-serif;background:#f6f7f9;color:#111827}}
+main{{max-width:1200px;margin:0 auto;padding:24px 16px}}
+h1{{font-size:20px;margin:0 0 12px}}
+.stage{{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:12px;overflow:auto}}
+.stage svg{{max-width:100%;height:auto;display:block;margin:0 auto}}
+.bar{{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}}
+button,select{{font:inherit;font-size:13px;padding:6px 12px;border:1px solid #d1d5db;border-radius:8px;background:#fff;cursor:pointer}}
+button:disabled{{opacity:.4;cursor:default}}
+#cap{{flex:1;min-width:200px;font-size:14px}}
+#cap small{{display:block;color:#6b7280;font-size:12px}}
+.dim{{opacity:.2;transition:opacity .3s}}
+[data-node],[data-edge]{{transition:opacity .3s}}
+.lit>path:first-of-type{{stroke:#f59e0b;stroke-width:3}}
+</style></head>
+<body><main>
+<h1>{title}</h1>
+<div class="stage">{svg}</div>
+<div class="bar" id="bar">
+<select id="pick"></select>
+<button id="prev" title="Previous step">&#9664;</button>
+<button id="play">Play</button>
+<button id="next" title="Next step">&#9654;</button>
+<div id="cap"></div>
+</div>
+</main>
+<script>
+const STORIES = {data};
+const STEP_MS = {step_ms};
+const svg = document.querySelector('.stage svg');
+const pick = document.getElementById('pick'), cap = document.getElementById('cap');
+const play = document.getElementById('play');
+const ns = 'http://www.w3.org/2000/svg';
+const sel = (attr, id) => svg.querySelector('[' + attr + '="' + CSS.escape(id) + '"]');
+if (!STORIES.length) document.getElementById('bar').hidden = true;
+STORIES.forEach((s, i) => pick.add(new Option(s.name, i)));
+let story = null, step = 0, start = 0, paused = null, raf = 0;
+const trail = document.createElementNS(ns, 'path');
+trail.setAttribute('fill', 'none'); trail.setAttribute('stroke', '#f59e0b');
+trail.setAttribute('stroke-width', '3'); trail.setAttribute('stroke-linecap', 'round');
+const dot = document.createElementNS(ns, 'circle');
+dot.setAttribute('r', '7'); dot.setAttribute('fill', '#f59e0b');
+const ease = p => p * p * (3 - 2 * p);
+function show() {{
+  const all = svg.querySelectorAll('[data-node],[data-edge]');
+  all.forEach(el => el.classList.remove('dim', 'lit'));
+  trail.remove(); dot.remove();
+  if (!story) {{ play.textContent = 'Play'; cap.textContent = ''; return; }}
+  const s = STORIES[story.i], st = s.steps[step];
+  const parts = new Set(s.steps.flatMap(x => [x.edge, x.from, x.to]));
+  all.forEach(el => {{
+    if (!parts.has(el.dataset.node ?? el.dataset.edge)) el.classList.add('dim');
+  }});
+  [st.from, st.to].forEach(id => sel('data-node', id)?.classList.add('lit'));
+  cap.innerHTML = '';
+  const small = document.createElement('small');
+  small.textContent = s.name + ' · step ' + (step + 1) + ' of ' + s.steps.length;
+  cap.append(small, st.caption || '');
+  svg.append(trail, dot);
+}}
+function frame(now) {{
+  if (!story) return;
+  const s = STORIES[story.i];
+  const t = Math.max(0, paused ?? (now - start));
+  step = Math.min(Math.floor(t / STEP_MS), s.steps.length);
+  if (step >= s.steps.length) {{ stop(); return; }}
+  if (step !== story.shown) {{ story.shown = step; show(); }}
+  const wire = sel('data-edge', s.steps[step].edge)?.querySelector('path.wire');
+  if (wire) {{
+    const len = wire.getTotalLength(), head = len * ease((t % STEP_MS) / STEP_MS);
+    trail.setAttribute('d', wire.getAttribute('d'));
+    trail.setAttribute('stroke-dasharray', head + ' ' + len);
+    const p = wire.getPointAtLength(head);
+    dot.setAttribute('cx', p.x); dot.setAttribute('cy', p.y);
+  }}
+  raf = requestAnimationFrame(frame);
+}}
+function begin(at) {{
+  cancelAnimationFrame(raf);
+  story = {{ i: +pick.value, shown: -1 }};
+  paused = null; start = performance.now() - at * STEP_MS;
+  play.textContent = 'Pause';
+  raf = requestAnimationFrame(frame);
+}}
+function stop() {{ cancelAnimationFrame(raf); story = null; paused = null; show(); }}
+play.onclick = () => {{
+  if (!story) return begin(0);
+  if (paused === null) {{ paused = performance.now() - start; play.textContent = 'Resume'; }}
+  else {{ start = performance.now() - paused; paused = null; play.textContent = 'Pause'; }}
+}};
+document.getElementById('prev').onclick = () => begin(Math.max(0, (story ? step : 0) - 1));
+document.getElementById('next').onclick = () => {{
+  const n = STORIES[+pick.value]?.steps.length ?? 0;
+  if (!story) return begin(0);
+  step + 1 < n ? begin(step + 1) : stop();
+}};
+pick.onchange = stop;
+</script>
+</body></html>
+"#,
+        step_ms = (motion::STEP_SECS * 1000.) as u32,
+    )
 }
 
 /// Words in lines of at most `width` characters.
@@ -1125,6 +1389,34 @@ mod tests {
         // Laid out: web above api.
         let v = &doc.views[0];
         assert!(v.node("web").unwrap().y < v.node("api").unwrap().y);
+    }
+
+    #[test]
+    fn animated_svg_and_story_page() {
+        let mut doc = sample();
+        let id = doc.relations[0].id.clone();
+        let view = &mut doc.views[0];
+        view.edges[0].motion = Motion::Packets;
+        view.nodes[0].effect = Effect::Spin;
+        view.stories.push(Story {
+            name: "Checkout".into(),
+            steps: vec![Step {
+                edge: id,
+                caption: "</script> pays".into(),
+            }],
+        });
+        let s = animated_svg(&doc, &doc.views[0]);
+        assert!(
+            s.contains("@keyframes flow") && s.contains("animateMotion") && s.contains("orbit")
+        );
+        assert!(!svg(&doc, &doc.views[0]).contains("@keyframes"));
+        let mut still = doc.views[0].clone();
+        still.still = true;
+        assert!(!animated_svg(&doc, &still).contains("animateMotion"));
+        let page = story_html(&doc, &doc.views[0]);
+        assert!(page.contains("\"Checkout\"") && page.contains("data-edge"));
+        assert!(!page.contains("</script> pays"));
+        assert!(roxmltree::Document::parse(&s).is_ok());
     }
 
     #[test]

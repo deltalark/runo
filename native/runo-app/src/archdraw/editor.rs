@@ -1139,6 +1139,147 @@ impl Editor {
         }
     }
 
+    /// Give the selected shapes an effect.
+    pub(crate) fn effect(&mut self, effect: Effect) {
+        if self.sel.nodes.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        let ids = self.sel.nodes.clone();
+        let v = self.cur_mut();
+        for id in &ids {
+            if let Some(n) = v.node_mut(id) {
+                n.effect = effect;
+            }
+        }
+    }
+
+    /// Turn motion on or off for this diagram.
+    pub(crate) fn set_still(&mut self, still: bool) {
+        if self.cur().still != still {
+            self.checkpoint();
+            self.cur_mut().still = still;
+        }
+    }
+
+    /// A new story from the selected connectors, in the order a request would follow
+    /// them: each step starts where one before it ended, where it can.
+    pub(crate) fn story_from_selection(&mut self, name: &str) -> Option<usize> {
+        let picked: Vec<String> = self
+            .sel
+            .edges
+            .iter()
+            .filter(|id| self.cur().edge(id).is_some())
+            .cloned()
+            .collect();
+        if picked.is_empty() {
+            return None;
+        }
+        let ends = |id: &str| {
+            self.doc
+                .relation(id)
+                .map(|r| (r.from.clone(), r.to.clone()))
+                .unwrap_or_default()
+        };
+        let mut left = picked.clone();
+        let mut order: Vec<String> = Vec::new();
+        // Start from a connector nothing else in the selection leads into.
+        let start = left
+            .iter()
+            .position(|id| {
+                let (from, _) = ends(id);
+                !left.iter().any(|o| o != id && ends(o).1 == from)
+            })
+            .unwrap_or(0);
+        order.push(left.remove(start));
+        while !left.is_empty() {
+            let (_, at) = ends(order.last().unwrap());
+            let next = left.iter().position(|id| ends(id).0 == at).unwrap_or(0);
+            order.push(left.remove(next));
+        }
+        self.checkpoint();
+        let steps = order
+            .into_iter()
+            .map(|edge| Step {
+                caption: self
+                    .doc
+                    .relation(&edge)
+                    .map(|r| r.label.clone())
+                    .unwrap_or_default(),
+                edge,
+            })
+            .collect();
+        let v = self.cur_mut();
+        v.stories.push(Story {
+            name: name.to_string(),
+            steps,
+        });
+        Some(v.stories.len() - 1)
+    }
+
+    pub(crate) fn rename_story(&mut self, i: usize, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || self.cur().stories.get(i).is_none_or(|s| s.name == name) {
+            return;
+        }
+        self.checkpoint();
+        self.cur_mut().stories[i].name = name.to_string();
+    }
+
+    pub(crate) fn delete_story(&mut self, i: usize) {
+        if i < self.cur().stories.len() {
+            self.checkpoint();
+            self.cur_mut().stories.remove(i);
+        }
+    }
+
+    /// Add the selected connectors to the end of a story.
+    pub(crate) fn extend_story(&mut self, i: usize) {
+        let ids: Vec<String> = self.sel.edges.clone();
+        if ids.is_empty() || i >= self.cur().stories.len() {
+            return;
+        }
+        self.checkpoint();
+        let captions: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                self.doc
+                    .relation(id)
+                    .map(|r| r.label.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let story = &mut self.cur_mut().stories[i];
+        for (edge, caption) in ids.into_iter().zip(captions) {
+            story.steps.push(Step { edge, caption });
+        }
+    }
+
+    pub(crate) fn remove_step(&mut self, i: usize, step: usize) {
+        if self
+            .cur()
+            .stories
+            .get(i)
+            .is_some_and(|s| step < s.steps.len())
+        {
+            self.checkpoint();
+            self.cur_mut().stories[i].steps.remove(step);
+        }
+    }
+
+    pub(crate) fn set_caption(&mut self, i: usize, step: usize, caption: &str) {
+        let same = self
+            .cur()
+            .stories
+            .get(i)
+            .and_then(|s| s.steps.get(step))
+            .is_none_or(|s| s.caption == caption);
+        if !same {
+            self.checkpoint();
+            self.cur_mut().stories[i].steps[step].caption = caption.to_string();
+        }
+    }
+
     /// Format painter: remember the style of the first selected thing.
     pub(crate) fn copy_style(&mut self) {
         let v = self.cur();
@@ -1407,6 +1548,42 @@ mod tests {
 
     fn preset(label: &str) -> &'static Preset {
         PRESETS.iter().find(|p| p.label == label).unwrap()
+    }
+
+    #[test]
+    fn stories_follow_the_request_and_lose_deleted_steps() {
+        let mut ed = Editor::new(Doc::default());
+        let a = ed.add(preset("Person"), (0., 0.));
+        let b = ed.add(preset("Container"), (0., 300.));
+        let c = ed.add(preset("Database"), (0., 600.));
+        let ab = ed.connect(&a, &b).unwrap();
+        let bc = ed.connect(&b, &c).unwrap();
+        // Picked in the wrong order, played in the request's order.
+        ed.sel = Sel {
+            nodes: vec![],
+            edges: vec![bc.clone(), ab.clone()],
+        };
+        let i = ed.story_from_selection("Read").unwrap();
+        let steps: Vec<&str> = ed.cur().stories[i]
+            .steps
+            .iter()
+            .map(|s| s.edge.as_str())
+            .collect();
+        assert_eq!(steps, vec![ab.as_str(), bc.as_str()]);
+        ed.set_caption(i, 0, "Opens the app");
+        assert_eq!(ed.cur().stories[i].steps[0].caption, "Opens the app");
+        ed.sel = Sel {
+            nodes: vec![c.clone()],
+            edges: vec![],
+        };
+        ed.effect(Effect::Pulse);
+        assert_eq!(ed.cur().node(&c).unwrap().effect, Effect::Pulse);
+        ed.delete();
+        assert_eq!(ed.cur().stories[i].steps.len(), 1);
+        ed.set_still(true);
+        assert!(ed.cur().still);
+        assert!(ed.undo());
+        assert!(!ed.cur().still);
     }
 
     #[test]

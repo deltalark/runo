@@ -191,6 +191,115 @@ pub(crate) struct Node {
     pub locked: bool,
     #[serde(default, skip_serializing_if = "Style::is_empty")]
     pub style: Style,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub effect: Effect,
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+/// How a shape draws the eye while motion is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Effect {
+    #[default]
+    None,
+    /// A soft glow that breathes, for a hot path or a new part.
+    Pulse,
+    /// A ring that blinks, for an alert.
+    Blink,
+    /// The icon turns, for a worker, a sync or a job.
+    Spin,
+}
+
+impl Effect {
+    pub(crate) const ALL: [Effect; 4] = [Effect::None, Effect::Pulse, Effect::Blink, Effect::Spin];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Effect::None => "None",
+            Effect::Pulse => "Pulse",
+            Effect::Blink => "Blink",
+            Effect::Spin => "Spin",
+        }
+    }
+}
+
+/// How a connector moves while motion is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Motion {
+    /// Dashes marching in the arrow's direction.
+    #[default]
+    Flow,
+    /// Dots travelling along the line, both ways on a two-way connector.
+    Packets,
+    /// The line glows now and then.
+    Pulse,
+    None,
+}
+
+impl Motion {
+    pub(crate) const ALL: [Motion; 4] =
+        [Motion::Flow, Motion::Packets, Motion::Pulse, Motion::None];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Motion::Flow => "Flow",
+            Motion::Packets => "Packets",
+            Motion::Pulse => "Pulse",
+            Motion::None => "None",
+        }
+    }
+}
+
+/// How fast a connector moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Speed {
+    Slow,
+    #[default]
+    Normal,
+    Fast,
+}
+
+impl Speed {
+    pub(crate) const ALL: [Speed; 3] = [Speed::Slow, Speed::Normal, Speed::Fast];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Speed::Slow => "Slow",
+            Speed::Normal => "Normal",
+            Speed::Fast => "Fast",
+        }
+    }
+
+    /// Diagram units per second.
+    pub(crate) fn rate(self) -> f32 {
+        match self {
+            Speed::Slow => 24.,
+            Speed::Normal => 48.,
+            Speed::Fast => 110.,
+        }
+    }
+}
+
+/// A named walk through the diagram, one connector at a time, played as an animation.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Story {
+    pub name: String,
+    #[serde(default, rename = "step", skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<Step>,
+}
+
+/// One step of a story: a connector, and what to say while it plays.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Step {
+    /// The connector's (relation's) id.
+    pub edge: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub caption: String,
 }
 
 impl Node {
@@ -230,6 +339,10 @@ pub(crate) struct Edge {
     pub arrow: Arrow,
     #[serde(default, skip_serializing_if = "Style::is_empty")]
     pub style: Style,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub motion: Motion,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub speed: Speed,
 }
 
 /// One diagram: a view over the model.
@@ -245,6 +358,11 @@ pub(crate) struct View {
     pub nodes: Vec<Node>,
     #[serde(default, rename = "edge", skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<Edge>,
+    /// Motion is off on this diagram.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub still: bool,
+    #[serde(default, rename = "story", skip_serializing_if = "Vec::is_empty")]
+    pub stories: Vec<Story>,
 }
 
 impl View {
@@ -353,6 +471,11 @@ impl Doc {
                         .find(|r| r.id == e.id)
                         .is_some_and(|r| shown.contains(&r.from) && shown.contains(&r.to))
             });
+            let drawn: std::collections::HashSet<String> =
+                v.edges.iter().map(|e| e.id.clone()).collect();
+            for story in &mut v.stories {
+                story.steps.retain(|s| drawn.contains(&s.edge));
+            }
         }
     }
 
@@ -626,6 +749,7 @@ mod tests {
                             fill: Some("#112233".into()),
                             ..Default::default()
                         },
+                        effect: Effect::Pulse,
                         ..Default::default()
                     },
                     Node {
@@ -640,7 +764,17 @@ mod tests {
                 edges: vec![Edge {
                     id: "web-db".into(),
                     route: Route::Curved,
+                    motion: Motion::Packets,
+                    speed: Speed::Fast,
                     ..Default::default()
+                }],
+                still: false,
+                stories: vec![Story {
+                    name: "Read".into(),
+                    steps: vec![Step {
+                        edge: "web-db".into(),
+                        caption: "Reads the orders".into(),
+                    }],
                 }],
             }],
         }

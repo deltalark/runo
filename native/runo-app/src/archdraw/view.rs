@@ -6,6 +6,7 @@ use super::geom::{self, Align, Guide, Handle, Pt, Side};
 use super::io;
 use super::model::Style as DStyle;
 use super::model::*;
+use super::motion;
 use super::shape::{self, Seg, Theme};
 use crate::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -142,7 +143,32 @@ pub(crate) struct ArchEditor {
     export_open: bool,
     scanning: bool,
     load_error: Option<String>,
+    /// When the editor opened: the clock every animation runs on.
+    born: Instant,
+    /// Renaming a story (no step) or changing a step's caption.
+    f_story: Entity<InputState>,
+    story_edit: Option<(usize, Option<usize>)>,
+    /// The story whose steps the panel lists.
+    open_story: Option<usize>,
+    /// A story playing: which, and when it started (or how far in it was paused).
+    playing: Option<Playing>,
+    /// A repaint is scheduled for the next animation frame.
+    ticking: bool,
     _subs: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy)]
+struct Playing {
+    story: usize,
+    start: Instant,
+    paused: Option<f32>,
+}
+
+impl Playing {
+    fn elapsed(&self) -> f32 {
+        self.paused
+            .unwrap_or_else(|| self.start.elapsed().as_secs_f32())
+    }
 }
 
 impl EventEmitter<ArchEvent> for ArchEditor {}
@@ -341,6 +367,23 @@ impl ArchEditor {
         );
         let t_model = area(window, cx, "", None, &mut subs);
         let t_view = area(window, cx, "", None, &mut subs);
+        let f_story = cx.new(|cx| InputState::new(window, cx));
+        subs.push(
+            cx.subscribe_in(&f_story, window, |this, state, ev, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let v = state.read(cx).value().to_string();
+                    if let Some((i, step)) = this.story_edit.take() {
+                        this.act(cx, |ed| match step {
+                            Some(j) => ed.set_caption(i, j, v.trim()),
+                            None => ed.rename_story(i, &v),
+                        });
+                    }
+                    if matches!(ev, InputEvent::PressEnter { .. }) {
+                        window.focus(&this.focus, cx);
+                    }
+                }
+            }),
+        );
         Self {
             ed: Editor::new(doc),
             root,
@@ -388,6 +431,12 @@ impl ArchEditor {
             export_open: false,
             scanning: false,
             load_error,
+            born: Instant::now(),
+            f_story,
+            story_edit: None,
+            open_story: None,
+            playing: None,
+            ticking: false,
             _subs: subs,
         }
     }
@@ -783,6 +832,8 @@ impl ArchEditor {
                 .background_spawn(async move {
                     let bytes = match ext {
                         "svg" => io::svg(&doc, &view).into_bytes(),
+                        "motion.svg" => io::animated_svg(&doc, &view).into_bytes(),
+                        "html" => io::story_html(&doc, &view).into_bytes(),
                         "png" => io::png(&doc, &view)?,
                         "mmd" => io::mermaid(&doc, &view).into_bytes(),
                         _ => io::drawio(&doc).into_bytes(),
@@ -1389,6 +1440,9 @@ struct ShapeDraw {
     opacity: f32,
     dashed: bool,
     width: f32,
+    rect: Rect,
+    effect: Effect,
+    radius: f32,
 }
 
 #[derive(Clone)]
@@ -1400,6 +1454,18 @@ struct WireDraw {
     width: f32,
     start: bool,
     end: bool,
+    motion: Motion,
+    speed: Speed,
+    /// Drawn faintly: another part of the diagram is playing.
+    dim: bool,
+}
+
+/// The step of a story on screen: the connector a packet travels and how far it got.
+#[derive(Clone)]
+struct StoryDraw {
+    line: Vec<Pt>,
+    progress: f32,
+    lit: Vec<Rect>,
 }
 
 /// Everything the canvas paints in one frame.
@@ -1421,6 +1487,10 @@ struct Scene {
     marquee: Option<Rect>,
     connect: Option<WireDraw>,
     target: Option<Rect>,
+    /// Seconds on the animation clock, and whether anything moves.
+    t: f32,
+    moving: bool,
+    story: Option<StoryDraw>,
 }
 
 fn col(c: u32, a: f32) -> Rgba {
@@ -1503,7 +1573,13 @@ fn arrowhead(from: Pt, tip: Pt, size: f32) -> Vec<Seg> {
     ]
 }
 
-fn paint_wire(w: &WireDraw, tf: &dyn Fn(Pt) -> Point<Pixels>, zoom: f32, window: &mut Window) {
+fn paint_wire(
+    w: &WireDraw,
+    tf: &dyn Fn(Pt) -> Point<Pixels>,
+    zoom: f32,
+    alpha: f32,
+    window: &mut Window,
+) {
     let width = (w.width * zoom).max(1.);
     let size = (10. * zoom).max(6.) / zoom;
     // Stop the line short of the arrow's tip so the tip stays sharp.
@@ -1533,21 +1609,161 @@ fn paint_wire(w: &WireDraw, tf: &dyn Fn(Pt) -> Point<Pixels>, zoom: f32, window:
     }
     let draw = WireDraw { pts, ..w.clone() };
     if let Some(p) = build_path(&wire_segs(&draw), tf, stroke_builder(width, w.dashed, zoom)) {
-        window.paint_path(p, col(w.color, 1.));
+        window.paint_path(p, col(w.color, alpha));
     }
     if w.end {
         if let Some((from, tip)) = wire.end_dir() {
             if let Some(p) = build_path(&arrowhead(from, tip, size), tf, PathBuilder::fill()) {
-                window.paint_path(p, col(w.color, 1.));
+                window.paint_path(p, col(w.color, alpha));
             }
         }
     }
     if w.start {
         if let Some((from, tip)) = wire.start_dir() {
             if let Some(p) = build_path(&arrowhead(from, tip, size), tf, PathBuilder::fill()) {
-                window.paint_path(p, col(w.color, 1.));
+                window.paint_path(p, col(w.color, alpha));
             }
         }
+    }
+}
+
+/// A line through `pts`, stroked.
+fn paint_line(
+    pts: &[Pt],
+    tf: &dyn Fn(Pt) -> Point<Pixels>,
+    width: f32,
+    color: Rgba,
+    window: &mut Window,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let mut b = PathBuilder::stroke(px(width));
+    b.move_to(tf(pts[0]));
+    for p in &pts[1..] {
+        b.line_to(tf(*p));
+    }
+    if let Ok(path) = b.build() {
+        window.paint_path(path, color);
+    }
+}
+
+/// A filled circle around `c` (in diagram units) with radius `r` (in pixels).
+fn paint_dot(c: Pt, r: f32, tf: &dyn Fn(Pt) -> Point<Pixels>, color: Rgba, window: &mut Window) {
+    let p = tf(c);
+    window.paint_quad(quad(
+        Bounds::new(
+            point(p.x - px(r), p.y - px(r)),
+            size(px(2. * r), px(2. * r)),
+        ),
+        px(r),
+        color,
+        px(0.),
+        color,
+        BorderStyle::Solid,
+    ));
+}
+
+/// What moves on a connector at time `t`, over its still line.
+fn paint_motion(
+    w: &WireDraw,
+    t: f32,
+    tf: &dyn Fn(Pt) -> Point<Pixels>,
+    zoom: f32,
+    window: &mut Window,
+) {
+    let line = motion::flatten(&w.pts, w.curved);
+    let bright = shape::mix(w.color, 0xffffff, 0.15);
+    match w.motion {
+        Motion::Flow => {
+            let width = ((w.width + 0.8) * zoom).max(1.5);
+            for dash in motion::dashes(&line, t, w.speed) {
+                paint_line(&dash, tf, width, col(bright, 1.), window);
+            }
+        }
+        Motion::Packets => {
+            let len = motion::length(&line);
+            let r = (4.2 * zoom).clamp(2.6, 8.);
+            for s in motion::packets(len, t, w.speed) {
+                paint_dot(motion::at(&line, s), r + 2.5, tf, col(bright, 0.25), window);
+                paint_dot(motion::at(&line, s), r, tf, col(bright, 1.), window);
+            }
+            if w.start && w.end {
+                let spacing = len / (len / motion::PACKET_SPACING).ceil().max(1.);
+                for s in motion::packets(len, t + spacing / 2. / w.speed.rate(), w.speed) {
+                    paint_dot(motion::at(&line, len - s), r, tf, col(bright, 0.8), window);
+                }
+            }
+        }
+        Motion::Pulse => {
+            let p = motion::pulse(t * w.speed.rate() / Speed::Normal.rate());
+            let width = ((w.width + 5. * p) * zoom).max(1.);
+            paint_line(&line, tf, width, col(w.color, 0.35 * p), window);
+        }
+        Motion::None => {}
+    }
+}
+
+/// A shape's effect at time `t`: a breathing glow, a blinking ring.
+fn paint_effect(
+    sh: &ShapeDraw,
+    t: f32,
+    accent: u32,
+    tf: &dyn Fn(Pt) -> Point<Pixels>,
+    zoom: f32,
+    window: &mut Window,
+) {
+    let ring = |grow: f32, width: f32, color: Rgba, window: &mut Window| {
+        let p = tf((sh.rect.x, sh.rect.y));
+        let g = grow * zoom;
+        window.paint_quad(quad(
+            Bounds::new(
+                point(p.x - px(g), p.y - px(g)),
+                size(px(sh.rect.w * zoom + 2. * g), px(sh.rect.h * zoom + 2. * g)),
+            ),
+            px((sh.radius + grow) * zoom),
+            col(0, 0.),
+            px(width),
+            color,
+            BorderStyle::Solid,
+        ));
+    };
+    let color = sh.stroke.unwrap_or(accent);
+    match sh.effect {
+        Effect::Pulse => {
+            let p = motion::pulse(t);
+            ring(
+                3. + 9. * p,
+                (2.5 * zoom).max(1.),
+                col(color, 0.55 * (1. - p) + 0.1),
+                window,
+            );
+        }
+        Effect::Blink => {
+            if motion::blink(t) {
+                ring(5., (2.5 * zoom).max(1.5), col(0xef4444, 0.95), window);
+            }
+        }
+        Effect::Spin => {
+            let o = motion::outline(sh.rect.x, sh.rect.y, sh.rect.w, sh.rect.h, 5.);
+            let (head, tail) = motion::orbit(&o, t);
+            let width = (2.5 * zoom).max(1.5);
+            paint_line(
+                &motion::slice(&o, tail, head),
+                tf,
+                width,
+                col(color, 0.9),
+                window,
+            );
+            paint_dot(
+                motion::at(&o, head),
+                width * 1.6,
+                tf,
+                col(color, 1.),
+                window,
+            );
+        }
+        Effect::None => {}
     }
 }
 
@@ -1595,10 +1811,68 @@ fn paint_scene(b: Bounds<Pixels>, s: &Scene, window: &mut Window) {
         paint_shape(sh, &tf, zoom, window);
     }
     for wd in &s.wires {
-        paint_wire(wd, &tf, zoom, window);
+        let moves = s.moving && !wd.dim && wd.motion != Motion::None;
+        let alpha = if wd.dim {
+            0.2
+        } else if moves && wd.motion == Motion::Flow {
+            0.4
+        } else {
+            1.
+        };
+        paint_wire(wd, &tf, zoom, alpha, window);
+        if moves {
+            paint_motion(wd, s.t, &tf, zoom, window);
+        }
     }
     for sh in &s.over {
         paint_shape(sh, &tf, zoom, window);
+    }
+    if s.moving {
+        for sh in s.under.iter().chain(&s.over) {
+            if sh.effect != Effect::None && sh.opacity > 0.5 {
+                paint_effect(sh, s.t, s.accent, &tf, zoom, window);
+            }
+        }
+    }
+    if let Some(st) = &s.story {
+        for r in &st.lit {
+            let p = tf((r.x, r.y));
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(p.x - px(5.), p.y - px(5.)),
+                    size(px(r.w * zoom + 10.), px(r.h * zoom + 10.)),
+                ),
+                px(10.),
+                col(0, 0.),
+                px(2.5),
+                col(0xf59e0b, 0.9),
+                BorderStyle::Solid,
+            ));
+        }
+        let len = motion::length(&st.line);
+        let head = len * motion::ease(st.progress);
+        paint_line(
+            &motion::slice(&st.line, 0., head),
+            &tf,
+            (3. * zoom).max(2.),
+            col(0xf59e0b, 0.9),
+            window,
+        );
+        let r = (7. * zoom).clamp(4., 12.);
+        paint_dot(
+            motion::at(&st.line, head),
+            r + 3.,
+            &tf,
+            col(0xf59e0b, 0.3),
+            window,
+        );
+        paint_dot(
+            motion::at(&st.line, head),
+            r,
+            &tf,
+            col(0xf59e0b, 1.),
+            window,
+        );
     }
     let rect_bounds = |r: &Rect, grow: f32| {
         let p = tf((r.x, r.y));
@@ -1675,7 +1949,7 @@ fn paint_scene(b: Bounds<Pixels>, s: &Scene, window: &mut Window) {
         window.paint_quad(fill(bounds, rgb(0xec4899)));
     }
     if let Some(wd) = &s.connect {
-        paint_wire(wd, &tf, zoom, window);
+        paint_wire(wd, &tf, zoom, 1., window);
     }
     if let Some(m) = &s.marquee {
         window.paint_quad(quad(
@@ -1847,6 +2121,22 @@ impl ArchEditor {
     fn scene(&self, theme: &Theme) -> Scene {
         let v = self.ed.cur();
         let accent = c_blue();
+        let t = self.born.elapsed().as_secs_f32();
+        // A story playing: the edges and shapes it involves, and the step on now.
+        let story = self.playing.and_then(|p| {
+            let st = v.stories.get(p.story)?;
+            let mut edges = std::collections::HashSet::new();
+            let mut nodes = std::collections::HashSet::new();
+            for step in &st.steps {
+                if let Some(r) = self.ed.doc.relation(&step.edge) {
+                    edges.insert(step.edge.clone());
+                    nodes.insert(r.from.clone());
+                    nodes.insert(r.to.clone());
+                }
+            }
+            let now = motion::step_at(p.elapsed(), st.steps.len());
+            Some((edges, nodes, now))
+        });
         let mut under = Vec::new();
         let mut over = Vec::new();
         for n in &v.nodes {
@@ -1855,14 +2145,21 @@ impl ArchEditor {
             };
             let o = shape::outline(e.kind, &n.rect(), &n.style);
             let p = shape::paint(e.kind, &n.style, theme);
+            let dim = story.as_ref().is_some_and(|s| !s.1.contains(&n.id));
             let sd = ShapeDraw {
                 fill: o.fill,
                 detail: o.detail,
                 fill_c: p.fill,
                 stroke: p.stroke,
-                opacity: p.opacity,
+                opacity: if dim { p.opacity * 0.3 } else { p.opacity },
                 dashed: p.dashed,
                 width: if e.kind == Kind::Boundary { 1.2 } else { 1.5 },
+                rect: n.rect(),
+                effect: n.effect,
+                radius: n
+                    .style
+                    .radius
+                    .unwrap_or_else(|| shape::default_radius(e.kind)),
             };
             if e.kind == Kind::Boundary {
                 under.push(sd);
@@ -1898,6 +2195,9 @@ impl ArchEditor {
                     width: if selected { 2.5 } else { 1.5 },
                     start: e.arrow == Arrow::Both,
                     end: e.arrow != Arrow::None,
+                    motion: e.motion,
+                    speed: e.speed,
+                    dim: story.as_ref().is_some_and(|s| !s.0.contains(&id)),
                 })
             })
             .collect();
@@ -1957,6 +2257,9 @@ impl ArchEditor {
                         width: 2.,
                         start: false,
                         end: true,
+                        motion: Motion::None,
+                        speed: Speed::Normal,
+                        dim: false,
                     }
                 });
                 (None, wire, target)
@@ -1993,7 +2296,30 @@ impl ArchEditor {
             marquee,
             connect,
             target,
+            t,
+            moving: !v.still || self.playing.is_some(),
+            story: self.story_draw(),
         }
+    }
+
+    /// The step of the playing story, if one is on screen now.
+    fn story_draw(&self) -> Option<StoryDraw> {
+        let p = self.playing?;
+        let st = self.ed.cur().stories.get(p.story)?;
+        let (i, progress) = motion::step_at(p.elapsed(), st.steps.len())?;
+        let edge = &st.steps[i].edge;
+        let (_, wire) = self.ed.wires().into_iter().find(|(id, _)| id == edge)?;
+        let r = self.ed.doc.relation(edge)?;
+        let line = motion::flatten(&wire.points, wire.curved);
+        let lit = [&r.from, &r.to]
+            .iter()
+            .filter_map(|id| self.ed.rect(id))
+            .collect();
+        Some(StoryDraw {
+            line,
+            progress,
+            lit,
+        })
     }
 
     /// Fill the property fields for what's selected, when that changes.
@@ -2344,6 +2670,18 @@ impl ArchEditor {
                     cx.notify();
                 })),
             )
+            .child(
+                icon_btn(
+                    "arch-motion-toggle",
+                    IconName::Activity,
+                    "Motion: animate connectors and effects (saved with the diagram)",
+                    !self.ed.cur().still,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let still = !this.ed.cur().still;
+                    this.act(cx, |ed| ed.set_still(still));
+                })),
+            )
             .child(sep())
             .child(
                 icon_btn("arch-zoom-out", IconName::Minus, "Zoom out", false).on_click(
@@ -2463,6 +2801,22 @@ impl ArchEditor {
                     .on_click(cx.listener(|this, _, _, cx| this.export("svg", cx))),
             )
             .child(
+                item(
+                    "arch-exp-motion",
+                    "Animated SVG",
+                    "Moving connectors and effects, for docs and slides",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.export("motion.svg", cx))),
+            )
+            .child(
+                item(
+                    "arch-exp-html",
+                    "Story player",
+                    "A web page that plays this diagram's stories",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.export("html", cx))),
+            )
+            .child(
                 item("arch-exp-png", "PNG", "This diagram, as an image at 2x")
                     .on_click(cx.listener(|this, _, _, cx| this.export("png", cx))),
             )
@@ -2515,7 +2869,16 @@ impl ArchEditor {
                             .left(px(ix))
                             .top(px(iy))
                             .opacity(0.8 * p.opacity)
-                            .child(icon(glyph, 14. * z, p.stroke.unwrap_or(p.text)))
+                            .child({
+                                let i = icon(glyph, 14. * z, p.stroke.unwrap_or(p.text));
+                                if n.effect == Effect::Spin && !v.still {
+                                    i.rotate(radians(motion::spin(
+                                        self.born.elapsed().as_secs_f32(),
+                                    )))
+                                } else {
+                                    i
+                                }
+                            })
                             .into_any_element(),
                     );
                 }
@@ -3157,6 +3520,7 @@ impl ArchEditor {
             .children(self.inline_view())
             .children(self.empty_state(cx))
             .children(self.minimap(cx))
+            .children(self.player(cx))
             .child(
                 div()
                     .absolute()
@@ -3591,6 +3955,7 @@ impl ArchEditor {
                 }
                 body = body.child(label_row("Opens diagram (right-click it to open)", links));
             }
+            body = body.child(self.effect_section(Some(n.effect), cx));
             body = body.child(self.style_section(&n.style.clone(), false, cx));
             body = body.child(section("Arrange")).child(
                 div()
@@ -3705,6 +4070,7 @@ impl ArchEditor {
             body = body
                 .child(label_row("Path", routes))
                 .child(label_row("Arrows", arrows))
+                .child(self.motion_section(Some(e.motion), Some(e.speed), cx))
                 .child(self.style_section(&e.style.clone(), true, cx))
                 .child(
                     div()
@@ -3868,6 +4234,20 @@ impl ArchEditor {
                 .and_then(|id| v.node(id))
                 .map(|n| n.style.clone())
                 .unwrap_or_default();
+            if n > 0 {
+                let effect = self
+                    .ed
+                    .sel
+                    .nodes
+                    .first()
+                    .and_then(|id| v.node(id))
+                    .map(|n| n.effect);
+                body = body.child(self.effect_section(effect, cx));
+            }
+            if m > 0 {
+                let e = self.ed.sel.edges.first().and_then(|id| v.edge(id));
+                body = body.child(self.motion_section(e.map(|e| e.motion), e.map(|e| e.speed), cx));
+            }
             body = body.child(self.style_section(&first, n == 0, cx)).child(
                 div()
                     .flex()
@@ -3918,6 +4298,7 @@ impl ArchEditor {
                             el.child(text_btn("arch-del-view", "Delete diagram", Some(IconName::Trash), false).on_click(cx.listener(|this, _, _, cx| this.act(cx, |ed| ed.delete_view()))))
                         }),
                 )
+                .child(self.stories_section(cx))
                 .child(section("Shortcuts"))
                 .child(
                     div()
@@ -3950,6 +4331,463 @@ impl ArchEditor {
                 );
         }
         body
+    }
+
+    /// How the selected connectors move.
+    fn motion_section(
+        &self,
+        motion: Option<Motion>,
+        speed: Option<Speed>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut kinds = div().flex().flex_wrap().gap_1();
+        for (i, m) in Motion::ALL.into_iter().enumerate() {
+            kinds = kinds.child(
+                chip_btn(("arch-motion", i), m.label(), motion == Some(m)).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.act(cx, |ed| ed.edges(|e| e.motion = m))
+                    }),
+                ),
+            );
+        }
+        let mut speeds = div().flex().gap_1();
+        for (i, sp) in Speed::ALL.into_iter().enumerate() {
+            speeds = speeds.child(
+                chip_btn(("arch-speed", i), sp.label(), speed == Some(sp)).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.act(cx, |ed| ed.edges(|e| e.speed = sp))
+                    }),
+                ),
+            );
+        }
+        let mut out = div()
+            .v_flex()
+            .gap_2()
+            .child(section("Motion"))
+            .child(kinds)
+            .when(motion != Some(Motion::None), |el| {
+                el.child(label_row("Speed", speeds))
+            });
+        if self.ed.cur().still {
+            out = out.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child("Motion is off for this diagram. Turn it on in the toolbar."),
+            );
+        }
+        let stories = &self.ed.cur().stories;
+        let mut story_row = div().flex().flex_wrap().gap_1().child(
+            text_btn(
+                "arch-story-new",
+                "New story from these",
+                Some(IconName::Play),
+                false,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                let n = this.ed.cur().stories.len() + 1;
+                let mut made = None;
+                this.act(cx, |ed| {
+                    made = ed.story_from_selection(&format!("Story {n}"))
+                });
+                if let Some(i) = made {
+                    this.note(format!("Made Story {n}. Press Play to watch it."), false);
+                    this.play(i, cx);
+                }
+            })),
+        );
+        for (i, st) in stories.iter().enumerate() {
+            story_row = story_row.child(
+                chip_btn(("arch-story-add", i), format!("Add to {}", st.name), false).on_click(
+                    cx.listener(move |this, _, _, cx| this.act(cx, |ed| ed.extend_story(i))),
+                ),
+            );
+        }
+        out.child(label_row(
+            "Story (an animated walk through the diagram)",
+            story_row,
+        ))
+    }
+
+    /// How the selected shapes draw the eye.
+    fn effect_section(&self, effect: Option<Effect>, cx: &mut Context<Self>) -> Div {
+        let mut row = div().flex().flex_wrap().gap_1();
+        for (i, fx) in Effect::ALL.into_iter().enumerate() {
+            row = row.child(
+                chip_btn(("arch-effect", i), fx.label(), effect == Some(fx))
+                    .on_click(cx.listener(move |this, _, _, cx| this.act(cx, |ed| ed.effect(fx)))),
+            );
+        }
+        div().v_flex().gap_2().child(section("Effect")).child(row)
+    }
+
+    /// The diagram's stories, to play or remove.
+    fn stories_section(&self, cx: &mut Context<Self>) -> Div {
+        let v = self.ed.cur();
+        let mut out = div().v_flex().gap_2().child(section("Stories"));
+        if v.stories.is_empty() {
+            return out.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_secondary()))
+                    .child("Select the connectors a request travels, then choose New story from these. Play shows it step by step."),
+            );
+        }
+        for (i, st) in v.stories.iter().enumerate() {
+            let on = self.playing.is_some_and(|p| p.story == i);
+            let open = self.open_story == Some(i) || on;
+            let renaming = self.story_edit == Some((i, None));
+            out = out.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        icon_btn(
+                            ("arch-story-play", i),
+                            if on { IconName::Square } else { IconName::Play },
+                            if on { "Stop" } else { "Play" },
+                            on,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.playing.is_some_and(|p| p.story == i) {
+                                this.playing = None;
+                            } else {
+                                this.play(i, cx);
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .child(if renaming {
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.f_story).bordered(true).h(px(26.)))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .id(("arch-story-name", i))
+                            .flex_1()
+                            .min_w_0()
+                            .cursor_pointer()
+                            .text_size(px(12.5))
+                            .child(format!("{} · {} steps", st.name, st.steps.len()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_story = if this.open_story == Some(i) {
+                                    None
+                                } else {
+                                    Some(i)
+                                };
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    })
+                    .child(
+                        icon_btn(("arch-story-ren", i), IconName::Pencil, "Rename", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let name = this
+                                    .ed
+                                    .cur()
+                                    .stories
+                                    .get(i)
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_default();
+                                this.edit_story(i, None, name, window, cx);
+                            })),
+                    )
+                    .child(
+                        icon_btn(
+                            ("arch-story-del", i),
+                            IconName::Trash,
+                            "Delete story",
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.playing.is_some_and(|p| p.story == i) {
+                                this.playing = None;
+                            }
+                            this.open_story = None;
+                            this.act(cx, |ed| ed.delete_story(i));
+                        })),
+                    ),
+            );
+            if !open {
+                continue;
+            }
+            let current = self
+                .playing
+                .filter(|p| p.story == i)
+                .and_then(|p| motion::step_at(p.elapsed(), st.steps.len()))
+                .map(|s| s.0);
+            for (j, step) in st.steps.iter().enumerate() {
+                let editing = self.story_edit == Some((i, Some(j)));
+                let caption = if step.caption.is_empty() {
+                    self.ed
+                        .doc
+                        .relation(&step.edge)
+                        .map(|r| {
+                            let n = |id: &str| {
+                                self.ed
+                                    .doc
+                                    .element(id)
+                                    .map(|e| e.name.clone())
+                                    .unwrap_or_default()
+                            };
+                            format!("{} → {}", n(&r.from), n(&r.to))
+                        })
+                        .unwrap_or_default()
+                } else {
+                    step.caption.clone()
+                };
+                out = out.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .pl(px(30.))
+                        .child(
+                            div()
+                                .w(px(16.))
+                                .text_size(px(11.))
+                                .text_color(rgb(if current == Some(j) {
+                                    0xf59e0b
+                                } else {
+                                    c_muted()
+                                }))
+                                .child(format!("{}", j + 1)),
+                        )
+                        .child(if editing {
+                            div()
+                                .flex_1()
+                                .child(Input::new(&self.f_story).bordered(true).h(px(26.)))
+                                .into_any_element()
+                        } else {
+                            div()
+                                .id(("arch-step", i * 1000 + j))
+                                .flex_1()
+                                .min_w_0()
+                                .cursor_pointer()
+                                .text_size(px(12.))
+                                .text_color(rgb(c_secondary()))
+                                .hover(|el| el.text_color(rgb(c_text())))
+                                .child(caption.clone())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.edit_story(i, Some(j), caption.clone(), window, cx);
+                                }))
+                                .into_any_element()
+                        })
+                        .child(
+                            icon_btn(
+                                ("arch-step-del", i * 1000 + j),
+                                IconName::X,
+                                "Remove step",
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.act(cx, |ed| ed.remove_step(i, j)),
+                            )),
+                        ),
+                );
+            }
+        }
+        out
+    }
+
+    /// Edit a story's name (no step) or a step's caption in place.
+    fn edit_story(
+        &mut self,
+        i: usize,
+        step: Option<usize>,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.story_edit = Some((i, step));
+        self.f_story
+            .update(cx, |s, cx| s.set_value(text, window, cx));
+        let input = self.f_story.clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |s, cx| s.focus(window, cx))
+        });
+        cx.notify();
+    }
+
+    /// Start playing a story from its first step.
+    fn play(&mut self, story: usize, cx: &mut Context<Self>) {
+        self.playing = Some(Playing {
+            story,
+            start: Instant::now(),
+            paused: None,
+        });
+        cx.notify();
+    }
+
+    /// Jump `by` steps in the playing story.
+    fn step_story(&mut self, by: i32) {
+        let Some(p) = self.playing.as_mut() else {
+            return;
+        };
+        let steps = self
+            .ed
+            .cur()
+            .stories
+            .get(p.story)
+            .map_or(0, |s| s.steps.len());
+        let now = (p.elapsed() / motion::STEP_SECS) as i32;
+        let to = (now + by).clamp(0, steps.saturating_sub(1) as i32) as f32 * motion::STEP_SECS;
+        if p.paused.is_some() {
+            p.paused = Some(to);
+        } else {
+            p.start = Instant::now() - Duration::from_secs_f32(to);
+        }
+    }
+
+    fn pause_story(&mut self) {
+        let Some(p) = self.playing.as_mut() else {
+            return;
+        };
+        match p.paused.take() {
+            Some(at) => p.start = Instant::now() - Duration::from_secs_f32(at),
+            None => p.paused = Some(p.start.elapsed().as_secs_f32()),
+        }
+    }
+
+    /// The bar under a playing story: where it is and its controls.
+    fn player(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.playing?;
+        let st = self.ed.cur().stories.get(p.story)?;
+        let (i, _) = motion::step_at(p.elapsed(), st.steps.len())
+            .unwrap_or((st.steps.len().saturating_sub(1), 1.));
+        let step = st.steps.get(i)?;
+        let caption = if step.caption.is_empty() {
+            self.ed
+                .doc
+                .relation(&step.edge)
+                .map(|r| {
+                    let n = |id: &str| {
+                        self.ed
+                            .doc
+                            .element(id)
+                            .map(|e| e.name.clone())
+                            .unwrap_or_default()
+                    };
+                    format!("{} → {}", n(&r.from), n(&r.to))
+                })
+                .unwrap_or_default()
+        } else {
+            step.caption.clone()
+        };
+        Some(
+            div()
+                .absolute()
+                .bottom(px(44.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .id("arch-player")
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .bg(float(c_canvas()))
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .v_flex()
+                                .min_w(px(220.))
+                                .max_w(px(420.))
+                                .child(div().text_size(px(11.)).text_color(rgb(c_muted())).child(
+                                    format!("{} · step {} of {}", st.name, i + 1, st.steps.len()),
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(13.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(caption),
+                                ),
+                        )
+                        .child(
+                            icon_btn(
+                                "arch-play-prev",
+                                IconName::ChevronLeft,
+                                "Previous step",
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.step_story(-1);
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            icon_btn(
+                                "arch-play-pause",
+                                if p.paused.is_some() {
+                                    IconName::Play
+                                } else {
+                                    IconName::Pause
+                                },
+                                "Pause or play",
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.pause_story();
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            icon_btn("arch-play-next", IconName::ChevronRight, "Next step", false)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.step_story(1);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            icon_btn("arch-play-stop", IconName::X, "Stop", false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.playing = None;
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Repaint soon while something on the canvas moves.
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.ticking {
+            return;
+        }
+        self.ticking = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(33))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.ticking = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Whether anything on the diagram moves now.
+    fn animating(&self) -> bool {
+        if self.playing.is_some() {
+            return true;
+        }
+        let v = self.ed.cur();
+        !v.still
+            && (v.edges.iter().any(|e| e.motion != Motion::None)
+                || v.nodes.iter().any(|n| n.effect != Effect::None))
     }
 
     fn text_panel(&self, cx: &mut Context<Self>) -> Div {
@@ -4059,6 +4897,23 @@ impl Render for ArchEditor {
         if !self.fitted && self.view_size().0 > 10. {
             self.fit(false);
             self.fitted = true;
+        }
+        if let Some(p) = self.playing {
+            let steps = self
+                .ed
+                .cur()
+                .stories
+                .get(p.story)
+                .map_or(0, |s| s.steps.len());
+            if p.paused.is_none() && motion::step_at(p.elapsed(), steps).is_none() {
+                // Rest on the last step for a moment, then end.
+                if p.elapsed() > steps as f32 * motion::STEP_SECS + 1.2 {
+                    self.playing = None;
+                }
+            }
+        }
+        if self.animating() {
+            self.tick(cx);
         }
         let theme = self.theme();
         let scene = self.scene(&theme);
