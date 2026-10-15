@@ -7439,4 +7439,3 @@ fn thinking_line(secs: Option<u64>, scanning: bool) -> &'static str {
 fn pulse(d: f32) -> f32 {
     1. - (d * 2. - 1.).abs()
 }
-
