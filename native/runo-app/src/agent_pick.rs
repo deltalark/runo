@@ -127,8 +127,14 @@ impl AgentPick {
             return None;
         }
         let shown = self.shown.unwrap_or(self.agent);
-        let mut agents = div().p_1().w(px(190.)).v_flex();
-        for i in self.choices(cx) {
+        let choices = self.choices(cx);
+        let mut agents = div()
+            .id(SharedString::from(format!("{key}-agents")))
+            .p_1()
+            .w(px(190.))
+            .overflow_y_scroll()
+            .v_flex();
+        for i in choices.iter().copied() {
             let p = &agent::PROVIDERS[i];
             agents = agents.child(
                 menu_row(
@@ -165,20 +171,28 @@ impl AgentPick {
                 .child(icon(IconName::ChevronRight, 12., c_muted())),
             );
         }
-        // The models column keeps the height of the longest list, so hovering an agent
-        // with fewer models doesn't resize the menu under the pointer.
+        // Both columns keep the height of the longest list, so hovering an agent with
+        // fewer models doesn't resize the menu under the pointer. The height stops where
+        // the menu, with the line above, still fits its box; longer lists scroll in place.
         let rows = |agent: usize| -> f32 {
             Self::models(agent)
                 .iter()
-                .map(|c| if c.desc.is_empty() { 28. } else { 44. })
+                .map(|c| if c.desc.is_empty() { 31. } else { 50. })
                 .sum::<f32>()
+                + 30.
         };
-        let tallest = self.choices(cx).into_iter().map(rows).fold(0., f32::max);
+        let tallest = choices
+            .iter()
+            .copied()
+            .map(rows)
+            .fold(choices.len() as f32 * 31. + 8., f32::max);
+        let height = px(tallest.clamp(150., 240.));
+        let agents = agents.h(height);
         let mut models = div()
             .id(SharedString::from(format!("{key}-models")))
             .p_1()
             .w(px(240.))
-            .h(px((tallest + 34.).clamp(150., 330.)))
+            .h(height)
             .overflow_y_scroll()
             .v_flex()
             .child(

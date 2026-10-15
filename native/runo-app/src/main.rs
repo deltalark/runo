@@ -604,6 +604,9 @@ fn menu_row(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        // Rows keep their full height: a menu column with a fixed height scrolls instead
+        // of squeezing them, which would draw each description over the next row.
+        .flex_none()
         .min_h(px(28.))
         .px_2()
         .py(px(5.))
@@ -618,8 +621,9 @@ fn menu_row(
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .v_flex()
-                .child(div().child(label))
+                .child(div().whitespace_normal().child(label))
                 .when(!desc.is_empty(), |el| {
                     el.child(
                         div()
