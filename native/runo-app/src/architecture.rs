@@ -1363,13 +1363,14 @@ impl RunoApp {
                     task,
                     context,
                     edit,
+                    images,
                 } => this.start_with_context(
                     pid,
                     task,
                     shell::StartContext {
                         label: "Architecture diagram".into(),
                         text: context.clone(),
-                        images: Vec::new(),
+                        images: images.clone(),
                         in_place: *edit,
                     },
                     window,

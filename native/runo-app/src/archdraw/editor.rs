@@ -635,10 +635,12 @@ impl Editor {
         }
         self.checkpoint();
         let id = self.doc.new_id(&format!("{from}-to-{to}"));
+        let label = default_label(self.kind_of(from), self.kind_of(to)).to_string();
         self.doc.relations.push(Relation {
             id: id.clone(),
             from: from.to_string(),
             to: to.to_string(),
+            label,
             ..Default::default()
         });
         self.cur_mut().edges.push(Edge {
@@ -2075,6 +2077,142 @@ pub(crate) fn changes(before: &Doc, after: &Doc, view: &str) -> Changes {
     out
 }
 
+/// What a new connector between two parts of these kinds most likely means; nothing
+/// for drawing shapes, whose meaning the canvas can't guess.
+pub(crate) fn default_label(from: Kind, to: Kind) -> &'static str {
+    if from.c4().is_none() || to.c4().is_none() {
+        return "";
+    }
+    match (from, to) {
+        (Kind::Person, _) => "Uses",
+        (_, Kind::Database) => "Reads and writes",
+        (_, Kind::Queue) => "Publishes to",
+        (Kind::Queue, _) => "Delivers to",
+        (_, Kind::Person) => "Notifies",
+        _ => "Calls",
+    }
+}
+
+/// Something on a diagram worth a second look, and what it's about.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Finding {
+    pub text: String,
+    pub nodes: Vec<String>,
+    pub edge: Option<String>,
+}
+
+impl Editor {
+    /// The nearest place to `at` where a shape of `size` sits clear of the other parts
+    /// (boundaries don't count: shapes go inside them).
+    pub(crate) fn free_spot(&self, at: Pt, size: (f32, f32)) -> Pt {
+        let sight = self.sight();
+        let taken: Vec<Rect> = self
+            .cur()
+            .nodes
+            .iter()
+            .filter(|n| sight.shows(&n.id) && self.kind_of(&n.id) != Kind::Boundary)
+            .map(|n| n.rect().inflate(20.))
+            .collect();
+        let clear = |p: Pt| {
+            let r = Rect::new(p.0 - size.0 / 2., p.1 - size.1 / 2., size.0, size.1);
+            !taken.iter().any(|o| o.intersects(&r))
+        };
+        if clear(at) {
+            return at;
+        }
+        for ring in 1..40 {
+            let d = ring as f32 * 40.;
+            let steps = ring * 8;
+            for i in 0..steps {
+                let a = i as f32 / steps as f32 * std::f32::consts::TAU;
+                let p = (at.0 + d * a.cos(), at.1 + d * a.sin());
+                if clear(p) {
+                    return p;
+                }
+            }
+        }
+        at
+    }
+
+    /// Checks of the diagram open now: parts on their own, parts and connectors missing
+    /// what a reader needs, and parts drawn over each other.
+    pub(crate) fn findings(&self) -> Vec<Finding> {
+        let v = self.cur();
+        let sight = self.sight();
+        let name = |id: &str| {
+            self.doc
+                .element(id)
+                .map(|e| e.name.replace('\n', " "))
+                .unwrap_or_else(|| id.to_string())
+        };
+        let mut out = Vec::new();
+        let mut touched = HashSet::new();
+        for e in &v.edges {
+            let Some(r) = self.doc.relation(&e.id) else {
+                continue;
+            };
+            touched.insert(r.from.as_str());
+            touched.insert(r.to.as_str());
+            if r.label.trim().is_empty() && sight.shows(&r.from) && sight.shows(&r.to) {
+                out.push(Finding {
+                    text: format!(
+                        "The connector from {} to {} says nothing about what it carries",
+                        name(&r.from),
+                        name(&r.to)
+                    ),
+                    nodes: Vec::new(),
+                    edge: Some(e.id.clone()),
+                });
+            }
+        }
+        let parts: Vec<&Node> = v
+            .nodes
+            .iter()
+            .filter(|n| sight.shows(&n.id) && self.kind_of(&n.id).is_part())
+            .collect();
+        for n in &parts {
+            let Some(el) = self.doc.element(&n.id) else {
+                continue;
+            };
+            if !touched.contains(n.id.as_str()) {
+                out.push(Finding {
+                    text: format!("{} isn't connected to anything", name(&n.id)),
+                    nodes: vec![n.id.clone()],
+                    edge: None,
+                });
+            }
+            let built = matches!(
+                el.kind,
+                Kind::Container | Kind::Component | Kind::Database | Kind::Queue
+            );
+            if built && el.tech.trim().is_empty() {
+                out.push(Finding {
+                    text: format!("{} doesn't say what it's built with", name(&n.id)),
+                    nodes: vec![n.id.clone()],
+                    edge: None,
+                });
+            }
+        }
+        // Overlaps, among a sensible number of parts.
+        if parts.len() <= 400 {
+            for (i, a) in parts.iter().enumerate() {
+                for b in &parts[i + 1..] {
+                    let nested = a.parent.as_deref() == Some(b.id.as_str())
+                        || b.parent.as_deref() == Some(a.id.as_str());
+                    if !nested && a.rect().intersects(&b.rect()) {
+                        out.push(Finding {
+                            text: format!("{} and {} overlap", name(&a.id), name(&b.id)),
+                            nodes: vec![a.id.clone(), b.id.clone()],
+                            edge: None,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 /// What's out of sight on a diagram.
 pub(crate) fn view_sight(v: &View) -> Sight {
     let mut sight = Sight::default();
@@ -2304,6 +2442,43 @@ mod tests {
         assert!(ed.cur().still);
         assert!(ed.undo());
         assert!(!ed.cur().still);
+    }
+
+    #[test]
+    fn new_connectors_are_labelled_and_findings_point_at_gaps() {
+        let mut ed = Editor::new(Doc::default());
+        let p = ed.add(preset("Person"), (0., 0.));
+        let a = ed.add(preset("Container"), (0., 300.));
+        let d = ed.add(preset("Database"), (0., 600.));
+        let lone = ed.add(preset("Container"), (600., 300.));
+        let note = ed.add(preset("Sticky note"), (600., 600.));
+        let pa = ed.connect(&p, &a).unwrap();
+        let ad = ed.connect(&a, &d).unwrap();
+        assert_eq!(ed.doc.relation(&pa).unwrap().label, "Uses");
+        assert_eq!(ed.doc.relation(&ad).unwrap().label, "Reads and writes");
+        let pn = ed.connect(&p, &note).unwrap();
+        assert_eq!(ed.doc.relation(&pn).unwrap().label, "");
+        let f = ed.findings();
+        let about = |id: &str| {
+            f.iter()
+                .filter(|x| x.nodes.contains(&id.to_string()))
+                .count()
+        };
+        assert!(f.iter().any(|x| x.edge.as_deref() == Some(pn.as_str())));
+        assert!(f
+            .iter()
+            .any(|x| x.text.contains("isn't connected") && x.nodes == [lone.clone()]));
+        // No technology on the containers and the database; a note needs none.
+        assert_eq!(about(&note), 0);
+        assert!(about(&a) >= 1 && about(&d) >= 1);
+        // A free spot keeps clear of what's there.
+        let r = ed.rect(&a).unwrap();
+        let (x, y) = ed.free_spot(r.center(), (r.w, r.h));
+        let spot = Rect::new(x - r.w / 2., y - r.h / 2., r.w, r.h);
+        assert!(!ed.cur().nodes.iter().any(|n| n.rect().intersects(&spot)));
+        // Drawn over another part.
+        ed.set_rects(&[(lone.clone(), ed.rect(&a).unwrap())]);
+        assert!(ed.findings().iter().any(|x| x.text.ends_with("overlap")));
     }
 
     #[test]

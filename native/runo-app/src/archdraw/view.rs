@@ -2,7 +2,7 @@
 //! You draw; nothing changes the diagram behind your back.
 
 use super::editor::{
-    changes, search as search_presets, Changes, Editor, Hit, Preset, Sel, GROUPS, PRESETS,
+    changes, search as search_presets, Changes, Editor, Finding, Hit, Preset, Sel, GROUPS, PRESETS,
 };
 use super::geom::{self, Align, Guide, Handle, Pt, Side};
 use super::io;
@@ -40,6 +40,8 @@ pub(crate) enum ArchEvent {
         task: String,
         context: String,
         edit: bool,
+        /// Pictures to attach, by path.
+        images: Vec<String>,
     },
     /// Show a file of the project.
     Open(PathBuf),
@@ -190,6 +192,10 @@ pub(crate) struct ArchEditor {
     review: Option<Review>,
     /// Bumped to stop watching the files for an agent's edit.
     poll_gen: u64,
+    /// The list of checks on the diagram is open.
+    check_open: bool,
+    /// A picture picked to turn into the diagram, waiting for the next frame.
+    pending_picture: Option<PathBuf>,
     _subs: Vec<Subscription>,
 }
 
@@ -281,6 +287,16 @@ fn area(
         );
     }
     state
+}
+
+/// Whether a picked file is a picture rather than a diagram file.
+fn is_picture(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "webp" | "gif"
+        )
+    })
 }
 
 fn split_list(text: &str, by: char) -> Vec<String> {
@@ -545,6 +561,8 @@ impl ArchEditor {
             waiting: None,
             review: None,
             poll_gen: 0,
+            check_open: false,
+            pending_picture: None,
             _subs: subs,
         }
     }
@@ -778,6 +796,7 @@ impl ArchEditor {
 
     fn quick_add(&mut self, preset: &Preset, window: &mut Window, cx: &mut Context<Self>) {
         let at = self.quick.take().unwrap_or_else(|| self.center_world());
+        let at = self.ed.free_spot(at, preset.kind.size());
         let id = self.add_preset(preset, at, cx);
         if let Some(from) = self.quick_from.take() {
             self.ed.connect(&from, &id);
@@ -926,13 +945,20 @@ impl ArchEditor {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Import a draw.io diagram".into()),
+            prompt: Some("Import a draw.io diagram, or a picture of one".into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
                 let Some(path) = paths.into_iter().next() else {
                     return;
                 };
+                if is_picture(&path) {
+                    let _ = this.update(cx, |this, cx| {
+                        this.pending_picture = Some(path);
+                        cx.notify();
+                    });
+                    return;
+                }
                 let result = std::fs::read_to_string(&path)
                     .map_err(|e| e.to_string())
                     .and_then(|t| io::import_drawio(&t));
@@ -1109,6 +1135,7 @@ impl ArchEditor {
             ),
             context,
             edit: false,
+            images: Vec::new(),
         });
     }
 
@@ -1118,20 +1145,39 @@ impl ArchEditor {
     /// watch them for its change.
     fn send_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let task = self.f_ask.read(cx).value().trim().to_string();
-        if task.is_empty() || self.waiting.is_some() {
+        if task.is_empty() {
             return;
+        }
+        if self.ask_edit(task, Vec::new(), window, cx) {
+            self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+    }
+
+    /// Start an agent on a change to the diagram and watch for it. Returns whether it
+    /// started.
+    fn ask_edit(
+        &mut self,
+        task: String,
+        images: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.waiting.is_some() {
+            self.note("An agent is already working on the diagram.".into(), false);
+            cx.notify();
+            return false;
         }
         if self.review.is_some() {
             self.note("Accept or reject the last change first.".into(), false);
             cx.notify();
-            return;
+            return false;
         }
         // The agent works from the files, so they must hold what's on screen, with the
         // guide to them alongside.
         if let Err(e) = save(&self.root, &self.ed.doc) {
             self.note(format!("Couldn't save the diagram: {e}"), true);
             cx.notify();
-            return;
+            return false;
         }
         self.ed.dirty = false;
         self.saved_at = Some(Instant::now());
@@ -1142,15 +1188,225 @@ impl ArchEditor {
             stamp: stamp(&self.root),
             broken: None,
         });
-        self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
         window.focus(&self.focus, cx);
         cx.emit(ArchEvent::Ask {
             task,
             context,
             edit: true,
+            images,
         });
         self.watch(cx);
         cx.notify();
+        true
+    }
+
+    /// Put the cursor in the ask bar, for a change to what's selected.
+    fn focus_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu = None;
+        let input = self.f_ask.clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |s, cx| s.focus(window, cx))
+        });
+        cx.notify();
+    }
+
+    /// Have an agent break a part down into a diagram of its own, linked from it.
+    fn expand_with_ai(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(e) = self.ed.doc.element(id) else {
+            return;
+        };
+        let name = e.name.replace('\n', " ");
+        let task = format!(
+            "Break {name} (id {id}) down into its main parts, from the code where you can find \
+             it. Add them as elements, add a new diagram {FOLDER}/views/{id}-inside.toml that \
+             shows them and how they connect to each other and to what {name} talks to, and set \
+             link = \"{id}-inside\" on {name} so it opens that diagram."
+        );
+        self.ask_edit(task, Vec::new(), window, cx);
+    }
+
+    /// Have an agent add what the diagram leaves out.
+    fn suggest_missing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let task = "Compare this diagram with the project's code and add what it leaves out: \
+                    services, data stores, queues, external systems and the connections between \
+                    them, each placed near what it connects to and labelled with what flows. \
+                    Don't remove anything."
+            .to_string();
+        self.ask_edit(task, Vec::new(), window, cx);
+    }
+
+    /// Have an agent redraw a picture of a diagram (a whiteboard photo, a sketch, a
+    /// screenshot) as this one.
+    fn draw_picture(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let empty = self.ed.cur().nodes.is_empty();
+        let task = format!(
+            "Turn the attached picture of an architecture diagram into {}. Keep its parts, \
+             groupings, connections and labels, use the closest kinds (person, container, \
+             database, queue, external, boundary and so on), and lay the shapes out like the \
+             picture, tidied onto a grid.",
+            if empty {
+                "this diagram"
+            } else {
+                "a new diagram next to this one"
+            }
+        );
+        self.ask_edit(task, vec![path.to_string_lossy().into_owned()], window, cx);
+    }
+
+    /// Select what a finding is about and bring it into view.
+    fn show_finding(&mut self, f: &Finding, cx: &mut Context<Self>) {
+        for id in &f.nodes {
+            if !self.ed.sight().shows(id) {
+                self.ed.reveal(id);
+            }
+        }
+        self.ed.sel = Sel {
+            nodes: f.nodes.clone(),
+            edges: f.edge.iter().cloned().collect(),
+        };
+        let first = f.nodes.first().cloned().or_else(|| {
+            let r = self.ed.doc.relation(f.edge.as_deref()?)?;
+            Some(r.from.clone())
+        });
+        if let Some(r) = first.and_then(|id| self.ed.rect(&id)) {
+            let vis = self.visible_world().inflate(-40. / self.zoom);
+            if !vis.contains_rect(&r) {
+                let (vw, vh) = self.view_size();
+                let (cx_, cy_) = r.center();
+                self.pan = (vw / 2. - cx_ * self.zoom, vh / 2. - cy_ * self.zoom);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The checks on the diagram open now, each a click away from what it's about.
+    fn check_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.check_open {
+            return None;
+        }
+        let found = self.ed.findings();
+        let mut list = div().v_flex().max_h(px(360.)).overflow_y_hidden();
+        if found.is_empty() {
+            list = list.child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(12.5))
+                    .text_color(rgb(c_secondary()))
+                    .child("Nothing to fix: every part is connected and labelled."),
+            );
+        }
+        for (i, f) in found.iter().take(40).enumerate() {
+            let f2 = f.clone();
+            list = list.child(
+                div()
+                    .id(("arch-finding", i))
+                    .px_3()
+                    .py(px(6.))
+                    .flex()
+                    .gap_2()
+                    .items_start()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .text_size(px(12.5))
+                    .text_color(rgb(c_text()))
+                    .child(
+                        div()
+                            .pt(px(2.))
+                            .child(icon(IconName::CircleAlert, 12., 0xf59e0b)),
+                    )
+                    .child(div().flex_1().min_w_0().child(f.text.clone()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_finding(&f2, cx))),
+            );
+        }
+        let more = found.len().saturating_sub(40);
+        Some(
+            div()
+                .absolute()
+                .top(px(6.))
+                .right(px(8.))
+                .w(px(340.))
+                .p_1()
+                .v_flex()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(c_border()))
+                .bg(float(c_canvas()))
+                .shadow_lg()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(c_text()))
+                                .child(if found.is_empty() {
+                                    "Checks".to_string()
+                                } else {
+                                    format!("{} to look at", found.len())
+                                }),
+                        )
+                        .child(
+                            icon_btn("arch-check-close", IconName::X, "Close", false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.check_open = false;
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                )
+                .child(list)
+                .when(more > 0, |el| {
+                    el.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child(format!("And {more} more")),
+                    )
+                })
+                .when(!found.is_empty(), |el| {
+                    el.child(
+                        div().p_2().flex().justify_end().child(
+                            text_btn(
+                                "arch-check-fix",
+                                "Fix with AI",
+                                Some(IconName::Sparkles),
+                                true,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.fix_findings(window, cx)),
+                            ),
+                        ),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Have an agent fix what the checks found.
+    fn fix_findings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let found = self.ed.findings();
+        if found.is_empty() {
+            return;
+        }
+        let mut task = String::from(
+            "Fix these problems on the diagram, using the project's code for missing labels and \
+             technologies, and moving shapes apart where they overlap:\n",
+        );
+        for f in found.iter().take(60) {
+            task.push_str(&format!("- {}\n", f.text));
+        }
+        self.check_open = false;
+        self.ask_edit(task, Vec::new(), window, cx);
     }
 
     /// What an agent needs to change the diagram: where the files are, which diagram is
@@ -1348,7 +1604,7 @@ impl ArchEditor {
     /// accept or reject it.
     fn ask_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let bar = div()
-            .id("arch-ask")
+            .id("arch-ask-bar")
             .max_w(px(640.))
             .p_1()
             .flex()
@@ -1833,7 +2089,7 @@ impl ArchEditor {
                 let at = at
                     .filter(|p| self.inside(*p))
                     .map(|p| self.world(self.local(p)))
-                    .unwrap_or_else(|| self.center_world());
+                    .unwrap_or_else(|| self.ed.free_spot(self.center_world(), preset.kind.size()));
                 self.add_preset(preset, at, cx);
             }
             Drag::Bend { moved, .. } => {
@@ -3324,11 +3580,12 @@ impl ArchEditor {
 
     fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut tabs = div()
+            .id("arch-tabs")
             .flex()
             .items_center()
             .gap_1()
             .min_w_0()
-            .overflow_hidden();
+            .overflow_x_scroll();
         for (i, v) in self.ed.doc.views.iter().enumerate() {
             let on = v.id == self.ed.view;
             let id = v.id.clone();
@@ -3477,6 +3734,19 @@ impl ArchEditor {
             )
             .child(
                 icon_btn(
+                    "arch-check",
+                    IconName::ListChecks,
+                    "Check the diagram",
+                    self.check_open,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.check_open = !this.check_open;
+                    this.export_open = false;
+                    cx.notify();
+                })),
+            )
+            .child(
+                icon_btn(
                     "arch-motion-toggle",
                     IconName::Activity,
                     "Motion: animate connectors and effects (saved with the diagram)",
@@ -3526,25 +3796,26 @@ impl ArchEditor {
             )
             .child(sep())
             .child(
-                text_btn(
+                icon_btn(
                     "arch-from-code",
                     if self.scanning {
-                        "Reading…"
+                        IconName::LoaderCircle
                     } else {
-                        "From code"
+                        IconName::ScanSearch
                     },
-                    Some(IconName::ScanSearch),
+                    "From code: draw the project's packages and the services they use",
                     false,
                 )
-                .tooltip(tip(
-                    "Draw the project's packages and the services they use as a starting point",
-                ))
                 .on_click(cx.listener(|this, _, _, cx| this.start_from_code(cx))),
             )
             .child(
-                text_btn("arch-import", "Import", Some(IconName::Upload), false)
-                    .tooltip(tip("Import a draw.io (.drawio) file"))
-                    .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
+                icon_btn(
+                    "arch-import",
+                    IconName::Upload,
+                    "Import a draw.io file, or a picture of a diagram for AI to redraw",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
             )
             .child(
                 text_btn("arch-export", "Export", Some(IconName::Download), false).on_click(
@@ -3910,12 +4181,22 @@ impl ArchEditor {
                         }),
                     ));
                 }
+                items.push((
+                    "Change with AI…",
+                    "",
+                    Box::new(|this, window, cx| this.focus_ask(window, cx)),
+                ));
                 if !multi && self.ed.kind_of(id).is_part() {
-                    let id = id.clone();
+                    let (a, b) = (id.clone(), id.clone());
                     items.push((
-                        "Ask an agent about it",
+                        "Explain with AI",
                         "",
-                        Box::new(move |this, _, cx| this.ask_about(&id, cx)),
+                        Box::new(move |this, _, cx| this.ask_about(&a, cx)),
+                    ));
+                    items.push((
+                        "Expand into parts with AI",
+                        "",
+                        Box::new(move |this, window, cx| this.expand_with_ai(&b, window, cx)),
                     ));
                 }
                 if let Some(link) = self
@@ -4048,6 +4329,11 @@ impl ArchEditor {
                     ));
                 }
                 items.push((
+                    "Suggest what's missing with AI",
+                    "",
+                    Box::new(|this, window, cx| this.suggest_missing(window, cx)),
+                ));
+                items.push((
                     "Select all",
                     "⌘A",
                     Box::new(|this, _, _| this.ed.select_all()),
@@ -4067,10 +4353,15 @@ impl ArchEditor {
                 ));
             }
         }
+        // Keep the whole menu on the canvas.
+        let (vw, vh) = self.view_size();
+        let tall = items.len() as f32 * 28. + 10.;
+        let left = at.0.min(vw - 238.).max(4.);
+        let top = at.1.min(vh - tall - 4.).max(4.);
         let mut list = div()
             .absolute()
-            .left(px(at.0))
-            .top(px(at.1))
+            .left(px(left))
+            .top(px(top))
             .w(px(230.))
             .p_1()
             .v_flex()
@@ -4354,7 +4645,7 @@ impl ArchEditor {
                                 .flex()
                                 .gap_2()
                                 .child(text_btn("arch-empty-code", if self.scanning { "Reading the code…" } else { "Start from code" }, Some(IconName::ScanSearch), true).on_click(cx.listener(|this, _, _, cx| this.start_from_code(cx))))
-                                .child(text_btn("arch-empty-import", "Import draw.io", Some(IconName::Upload), false).on_click(cx.listener(|this, _, _, cx| this.import(cx)))),
+                                .child(text_btn("arch-empty-import", "Import draw.io or a picture", Some(IconName::Upload), false).on_click(cx.listener(|this, _, _, cx| this.import(cx)))),
                         )
                         .child(div().text_size(px(11.5)).text_color(rgb(c_muted())).child("Shortcuts: R container, D database, P person, Q queue, B boundary, T text, N note. Tab adds a connected shape.")),
                 )
@@ -4503,6 +4794,9 @@ impl ArchEditor {
         }
         if self.export_open {
             area = area.child(self.export_menu(cx));
+        }
+        if let Some(panel) = self.check_panel(cx) {
+            area = area.child(panel);
         }
         area.into_any_element()
     }
@@ -6243,6 +6537,9 @@ impl Render for ArchEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some((at, from)) = self.pending_quick.take() {
             self.open_quick(at, Some(from), window, cx);
+        }
+        if let Some(path) = self.pending_picture.take() {
+            self.draw_picture(path, window, cx);
         }
         self.load_fields(window, cx);
         self.load_text(window, cx);
