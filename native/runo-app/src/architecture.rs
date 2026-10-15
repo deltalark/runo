@@ -1364,18 +1364,22 @@ impl RunoApp {
                     context,
                     edit,
                     images,
-                } => this.start_with_context(
-                    pid,
-                    task,
-                    shell::StartContext {
-                        label: "Architecture diagram".into(),
-                        text: context.clone(),
-                        images: images.clone(),
-                        in_place: *edit,
-                    },
-                    window,
-                    cx,
-                ),
+                    agent,
+                } => {
+                    this.new_provider = *agent;
+                    this.start_with_context(
+                        pid,
+                        task,
+                        shell::StartContext {
+                            label: "Architecture diagram".into(),
+                            text: context.clone(),
+                            images: images.clone(),
+                            in_place: *edit,
+                        },
+                        window,
+                        cx,
+                    )
+                }
                 ArchEvent::Open(path) => {
                     this.view = View::Session;
                     this.show_panel = true;

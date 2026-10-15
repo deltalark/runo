@@ -61,6 +61,7 @@ All notable changes to Runo are documented here.
 
 ### Changed
 
+- The Ask AI bar on the Architecture and Design canvases shows which agent it hands the task to, with a menu to pick another installed agent and a line on how it works: the agent edits the files in your project folder and you review its change before keeping it. The shape or screen count and save status moved to a strip under the canvas, so the ask bar no longer covers it.
 - While an agent draws or changes an architecture diagram, the canvas shows it working: a sketch of a diagram taking shape on an empty canvas, or a soft glow and a line saying what the agent is likely doing, with how long it has been at it. When its drawing lands somewhere off screen, the canvas fits and centres it. Importing a `.drawio` into an empty project drops the blank starter diagram, as Start from code already did.
 - Deleting a session asks in a popup first, from the session header or its menu, instead of swapping the header buttons.
 - Stop moved from the session header into the message box: the send button becomes Stop while the agent works.

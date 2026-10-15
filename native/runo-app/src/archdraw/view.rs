@@ -45,6 +45,8 @@ pub(crate) enum ArchEvent {
         edit: bool,
         /// Pictures to attach, by path.
         images: Vec<String>,
+        /// The agent to hand it to, by index into `agent::PROVIDERS`.
+        agent: usize,
     },
     /// Show a file of the project.
     Open(PathBuf),
@@ -223,6 +225,8 @@ pub(crate) struct ArchEditor {
     /// Asking an agent to change the diagram, and its change while it's being reviewed.
     f_ask: Entity<InputState>,
     waiting: Option<Waiting>,
+    /// The agent the ask bar hands its task to.
+    pick: crate::agent_pick::AgentPick,
     review: Option<Review>,
     /// Bumped to stop watching the files for an agent's edit.
     poll_gen: u64,
@@ -600,6 +604,7 @@ impl ArchEditor {
             trail: Vec::new(),
             f_ask,
             waiting: None,
+            pick: crate::agent_pick::AgentPick::new(cx),
             review: None,
             poll_gen: 0,
             check_open: false,
@@ -1326,6 +1331,7 @@ impl ArchEditor {
             context,
             edit: false,
             images: Vec::new(),
+            agent: self.pick.agent,
         });
     }
 
@@ -1385,7 +1391,9 @@ impl ArchEditor {
             context,
             edit: true,
             images,
+            agent: self.pick.agent,
         });
+        self.pick.open = false;
         self.watch(cx);
         cx.notify();
         true
@@ -1934,35 +1942,45 @@ impl ArchEditor {
                 .children(broken_note(&w.broken))
         } else {
             let picked = self.ed.sel.nodes.len() + self.ed.sel.edges.len();
-            div().child(
-                bar.w(px(460.))
-                    .border_color(rgb(c_border()))
-                    .when(picked > 0, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .px_2()
-                                .py(px(2.))
-                                .rounded_md()
-                                .bg(col(c_blue(), 0.12))
-                                .text_size(px(11.5))
-                                .text_color(rgb(c_blue()))
-                                .child(format!("{picked} selected")),
+            div()
+                .v_flex()
+                .items_end()
+                .gap_1()
+                .children(self.pick.menu(
+                    "arch-ask",
+                    "the diagram's files in architecture/",
+                    cx,
+                    |t: &mut Self| &mut t.pick,
+                ))
+                .child(
+                    bar.w(px(520.))
+                        .border_color(rgb(c_border()))
+                        .when(picked > 0, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .px_2()
+                                    .py(px(2.))
+                                    .rounded_md()
+                                    .bg(col(c_blue(), 0.12))
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(c_blue()))
+                                    .child(format!("{picked} selected")),
+                            )
+                        })
+                        .child(
+                            div().flex_1().child(
+                                Input::new(&self.f_ask)
+                                    .bordered(false)
+                                    .h(px(28.))
+                                    .prefix(icon(IconName::Sparkles, 13., c_blue())),
+                            ),
                         )
-                    })
-                    .child(
-                        div().flex_1().child(
-                            Input::new(&self.f_ask)
-                                .bordered(false)
-                                .h(px(28.))
-                                .prefix(icon(IconName::Sparkles, 13., c_blue())),
-                        ),
-                    )
-                    .child(
-                        text_btn("arch-ask-send", "Send", None, true)
-                            .on_click(cx.listener(|this, _, window, cx| this.send_ask(window, cx))),
-                    ),
-            )
+                        .child(self.pick.chip("arch-ask", cx, |t: &mut Self| &mut t.pick))
+                        .child(text_btn("arch-ask-send", "Send", None, true).on_click(
+                            cx.listener(|this, _, window, cx| this.send_ask(window, cx)),
+                        )),
+                )
         };
         // A change under review sits at the top, clear of the status line and the map.
         div()
@@ -5497,20 +5515,7 @@ impl ArchEditor {
             .children(self.breadcrumbs(cx))
             .children(self.find_bar(cx))
             .children(self.removed_labels())
-            .child(self.ask_bar(cx))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(12.))
-                    .bottom(px(10.))
-                    .px_2()
-                    .py(px(3.))
-                    .rounded_md()
-                    .bg(float(c_canvas()))
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_muted()))
-                    .child(status),
-            );
+            .child(self.ask_bar(cx));
         if let Some((text, err)) = notice {
             area = area.child(
                 div()
@@ -5575,7 +5580,27 @@ impl ArchEditor {
         if let Some(panel) = self.check_panel(cx) {
             area = area.child(panel);
         }
-        area.into_any_element()
+        // The status sits in a strip under the canvas, so nothing drawn over the canvas covers it.
+        div()
+            .flex_1()
+            .min_h_0()
+            .v_flex()
+            .child(area)
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(26.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .border_t_1()
+                    .border_color(rgb(c_border()))
+                    .bg(tint(c_canvas()))
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child(div().min_w_0().truncate().child(status)),
+            )
+            .into_any_element()
     }
 
     fn swatches(
