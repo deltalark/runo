@@ -345,6 +345,9 @@ pub(crate) fn moved_path(from: &Path, to: &Path, after: bool) -> Path {
 pub(crate) struct Link {
     pub goto: String,
     pub rect: Box,
+    /// Where the linked element is on its screen.
+    #[serde(default)]
+    pub path: Path,
 }
 
 /// The parent's path, or None at the top.

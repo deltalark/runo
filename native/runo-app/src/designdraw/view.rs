@@ -37,12 +37,25 @@ pub(crate) enum DesignEvent {
         images: Vec<String>,
         /// The agent to hand it to, by index into `agent::PROVIDERS`.
         agent: usize,
+        /// The model picked for it; empty for its default.
+        model: String,
     },
 }
 
 type Pt = (f32, f32);
 /// From one point to another, for a link arrow.
-type Arrow = (Pt, Pt);
+/// A link's arrow on screen: from, to, and whether it's faded because it doesn't touch
+/// the picked screen.
+type Arrow = (Pt, Pt, bool);
+
+/// A prototype link between screens, in canvas units.
+struct LinkLine {
+    screen: String,
+    path: dom::Path,
+    from: Pt,
+    to: Pt,
+    faint: bool,
+}
 
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 3.;
@@ -71,6 +84,13 @@ enum Drag {
     },
     /// Linking the selected element to another screen.
     Link {
+        from: Pt,
+        to: Pt,
+    },
+    /// Dragging the end of a link's arrow onto another screen.
+    Relink {
+        screen: String,
+        path: dom::Path,
         from: Pt,
         to: Pt,
     },
@@ -411,8 +431,9 @@ impl DesignCanvas {
 
     /// Pick up changes made while the page was away.
     /// Start the AI bar on this agent, such as the one the canvas's chat used last.
-    pub(crate) fn use_agent(&mut self, agent: usize) {
+    pub(crate) fn use_agent(&mut self, agent: usize, model: String) {
         self.pick.agent = agent;
+        self.pick.model = model;
     }
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
@@ -597,6 +618,7 @@ impl DesignCanvas {
             edit: true,
             images: Vec::new(),
             agent: self.pick.agent,
+            model: self.pick.model.clone(),
         });
         self.pick.open = false;
         cx.notify();
@@ -1645,6 +1667,22 @@ impl DesignCanvas {
             };
             return;
         }
+        // The end of a link's arrow: drag it onto another screen to send the link there.
+        if self.hotspots && e.button == MouseButton::Left {
+            let hit = self.link_lines().into_iter().find(|l| {
+                let p = self.screen_pt(l.to);
+                (local.0 - p.0).abs() < 10. && (local.1 - p.1).abs() < 10.
+            });
+            if let Some(l) = hit {
+                self.drag = Drag::Relink {
+                    screen: l.screen,
+                    path: l.path,
+                    from: l.from,
+                    to: w,
+                };
+                return;
+            }
+        }
         // The link handle on the selected element.
         if let Some(h) = self.link_handle() {
             let s = self.screen_pt(h);
@@ -1763,7 +1801,7 @@ impl DesignCanvas {
                     s.y = y;
                 }
             }
-            Drag::Link { to, .. } => *to = w,
+            Drag::Link { to, .. } | Drag::Relink { to, .. } => *to = w,
         }
         cx.notify();
     }
@@ -1817,6 +1855,25 @@ impl DesignCanvas {
                     }
                 }
             }
+            Drag::Relink {
+                screen, path, to, ..
+            } => match self.screen_at(to) {
+                Some((target, _)) if target != screen => {
+                    let name = self
+                        .canvas
+                        .screen(&target)
+                        .map(|s| s.name.clone())
+                        .unwrap_or(target.clone());
+                    self.screen = Some(screen);
+                    self.edit(
+                        dom::op(&path, "attr", &[json!("data-goto"), json!(target)]),
+                        After::Path(path),
+                        cx,
+                    );
+                    self.say(format!("The link now goes to {name}."));
+                }
+                _ => self.say("Drop the arrow on another screen to send the link there."),
+            },
             Drag::Link { to, .. } => {
                 if let Some((target, _)) = self.screen_at(to) {
                     if Some(&target) != self.screen.as_ref() {
@@ -2335,25 +2392,29 @@ impl DesignCanvas {
         }
         // What opens another screen, outlined where it sits.
         if self.hotspots {
+            let mut n = 0;
             for s in &self.canvas.screens {
                 let Some(shot) = self.shots.get(&s.id) else {
                     continue;
                 };
                 for l in &shot.links {
                     let (x, y) = self.screen_pt((s.x + l.rect.x, s.y + l.rect.y));
+                    let (w, h) = (l.rect.w * z, l.rect.h * z);
                     out.push(
                         div()
                             .absolute()
                             .left(px(x - 1.))
                             .top(px(y - 1.))
-                            .w(px(l.rect.w * z + 2.))
-                            .h(px(l.rect.h * z + 2.))
+                            .w(px(w + 2.))
+                            .h(px(h + 2.))
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(col(c_blue(), 0.85))
-                            .bg(col(c_blue(), 0.1))
+                            .border_color(col(c_blue(), 0.6))
+                            .bg(col(c_blue(), 0.08))
                             .into_any_element(),
                     );
+                    out.extend(hot_dot(("design-hot-dot", n), (x + w, y), n));
+                    n += 1;
                 }
             }
         }
@@ -2790,28 +2851,75 @@ impl DesignCanvas {
         out
     }
 
-    /// Arrows for the links between screens, and the one being dragged.
-    fn paint_links(&self) -> (Vec<Arrow>, Option<Arrow>) {
+    /// The links between screens. Each leaves its element on the side facing the screen
+    /// it goes to, and arrows into the same side of a screen are spread down it rather
+    /// than meeting at one point. Links that don't touch the picked screen are faded.
+    fn link_lines(&self) -> Vec<LinkLine> {
         let mut out = Vec::new();
-        for s in self.canvas.screens.iter().filter(|_| self.hotspots) {
+        let mut into: HashMap<(String, bool), usize> = HashMap::new();
+        for s in &self.canvas.screens {
             let Some(shot) = self.shots.get(&s.id) else {
                 continue;
             };
+            let sw = self.size_of(s).0;
             for l in &shot.links {
                 let Some(t) = self.canvas.screen(&l.goto) else {
                     continue;
                 };
-                let from = (s.x + l.rect.x + l.rect.w, s.y + l.rect.y + l.rect.h / 2.);
-                let to = if t.x >= s.x {
-                    (t.x, t.y + 40.)
+                if t.id == s.id {
+                    continue;
+                }
+                let (tw, th) = self.size_of(t);
+                // Forward when the target is to the right, else back into its right side.
+                let forward = t.x + tw / 2. >= s.x + sw / 2.;
+                let y = s.y + l.rect.y + l.rect.h / 2.;
+                let from = if forward {
+                    (s.x + l.rect.x + l.rect.w, y)
                 } else {
-                    (t.x + self.size_of(t).0, t.y + 40.)
+                    (s.x + l.rect.x, y)
                 };
-                out.push((self.screen_pt(from), self.screen_pt(to)));
+                // Level with where it starts when the target is that tall, so arrows run
+                // straight across, then spread from others arriving on the same side.
+                let k = into.entry((t.id.clone(), forward)).or_insert(0);
+                let level = (y - t.y).clamp(28., (th - 12.).max(28.));
+                let ty = t.y + (level + *k as f32 * 18.).min((th - 12.).max(28.));
+                *k += 1;
+                let to = if forward { (t.x, ty) } else { (t.x + tw, ty) };
+                let faint = self
+                    .screen
+                    .as_ref()
+                    .is_some_and(|p| *p != s.id && *p != t.id);
+                out.push(LinkLine {
+                    screen: s.id.clone(),
+                    path: l.path.clone(),
+                    from,
+                    to,
+                    faint,
+                });
             }
         }
+        out
+    }
+
+    /// Arrows for the links between screens, and the one being dragged.
+    fn paint_links(&self) -> (Vec<Arrow>, Option<Arrow>) {
+        if !self.hotspots {
+            return (Vec::new(), None);
+        }
+        let moving = match &self.drag {
+            Drag::Relink { screen, path, .. } => Some((screen, path)),
+            _ => None,
+        };
+        let out = self
+            .link_lines()
+            .into_iter()
+            .filter(|l| moving != Some((&l.screen, &l.path)))
+            .map(|l| (self.screen_pt(l.from), self.screen_pt(l.to), l.faint))
+            .collect();
         let dragging = match &self.drag {
-            Drag::Link { from, to } => Some((self.screen_pt(*from), self.screen_pt(*to))),
+            Drag::Link { from, to } | Drag::Relink { from, to, .. } => {
+                Some((self.screen_pt(*from), self.screen_pt(*to), false))
+            }
             _ => None,
         };
         (out, dragging)
@@ -2864,6 +2972,12 @@ impl DesignCanvas {
                         .hover(|el| el.bg(col(c_blue(), 0.2)))
                         .on_click(cx.listener(move |this, _, _, cx| this.play_go(&to, cx))),
                 );
+                if self.hotspots {
+                    let corner = ((l.rect.x + l.rect.w) * scale, l.rect.y * scale);
+                    for dot in hot_dot(("design-play-dot", i), corner, i) {
+                        frame = frame.child(dot);
+                    }
+                }
             }
         }
         Some(
@@ -3078,10 +3192,11 @@ impl DesignCanvas {
                     move |b, _, window, _| {
                         let o = (f32::from(b.origin.x), f32::from(b.origin.y));
                         let tf = |p: Pt| point(px(o.0 + p.0), px(o.1 + p.1));
-                        for (a, z) in &links {
-                            paint_arrow(*a, *z, &tf, col(c_blue(), 0.55), window);
+                        for (a, z, faint) in &links {
+                            let alpha = if *faint { 0.15 } else { 0.6 };
+                            paint_arrow(*a, *z, &tf, col(c_blue(), alpha), window);
                         }
-                        if let Some((a, z)) = dragging {
+                        if let Some((a, z, _)) = dragging {
                             paint_arrow(a, z, &tf, col(c_blue(), 1.), window);
                         }
                     },
@@ -4186,6 +4301,43 @@ fn kind_of(tag: &str) -> &'static str {
 /// A pixel length as a number: `12px` gives 12.
 fn dom_px(css: &str) -> Option<f32> {
     css.trim().strip_suffix("px")?.trim().parse().ok()
+}
+
+/// A hotspot's dot at `at`, with a ring that pings out of it so links catch the eye.
+/// Neighbouring dots ping out of step, so a screen of links twinkles rather than flashes.
+fn hot_dot(id: impl Into<ElementId>, at: (f32, f32), n: usize) -> Vec<AnyElement> {
+    let (x, y) = at;
+    let phase = (n as f32 * 0.37).fract();
+    let ring = div()
+        .absolute()
+        .rounded_full()
+        .border_2()
+        .border_color(rgb(c_blue()))
+        .animated(
+            id,
+            Animation::new(Duration::from_millis(1600)).repeat(),
+            move |el, d| {
+                let t = (d + phase).fract();
+                let size = 8. + 18. * t;
+                el.left(px(x - size / 2.))
+                    .top(px(y - size / 2.))
+                    .w(px(size))
+                    .h(px(size))
+                    .opacity(0.75 * (1. - t) * (1. - t))
+            },
+        );
+    let dot = div()
+        .absolute()
+        .left(px(x - 4.5))
+        .top(px(y - 4.5))
+        .size(px(9.))
+        .rounded_full()
+        .border_1()
+        .border_color(rgb(0xffffff))
+        .bg(rgb(c_blue()))
+        .shadow_sm()
+        .into_any_element();
+    vec![ring, dot]
 }
 
 #[cfg(test)]

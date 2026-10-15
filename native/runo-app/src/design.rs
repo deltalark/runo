@@ -361,6 +361,7 @@ impl RunoApp {
                     edit,
                     images,
                     agent,
+                    model,
                 } => this.ask_from_canvas(
                     pid,
                     View::Design,
@@ -372,6 +373,7 @@ impl RunoApp {
                         in_place: *edit,
                     },
                     *agent,
+                    model.clone(),
                     window,
                     cx,
                 ),
@@ -379,8 +381,8 @@ impl RunoApp {
             cx.notify();
         });
         self.design.canvas_subs.push(sub);
-        if let Some(agent) = self.canvas_agent(pid, View::Design) {
-            canvas.update(cx, |c, _| c.use_agent(agent));
+        if let Some((agent, model)) = self.canvas_agent(pid, View::Design) {
+            canvas.update(cx, |c, _| c.use_agent(agent, model));
         }
         self.design.canvases.insert(project.id, canvas);
     }

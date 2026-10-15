@@ -47,6 +47,8 @@ pub(crate) enum ArchEvent {
         images: Vec<String>,
         /// The agent to hand it to, by index into `agent::PROVIDERS`.
         agent: usize,
+        /// The model picked for it; empty for its default.
+        model: String,
     },
     /// Show a file of the project.
     Open(PathBuf),
@@ -620,8 +622,9 @@ impl ArchEditor {
     /// Read the files again if nothing is waiting to be saved (an agent or git may have
     /// changed them).
     /// Start the AI bar on this agent, such as the one the canvas's chat used last.
-    pub(crate) fn use_agent(&mut self, agent: usize) {
+    pub(crate) fn use_agent(&mut self, agent: usize, model: String) {
         self.pick.agent = agent;
+        self.pick.model = model;
     }
 
     pub(crate) fn reload_if_clean(&mut self, cx: &mut Context<Self>) {
@@ -1339,6 +1342,7 @@ impl ArchEditor {
             edit: false,
             images: Vec::new(),
             agent: self.pick.agent,
+            model: self.pick.model.clone(),
         });
     }
 
@@ -1400,6 +1404,7 @@ impl ArchEditor {
             edit: true,
             images,
             agent: self.pick.agent,
+            model: self.pick.model.clone(),
         });
         self.pick.open = false;
         self.watch(cx);

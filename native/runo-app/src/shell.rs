@@ -2661,6 +2661,7 @@ impl RunoApp {
         task: &str,
         context: StartContext,
         agent: usize,
+        model: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2690,6 +2691,14 @@ impl RunoApp {
                 }
                 session.canvas_context = full;
                 session.unread = false;
+                let current = session
+                    .selections()
+                    .get("model")
+                    .cloned()
+                    .unwrap_or_default();
+                if current != model {
+                    session.set_model(model);
+                }
             }
             self.apply_context(id, &context);
             let provider = agent::PROVIDERS[agent].id;
@@ -2703,6 +2712,7 @@ impl RunoApp {
         self.new_provider = agent;
         self.new_isolated = false;
         self.new_context = Some(context);
+        self.new_model = Some(model);
         self.new_back = view;
         self.new_task
             .update(cx, |t, cx| t.set_value(task, window, cx));
@@ -2711,6 +2721,7 @@ impl RunoApp {
         let race = std::mem::replace(&mut self.race_mode, false);
         let before = self.state.next_id;
         self.create_session(window, cx);
+        self.new_model = None;
         self.race_mode = race;
         let name = canvas_name(view);
         for s in self.state.sessions.iter_mut() {
@@ -2723,10 +2734,14 @@ impl RunoApp {
         }
     }
 
-    /// The agent a canvas's last chat used, for its AI bar to start on.
-    pub(crate) fn canvas_agent(&self, pid: u64, view: View) -> Option<usize> {
+    /// The agent and model a canvas's last chat used, for its AI bar to start on.
+    pub(crate) fn canvas_agent(&self, pid: u64, view: View) -> Option<(usize, String)> {
         let s = self.canvas_sessions(pid, view).into_iter().next()?;
-        agent::PROVIDERS.iter().position(|p| p.id == s.provider)
+        let agent = agent::PROVIDERS.iter().position(|p| p.id == s.provider)?;
+        Some((
+            agent,
+            s.selections().get("model").cloned().unwrap_or_default(),
+        ))
     }
 
     /// Open a session where it belongs: one asked from the Design or Architecture canvas
