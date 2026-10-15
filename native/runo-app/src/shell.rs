@@ -2168,7 +2168,9 @@ impl RunoApp {
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
-        session.handoff = if session.handoff.is_empty() {
+        session.handoff = if context.text.is_empty() {
+            std::mem::take(&mut session.handoff)
+        } else if session.handoff.is_empty() {
             context.text.clone()
         } else {
             format!("{}\n\n{}", session.handoff, context.text)
@@ -2605,6 +2607,10 @@ pub(crate) fn lean_context(prev: &str, now: &str) -> String {
     if prev.is_empty() || fresh.len() == all.len() {
         return now.to_string();
     }
+    // Nothing changed: the ask goes on its own.
+    if fresh.is_empty() {
+        return String::new();
+    }
     let mut out = String::from(
         "## The canvas\nThe rules for this canvas and anything not repeated here are as in your \
          earlier requests in this conversation.",
@@ -2927,6 +2933,7 @@ mod tests {
         // Nothing sent before, or nothing in common: all of it.
         assert_eq!(lean_context("", next), next);
         assert_eq!(lean_context("Other.", next), next);
+        assert_eq!(lean_context(next, next), "");
     }
 
     use super::*;
