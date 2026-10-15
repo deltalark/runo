@@ -60,6 +60,7 @@ All notable changes to Runo are documented here.
 
 ### Changed
 
+- While an agent draws or changes an architecture diagram, the canvas shows it working: a sketch of a diagram taking shape on an empty canvas, or a soft glow and a line saying what the agent is likely doing, with how long it has been at it. When its drawing lands somewhere off screen, the canvas fits and centres it. Importing a `.drawio` into an empty project drops the blank starter diagram, as Start from code already did.
 - Deleting a session asks in a popup first, from the session header or its menu, instead of swapping the header buttons.
 - Stop moved from the session header into the message box: the send button becomes Stop while the agent works.
 - "Working" and how long the turn has run now show at the bottom of the chat instead of in the header.
