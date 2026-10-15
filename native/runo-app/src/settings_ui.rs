@@ -303,6 +303,21 @@ fn tilde(path: &std::path::Path) -> String {
     }
 }
 
+/// Automatic, then each Chromium-based browser installed, by path. A chosen browser that
+/// has since been removed stays listed so the setting still shows.
+fn browser_options(chosen: &str) -> Vec<(String, String)> {
+    let mut out = vec![("auto".to_string(), "Automatic".to_string())];
+    let mut paths = browser_engine::installed();
+    if chosen != "auto" && !chosen.is_empty() && !paths.iter().any(|p| p.as_os_str() == chosen) {
+        paths.push(std::path::PathBuf::from(chosen));
+    }
+    out.extend(paths.into_iter().map(|p| {
+        let name = browser_engine::browser_name(&p);
+        (p.to_string_lossy().to_string(), name)
+    }));
+    out
+}
+
 fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
     items
         .iter()
@@ -664,11 +679,12 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Show the Runo assistant", "Click the mark or press the Ask Runo shortcut, then ask how to do something. Off, the mark is hidden.", st.assistant, |s, v| s.assistant = v),
                 row("Answers with", "Your default agent writes answers from the guide on a fast model, and it counts toward usage. Guide only answers offline with the best matching article.", Ctl::Dropdown(options(&[("agent", "Default agent"), ("guide", "Guide only")]), st.assistant_answers.clone(), Rc::new(|s, v| s.assistant_answers = v))),
             ]),
-            section("Browser", "Show pages in the Browser tab with a headless copy of the Chrome, Edge, Brave or Chromium on this machine, using its own profile.", vec![
+            section("Browser", "Show pages in the Browser tab with a headless copy of a Chromium-based browser on this machine (Chrome, Edge, Brave, Arc, Vivaldi, Opera and others), using its own profile.", vec![
                 switch_row("Built-in browser", "Adds the Browser tab: open your dev server beside the conversation and click and type in it. Off, the tab is hidden.", st.browser_enabled, |s, v| s.browser_enabled = v),
+                row("Browser", "Automatic uses your default browser when it's Chromium-based, otherwise the first one found. Safari and Firefox can't be driven this way. A change applies the next time Runo starts the browser.", Ctl::Dropdown(browser_options(&st.browser), st.browser.clone(), Rc::new(|s, v| s.browser = v))),
                 match browser_engine::find_chromium() {
                     Some(path) => row("Uses", &tilde(&path), Ctl::Chip(browser_engine::browser_name(&path), 0)),
-                    None => row("Uses", "No Chromium-based browser found in Applications. Downloading Chrome for Testing is coming next.", Ctl::Chip("Not found".into(), 1)),
+                    None => row("Uses", "No Chromium-based browser found. Install Chrome, Edge, Brave or another, or set CHROME_PATH.", Ctl::Chip("Not found".into(), 1)),
                 },
             ]),
             section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
