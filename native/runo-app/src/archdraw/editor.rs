@@ -588,6 +588,36 @@ impl Editor {
         id
     }
 
+    /// Add a picture as a part of its own, named under it, centred on `at`. `image` is
+    /// relative to the diagram folder.
+    pub(crate) fn add_icon(&mut self, name: &str, image: &str, at: Pt) -> String {
+        const ICON: Preset = Preset {
+            label: "Icon",
+            group: "",
+            kind: Kind::Icon,
+            icon: "",
+            tech: "",
+            words: "",
+        };
+        let id = self.add(&ICON, at);
+        if let Some(e) = self.doc.element_mut(&id) {
+            e.name = name.to_string();
+            e.image = image.to_string();
+        }
+        id
+    }
+
+    /// Show a picture on a shape, or take it off with an empty `image`.
+    pub(crate) fn set_image(&mut self, id: &str, image: &str) {
+        if self.doc.element(id).is_none_or(|e| e.image == image) {
+            return;
+        }
+        self.checkpoint();
+        if let Some(e) = self.doc.element_mut(id) {
+            e.image = image.to_string();
+        }
+    }
+
     /// Show an element of the model on this diagram, with its connectors to what's here.
     pub(crate) fn place(&mut self, id: &str, at: Pt) {
         if self.cur().node(id).is_some() {
@@ -1696,7 +1726,12 @@ impl Editor {
         };
         let is_boundary = |id: &str| self.kind_of(id) == Kind::Boundary;
         let pad = 30.;
+        // A boundary is fitted snugly round what it holds. A folded one keeps its size: what
+        // it holds is hidden.
         let fit = |rects: &mut HashMap<String, Rect>, id: &str| {
+            if v.node(id).is_some_and(|n| n.collapsed) {
+                return;
+            }
             let kids: Vec<Rect> = v
                 .nodes
                 .iter()
@@ -1710,7 +1745,11 @@ impl Editor {
                     inner.w + 2. * pad,
                     inner.h + 2. * pad + BOUNDARY_HEAD,
                 );
-                rects.insert(id.to_string(), r.union(&need));
+                let need = Rect {
+                    w: need.w.max(r.w.min(200.)),
+                    ..need
+                };
+                rects.insert(id.to_string(), need);
             }
         };
         for p in order {
@@ -1877,7 +1916,22 @@ impl Editor {
         let mut inner: HashMap<String, HashMap<String, Rect>> = HashMap::new();
         let pad = 30.;
         for k in &kids {
-            if self.kind_of(&k.id) == Kind::Boundary
+            if k.collapsed {
+                // A folded boundary moves as one box; what it holds keeps its place in it.
+                let sub = v
+                    .descendants(&k.id)
+                    .iter()
+                    .filter_map(|id| v.node(id))
+                    .map(|c| {
+                        (
+                            c.id.clone(),
+                            Rect::new(c.x - k.x - pad, c.y - k.y - pad - BOUNDARY_HEAD, c.w, c.h),
+                        )
+                    })
+                    .collect();
+                sizes.insert(k.id.clone(), (k.w, k.h));
+                inner.insert(k.id.clone(), sub);
+            } else if self.kind_of(&k.id) == Kind::Boundary
                 && v.nodes
                     .iter()
                     .any(|n| n.parent.as_deref() == Some(k.id.as_str()))
@@ -3153,6 +3207,43 @@ mod tests {
         ed.reveal(&a);
         assert!(ed.sight().shows(&a));
         assert_eq!(ed.rect(&g).unwrap(), open);
+    }
+
+    #[test]
+    fn beautify_leaves_folded_boundaries_folded() {
+        for how in [Beautify::Tidy, Beautify::Down, Beautify::Across] {
+            let mut ed = Editor::new(Doc::default());
+            let web = ed.add(preset("Web app"), (0., 0.));
+            let g = ed.add(preset("VPC / network"), (600., 600.));
+            let a = ed.add(preset("Service"), (600., 600.));
+            let gap = |ed: &Editor| {
+                let (rg, ra) = (ed.rect(&g).unwrap(), ed.rect(&a).unwrap());
+                (ra.x - rg.x, ra.y - rg.y)
+            };
+            ed.connect(&web, &a);
+            ed.toggle_collapse(&g);
+            let before = gap(&ed);
+            ed.sel = Sel::default();
+            ed.beautify(how);
+            let n = ed.cur().node(&g).unwrap();
+            assert!(n.collapsed, "{how:?}");
+            assert_eq!((n.w, n.h), COLLAPSED, "{how:?} keeps it folded");
+            assert_eq!(gap(&ed), before, "{how:?} moves what it holds along");
+        }
+    }
+
+    #[test]
+    fn tidy_fits_boundaries_snugly() {
+        let mut ed = Editor::new(Doc::default());
+        let g = ed.add(preset("VPC / network"), (400., 400.));
+        let a = ed.add(preset("Service"), (300., 300.));
+        let big = Rect::new(0., 0., 1400., 1200.);
+        ed.set_rects(&[(g.clone(), big)]);
+        ed.sel = Sel::default();
+        ed.beautify(Beautify::Tidy);
+        let (rg, ra) = (ed.rect(&g).unwrap(), ed.rect(&a).unwrap());
+        assert!(rg.contains_rect(&ra));
+        assert!(rg.w < 400. && rg.h < 400., "{rg:?}");
     }
 
     #[test]

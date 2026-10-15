@@ -36,10 +36,12 @@ pub(crate) enum Kind {
     Cloud,
     Note,
     Text,
+    /// A logo or picture with its name under it, like a cloud provider's service icon.
+    Icon,
 }
 
 impl Kind {
-    pub(crate) const ALL: [Kind; 15] = [
+    pub(crate) const ALL: [Kind; 16] = [
         Kind::Person,
         Kind::System,
         Kind::Container,
@@ -55,6 +57,7 @@ impl Kind {
         Kind::Cloud,
         Kind::Note,
         Kind::Text,
+        Kind::Icon,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -74,6 +77,7 @@ impl Kind {
             Kind::Cloud => "Cloud",
             Kind::Note => "Sticky note",
             Kind::Text => "Text",
+            Kind::Icon => "Icon",
         }
     }
 
@@ -87,6 +91,7 @@ impl Kind {
             Kind::Cloud => (200., 110.),
             Kind::Note => (180., 140.),
             Kind::Text => (180., 40.),
+            Kind::Icon => (96., 104.),
             Kind::Component => (180., 80.),
             _ => (200., 90.),
         }
@@ -134,6 +139,10 @@ pub(crate) struct Element {
     /// A glyph shown on the shape (a Lucide icon name), e.g. "database" or "zap".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub icon: String,
+    /// A picture shown on the shape, relative to the diagram folder (`icons/docker.svg`):
+    /// the whole shape for an icon, a badge in the corner for others.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub image: String,
     /// Another diagram that zooms into this element; double-click opens it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link: String,

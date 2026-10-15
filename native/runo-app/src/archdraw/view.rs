@@ -6,6 +6,7 @@ use super::editor::{
     GROUPS, PRESETS,
 };
 use super::geom::{self, Align, Guide, Handle, Pt, Side};
+use super::icons::{self, Library};
 use super::io;
 use super::model::Style as DStyle;
 use super::model::*;
@@ -16,6 +17,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 actions!(
@@ -91,6 +93,12 @@ enum Drag {
         preset: &'static Preset,
         at: Option<Point<Pixels>>,
     },
+    /// A logo or picture from the palette, by its file and name.
+    Picture {
+        file: PathBuf,
+        name: String,
+        at: Option<Point<Pixels>>,
+    },
     /// Bending a connector by one of its segments.
     Bend {
         id: String,
@@ -100,6 +108,29 @@ enum Drag {
         straight: bool,
         moved: bool,
     },
+}
+
+/// The library of logos and tech icons, loaded the first time someone searches.
+enum IconLib {
+    Idle,
+    Loading,
+    Ready(Arc<Library>),
+    Failed(String),
+}
+
+/// One icon's picture in the palette.
+#[derive(Clone)]
+enum Thumb {
+    Loading,
+    Ready(PathBuf),
+    Failed,
+}
+
+/// How many logos a search shows.
+const ICON_HITS: usize = 24;
+
+fn thumb_key(i: &icons::Icon) -> String {
+    format!("{}/{}", i.set.label(), i.slug)
 }
 
 enum Menu {
@@ -199,6 +230,8 @@ pub(crate) struct ArchEditor {
     check_open: bool,
     /// A picture picked to turn into the diagram, waiting for the next frame.
     pending_picture: Option<PathBuf>,
+    icons: IconLib,
+    thumbs: std::collections::HashMap<String, Thumb>,
     _subs: Vec<Subscription>,
 }
 
@@ -411,9 +444,11 @@ impl ArchEditor {
             },
             &mut subs,
         );
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search shapes"));
-        subs.push(cx.subscribe_in(&search, window, |_, _, ev, _, cx| {
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search shapes and logos"));
+        subs.push(cx.subscribe_in(&search, window, |this, _, ev, _, cx| {
             if matches!(ev, InputEvent::Change) {
+                this.icons_for_search(cx);
                 cx.notify();
             }
         }));
@@ -567,6 +602,8 @@ impl ArchEditor {
             poll_gen: 0,
             check_open: false,
             pending_picture: None,
+            icons: IconLib::Idle,
+            thumbs: Default::default(),
             _subs: subs,
         }
     }
@@ -798,6 +835,126 @@ impl ArchEditor {
         id
     }
 
+    /// Search the logo library for what's typed in the palette: load the library the
+    /// first time, then download the pictures of the icons it finds.
+    fn icons_for_search(&mut self, cx: &mut Context<Self>) {
+        let q = self.search.read(cx).value().trim().to_string();
+        if q.chars().count() < 2 {
+            return;
+        }
+        match &self.icons {
+            IconLib::Idle | IconLib::Failed(_) => {
+                self.icons = IconLib::Loading;
+                cx.spawn(async move |this, cx| {
+                    let lib = cx.background_spawn(async move { icons::load() }).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.icons = match lib {
+                            Ok(l) => IconLib::Ready(Arc::new(l)),
+                            Err(e) => IconLib::Failed(e),
+                        };
+                        this.icons_for_search(cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            IconLib::Ready(lib) => {
+                let want: Vec<icons::Icon> = lib
+                    .search(&q, ICON_HITS)
+                    .into_iter()
+                    .filter(|i| {
+                        !matches!(
+                            self.thumbs.get(&thumb_key(i)),
+                            Some(Thumb::Loading | Thumb::Ready(_))
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                for i in want {
+                    let key = thumb_key(&i);
+                    self.thumbs.insert(key.clone(), Thumb::Loading);
+                    cx.spawn(async move |this, cx| {
+                        let got = cx.background_spawn(async move { icons::fetch(&i) }).await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.thumbs
+                                .insert(key, got.map(Thumb::Ready).unwrap_or(Thumb::Failed));
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+            }
+            IconLib::Loading => {}
+        }
+    }
+
+    /// Put a picture on the diagram: copied into the diagram's `icons/` folder, then on the
+    /// shape it was dropped on, or as a part of its own.
+    fn place_picture(
+        &mut self,
+        file: &std::path::Path,
+        name: &str,
+        at: Option<Pt>,
+        cx: &mut Context<Self>,
+    ) {
+        let image = match icons::add_to_project(&self.root, file, name) {
+            Ok(i) => i,
+            Err(e) => {
+                self.note(e, true);
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(at) = at {
+            if let Hit::Node(id) = self.ed.hit(at, 2. / self.zoom) {
+                let kind = self.ed.kind_of(&id);
+                if kind.is_part() {
+                    self.ed.set_image(&id, &image);
+                    self.ed.sel = Sel {
+                        nodes: vec![id],
+                        edges: Vec::new(),
+                    };
+                    self.after_edit(cx);
+                    return;
+                }
+            }
+        }
+        let at = at.unwrap_or_else(|| self.ed.free_spot(self.center_world(), Kind::Icon.size()));
+        self.ed.add_icon(name, &image, at);
+        self.after_edit(cx);
+    }
+
+    /// Pick a picture of your own to put on the diagram.
+    fn pick_picture(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Add a picture: SVG, PNG, JPG, WebP or GIF".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                let Some(path) = paths.into_iter().next() else {
+                    return;
+                };
+                let _ = this.update(cx, |this, cx| {
+                    if !icons::is_picture(&path) {
+                        this.note("That isn't a picture Runo can show.".into(), true);
+                        cx.notify();
+                        return;
+                    }
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Picture")
+                        .to_string();
+                    this.place_picture(&path, &name, None, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
     fn quick_add(&mut self, preset: &Preset, window: &mut Window, cx: &mut Context<Self>) {
         let at = self.quick.take().unwrap_or_else(|| self.center_world());
         let at = self.ed.free_spot(at, preset.kind.size());
@@ -996,7 +1153,8 @@ impl ArchEditor {
     /// Save an export through the save dialog, falling back to `architecture/export/`.
     fn export(&mut self, ext: &'static str, cx: &mut Context<Self>) {
         self.export_open = false;
-        let doc = self.ed.doc.clone();
+        let mut doc = self.ed.doc.clone();
+        icons::inline_pictures(&self.root, &mut doc);
         let view = self.ed.cur().clone();
         let name = format!(
             "{}.{ext}",
@@ -2085,7 +2243,7 @@ impl ArchEditor {
             }
             Drag::Marquee { to, .. } => *to = w,
             Drag::Connect { to, .. } => *to = w,
-            Drag::Place { at, .. } => *at = Some(e.position),
+            Drag::Place { at, .. } | Drag::Picture { at, .. } => *at = Some(e.position),
         }
         cx.notify();
     }
@@ -2141,6 +2299,12 @@ impl ArchEditor {
                     .map(|p| self.world(self.local(p)))
                     .unwrap_or_else(|| self.ed.free_spot(self.center_world(), preset.kind.size()));
                 self.add_preset(preset, at, cx);
+            }
+            Drag::Picture { file, name, at } => {
+                let at = at
+                    .filter(|p| self.inside(*p))
+                    .map(|p| self.world(self.local(p)));
+                self.place_picture(&file, &name, at, cx);
             }
             Drag::Bend { moved, .. } => {
                 if moved {
@@ -3056,6 +3220,7 @@ fn kind_icon(kind: Kind) -> IconName {
         Kind::Cloud => "cloud",
         Kind::Note => "sticky-note",
         Kind::Text => "type",
+        Kind::Icon => "image",
     };
     icon_named(name).unwrap_or(IconName::Square)
 }
@@ -3532,20 +3697,36 @@ impl ArchEditor {
             }
         } else {
             let hits = search_presets(&q);
-            if hits.is_empty() {
-                list = list.child(
-                    div()
-                        .p_2()
-                        .text_size(px(12.))
-                        .text_color(rgb(c_muted()))
-                        .child("No shape matches."),
-                );
+            if !hits.is_empty() {
+                list = list.child(section("Shapes"));
             }
             for p in hits {
                 let idx = PRESETS.iter().position(|x| std::ptr::eq(x, p)).unwrap_or(0);
                 list = list.child(row(idx, p, cx));
             }
+            list = list
+                .child(section("Logos and icons"))
+                .child(self.icon_results(&q, cx));
         }
+        list = list.child(
+            div()
+                .id("arch-own-picture")
+                .mt_1()
+                .h(px(28.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(rgb(c_secondary()))
+                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+                .tooltip(tip("Add a PNG, JPG or SVG of your own"))
+                .on_click(cx.listener(|this, _, _, cx| this.pick_picture(cx)))
+                .child(icon(IconName::Image, 13., c_muted()))
+                .child("Your own picture…"),
+        );
         let unplaced: Vec<(String, String, Kind)> = self
             .ed
             .unplaced()
@@ -3631,6 +3812,101 @@ impl ArchEditor {
                     .child("Drag a shape onto the canvas, or click it to add it in the middle."),
             )
             .into_any_element()
+    }
+
+    /// The logos that match a search, as a grid to drag from.
+    fn icon_results(&self, q: &str, cx: &mut Context<Self>) -> AnyElement {
+        let message = |text: String| {
+            div()
+                .p_2()
+                .text_size(px(12.))
+                .text_color(rgb(c_muted()))
+                .child(text)
+                .into_any_element()
+        };
+        if q.chars().count() < 2 {
+            return message("Type two letters or more to search logos.".into());
+        }
+        let lib = match &self.icons {
+            IconLib::Ready(lib) => lib.clone(),
+            IconLib::Failed(e) => return message(e.clone()),
+            IconLib::Idle | IconLib::Loading => {
+                return message("Getting the logo library…".into());
+            }
+        };
+        let hits = lib.search(q, ICON_HITS);
+        if hits.is_empty() {
+            return message("No logo matches.".into());
+        }
+        let mut grid = div().flex().flex_wrap().gap(px(2.));
+        for (i, hit) in hits.into_iter().enumerate() {
+            let thumb = self.thumbs.get(&thumb_key(hit)).cloned();
+            let title = hit.title.clone();
+            let file = match &thumb {
+                Some(Thumb::Ready(f)) => Some(f.clone()),
+                _ => None,
+            };
+            let picture = match thumb {
+                Some(Thumb::Ready(f)) => img(f)
+                    .size(px(26.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                Some(Thumb::Failed) => icon(IconName::CircleX, 14., c_muted()).into_any_element(),
+                _ => div()
+                    .size(px(22.))
+                    .rounded(px(5.))
+                    .bg(tint(c_subtle()))
+                    .into_any_element(),
+            };
+            grid = grid.child(
+                div()
+                    .id(("arch-logo", i))
+                    .w(px(48.))
+                    .h(px(54.))
+                    .v_flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(3.))
+                    .rounded_md()
+                    .when(file.is_some(), |el| el.cursor_grab())
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .tooltip({
+                        let text: SharedString =
+                            format!("{} · {}", hit.title, hit.set.label()).into();
+                        move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(text.clone())
+                                .build(window, cx)
+                        }
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            if let Some(file) = &file {
+                                this.drag = Drag::Picture {
+                                    file: file.clone(),
+                                    name: title.clone(),
+                                    at: None,
+                                };
+                                window.focus(&this.focus, cx);
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(picture)
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(2.))
+                            .truncate()
+                            .text_center()
+                            .text_size(px(9.5))
+                            .text_color(rgb(c_secondary()))
+                            .child(hit.title.clone()),
+                    ),
+            );
+        }
+        grid.into_any_element()
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4214,7 +4490,28 @@ impl ArchEditor {
             );
             let fs = p.font * z;
             let nr = self.screen_rect(&n.rect());
-            if !e.icon.is_empty() && e.kind.is_part() && nr.h > 34. && nr.w > 60. && z > 0.45 {
+            if !e.image.is_empty() && z > 0.15 {
+                let file = folder(&self.root).join(&e.image);
+                let sr = self.screen_rect(&shape::picture_rect(e.kind, &n.rect()));
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(sr.x))
+                        .top(px(sr.y))
+                        .w(px(sr.w))
+                        .h(px(sr.h))
+                        .opacity(p.opacity)
+                        .child(img(file).size_full().object_fit(ObjectFit::Contain))
+                        .into_any_element(),
+                );
+            }
+            if e.image.is_empty()
+                && !e.icon.is_empty()
+                && e.kind.is_part()
+                && nr.h > 34.
+                && nr.w > 60.
+                && z > 0.45
+            {
                 if let Some(glyph) = icon_named(&e.icon) {
                     let (ix, iy) = match e.kind {
                         Kind::Database => (nr.x + 8. * z, nr.y + nr.h * 0.25),
@@ -4257,7 +4554,9 @@ impl ArchEditor {
                 .opacity(p.opacity)
                 .when(!top, |el| el.items_center().justify_center().text_center())
                 .when(top, |el| el.flex_row().items_center().gap(px(6. * z)));
-            if top {
+            if top && !e.image.is_empty() {
+                block = block.child(div().w(px(18. * z)).flex_none());
+            } else if top {
                 if let Some(g) = icon_named(&e.icon) {
                     block = block.child(icon(g, 13. * z, p.stroke.unwrap_or(p.text)));
                 }
@@ -4430,6 +4729,22 @@ impl ArchEditor {
                         "Expand into parts with AI",
                         "",
                         Box::new(move |this, window, cx| this.expand_with_ai(&b, window, cx)),
+                    ));
+                }
+                let has_picture = self
+                    .ed
+                    .doc
+                    .element(id)
+                    .is_some_and(|e| !e.image.is_empty() && e.kind != Kind::Icon);
+                if !multi && has_picture {
+                    let id = id.clone();
+                    items.push((
+                        "Remove picture",
+                        "",
+                        Box::new(move |this, _, cx| {
+                            let id = id.clone();
+                            this.act(cx, |ed| ed.set_image(&id, ""));
+                        }),
                     ));
                 }
                 if let Some(link) = self
@@ -6804,7 +7119,10 @@ impl Render for ArchEditor {
             Drag::Place {
                 preset,
                 at: Some(at),
-            } => Some((*preset, *at)),
+            } => Some((preset.kind.size(), preset.label.to_string(), *at)),
+            Drag::Picture {
+                name, at: Some(at), ..
+            } => Some((Kind::Icon.size(), name.clone(), *at)),
             _ => None,
         };
         div()
@@ -6849,8 +7167,7 @@ impl Render for ArchEditor {
                     .child(self.canvas_area(scene, &theme, cx)),
             )
             .child(self.side_panel(cx))
-            .when_some(ghost, |el, (p, at)| {
-                let (w, h) = p.kind.size();
+            .when_some(ghost, |el, ((w, h), label, at)| {
                 let z = self.zoom;
                 el.child(deferred(
                     anchored()
@@ -6869,7 +7186,7 @@ impl Render for ArchEditor {
                                 .justify_center()
                                 .text_size(px(12.))
                                 .text_color(rgb(c_blue()))
-                                .child(p.label),
+                                .child(label),
                         ),
                 ))
             })

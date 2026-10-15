@@ -126,6 +126,9 @@ fn drawio_style(kind: Kind, n: &Node, edge_like: bool) -> String {
             "rounded=1;whiteSpace=wrap;html=1;container=1;collapsible=0;dashed=1;verticalAlign=top;align=left;spacingLeft=10;arcSize=4;"
         }
         Kind::Box => "rounded=0;whiteSpace=wrap;html=1;",
+        Kind::Icon => {
+            "shape=image;html=1;verticalLabelPosition=bottom;verticalAlign=top;imageAspect=1;aspect=fixed;"
+        }
         _ => "rounded=1;whiteSpace=wrap;html=1;arcSize=8;",
     });
     let _ = edge_like;
@@ -195,7 +198,14 @@ pub(crate) fn drawio(doc: &Doc) -> String {
                 out,
                 "        <mxCell id=\"n-{}\" value=\"{value}\" style=\"{}\" vertex=\"1\" parent=\"{parent}\">\n          <mxGeometry x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" as=\"geometry\" />\n        </mxCell>",
                 esc(&n.id),
-                esc(&drawio_style(e.kind, n, false)),
+                esc(&{
+                    let mut style = drawio_style(e.kind, n, false);
+                    // draw.io reads `;` as the end of a style, so the URI goes without `;base64`.
+                    if e.kind == Kind::Icon && e.image.starts_with("data:") {
+                        let _ = write!(style, "image={};", e.image.replacen(";base64", "", 1));
+                    }
+                    style
+                }),
                 n.x - px,
                 n.y - py,
                 n.w,
@@ -350,6 +360,7 @@ fn kind_from_style(s: &HashMap<String, String>) -> Kind {
             }
         }
         "umlActor" | "actor" => Kind::Person,
+        "image" => Kind::Icon,
         "cloud" => Kind::Cloud,
         "note" | "card" => Kind::Note,
         "process" => Kind::Box,
@@ -1056,7 +1067,26 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
                 lines.push((l, size, p.sub, false));
             }
         }
-        text_block(out, &o.text, &lines, shown_kind == Kind::Boundary);
+        if e.image.starts_with("data:") {
+            let r = shape::picture_rect(shown_kind, &n.rect());
+            let _ = writeln!(
+                out,
+                "<image href=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"xMidYMid meet\" opacity=\"{}\"/>",
+                esc(&e.image),
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                p.opacity
+            );
+        }
+        // A boundary's title moves over for its picture, as on the canvas.
+        let text = if shown_kind == Kind::Boundary && !e.image.is_empty() {
+            Rect::new(o.text.x + 24., o.text.y, (o.text.w - 24.).max(1.), o.text.h)
+        } else {
+            o.text
+        };
+        text_block(out, &text, &lines, shown_kind == Kind::Boundary);
         if animated && n.effect != Effect::None {
             svg_effect(
                 out,

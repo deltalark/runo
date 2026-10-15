@@ -29,6 +29,7 @@ owner = "Team Checkout"
 tags = ["checkout", "tier-1"]
 code = ["services/orders/**"]   # paths or globs of the code behind it
 icon = "server"            # a Lucide icon name shown on the shape
+image = "icons/docker.svg" # a picture in this folder: the whole shape for an `icon`, a corner badge otherwise
 link = "orders-internals"  # the id of a diagram that zooms into this part
 
 [[relation]]
@@ -42,7 +43,13 @@ tech = "HTTPS / JSON"
 Kinds: `person`, `system`, `container`, `component`, `database`, `queue`, `external`
 (an external system), `boundary` (a group such as a VPC, region or team, drawn behind
 what it holds), `box`, `rounded`, `ellipse`, `diamond` (a decision), `cloud`, `note`
-(a sticky note) and `text`.
+(a sticky note), `text` and `icon` (a logo or picture with its name under it).
+
+Pictures live in `icons/` next to these files, as SVG, PNG, JPG, WebP or GIF. To use a
+brand or technology logo, save it there first: Simple Icons has one-colour logos at
+`https://raw.githubusercontent.com/simple-icons/simple-icons/develop/icons/<name>.svg`
+(`docker`, `nodedotjs`, `postgresql`, `amazonwebservices`) and Devicon has colour ones at
+`https://raw.githubusercontent.com/devicons/devicon/master/icons/<name>/<name>-original.svg`.
 
 ## views/*.toml
 

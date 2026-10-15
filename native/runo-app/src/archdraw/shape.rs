@@ -192,6 +192,12 @@ pub(crate) fn outline(kind: Kind, r: &Rect, style: &Style) -> Outline {
         Kind::Text => {
             text = *r;
         }
+        Kind::Icon => {
+            // The picture fills the top; the name sits under it. The outline isn't painted
+            // but is what a click lands on.
+            rounded(&mut fill, r, 6.);
+            text = Rect::new(r.x - 30., r.bottom() - 24., r.w + 60., 24.);
+        }
         Kind::Boundary => {
             rounded(&mut fill, r, radius);
             text = Rect::new(r.x + 12., r.y + 8., r.w - 24., 22.);
@@ -260,7 +266,7 @@ pub(crate) struct Paint {
 pub(crate) fn paint(kind: Kind, style: &Style, theme: &Theme) -> Paint {
     let acc = accent(kind);
     let fill_default = match kind {
-        Kind::Text => None,
+        Kind::Text | Kind::Icon => None,
         Kind::Note => Some(if theme.dark { 0x4a3f12 } else { 0xfef3c7 }),
         Kind::Boundary => Some(mix(acc, theme.canvas, if theme.dark { 0.08 } else { 0.05 })),
         Kind::Person | Kind::System => {
@@ -284,7 +290,7 @@ pub(crate) fn paint(kind: Kind, style: &Style, theme: &Theme) -> Paint {
     let stroke = match style.stroke.as_deref() {
         Some("none") => None,
         Some(s) => parse_hex(s).or(Some(acc)),
-        None if kind == Kind::Text => None,
+        None if kind == Kind::Text || kind == Kind::Icon => None,
         None => Some(acc),
     };
     let text = style
@@ -324,8 +330,9 @@ mod tests {
         for kind in Kind::ALL {
             let o = outline(kind, &r, &Style::default());
             assert_eq!(o.fill.is_empty(), kind == Kind::Text, "{kind:?}");
+            // An icon's name may be wider than its picture.
             assert!(
-                r.inflate(1.).contains_rect(&o.text),
+                kind == Kind::Icon || r.inflate(1.).contains_rect(&o.text),
                 "{kind:?} text stays inside"
             );
         }
@@ -357,5 +364,18 @@ mod tests {
         rounded(&mut segs, &Rect::new(0., 0., 10., 10.), 0.);
         assert_eq!(svg_d(&segs), "M0.0 0.0 L10.0 0.0 L10.0 10.0 L0.0 10.0 Z");
         assert_eq!(mix(0xffffff, 0x000000, 0.5), 0x808080);
+    }
+}
+
+/// Where a shape's picture goes: all of an icon above its name, a badge in the corner of
+/// anything else.
+pub(crate) fn picture_rect(kind: Kind, r: &Rect) -> Rect {
+    match kind {
+        Kind::Icon => Rect::new(r.x + 10., r.y + 6., r.w - 20., (r.h - 36.).max(8.)),
+        Kind::Boundary => Rect::new(r.x + 10., r.y + 8., 18., 18.),
+        _ => {
+            let s = (r.h * 0.3).clamp(16., 26.);
+            Rect::new(r.x + 7., r.y + 7., s, s)
+        }
     }
 }
