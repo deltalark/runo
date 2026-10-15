@@ -26,6 +26,8 @@ pub(crate) struct Shot {
     /// The CSS size drawn: the device's width, and its height or the page's if taller.
     pub size: (f32, f32),
     pub links: Vec<Link>,
+    /// What the design checks look at, when the page could say.
+    pub facts: Option<super::checks::Facts>,
 }
 
 pub(crate) struct Renderer {
@@ -107,10 +109,14 @@ impl Renderer {
             .eval(PAGE, &dom::call("links", &[]))
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
+        let facts = engine
+            .eval(PAGE, super::checks::FACTS)
+            .and_then(|v| serde_json::from_value(v).ok());
         Ok(Shot {
             image,
             size: (w, height),
             links,
+            facts,
         })
     }
 

@@ -1,11 +1,12 @@
 //! The design canvas: every screen as an artboard drawn by Chromium, elements picked and
 //! changed in place, a theme that restyles every screen, and a prototype to click through.
 
+use super::checks;
 use super::dom::{self, Element, Layer};
 use super::model::Canvas;
 use super::model::*;
 use super::render::{Renderer, Shot};
-use crate::archdraw::view::{chip_btn, col, icon_btn, label_row, section, text_btn};
+use crate::archdraw::view::{chip_btn, col, icon_btn, label_row, section, text_btn, tip};
 use crate::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use serde_json::json;
@@ -51,6 +52,7 @@ enum Panel {
     Inspect,
     Layers,
     Theme,
+    Checks,
 }
 
 enum Drag {
@@ -147,6 +149,8 @@ pub(crate) struct DesignCanvas {
     f_ask: Entity<InputState>,
     /// The change an agent was asked for, while it works and until it's kept or undone.
     ai: Option<AiChange>,
+    /// The ask bar is describing a new screen for this device.
+    ask_new: Option<Device>,
     _subs: Vec<Subscription>,
 }
 
@@ -156,6 +160,8 @@ struct AiChange {
     before: HashMap<PathBuf, Vec<u8>>,
     /// Files changed since it was asked for.
     changed: bool,
+    /// Made by an agent, rather than by picking a variant.
+    by_ai: bool,
 }
 
 impl EventEmitter<DesignEvent> for DesignCanvas {}
@@ -257,6 +263,7 @@ impl DesignCanvas {
             seen: HashMap::new(),
             f_ask,
             ai: None,
+            ask_new: None,
             _subs: subs,
         };
         this.seen = this.file_times();
@@ -417,6 +424,10 @@ impl DesignCanvas {
                 .filter(|s| !before.contains(&s.id))
                 .map(|s| s.id.clone())
                 .collect();
+            self.place_variants(&added);
+            if !added.is_empty() {
+                self.save_canvas();
+            }
             for id in added {
                 self.draw(&id, cx);
             }
@@ -445,6 +456,35 @@ impl DesignCanvas {
         cx.notify();
     }
 
+    /// Put new variants of a screen in a row under it.
+    fn place_variants(&mut self, added: &[String]) {
+        for id in added {
+            let Some(base) = variant_of(id) else {
+                continue;
+            };
+            let Some(b) = self.canvas.screen(&base).cloned() else {
+                continue;
+            };
+            let n = id
+                .rsplit("-v")
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(1)
+                .max(1);
+            let (w, _) = b.device.size();
+            let h = self
+                .shots
+                .get(&base)
+                .map(|s| s.size.1)
+                .unwrap_or(b.device.size().1);
+            if let Some(s) = self.canvas.screen_mut(id) {
+                s.x = b.x + (n - 1) as f32 * (w + VARIANT_GAP);
+                s.y = b.y + h + VARIANT_GAP + TITLE_H;
+                s.device = b.device;
+            }
+        }
+    }
+
     /// Remember our own writes so they don't read as outside changes.
     fn note_writes(&mut self) {
         self.seen = self.file_times();
@@ -459,38 +499,50 @@ impl DesignCanvas {
 
     // ---- AI
 
-    /// Start an agent on the change typed in the ask bar.
+    /// Start an agent on what's typed in the ask bar.
     fn send_ask(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let task = self.f_ask.read(cx).value().trim().to_string();
-        if task.is_empty() {
+        let typed = self.f_ask.read(cx).value().trim().to_string();
+        if typed.is_empty() {
             return;
         }
+        let task = match self.ask_new {
+            Some(device) => describe_task(&typed, device),
+            None => typed,
+        };
+        if self.ask(task, window, cx) {
+            self.ask_new = None;
+            self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
+        }
+    }
+
+    /// Start an agent on a change to the design. False when one can't start now.
+    fn ask(&mut self, task: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match &self.ai {
             Some(ai) if ai.changed => {
                 self.say("Keep or undo the last AI change first.");
                 cx.notify();
-                return;
+                return false;
             }
             Some(_) => {
                 self.say("AI is already working on the design.");
                 cx.notify();
-                return;
+                return false;
             }
             None => {}
         }
         if let Err(e) = seed(&self.root) {
             self.error = Some(format!("Couldn't set up {FOLDER}/: {e}"));
             cx.notify();
-            return;
+            return false;
         }
         self.save_canvas();
         let context = self.ask_context();
         self.ai = Some(AiChange {
-            task: task.clone(),
+            task: summary(&task),
             before: snapshot(&folder(&self.root)),
             changed: false,
+            by_ai: true,
         });
-        self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
         // Leave the keys to the New session dialog that opens next.
         window.blur(cx);
         cx.emit(DesignEvent::Ask {
@@ -499,6 +551,123 @@ impl DesignCanvas {
             edit: true,
             images: Vec::new(),
         });
+        cx.notify();
+        true
+    }
+
+    /// Describe a new screen in the ask bar, for AI to design.
+    fn start_describe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_open = false;
+        self.ask_new = Some(self.new_device);
+        let input = self.f_ask.clone();
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |s, cx| s.focus(window, cx))
+        });
+        cx.notify();
+    }
+
+    /// Have AI make three different takes on the selected screen, beside it.
+    fn variants_with_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
+            return;
+        };
+        let task = variants_task(&s.id, &s.name);
+        self.ask(task, window, cx);
+    }
+
+    /// Use a variant in place of the screen it was made from: its file takes the
+    /// screen's, under the screen's name, and the other variants go.
+    fn use_variant(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(base) = variant_of(id).filter(|b| self.canvas.screen(b).is_some()) else {
+            return;
+        };
+        let Some(name) = self.canvas.screen(&base).map(|s| s.name.clone()) else {
+            return;
+        };
+        if self.ai.as_ref().is_some_and(|ai| !ai.changed) {
+            self.say("Wait for AI to finish first.");
+            cx.notify();
+            return;
+        }
+        let dir = folder(&self.root).join("screens");
+        let before = match self.ai.take() {
+            // An AI change not yet kept: undo puts back what was there before it.
+            Some(ai) => ai.before,
+            None => snapshot(&folder(&self.root)),
+        };
+        let Ok(html) = std::fs::read_to_string(dir.join(format!("{id}.html"))) else {
+            return;
+        };
+        let html = with_title(&html, &name);
+        if let Err(e) = std::fs::write(dir.join(format!("{base}.html")), html) {
+            self.error = Some(format!("Couldn't use the variant: {e}"));
+            cx.notify();
+            return;
+        }
+        let gone: Vec<String> = self
+            .canvas
+            .screens
+            .iter()
+            .filter(|s| variant_of(&s.id).as_deref() == Some(base.as_str()))
+            .map(|s| s.id.clone())
+            .collect();
+        for v in &gone {
+            let _ = std::fs::remove_file(dir.join(format!("{v}.html")));
+        }
+        self.canvas.screens.retain(|s| !gone.contains(&s.id));
+        self.save_canvas();
+        let n = id.rsplit("-v").next().unwrap_or_default();
+        self.ai = Some(AiChange {
+            task: format!("Used variant {n} for {name}"),
+            before,
+            changed: true,
+            by_ai: false,
+        });
+        self.screen = Some(base.clone());
+        self.element = None;
+        self.undo.clear();
+        self.redo.clear();
+        self.seen.clear();
+        self.check_files(cx);
+        cx.notify();
+    }
+
+    /// Every screen's check findings, in canvas order.
+    fn findings(&self) -> Vec<(String, String, Vec<checks::Finding>)> {
+        let ids: HashSet<String> = self.canvas.screens.iter().map(|s| s.id.clone()).collect();
+        self.canvas
+            .screens
+            .iter()
+            .filter_map(|s| {
+                let facts = self.shots.get(&s.id)?.facts.as_ref()?;
+                Some((
+                    s.id.clone(),
+                    s.name.clone(),
+                    checks::review(facts, s.device, &ids),
+                ))
+            })
+            .collect()
+    }
+
+    /// Have AI fix what the checks found.
+    fn fix_checks(&mut self, only: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let all: Vec<_> = self
+            .findings()
+            .into_iter()
+            .filter(|(id, _, f)| !f.is_empty() && only.as_ref().is_none_or(|o| o == id))
+            .collect();
+        if all.is_empty() {
+            return;
+        }
+        self.ask(checks::fix_task(&all), window, cx);
+    }
+
+    /// Select what a finding is about.
+    fn show_finding(&mut self, id: &str, path: Option<dom::Path>, cx: &mut Context<Self>) {
+        self.select_screen(Some(id.to_string()));
+        if let Some(path) = path {
+            self.select_path(id, path, cx);
+        }
         cx.notify();
     }
 
@@ -577,7 +746,11 @@ impl DesignCanvas {
         if let Err(e) = restore(&folder(&self.root), &ai.before) {
             self.error = Some(format!("Couldn't undo the AI change: {e}"));
         } else {
-            self.say("Undid the AI change.");
+            self.say(if ai.by_ai {
+                "Undid the AI change."
+            } else {
+                "Put the screens back as they were."
+            });
         }
         self.undo.clear();
         self.redo.clear();
@@ -620,7 +793,11 @@ impl DesignCanvas {
                         .min_w_0()
                         .truncate()
                         .text_color(rgb(c_text()))
-                        .child(format!("AI changed the design: {}", ai.task)),
+                        .child(if ai.by_ai {
+                            format!("AI changed the design: {}", ai.task)
+                        } else {
+                            ai.task.clone()
+                        }),
                 )
                 .child(
                     text_btn("design-ai-undo", "Undo", Some(IconName::Undo2), false)
@@ -648,18 +825,49 @@ impl DesignCanvas {
                 ),
             None => {
                 let empty = self.f_ask.read(cx).value().trim().is_empty();
-                bar.border_color(rgb(c_border()))
-                    .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
-                    .child(
+                let bar = bar
+                    .border_color(rgb(if self.ask_new.is_some() {
+                        c_blue()
+                    } else {
+                        c_border()
+                    }))
+                    .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())));
+                let bar = match self.ask_new {
+                    Some(d) => bar.child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&self.f_ask).appearance(false)),
-                    )
-                    .child(
-                        text_btn("design-ask-send", "Send", None, !empty)
-                            .on_click(cx.listener(|this, _, window, cx| this.send_ask(window, cx))),
-                    )
+                            .id("design-ask-new")
+                            .flex_none()
+                            .h(px(22.))
+                            .pl_2()
+                            .pr_1()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded_md()
+                            .bg(tint(c_selected()))
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_text()))
+                            .child(format!("New {} screen", d.label().to_lowercase()))
+                            .child(icon(IconName::Close, 11., c_muted()))
+                            .cursor_pointer()
+                            .tooltip(tip("Change this screen instead"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.ask_new = None;
+                                cx.notify();
+                            })),
+                    ),
+                    None => bar,
+                };
+                bar.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Input::new(&self.f_ask).appearance(false)),
+                )
+                .child(
+                    text_btn("design-ask-send", "Send", None, !empty)
+                        .on_click(cx.listener(|this, _, window, cx| this.send_ask(window, cx))),
+                )
             }
         };
         Some(
@@ -1644,6 +1852,38 @@ impl DesignCanvas {
                 ),
             );
         }
+        let describe = div()
+            .id("design-describe")
+            .mx_1()
+            .mb_1()
+            .px_2()
+            .py(px(6.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .border_1()
+            .border_color(rgb(c_border()))
+            .hover(|el| el.bg(tint(c_subtle())))
+            .child(icon(IconName::Sparkles, 14., c_blue()))
+            .child(
+                div()
+                    .v_flex()
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_text()))
+                            .child("Describe it to AI"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(c_muted()))
+                            .child("Say what the screen is for; AI designs it"),
+                    ),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.start_describe(window, cx)));
         div()
             .absolute()
             .top(px(6.))
@@ -1658,6 +1898,7 @@ impl DesignCanvas {
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(devices)
+            .child(describe)
             .child(list)
             .into_any_element()
     }
@@ -1732,6 +1973,40 @@ impl DesignCanvas {
                 ),
             };
             out.push(body.into_any_element());
+        }
+        // What the checks found, marked on the screens.
+        if self.panel == Panel::Checks {
+            for (id, _, found) in self.findings() {
+                let Some(s) = self.canvas.screen(&id) else {
+                    continue;
+                };
+                for f in found {
+                    let Some(r) = f.rect else {
+                        continue;
+                    };
+                    let (x, y) = self.screen_pt((s.x + r.x, s.y + r.y));
+                    // Kept to the screen: what pokes out of it is marked to its edge.
+                    let sw = self.size_of(s).0;
+                    let r = dom::Box {
+                        w: r.w.min(sw - r.x).max(4.),
+                        ..r
+                    };
+                    let color = if f.kind.serious() { c_red() } else { c_amber() };
+                    out.push(
+                        div()
+                            .absolute()
+                            .left(px(x - 2.))
+                            .top(px(y - 2.))
+                            .w(px(r.w * z + 4.))
+                            .h(px(r.h * z + 4.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_dashed()
+                            .border_color(rgb(color))
+                            .into_any_element(),
+                    );
+                }
+            }
         }
         // The picked element.
         if let (Some(el), Some(s)) = (
@@ -1993,7 +2268,18 @@ impl DesignCanvas {
                                 )),
                         )
                         .child(devices)
-                        .child(row),
+                        .child(row)
+                        .child(
+                            text_btn(
+                                "design-start-describe",
+                                "Or describe it to AI",
+                                Some(IconName::Sparkles),
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_describe(window, cx)
+                            })),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -2140,7 +2426,7 @@ impl DesignCanvas {
     // ---- The side panel
 
     fn side_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tab = |id: &'static str, label: &'static str, p: Panel, cx: &mut Context<Self>| {
+        let tab = |id: &'static str, label: SharedString, p: Panel, cx: &mut Context<Self>| {
             let on = self.panel == p;
             div()
                 .id(id)
@@ -2165,7 +2451,9 @@ impl DesignCanvas {
             Panel::Inspect => self.inspector(cx),
             Panel::Layers => self.layers_panel(cx),
             Panel::Theme => self.theme_panel(cx),
+            Panel::Checks => self.checks_panel(cx),
         };
+        let issues: usize = self.findings().iter().map(|f| f.2.len()).sum();
         div()
             .w(px(290.))
             .flex_none()
@@ -2184,9 +2472,24 @@ impl DesignCanvas {
                     .gap_1()
                     .border_b_1()
                     .border_color(rgb(c_border()))
-                    .child(tab("design-tab-inspect", "Inspect", Panel::Inspect, cx))
-                    .child(tab("design-tab-layers", "Layers", Panel::Layers, cx))
-                    .child(tab("design-tab-theme", "Theme", Panel::Theme, cx)),
+                    .child(tab(
+                        "design-tab-inspect",
+                        "Inspect".into(),
+                        Panel::Inspect,
+                        cx,
+                    ))
+                    .child(tab("design-tab-layers", "Layers".into(), Panel::Layers, cx))
+                    .child(tab("design-tab-theme", "Theme".into(), Panel::Theme, cx))
+                    .child(tab(
+                        "design-tab-checks",
+                        if issues == 0 {
+                            "Checks".into()
+                        } else {
+                            format!("Checks {issues}").into()
+                        },
+                        Panel::Checks,
+                        cx,
+                    )),
             )
             .child(
                 div()
@@ -2313,6 +2616,36 @@ impl DesignCanvas {
                                     false,
                                 )
                                 .on_click(cx.listener(|this, _, _, cx| this.duplicate_screen(cx))),
+                            )
+                            .child(
+                                text_btn(
+                                    "design-variants",
+                                    "Variants with AI",
+                                    Some(IconName::Sparkles),
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.variants_with_ai(window, cx),
+                                )),
+                            )
+                            .when(
+                                variant_of(&s.id).is_some_and(|b| self.canvas.screen(&b).is_some()),
+                                |el| {
+                                    let id = s.id.clone();
+                                    el.child(
+                                        text_btn(
+                                            "design-use-variant",
+                                            "Use this variant",
+                                            Some(IconName::Check),
+                                            true,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.use_variant(&id, cx)
+                                            }),
+                                        ),
+                                    )
+                                },
                             )
                             .child(
                                 text_btn(
@@ -2716,6 +3049,107 @@ impl DesignCanvas {
         )
     }
 
+    /// What the design checks found on each screen.
+    fn checks_panel(&self, cx: &mut Context<Self>) -> Div {
+        let all = self.findings();
+        let total: usize = all.iter().map(|f| f.2.len()).sum();
+        let mut out = div().v_flex().gap_1().pt_2();
+        out = out.child(
+            div()
+                .text_size(px(12.5))
+                .text_color(rgb(c_secondary()))
+                .child(if self.canvas.screens.is_empty() {
+                    "Add a screen, and Runo checks it for text that's hard to read, targets too small to tap, colours outside the theme and more.".to_string()
+                } else if total == 0 {
+                    "Nothing to fix: text is readable, targets are big enough, colours come from the theme and every link has a screen.".to_string()
+                } else {
+                    format!(
+                        "{total} thing{} to look at. Click one to pick it on its screen.",
+                        if total == 1 { "" } else { "s" }
+                    )
+                }),
+        );
+        if total > 0 {
+            out = out.child(
+                div().pt_1().child(
+                    text_btn(
+                        "design-fix-all",
+                        "Fix all with AI",
+                        Some(IconName::Sparkles),
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.fix_checks(None, window, cx))),
+                ),
+            );
+        }
+        let mut n: usize = 0;
+        for (id, name, found) in all {
+            if found.is_empty() {
+                continue;
+            }
+            let sid = id.clone();
+            out = out.child(
+                div()
+                    .pt_3()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_muted()))
+                            .child(format!("{} · {}", name.to_uppercase(), found.len())),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("design-fix-{id}")))
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_blue()))
+                            .cursor_pointer()
+                            .child("Fix with AI")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.fix_checks(Some(sid.clone()), window, cx)
+                            })),
+                    ),
+            );
+            for f in found {
+                n += 1;
+                let (id, path) = (id.clone(), f.path.clone());
+                let color = if f.kind.serious() { c_red() } else { c_amber() };
+                out = out.child(
+                    div()
+                        .id(("design-finding", n))
+                        .px_2()
+                        .py(px(5.))
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|el| el.bg(tint(c_subtle())))
+                        .child(
+                            div()
+                                .pt(px(5.))
+                                .child(div().size(px(6.)).rounded_full().bg(rgb(color))),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.))
+                                .text_color(rgb(c_text()))
+                                .child(f.text.clone()),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.show_finding(&id, path.clone(), cx)
+                        })),
+                );
+            }
+        }
+        out
+    }
+
     fn theme_panel(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
         let mut swatches = div().flex().flex_wrap().gap(px(5.));
@@ -2898,6 +3332,50 @@ fn token_name(t: &str) -> &'static str {
 }
 
 /// Every file under `dir`, to put back later.
+/// Space between a screen and the row of its variants.
+const VARIANT_GAP: f32 = 80.;
+
+/// The screen a variant was made from: `home-v2` is a variant of `home`.
+fn variant_of(id: &str) -> Option<String> {
+    let (base, n) = id.rsplit_once("-v")?;
+    (!base.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        .then(|| base.to_string())
+}
+
+/// The task for AI to design a new screen from a description.
+fn describe_task(what: &str, device: Device) -> String {
+    format!(
+        "Design a new {} screen: {what}\n\nAdd it as a new file in {FOLDER}/screens/ with a \
+         short id, a <title> naming it and <meta name=\"runo:device\" content=\"{}\">. Make \
+         it complete and realistic, with real-sounding content rather than placeholders, built \
+         from the classes in {FOLDER}/components.css and the variables in {FOLDER}/tokens.css. \
+         Link it to the screens it naturally leads to and from with data-goto where that fits.",
+        device.label().to_lowercase(),
+        device.label().to_lowercase()
+    )
+}
+
+/// The task for AI to make variants of a screen.
+fn variants_task(id: &str, name: &str) -> String {
+    format!(
+        "Make three alternative designs of the screen {name} ({FOLDER}/screens/{id}.html) as \
+         new screens {FOLDER}/screens/{id}-v1.html, {id}-v2.html and {id}-v3.html. Keep its \
+         purpose, content and links, but make each a clearly different take: a different \
+         layout, hierarchy or density, not just other colours. Title each \"{name} · variant \
+         N\". Don't change {id}.html itself; Runo shows the variants under it to pick from."
+    )
+}
+
+/// A task cut to a line, for the ask bar.
+fn summary(task: &str) -> String {
+    let line = task.lines().next().unwrap_or_default();
+    if line.chars().count() > 90 {
+        format!("{}…", line.chars().take(89).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
 fn snapshot(dir: &std::path::Path) -> HashMap<PathBuf, Vec<u8>> {
     fn go(dir: &std::path::Path, out: &mut HashMap<PathBuf, Vec<u8>>) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -2936,6 +3414,25 @@ fn restore(dir: &std::path::Path, before: &HashMap<PathBuf, Vec<u8>>) -> std::io
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn variants_are_named_after_their_screen() {
+        assert_eq!(variant_of("home-v2").as_deref(), Some("home"));
+        assert_eq!(variant_of("sign-up-v10").as_deref(), Some("sign-up"));
+        assert_eq!(variant_of("home"), None);
+        assert_eq!(variant_of("-v1"), None);
+        assert_eq!(variant_of("review-vote"), None);
+        let task = variants_task("home", "Home");
+        assert!(task.contains("design/screens/home-v1.html"));
+        assert!(task.contains("Don't change home.html"));
+        let task = describe_task("a checkout with Apple Pay", Device::Phone);
+        assert!(task.starts_with("Design a new phone screen: a checkout with Apple Pay"));
+        assert!(task.contains("content=\"phone\""));
+        assert_eq!(
+            summary(&task),
+            "Design a new phone screen: a checkout with Apple Pay"
+        );
+    }
 
     #[test]
     fn undoing_an_ai_change_puts_the_folder_back() {
