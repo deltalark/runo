@@ -74,6 +74,24 @@ if (!window.__runo) window.__runo = (() => {
     walk(document.body, 0);
     return out;
   };
+  // Every element shown, with where it sits and which way its children run, so the canvas
+  // can find what's under the pointer and where a dragged element would land.
+  const boxes = () => {
+    const out = [];
+    for (const el of document.body.querySelectorAll('*')) {
+      if (SKIP.has(el.tagName) || out.length >= 1500) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      const path = pathOf(el);
+      if (!path) continue;
+      const row = (cs.display.includes('flex') && cs.flexDirection.startsWith('row'))
+        || cs.display.includes('grid') || cs.display === 'inline';
+      out.push({ path, rect: rect(el), row, tag: el.tagName.toLowerCase() });
+    }
+    return out;
+  };
   const links = () => Array.from(document.querySelectorAll('[data-goto]'))
     .map((el) => ({ path: pathOf(el), goto: el.dataset.goto.replace(/\.html$/, ''), rect: rect(el) }))
     .filter((l) => l.path);
@@ -85,6 +103,12 @@ if (!window.__runo) window.__runo = (() => {
   };
   const ops = {
     text: (el, v) => { el.textContent = v; },
+    styles: (el, map) => {
+      for (const [k, v] of Object.entries(map)) {
+        if (v) el.style.setProperty(k, v); else el.style.removeProperty(k);
+      }
+      if (!el.getAttribute('style')) el.removeAttribute('style');
+    },
     style: (el, k, v) => { if (v) el.style.setProperty(k, v); else el.style.removeProperty(k);
       if (!el.getAttribute('style')) el.removeAttribute('style'); },
     attr: (el, k, v) => { if (v === null || v === '') el.removeAttribute(k); else el.setAttribute(k, v); },
@@ -115,7 +139,7 @@ if (!window.__runo) window.__runo = (() => {
       return info(el);
     },
     info: (p) => { const el = at(p); return el ? info(el) : null; },
-    tree, links, html,
+    tree, links, html, boxes,
     size: () => ({ w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight }),
     op: (p, name, ...args) => {
       const el = p.length ? at(p) : document.body;
@@ -230,6 +254,92 @@ pub(crate) struct Layer {
     pub text: Option<String>,
 }
 
+/// An element on the page: where it sits, and whether its children run across.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct Bx {
+    pub path: Path,
+    pub rect: Box,
+    /// Its children run left to right (a flex row or a grid).
+    #[serde(default)]
+    pub row: bool,
+}
+
+/// The deepest element under a point, leaving out `skip` and what's inside it.
+pub(crate) fn under<'a>(boxes: &'a [Bx], x: f32, y: f32, skip: Option<&Path>) -> Option<&'a Bx> {
+    boxes
+        .iter()
+        .filter(|b| {
+            x >= b.rect.x && y >= b.rect.y && x <= b.rect.x + b.rect.w && y <= b.rect.y + b.rect.h
+        })
+        .filter(|b| skip.is_none_or(|s| !b.path.starts_with(s)))
+        .max_by_key(|b| b.path.len())
+}
+
+/// A measured distance: from, to, and how far in CSS pixels.
+pub(crate) type Gap = ((f32, f32), (f32, f32), f32);
+
+/// The distances to show between two elements, as lines with their length: to the edges of
+/// the one around the other, else across the gaps between them.
+pub(crate) fn spacing(a: &Box, b: &Box) -> Vec<Gap> {
+    let inside = |i: &Box, o: &Box| {
+        i.x >= o.x && i.y >= o.y && i.x + i.w <= o.x + o.w && i.y + i.h <= o.y + o.h
+    };
+    let mut out = Vec::new();
+    let (i, o) = if inside(a, b) {
+        (a, b)
+    } else if inside(b, a) {
+        (b, a)
+    } else {
+        // Side by side or one above the other: the gaps between them.
+        let ym = (a.y.max(b.y) + (a.y + a.h).min(b.y + b.h)) / 2.;
+        let ym = if a.y.max(b.y) <= (a.y + a.h).min(b.y + b.h) {
+            ym
+        } else {
+            a.y + a.h / 2.
+        };
+        let xm = (a.x.max(b.x) + (a.x + a.w).min(b.x + b.w)) / 2.;
+        let xm = if a.x.max(b.x) <= (a.x + a.w).min(b.x + b.w) {
+            xm
+        } else {
+            a.x + a.w / 2.
+        };
+        if a.x + a.w <= b.x {
+            out.push(((a.x + a.w, ym), (b.x, ym), b.x - a.x - a.w));
+        } else if b.x + b.w <= a.x {
+            out.push(((b.x + b.w, ym), (a.x, ym), a.x - b.x - b.w));
+        }
+        if a.y + a.h <= b.y {
+            out.push(((xm, a.y + a.h), (xm, b.y), b.y - a.y - a.h));
+        } else if b.y + b.h <= a.y {
+            out.push(((xm, b.y + b.h), (xm, a.y), a.y - b.y - b.h));
+        }
+        return out;
+    };
+    let (xm, ym) = (i.x + i.w / 2., i.y + i.h / 2.);
+    out.push(((o.x, ym), (i.x, ym), i.x - o.x));
+    out.push(((i.x + i.w, ym), (o.x + o.w, ym), o.x + o.w - i.x - i.w));
+    out.push(((xm, o.y), (xm, i.y), i.y - o.y));
+    out.push(((xm, i.y + i.h), (xm, o.y + o.h), o.y + o.h - i.y - i.h));
+    out.retain(|l| l.2 > 0.5);
+    out
+}
+
+/// Where an element at `from` ends up after moving it before or after the one at `to`.
+pub(crate) fn moved_path(from: &Path, to: &Path, after: bool) -> Path {
+    let mut t = to.clone();
+    // Taking the element out shifts its later siblings, and their insides, up by one.
+    let depth = from.len() - 1;
+    if t.len() > depth && t[..depth] == from[..depth] && t[depth] > from[depth] {
+        t[depth] -= 1;
+    }
+    if after {
+        if let Some(last) = t.last_mut() {
+            *last += 1;
+        }
+    }
+    t
+}
+
 /// An element that opens another screen.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct Link {
@@ -296,6 +406,51 @@ mod tests {
         assert!(e.rect.contains(10., 5.));
         assert_eq!(parent(&e.path), Some(vec![1]));
         assert_eq!(parent(&vec![]), None);
+    }
+
+    #[test]
+    fn moves_land_where_dropped() {
+        // Down past a later sibling: the gap it leaves shifts the target up.
+        assert_eq!(moved_path(&vec![0, 1], &vec![0, 3], true), vec![0, 3]);
+        assert_eq!(moved_path(&vec![0, 1], &vec![0, 3], false), vec![0, 2]);
+        // Up before an earlier sibling.
+        assert_eq!(moved_path(&vec![0, 3], &vec![0, 1], false), vec![0, 1]);
+        // Into another container after the old place.
+        assert_eq!(moved_path(&vec![1], &vec![2, 0], false), vec![1, 0]);
+        assert_eq!(moved_path(&vec![2, 0], &vec![1], true), vec![2]);
+    }
+
+    #[test]
+    fn the_deepest_element_is_under_the_pointer() {
+        let b = |path: Vec<usize>, x, y, w, h| Bx {
+            path,
+            rect: Box { x, y, w, h },
+            ..Default::default()
+        };
+        let boxes = vec![
+            b(vec![0], 0., 0., 100., 100.),
+            b(vec![0, 1], 10., 10., 20., 20.),
+        ];
+        assert_eq!(under(&boxes, 15., 15., None).unwrap().path, vec![0, 1]);
+        assert_eq!(under(&boxes, 50., 50., None).unwrap().path, vec![0]);
+        assert_eq!(
+            under(&boxes, 15., 15., Some(&vec![0, 1])).unwrap().path,
+            vec![0]
+        );
+        assert!(under(&boxes, 150., 15., None).is_none());
+    }
+
+    #[test]
+    fn spacing_is_measured_inside_and_between() {
+        let r = |x, y, w, h| Box { x, y, w, h };
+        let inner = spacing(&r(10., 20., 30., 10.), &r(0., 0., 100., 50.));
+        let d: Vec<f32> = inner.iter().map(|l| l.2).collect();
+        assert_eq!(d, vec![10., 60., 20., 20.]);
+        let beside = spacing(&r(0., 0., 10., 10.), &r(30., 0., 10., 10.));
+        assert_eq!(beside.len(), 1);
+        assert_eq!(beside[0].2, 20.);
+        let below = spacing(&r(0., 0., 10., 10.), &r(0., 16., 10., 10.));
+        assert_eq!(below[0].2, 6.);
     }
 
     #[test]
