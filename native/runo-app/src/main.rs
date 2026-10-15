@@ -3,6 +3,7 @@ mod agentcmds;
 mod alerts;
 mod applog;
 mod approvals;
+mod archdraw;
 mod architecture;
 mod assistant;
 mod browser;

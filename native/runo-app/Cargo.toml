@@ -51,6 +51,10 @@ libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
+# The architecture editor: draw.io files (XML, sometimes deflated) and PNG export.
+roxmltree = "0.21"
+flate2 = "1"
+resvg = "0.45"
 # The pairing code `runo --phone` prints in the terminal.
 qrcode = { version = "0.14", default-features = false }
 

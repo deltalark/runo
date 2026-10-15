@@ -3,6 +3,7 @@
 //! with both attached.
 
 use super::*;
+use crate::archdraw::view::{ArchEditor, ArchEvent};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -1238,6 +1239,10 @@ pub(crate) struct ArchPage {
     pub scanning: std::collections::HashSet<u64>,
     /// Packages shown the other way from how they start (only the first starts open).
     pub open: std::collections::HashSet<String>,
+    /// The diagram editor of each project, and whether the page shows it or the code map.
+    pub editors: HashMap<u64, Entity<ArchEditor>>,
+    pub code_map: bool,
+    pub editor_subs: Vec<Subscription>,
 }
 
 impl ArchPage {
@@ -1285,6 +1290,9 @@ impl ArchPage {
                 maps: HashMap::new(),
                 scanning: Default::default(),
                 open: Default::default(),
+                editors: HashMap::new(),
+                code_map: false,
+                editor_subs: Vec::new(),
             },
             subs,
         )
@@ -1312,6 +1320,7 @@ impl RunoApp {
             return;
         };
         let back = !std::mem::replace(&mut self.arch.shown, true);
+        self.ensure_arch_editor(&project, back, window, cx);
         if self.arch.project == Some(project.id) && !back {
             return;
         }
@@ -1328,6 +1337,50 @@ impl RunoApp {
         self.arch.loading = false;
         // The last map shows while the project is read again.
         self.map_project(project.id);
+    }
+
+    /// Make the project's diagram editor, or read its files again when the page comes back.
+    fn ensure_arch_editor(
+        &mut self,
+        project: &Project,
+        back: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.arch.editors.get(&project.id) {
+            if back {
+                editor.update(cx, |e, cx| e.reload_if_clean(cx));
+            }
+            return;
+        }
+        let root = PathBuf::from(&project.path);
+        let name = project.name.clone();
+        let editor = cx.new(|cx| ArchEditor::new(root, name, window, cx));
+        let pid = project.id;
+        let sub = cx.subscribe_in(&editor, window, move |this, _, event, window, cx| {
+            match event {
+                ArchEvent::Ask { task, context } => this.start_with_context(
+                    pid,
+                    task,
+                    shell::StartContext {
+                        label: "Architecture diagram".into(),
+                        text: context.clone(),
+                        images: Vec::new(),
+                    },
+                    window,
+                    cx,
+                ),
+                ArchEvent::Open(path) => {
+                    this.view = View::Session;
+                    this.show_panel = true;
+                    this.open_preview(&path.to_string_lossy());
+                    this.right_tab = RightTab::Files;
+                }
+            }
+            cx.notify();
+        });
+        self.arch.editor_subs.push(sub);
+        self.arch.editors.insert(project.id, editor);
     }
 
     /// Read the project's structure off the UI thread.
@@ -1638,6 +1691,11 @@ impl RunoApp {
             );
         };
         let pid = project.id;
+        if !self.arch.code_map {
+            if let Some(editor) = self.arch.editors.get(&pid) {
+                return self.arch_diagram(editor.clone(), cx);
+            }
+        }
         let scanning = self.arch.scanning.contains(&pid);
         let map = self.arch.maps.get(&pid);
 
@@ -1902,8 +1960,63 @@ impl RunoApp {
             Some(self.mode_project_chip(cx)),
             "The project's structure from its manifests and imports, notes and decisions kept in the repository, and agents that start with both.",
             body,
-            None,
+            Some(self.arch_tabs(cx)),
         )
+    }
+
+    /// Diagram or code map.
+    fn arch_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let code_map = self.arch.code_map;
+        crate::github::segmented()
+            .child(
+                crate::github::segment(("arch-tab", 0), "Diagram", !code_map).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.arch.code_map = false;
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                crate::github::segment(("arch-tab", 1), "Code map", code_map).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.arch.code_map = true;
+                        cx.notify();
+                    }),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The diagram editor, edge to edge under a slim header.
+    fn arch_diagram(&self, editor: Entity<ArchEditor>, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .v_flex()
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(48.))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(rgb(c_border()))
+                    .child(icon(Mode::Architecture.glyph(), 16., c_blue()))
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Architecture"),
+                    )
+                    .child(self.mode_project_chip(cx))
+                    .child(div().flex_1())
+                    .child(self.arch_tabs(cx)),
+            )
+            .child(div().flex_1().min_h_0().child(editor))
+            .into_any_element()
     }
 }
 

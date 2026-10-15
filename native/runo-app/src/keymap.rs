@@ -395,6 +395,7 @@ pub(crate) fn install(cx: &mut App) {
         }
     }
     bindings.push(KeyBinding::new("escape", Dismiss, Some("Runo")));
+    bindings.extend(crate::archdraw::view::bindings());
     bindings.push(KeyBinding::new("secondary-q", Quit, None));
     // Inside a shell, keys belong to the shell: Ctrl-P is history, Escape is vi.
     // Keys typed into the Browser tab's page go to the page.

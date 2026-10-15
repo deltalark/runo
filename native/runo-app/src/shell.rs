@@ -79,7 +79,7 @@ impl Mode {
         }
     }
 
-    fn glyph(self) -> IconName {
+    pub(crate) fn glyph(self) -> IconName {
         match self {
             Mode::Home => IconName::House,
             Mode::Sessions => IconName::CodeXml,
