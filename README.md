@@ -190,7 +190,8 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 
 ### Memory and MCP
 
-- **Project notes and memory.** Runo ships a small MCP server that lets any agent read the session memory, search earlier sessions in the project and save notes, instead of having the whole history pasted into every prompt.
+- **Project notes.** Keep each project's commands, decisions and gotchas in Markdown, saved as you type, with Write, Split and Preview views, an outline and search across projects. Turn on **Share with agents** and every new session in that project starts with the notes.
+- **Session memory.** Runo ships a small MCP server that lets any agent read the session memory, search earlier sessions in the project and save notes, instead of having the whole history pasted into every prompt.
 - **Shared MCP servers.** Runo finds the MCP servers configured in every app on your computer, and you can share any of them with all agents, not just the one it was set up for.
 - **Runo's own servers.** Add servers to Runo's own list in Settings → MCP and every agent's sessions get them. Cursor, Gemini CLI and Droid read them from their project config file, which Runo fills in for each turn, keeps out of git and tidies afterwards; Grok has no project-level MCP config, so it gets none.
 - **Hooks and skills.** See the Claude Code hooks and skills that apply to a project, open them in Runo's editor, and start a new skill.
@@ -203,6 +204,7 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 ### Made to feel at home
 
 - **Quick open** with <kbd>⌘</kbd> <kbd>K</kbd> to jump to any session, file or command, and <kbd>⌘</kbd> <kbd>N</kbd> for a new session.
+- **Your own shortcuts.** In **Settings → Keybindings**, click a shortcut and press the new keys. Runo warns you when the keys are already taken, and you can reset one or all of them.
 - **Light and dark themes**, accent colors, colorblind-friendly diff colors, and an optional glass look.
 - **A one-minute tour** on first launch that you can replay any time.
 - **Right-click menus** everywhere: pin, rename, archive and more.
