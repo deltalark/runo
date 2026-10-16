@@ -12,7 +12,8 @@ pub(crate) const FOLDER: &str = "design";
 const SCREENS: &str = "screens";
 const CANVAS: &str = "canvas.toml";
 pub(crate) const TOKENS: &str = "tokens.css";
-const COMPONENTS: &str = "components.css";
+pub(crate) const COMPONENTS: &str = "components.css";
+const ICONS: &str = "icons.css";
 const PROTOTYPE: &str = "prototype.js";
 
 /// The frame a screen is designed for.
@@ -249,16 +250,46 @@ pub(crate) fn seed(root: &Path) -> std::io::Result<()> {
     for (name, text) in [
         (TOKENS, TOKENS_CSS.to_string()),
         (COMPONENTS, COMPONENTS_CSS.to_string()),
+        (ICONS, ICONS_CSS.to_string()),
         (PROTOTYPE, prototype_js()),
     ] {
         let file = dir.join(name);
-        let old =
-            name == PROTOTYPE && std::fs::read_to_string(&file).is_ok_and(|t| t == PROTOTYPE_JS_V1);
-        if !file.exists() || old {
+        let was = std::fs::read_to_string(&file).ok();
+        let old = match name {
+            PROTOTYPE => was.as_deref() == Some(PROTOTYPE_JS_V1),
+            COMPONENTS => was.as_deref() == Some(COMPONENTS_CSS_V1),
+            _ => false,
+        };
+        if was.is_none() || old {
             std::fs::write(file, text)?;
+        } else if name == TOKENS {
+            // A theme from before the type scale, shadows and status colours gets them,
+            // keeping every value it has.
+            let was = was.unwrap_or_default();
+            let now = with_missing_tokens(&was);
+            if now != was {
+                std::fs::write(file, now)?;
+            }
         }
     }
     Ok(())
+}
+
+/// `css` with the tokens a new theme has that it lacks, added to its `:root`.
+fn with_missing_tokens(css: &str) -> String {
+    let Some((start, end)) = root_block(TOKENS_CSS) else {
+        return css.to_string();
+    };
+    let mut out = css.to_string();
+    for line in TOKENS_CSS[start..end].lines() {
+        let Some((name, value)) = line.trim().trim_end_matches(';').split_once(':') else {
+            continue;
+        };
+        if var(&out, name.trim()).is_none() {
+            out = set_var(&out, name.trim(), value.trim());
+        }
+    }
+    out
 }
 
 /// The `<title>` of a screen.
@@ -553,33 +584,18 @@ pub(crate) const COLOR_TOKENS: [&str; 7] = [
     "--border",
 ];
 
-const TOKENS_CSS: &str = r#"/* The design's theme. Every screen uses these, so changing one restyles them all. */
-:root {
-  --primary: #2563eb;
-  --on-primary: #ffffff;
-  --bg: #ffffff;
-  --surface: #f4f5f7;
-  --text: #0f172a;
-  --muted: #5b6577;
-  --border: #e2e8f0;
-  --radius: 12px;
-  --space: 8px;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-}
+/// The theme a new design starts with.
+pub(crate) const TOKENS_CSS: &str = include_str!("assets/tokens.css");
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --on-primary: #ffffff;
-    --bg: #0b0d12;
-    --surface: #161a22;
-    --text: #e8ebf1;
-    --muted: #8b95a7;
-    --border: #262c38;
-  }
-}
-"#;
+/// The building blocks a new design starts with.
+pub(crate) const COMPONENTS_CSS: &str = include_str!("assets/components.css");
 
-const COMPONENTS_CSS: &str = r#"/* Building blocks the screens share. Prefer these classes and the tokens over raw values. */
+/// Line icons for the screens, imported by `components.css`.
+pub(crate) const ICONS_CSS: &str = include_str!("assets/icons.css");
+
+/// What `components.css` was before it grew icons, a type scale and more parts, replaced
+/// when a design still has it unchanged.
+const COMPONENTS_CSS_V1: &str = r#"/* Building blocks the screens share. Prefer these classes and the tokens over raw values. */
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 16px; line-height: 1.45; }
 h1, h2, h3, p { margin: 0; }
@@ -705,6 +721,38 @@ mod tests {
         std::fs::write(&file, "// mine").unwrap();
         seed(&root).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "// mine");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_old_design_gets_icons_and_the_new_tokens_but_keeps_its_own() {
+        let root = temp("upgrade");
+        let dir = folder(&root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(COMPONENTS), COMPONENTS_CSS_V1).unwrap();
+        std::fs::write(
+            dir.join(TOKENS),
+            ":root {\n  --primary: #db2777;\n  --radius: 4px;\n}\n",
+        )
+        .unwrap();
+        seed(&root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(COMPONENTS)).unwrap(),
+            COMPONENTS_CSS
+        );
+        assert!(dir.join(ICONS).exists());
+        let tokens = std::fs::read_to_string(dir.join(TOKENS)).unwrap();
+        assert_eq!(var(&tokens, "--primary").as_deref(), Some("#db2777"));
+        assert_eq!(var(&tokens, "--radius").as_deref(), Some("4px"));
+        assert_eq!(var(&tokens, "--danger").as_deref(), Some("#dc2626"));
+        assert!(var(&tokens, "--text-xl").is_some());
+        // Components someone changed are theirs.
+        std::fs::write(dir.join(COMPONENTS), "/* mine */").unwrap();
+        seed(&root).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(COMPONENTS)).unwrap(),
+            "/* mine */"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

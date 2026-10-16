@@ -2362,6 +2362,7 @@ impl RunoApp {
                     .is_some_and(|s| s.status == Status::Done);
                 self.log_turn_end(id, ok, stopped, hold, took, &all);
                 self.finish_turn(id, ok, stopped, hold, cx);
+                self.design_turn_done(id, stopped, cx);
                 self.playbook_turn_done(id, ok);
                 self.write_memory(id);
                 self.save();

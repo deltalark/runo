@@ -232,6 +232,22 @@ impl RunoApp {
         self.design.canvases.insert(project.id, canvas);
     }
 
+    /// A turn of a chat asked from a Design canvas ended: the canvas looks at what the
+    /// agent made, then offers to keep or undo it.
+    pub(crate) fn design_turn_done(&mut self, id: u64, stopped: bool, cx: &mut Context<Self>) {
+        let Some(pid) = self
+            .state
+            .session(id)
+            .filter(|s| shell::canvas_of(s) == Some(View::Design))
+            .map(|s| s.project_id)
+        else {
+            return;
+        };
+        if let Some(canvas) = self.design.canvases.get(&pid) {
+            canvas.update(cx, |c, cx| c.agent_done(stopped, cx));
+        }
+    }
+
     /// The design canvas, edge to edge under a slim header.
     fn design_canvas(
         &self,

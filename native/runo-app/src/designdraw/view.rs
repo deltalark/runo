@@ -2,6 +2,7 @@
 //! elements picked and changed in place, a theme that restyles every screen, and a
 //! prototype to click through.
 
+use super::brief;
 use super::checks;
 use super::dom::{self, Element, Layer};
 use super::model::Canvas;
@@ -258,6 +259,36 @@ struct AiChange {
     by_ai: bool,
     /// When it was asked for, to show how long the agent has been working.
     started: Instant,
+    /// The agent's turn hasn't ended yet.
+    working: bool,
+    /// The whole task asked for, to check the result against.
+    asked: String,
+    /// The agent has been asked to look at what it made, once per change.
+    reviewed: bool,
+    /// Waiting for the changed screens to be drawn, to show the agent how they look.
+    review_due: bool,
+}
+
+impl AiChange {
+    /// A change made on the canvas rather than by an agent, kept or undone the same way.
+    fn by_hand(task: String, before: HashMap<PathBuf, Vec<u8>>) -> Self {
+        Self {
+            task,
+            before,
+            changed: true,
+            by_ai: false,
+            started: Instant::now(),
+            working: false,
+            asked: String::new(),
+            reviewed: true,
+            review_due: false,
+        }
+    }
+
+    /// The agent is still at it: its turn hasn't ended, or its work is being looked at.
+    fn busy(&self) -> bool {
+        self.by_ai && (self.working || self.review_due)
+    }
 }
 
 impl EventEmitter<DesignEvent> for DesignCanvas {}
@@ -469,6 +500,8 @@ impl DesignCanvas {
                 }
                 if this.stale.remove(&id2) {
                     this.draw(&id2, cx);
+                } else {
+                    this.review_when_drawn(cx);
                 }
             },
         );
@@ -772,18 +805,23 @@ impl DesignCanvas {
     /// Put new variants of a screen in a row under it.
     fn place_variants(&mut self, added: &[String]) {
         for id in added {
-            let Some(base) = variant_of(id) else {
+            let Some((base, n)) = variant_of(id)
+                .map(|base| {
+                    let n = id
+                        .rsplit("-v")
+                        .next()
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(1);
+                    (base, n)
+                })
+                .or_else(|| brief::state_of(id))
+            else {
                 continue;
             };
+            let n = n.max(1);
             let Some(b) = self.canvas.screen(&base).cloned() else {
                 continue;
             };
-            let n = id
-                .rsplit("-v")
-                .next()
-                .and_then(|n| n.parse::<usize>().ok())
-                .unwrap_or(1)
-                .max(1);
             let (w, _) = b.device.size();
             let h = self
                 .shots
@@ -819,7 +857,7 @@ impl DesignCanvas {
             return;
         }
         let task = match self.ask_new {
-            Some(device) => describe_task(&typed, device),
+            Some(device) => brief::describe_task(&typed, device),
             None => typed,
         };
         if self.ask(task, window, cx) {
@@ -831,13 +869,13 @@ impl DesignCanvas {
     /// Start an agent on a change to the design. False when one can't start now.
     fn ask(&mut self, task: String, window: &mut Window, cx: &mut Context<Self>) -> bool {
         match &self.ai {
-            Some(ai) if ai.changed => {
-                self.say("Keep or undo the last AI change first.");
+            Some(ai) if ai.busy() => {
+                self.say("AI is already working on the design.");
                 cx.notify();
                 return false;
             }
             Some(_) => {
-                self.say("AI is already working on the design.");
+                self.say("Keep or undo the last AI change first.");
                 cx.notify();
                 return false;
             }
@@ -849,7 +887,8 @@ impl DesignCanvas {
             return false;
         }
         self.save_canvas();
-        let mut context = self.ask_context();
+        let picture = self.screen.clone().and_then(|id| self.save_picture(&id));
+        let mut context = self.ask_context(picture.as_deref());
         let picked = self.picked_refs();
         if !picked.is_empty() {
             context.push_str(
@@ -864,7 +903,10 @@ impl DesignCanvas {
                 }
             }
         }
-        let images: Vec<String> = picked.into_iter().map(|(p, _)| p).collect();
+        let images: Vec<String> = picture
+            .into_iter()
+            .chain(picked.into_iter().map(|(p, _)| p))
+            .collect();
         self.refs_picked.clear();
         self.refs_open = false;
         self.ai = Some(AiChange {
@@ -873,6 +915,10 @@ impl DesignCanvas {
             changed: false,
             by_ai: true,
             started: Instant::now(),
+            working: true,
+            asked: task.clone(),
+            reviewed: false,
+            review_due: false,
         });
         // Leave the keys to the New session dialog that opens next.
         window.blur(cx);
@@ -905,7 +951,16 @@ impl DesignCanvas {
         let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
             return;
         };
-        let task = variants_task(&s.id, &s.name);
+        let task = brief::variants_task(&s.id, &s.name);
+        self.ask(task, window, cx);
+    }
+
+    /// Have AI design the selected screen's empty, loading and error states, beside it.
+    fn states_with_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
+            return;
+        };
+        let task = brief::states_task(&s.id, &s.name);
         self.ask(task, window, cx);
     }
 
@@ -918,7 +973,7 @@ impl DesignCanvas {
         let Some(name) = self.canvas.screen(&base).map(|s| s.name.clone()) else {
             return;
         };
-        if self.ai.as_ref().is_some_and(|ai| !ai.changed) {
+        if self.ai.as_ref().is_some_and(AiChange::busy) {
             self.say("Wait for AI to finish first.");
             cx.notify();
             return;
@@ -951,13 +1006,10 @@ impl DesignCanvas {
         self.canvas.screens.retain(|s| !gone.contains(&s.id));
         self.save_canvas();
         let n = id.rsplit("-v").next().unwrap_or_default();
-        self.ai = Some(AiChange {
-            task: format!("Used variant {n} for {name}"),
+        self.ai = Some(AiChange::by_hand(
+            format!("Used variant {n} for {name}"),
             before,
-            changed: true,
-            by_ai: false,
-            started: Instant::now(),
-        });
+        ));
         self.screen = Some(base.clone());
         self.element = None;
         self.undo.clear();
@@ -1007,82 +1059,43 @@ impl DesignCanvas {
     }
 
     /// What an agent needs to change the design: where it lives, how screens are made,
-    /// and what's picked on the canvas.
-    fn ask_context(&self) -> String {
-        let mut out = format!(
-            "## Change the design\n\
-             The design is in {FOLDER}/. Each screen is a standalone HTML file, \
-             {FOLDER}/screens/<id>.html, that links ../tokens.css, ../components.css and \
-             ../prototype.js (copy the <head> of an existing screen). Style with the classes in \
-             {FOLDER}/components.css and the CSS variables in {FOLDER}/tokens.css \
-             (var(--primary), var(--surface), var(--space), var(--radius) and so on) rather than \
-             raw colours and sizes, so the theme keeps working. Name a screen with <title>, set \
-             its device with <meta name=\"runo:device\" content=\"phone\"> (or tablet, \
-             desktop), and link screens for the prototype with data-goto=\"<other screen id>\" \
-             on what's clicked (add data-transition=\"sheet\" for a screen that opens as a \
-             modal sheet; push, fade, axis and none also work, and the platform's own is used \
-             otherwise). Make controls work when tapped in Play: a .switch flips its .on class, \
-             a .tab, or any child of an element with data-select, becomes the one with .on, \
-             data-toggle=\"class\" toggles that class on the element, data-show=\"#id\" \
-             shows or hides another element (menus, accordions, sheets), and checkboxes, \
-             radios and inputs work as they are. New screen files show up on the canvas by themselves. Make the \
-             change by editing these files directly: Runo shows it live and the user keeps or \
-             undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for \
-             this request.\n"
-        );
-        if self.canvas.screens.is_empty() {
-            out.push_str("\nThere are no screens yet.\n");
-        } else {
-            out.push_str("\nScreens now:\n");
-            for s in &self.canvas.screens {
-                out.push_str(&format!(
-                    "- {} ({FOLDER}/screens/{}.html, {})\n",
-                    s.name,
-                    s.id,
-                    s.device.label().to_lowercase()
-                ));
-            }
-        }
-        if let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) {
-            out.push_str(&format!(
-                "\nSelected on the canvas (\"this\" means it): the screen {} \
-                 ({FOLDER}/screens/{}.html)",
-                s.name, s.id
-            ));
-            if let Some(el) = &self.element {
-                let path: Vec<String> = el
-                    .path
-                    .iter()
-                    .map(|i| format!(":nth-child({})", i + 1))
-                    .collect();
-                out.push_str(&format!(
-                    ", and on it the element {}{} at `body > {}`",
-                    el.label,
-                    el.text
-                        .as_ref()
-                        .filter(|t| !t.is_empty())
-                        .map(|t| format!(" \"{t}\""))
-                        .unwrap_or_default(),
-                    path.join(" > ")
-                ));
-            }
-            out.push_str(".\n");
-            if self.element.is_some() {
-                out.push_str(
-                    "Change only that element unless asked otherwise. If what's asked for isn't \
-                     on the screen yet, add it inside that element when it's a container, else \
-                     right after it.\n",
-                );
-            }
-        } else {
-            out.push_str("\nNothing is selected on the canvas.\n");
-        }
-        if let Some(file) = self.rules_file() {
-            out.push_str(&format!(
-                "\nFollow the project's design rules in {file}: who it's for, the look and feel, and its rules for spacing, type and colour.\n"
-            ));
-        }
-        out
+    /// how to design well and what's picked on the canvas, with `picture` showing the
+    /// picked screen as it looks now.
+    fn ask_context(&self, picture: Option<&str>) -> String {
+        let components =
+            std::fs::read_to_string(folder(&self.root).join(COMPONENTS)).unwrap_or_default();
+        let selected = self.screen.as_ref().and_then(|id| self.canvas.screen(id));
+        let element = selected.and(self.element.as_ref()).map(|el| {
+            let path: Vec<String> = el
+                .path
+                .iter()
+                .map(|i| format!(":nth-child({})", i + 1))
+                .collect();
+            format!(
+                "{}{} at `body > {}`",
+                el.label,
+                el.text
+                    .as_ref()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| format!(" \"{t}\""))
+                    .unwrap_or_default(),
+                path.join(" > ")
+            )
+        });
+        brief::context(&brief::Canvas {
+            screens: self
+                .canvas
+                .screens
+                .iter()
+                .map(|s| (s.name.as_str(), s.id.as_str(), s.device))
+                .collect(),
+            selected: selected.map(|s| (s.name.as_str(), s.id.as_str())),
+            element,
+            rules: self.rules_file(),
+            components: &components,
+            tokens: &self.tokens,
+            picture: picture.map(String::from),
+        })
     }
 
     /// Keep what the agent changed.
@@ -1113,9 +1126,158 @@ impl DesignCanvas {
         cx.notify();
     }
 
+    /// Stop waiting for the agent: what it changed so far can be kept or undone.
     fn stop_ai(&mut self, cx: &mut Context<Self>) {
-        self.ai = None;
+        if let Some(ai) = &mut self.ai {
+            ai.working = false;
+            ai.review_due = false;
+            ai.reviewed = true;
+        }
+        if self.ai.as_ref().is_some_and(|ai| !ai.changed) {
+            self.ai = None;
+        }
         cx.notify();
+    }
+
+    /// The agent's turn on the design ended. The first time, the screens it changed are
+    /// drawn and shown back to it, with what the checks found, for it to look over and
+    /// polish when that's worth it; after that, its change waits to be kept or undone.
+    pub(crate) fn agent_done(&mut self, stopped: bool, cx: &mut Context<Self>) {
+        let Some(ai) = self.ai.as_mut().filter(|ai| ai.by_ai && ai.working) else {
+            return;
+        };
+        ai.working = false;
+        if stopped || ai.reviewed {
+            ai.reviewed = true;
+        } else {
+            ai.review_due = true;
+        }
+        // Read what it wrote now rather than at the next look, and draw it.
+        self.check_files(cx);
+        if self.ai.as_ref().is_some_and(|ai| !ai.changed) {
+            self.ai = None;
+            self.say("AI finished without changing the design.");
+        }
+        // The chat that just ended takes the next ask a moment later.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(400))
+                .await;
+            let _ = this.update(cx, |this, cx| this.review_when_drawn(cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The screens an agent change added or rewrote, by id, with whether each is new.
+    fn ai_screens(&self) -> Vec<(String, bool)> {
+        let Some(ai) = &self.ai else {
+            return Vec::new();
+        };
+        let dir = folder(&self.root).join("screens");
+        self.canvas
+            .screens
+            .iter()
+            .filter_map(|s| {
+                let file = dir.join(format!("{}.html", s.id));
+                let was = ai.before.get(&file);
+                let now = std::fs::read(&file).ok();
+                (was != now.as_ref()).then(|| (s.id.clone(), was.is_none()))
+            })
+            .collect()
+    }
+
+    /// Once the screens the agent changed are drawn, show them to it to look over, when
+    /// it made new screens or the checks found something serious; else it's done.
+    fn review_when_drawn(&mut self, cx: &mut Context<Self>) {
+        if !self.ai.as_ref().is_some_and(|ai| ai.review_due) {
+            return;
+        }
+        let changed = self.ai_screens();
+        if changed
+            .iter()
+            .any(|(id, _)| self.drawing.contains(id) || self.stale.contains(id))
+        {
+            return;
+        }
+        let ids: HashSet<String> = self.canvas.screens.iter().map(|s| s.id.clone()).collect();
+        let mut looked = Vec::new();
+        for (id, _) in &changed {
+            let Some(s) = self.canvas.screen(id) else {
+                continue;
+            };
+            let findings = self
+                .shots
+                .get(id)
+                .and_then(|shot| shot.facts.as_ref())
+                .map(|facts| checks::review(facts, s.device, &ids))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|f| f.kind.serious())
+                .collect();
+            looked.push(brief::Looked {
+                id: id.clone(),
+                name: s.name.clone(),
+                picture: None,
+                findings,
+            });
+        }
+        let worth =
+            changed.iter().any(|(_, new)| *new) || looked.iter().any(|l| !l.findings.is_empty());
+        let Some(ai) = self.ai.as_mut() else {
+            return;
+        };
+        ai.review_due = false;
+        ai.reviewed = true;
+        let asked = ai.asked.clone();
+        if !worth || looked.is_empty() {
+            cx.notify();
+            return;
+        }
+        // The pictures go to the agent; the most it's shown is a handful.
+        looked.truncate(REVIEW_MOST);
+        for l in &mut looked {
+            l.picture = self.save_picture(&l.id);
+        }
+        let task = brief::review_task(&asked, &looked);
+        let images: Vec<String> = looked.iter().filter_map(|l| l.picture.clone()).collect();
+        let context = self.ask_context(None);
+        if let Some(ai) = self.ai.as_mut() {
+            ai.working = true;
+        }
+        cx.emit(DesignEvent::Ask {
+            task,
+            context,
+            edit: true,
+            images,
+            agent: self.pick.agent,
+            model: self.pick.model.clone(),
+        });
+        cx.notify();
+    }
+
+    /// Save how a screen looks now as a picture for an agent, and say where.
+    fn save_picture(&self, id: &str) -> Option<String> {
+        let shot = self.shots.get(id)?;
+        let size = shot.image.size(0);
+        let (w, h) = (size.width.0 as u32, size.height.0 as u32);
+        let mut rgba = shot.image.as_bytes(0)?.to_vec();
+        // Drawings are kept as BGRA.
+        for px in rgba.as_chunks_mut::<4>().0 {
+            px.swap(0, 2);
+        }
+        let mut picture = image::RgbaImage::from_raw(w, h, rgba)?;
+        if w > PICTURE_WIDTH {
+            let h = (h as f32 * PICTURE_WIDTH as f32 / w as f32).round() as u32;
+            picture = image::imageops::thumbnail(&picture, PICTURE_WIDTH, h.max(1));
+        }
+        let dir = crate::design::folder(&self.root).join("shots");
+        std::fs::create_dir_all(&dir).ok()?;
+        let file = dir.join(format!("{id}.png"));
+        picture
+            .save_with_format(&file, image::ImageFormat::Png)
+            .ok()?;
+        Some(file.to_string_lossy().into_owned())
     }
 
     /// The bar along the bottom: ask AI, then keep or undo what it did.
@@ -1124,7 +1286,7 @@ impl DesignCanvas {
             return None;
         }
         let body = match &self.ai {
-            Some(ai) if ai.changed => askbar::composer("design-ask-bar", true).child(
+            Some(ai) if !ai.busy() => askbar::composer("design-ask-bar", true).child(
                 div()
                     .flex()
                     .items_center()
@@ -1156,7 +1318,11 @@ impl DesignCanvas {
             Some(ai) => askbar::composer("design-ask-bar", true).child(
                 askbar::working_row(
                     "design-wait-spin",
-                    design_line(ai.started.elapsed().as_secs()).to_string(),
+                    if ai.reviewed {
+                        "Checking its work".to_string()
+                    } else {
+                        design_line(ai.started.elapsed().as_secs()).to_string()
+                    },
                     ai.task.clone(),
                     ai.started.elapsed().as_secs(),
                 )
@@ -1483,15 +1649,19 @@ impl DesignCanvas {
 
     /// Whether AI is designing and nothing has changed yet.
     fn thinking_now(&self) -> bool {
-        self.ai.as_ref().is_some_and(|a| a.by_ai && !a.changed)
+        self.ai.as_ref().is_some_and(AiChange::busy)
     }
 
     /// Shows the canvas is busy while AI designs: a sketch taking shape on an empty canvas,
     /// else a glow round the canvas and a line saying what's going on.
     fn thinking(&self) -> Option<AnyElement> {
-        let ai = self.ai.as_ref().filter(|a| a.by_ai && !a.changed)?;
+        let ai = self.ai.as_ref().filter(|a| a.busy())?;
         let secs = ai.started.elapsed().as_secs();
-        let line = design_line(secs).to_string();
+        let line = if ai.reviewed {
+            "Looking over its work and polishing it".to_string()
+        } else {
+            design_line(secs).to_string()
+        };
         Some(if self.canvas.screens.is_empty() {
             askbar::busy_card("Designing your screens", line, Some(secs))
         } else {
@@ -1927,13 +2097,7 @@ impl DesignCanvas {
         drop_shot(self.shots.remove(&id), cx);
         self.save_canvas();
         self.select_screen(None);
-        self.ai = Some(AiChange {
-            task: format!("Deleted {name}"),
-            before,
-            changed: true,
-            by_ai: false,
-            started: Instant::now(),
-        });
+        self.ai = Some(AiChange::by_hand(format!("Deleted {name}"), before));
         cx.notify();
     }
 
@@ -4222,6 +4386,25 @@ impl DesignCanvas {
                                 )),
                             )
                             .when(
+                                variant_of(&s.id).is_none() && brief::state_of(&s.id).is_none(),
+                                |el| {
+                                    el.child(
+                                        text_btn(
+                                            "design-states",
+                                            "States with AI",
+                                            Some(IconName::Layers),
+                                            false,
+                                        )
+                                        .tooltip(tip(
+                                            "AI designs this screen empty, loading and with an error, beside it",
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.states_with_ai(window, cx)
+                                        })),
+                                    )
+                                },
+                            )
+                            .when(
                                 variant_of(&s.id).is_some_and(|b| self.canvas.screen(&b).is_some()),
                                 |el| {
                                     let id = s.id.clone();
@@ -5036,35 +5219,17 @@ fn token_name(t: &str) -> &'static str {
 /// Space between a screen and the row of its variants.
 const VARIANT_GAP: f32 = 80.;
 
+/// The most screens an agent is shown pictures of when it looks over its work.
+const REVIEW_MOST: usize = 4;
+
+/// The widest picture of a screen an agent is shown, in pixels.
+const PICTURE_WIDTH: u32 = 1200;
+
 /// The screen a variant was made from: `home-v2` is a variant of `home`.
 fn variant_of(id: &str) -> Option<String> {
     let (base, n) = id.rsplit_once("-v")?;
     (!base.is_empty() && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
         .then(|| base.to_string())
-}
-
-/// The task for AI to design a new screen from a description.
-fn describe_task(what: &str, device: Device) -> String {
-    format!(
-        "Design a new {} screen: {what}\n\nAdd it as a new file in {FOLDER}/screens/ with a \
-         short id, a <title> naming it and <meta name=\"runo:device\" content=\"{}\">. Make \
-         it complete and realistic, with real-sounding content rather than placeholders, built \
-         from the classes in {FOLDER}/components.css and the variables in {FOLDER}/tokens.css. \
-         Link it to the screens it naturally leads to and from with data-goto where that fits.",
-        device.label().to_lowercase(),
-        device.label().to_lowercase()
-    )
-}
-
-/// The task for AI to make variants of a screen.
-fn variants_task(id: &str, name: &str) -> String {
-    format!(
-        "Make three alternative designs of the screen {name} ({FOLDER}/screens/{id}.html) as \
-         new screens {FOLDER}/screens/{id}-v1.html, {id}-v2.html and {id}-v3.html. Keep its \
-         purpose, content and links, but make each a clearly different take: a different \
-         layout, hierarchy or density, not just other colours. Title each \"{name} · variant \
-         N\". Don't change {id}.html itself; Runo shows the variants under it to pick from."
-    )
 }
 
 /// A task cut to a line, for the ask bar.
@@ -5450,10 +5615,10 @@ mod tests {
         assert_eq!(variant_of("home"), None);
         assert_eq!(variant_of("-v1"), None);
         assert_eq!(variant_of("review-vote"), None);
-        let task = variants_task("home", "Home");
+        let task = brief::variants_task("home", "Home");
         assert!(task.contains("design/screens/home-v1.html"));
         assert!(task.contains("Don't change home.html"));
-        let task = describe_task("a checkout with Apple Pay", Device::Phone);
+        let task = brief::describe_task("a checkout with Apple Pay", Device::Phone);
         assert!(task.starts_with("Design a new phone screen: a checkout with Apple Pay"));
         assert!(task.contains("content=\"phone\""));
         assert_eq!(

@@ -310,6 +310,13 @@ pub(crate) fn fix_task(screens: &[(String, String, Vec<Finding>)]) -> String {
          Use the theme's CSS variables for colours and sizes. Elements are given as CSS \
          paths from <body>.\n",
     );
+    out.push_str(&listed(screens));
+    out
+}
+
+/// The findings of each screen, as lines under the screen's name and file.
+pub(crate) fn listed(screens: &[(String, String, Vec<Finding>)]) -> String {
+    let mut out = String::new();
     for (id, name, found) in screens {
         if found.is_empty() {
             continue;
