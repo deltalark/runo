@@ -4047,29 +4047,79 @@ impl DesignCanvas {
         row
     }
 
+    /// The side panel with nothing picked: screens to add, drawn as small wireframes in
+    /// the shape of the chosen device, and a few lines on how the canvas works.
+    fn add_screen_panel(&self, cx: &mut Context<Self>) -> Div {
+        let mut devices = div().flex().gap_1();
+        for (i, d) in Device::ALL.iter().enumerate() {
+            let d = *d;
+            devices = devices.child(
+                chip_btn(("design-side-dev", i), d.label(), self.new_device == d).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.new_device = d;
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+        let mut grid = div().grid().grid_cols(2).gap_2();
+        for (i, (kind, sub)) in TEMPLATES.iter().enumerate() {
+            let kind: &'static str = kind;
+            grid = grid.child(
+                template_card(("design-side-tpl", i), kind, sub, self.new_device)
+                    .on_click(cx.listener(move |this, _, _, cx| this.add_screen(kind, cx))),
+            );
+        }
+        let tips = [
+            (
+                IconName::MousePointerClick,
+                "Click a screen to edit what's on it",
+            ),
+            (IconName::Move, "Drag a screen by its name to move it"),
+            (
+                IconName::Link,
+                "Drag an element's blue dot onto a screen to link them",
+            ),
+            (IconName::Play, "Press Play to click through"),
+        ];
+        let mut how = div().v_flex().gap(px(6.));
+        for (name, line) in tips {
+            how = how.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .child(div().pt(px(1.)).child(icon(name, 13., c_muted())))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_secondary()))
+                            .child(line),
+                    ),
+            );
+        }
+        div()
+            .v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(section("Add a screen"))
+                    .child(div().pt_2().child(devices)),
+            )
+            .child(grid)
+            .child(section("How it works"))
+            .child(how)
+    }
+
     fn inspector(&self, cx: &mut Context<Self>) -> Div {
         let out = div().v_flex().gap_1();
         let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
-            return out
-                .child(section("Canvas"))
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_secondary()))
-                        .child("Click a screen to pick what's on it: text, buttons, cards. Drag a screen by its name. Drag the blue dot on a picked element onto another screen to link them, then press Play."),
-                )
-                .child(section("Add a screen"))
-                .child({
-                    let mut col_ = div().v_flex().gap_1();
-                    for (i, (kind, _)) in TEMPLATES.iter().enumerate() {
-                        let kind: &'static str = kind;
-                        col_ = col_.child(
-                            text_btn(("design-side-tpl", i), kind, None, false)
-                                .on_click(cx.listener(move |this, _, _, cx| this.add_screen(kind, cx))),
-                        );
-                    }
-                    col_
-                });
+            return out.child(self.add_screen_panel(cx));
         };
         let mut out = out;
         match &self.element {
@@ -5047,6 +5097,250 @@ fn dom_px(css: &str) -> Option<f32> {
 
 /// A hotspot's dot at `at`, with a ring that pings out of it so links catch the eye.
 /// Neighbouring dots ping out of step, so a screen of links twinkles rather than flashes.
+/// A screen to start from: its wireframe over its name and what it holds.
+fn template_card(
+    id: impl Into<ElementId>,
+    kind: &'static str,
+    sub: &'static str,
+    device: Device,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .w_full()
+        .v_flex()
+        .gap(px(6.))
+        .p(px(6.))
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(c_border()))
+        .cursor_pointer()
+        .hover(|el| el.bg(tint(c_subtle())).border_color(rgb(c_blue())))
+        .child(
+            div()
+                .h(px(72.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .bg(tint(c_subtle()))
+                .child(wireframe(kind, device)),
+        )
+        .child(
+            div()
+                .px(px(2.))
+                .v_flex()
+                .gap(px(1.))
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c_text()))
+                        .child(kind),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .line_height(px(14.))
+                        .text_color(rgb(c_muted()))
+                        .child(sub),
+                ),
+        )
+}
+
+/// A thumbnail of a template: a frame the device's shape with grey bars where its
+/// text, fields and rows sit, and the accent where its main action is.
+fn wireframe(kind: &str, device: Device) -> Div {
+    let (w, h) = match device {
+        Device::Phone => (38., 62.),
+        Device::Tablet => (48., 62.),
+        Device::Desktop => (92., 58.),
+    };
+    let ink = c_muted();
+    let faint = mix(c_muted(), c_canvas(), 0.4);
+    let bar = |frac: f32, h: f32, color: u32| {
+        div()
+            .w(relative(frac))
+            .h(px(h))
+            .flex_none()
+            .rounded(px(1.5))
+            .bg(rgb(color))
+    };
+    let title = |frac: f32| bar(frac, 4., ink);
+    let line = |frac: f32| bar(frac, 2.5, faint);
+    let field = || {
+        div()
+            .w_full()
+            .h(px(7.))
+            .flex_none()
+            .rounded(px(2.))
+            .border_1()
+            .border_color(rgb(faint))
+    };
+    let button = |frac: f32| {
+        div()
+            .w(relative(frac))
+            .h(px(7.))
+            .flex_none()
+            .rounded(px(2.))
+            .bg(rgb(c_blue()))
+    };
+    let frame = div()
+        .w(px(w))
+        .h(px(h))
+        .p(px(5.))
+        .v_flex()
+        .gap(px(3.))
+        .overflow_hidden()
+        .rounded(px(5.))
+        .border_1()
+        .border_color(rgb(c_border()))
+        .bg(rgb(c_canvas()));
+    match kind {
+        "Sign in" => frame
+            .justify_center()
+            .child(title(0.6))
+            .child(line(0.45))
+            .child(div().h(px(2.)))
+            .child(field())
+            .child(field())
+            .child(button(1.)),
+        "List" => {
+            let mut f = frame.child(title(0.5)).child(
+                div()
+                    .w_full()
+                    .h(px(6.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgb(mix(c_muted(), c_canvas(), 0.18))),
+            );
+            for frac in [0.7, 0.55, 0.65, 0.5] {
+                f = f.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(3.))
+                        .child(div().size(px(5.)).flex_none().rounded_full().bg(rgb(faint)))
+                        .child(line(frac)),
+                );
+            }
+            f
+        }
+        "Detail" => frame
+            .child(
+                div()
+                    .w_full()
+                    .h(relative(0.34))
+                    .flex_none()
+                    .rounded(px(2.))
+                    .bg(rgb(mix(c_blue(), c_canvas(), 0.3))),
+            )
+            .child(title(0.65))
+            .child(line(0.85))
+            .child(line(0.6))
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .gap(px(3.))
+                    .child(button(0.5))
+                    .child(
+                        div()
+                            .w(relative(0.5))
+                            .h(px(7.))
+                            .rounded(px(2.))
+                            .border_1()
+                            .border_color(rgb(faint)),
+                    ),
+            ),
+        "Settings" => {
+            let group = |on: [bool; 2]| {
+                let mut g = div()
+                    .w_full()
+                    .flex_none()
+                    .v_flex()
+                    .gap(px(3.))
+                    .p(px(3.))
+                    .rounded(px(2.))
+                    .border_1()
+                    .border_color(rgb(faint));
+                for o in on {
+                    g = g.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(line(0.5))
+                            .child(
+                                div()
+                                    .w(px(8.))
+                                    .h(px(4.5))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .bg(rgb(if o { c_blue() } else { faint })),
+                            ),
+                    );
+                }
+                g
+            };
+            frame
+                .child(title(0.55))
+                .child(group([true, false]))
+                .child(group([false, true]))
+        }
+        "Dashboard" => {
+            let stat = || {
+                div()
+                    .flex_1()
+                    .h(px(13.))
+                    .p(px(2.))
+                    .v_flex()
+                    .justify_end()
+                    .rounded(px(2.))
+                    .border_1()
+                    .border_color(rgb(faint))
+                    .child(bar(0.6, 3., ink))
+            };
+            frame
+                .child(title(0.55))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .gap(px(3.))
+                        .child(stat())
+                        .child(stat()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .gap(px(3.))
+                        .child(stat())
+                        .child(stat()),
+                )
+                .child(line(0.8))
+                .child(line(0.6))
+        }
+        "Empty state" => frame
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .size(px(12.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgb(faint)),
+            )
+            .child(div().h(px(1.)))
+            .child(title(0.6))
+            .child(line(0.45))
+            .child(div().h(px(1.)))
+            .child(button(0.5)),
+        _ => frame.child(title(0.55)),
+    }
+}
+
 fn hot_dot(id: impl Into<ElementId>, at: (f32, f32), n: usize) -> Vec<AnyElement> {
     let (x, y) = at;
     let phase = (n as f32 * 0.37).fract();
