@@ -1202,7 +1202,7 @@ impl DesignCanvas {
         let (w, h) = (size.width.0 as u32, size.height.0 as u32);
         let mut rgba = shot.image.as_bytes(0)?.to_vec();
         // Drawings are kept as BGRA.
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
         let mut picture = image::RgbaImage::from_raw(w, h, rgba)?;
