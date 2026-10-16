@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+mod comments;
 mod components;
 mod figma;
 
@@ -270,6 +271,15 @@ pub(crate) struct DesignCanvas {
     f_comp: Entity<InputState>,
     f_variant: Entity<InputState>,
     comp_vals: (String, String),
+    /// The comment tool, the design's comments, the one open, and its text box.
+    commenting: bool,
+    comments: Vec<super::notes::Comment>,
+    comment_open: Option<comments::CommentOpen>,
+    comment_focus: bool,
+    show_resolved: bool,
+    f_comment: Entity<InputState>,
+    /// Who's commenting, found out when they first comment.
+    author: String,
     f_inline: Entity<InputState>,
     inline_open: bool,
     /// What the text fields were filled for.
@@ -403,6 +413,7 @@ impl DesignCanvas {
         }));
         let fields = Self::make_fields(window, cx, &mut subs);
         let (f_comp, f_variant) = Self::make_component_fields(window, cx, &mut subs);
+        let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -462,6 +473,13 @@ impl DesignCanvas {
             f_comp,
             f_variant,
             comp_vals: Default::default(),
+            commenting: false,
+            comments: Vec::new(),
+            comment_open: None,
+            comment_focus: false,
+            show_resolved: false,
+            f_comment,
+            author: String::new(),
             f_inline,
             inline_open: false,
             loaded: None,
@@ -833,6 +851,9 @@ impl DesignCanvas {
         }
         self.tokens = std::fs::read_to_string(folder(&self.root).join(TOKENS)).unwrap_or_default();
         self.library = super::library::load(&self.root);
+        if self.commenting {
+            self.comments = super::notes::load(&self.root);
+        }
         if shared {
             self.draw_all(cx);
         } else {
@@ -2811,6 +2832,10 @@ impl DesignCanvas {
         self.new_open = false;
         let local = self.local(e.position);
         let w = self.world(local);
+        if self.commenting && e.button == MouseButton::Left {
+            self.comment_down(w, cx);
+            return;
+        }
         if e.button == MouseButton::Middle || (self.hand && e.button == MouseButton::Left) {
             self.drag = Drag::Pan {
                 from: local,
@@ -3290,10 +3315,18 @@ impl DesignCanvas {
             }
             (false, false, false, "v") => {
                 self.hand = false;
+                self.commenting = false;
+                self.comment_open = None;
                 true
             }
             (false, false, false, "h") => {
                 self.hand = !self.hand;
+                self.commenting = false;
+                self.comment_open = None;
+                true
+            }
+            (false, false, false, "c") => {
+                self.toggle_commenting(cx);
                 true
             }
             (false, false, false, "f") => {
@@ -3318,6 +3351,10 @@ impl DesignCanvas {
             self.playing = None;
         } else if self.inline_open {
             self.inline_open = false;
+        } else if self.comment_open.is_some() {
+            self.comment_open = None;
+        } else if self.commenting {
+            self.commenting = false;
         } else if self.new_open {
             self.new_open = false;
         } else if self.menu.is_some() {
@@ -4596,7 +4633,8 @@ impl DesignCanvas {
                 .size_full(),
             )
             .children(self.empty_state(cx))
-            .children(self.thinking());
+            .children(self.thinking())
+            .children(self.comment_layer(cx));
         if let Some(e) = &self.error {
             area = area.child(
                 div()
@@ -4614,7 +4652,11 @@ impl DesignCanvas {
                     .child(e.clone()),
             );
         }
-        if let Some(bar) = self.ask_bar(cx) {
+        // Commenting puts the comments where the ask bar would be, unless AI is at work.
+        if let Some(bar) = self
+            .ask_bar(cx)
+            .filter(|_| !self.commenting || self.ai.is_some())
+        {
             area = area.child(bar);
         }
         if let Some(text) = notice {
@@ -5000,6 +5042,7 @@ impl DesignCanvas {
                 });
             }
         }
+        self.focus_comment(window, cx);
         div()
             .size_full()
             .key_context("DesignCanvas")

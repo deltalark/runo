@@ -299,10 +299,12 @@ impl DesignCanvas {
                     "design-tool-move",
                     IconName::MousePointer2,
                     "Move (V)",
-                    !hand,
+                    !hand && !self.commenting,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.hand = false;
+                    this.commenting = false;
+                    this.comment_open = None;
                     cx.notify();
                 })),
             )
@@ -331,9 +333,20 @@ impl DesignCanvas {
                 tool("design-tool-hand", IconName::Hand, "Hand (H)", hand).on_click(cx.listener(
                     |this, _, _, cx| {
                         this.hand = !this.hand;
+                        this.commenting = false;
+                        this.comment_open = None;
                         cx.notify();
                     },
                 )),
+            )
+            .child(
+                tool(
+                    "design-tool-comment",
+                    comments::comment_icon(),
+                    "Comment (C)",
+                    self.commenting,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_commenting(cx))),
             )
             .child(sep())
             .child(
@@ -709,6 +722,45 @@ impl DesignCanvas {
                     )
                 })
         };
+        if self.commenting {
+            return div()
+                .w(px(RIGHT_W))
+                .flex_none()
+                .h_full()
+                .v_flex()
+                .border_l_1()
+                .border_color(rgb(c_border()))
+                .bg(tint(c_canvas()))
+                .child(
+                    div()
+                        .h(px(36.))
+                        .flex_none()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .border_b_1()
+                        .border_color(rgb(c_border()))
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child("Comments")
+                        .child(
+                            mini("design-comments-done", IconName::Close, "Done (Esc)", false)
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_commenting(cx))),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("design-comments")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .pb_4()
+                        .child(self.comments_panel(cx)),
+                )
+                .into_any_element();
+        }
         let body = match self.panel {
             Panel::Design => self.design_panel(cx),
             Panel::Prototype => self.prototype_panel(cx),
