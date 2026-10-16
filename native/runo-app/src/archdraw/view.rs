@@ -3791,7 +3791,7 @@ impl ArchEditor {
             let mut out = if grid {
                 div().flex().flex_wrap().gap(px(2.))
             } else {
-                div().v_flex().gap(px(1.))
+                div().v_flex()
             };
             for p in presets {
                 let idx = PRESETS.iter().position(|x| std::ptr::eq(x, p)).unwrap_or(0);
@@ -3825,9 +3825,10 @@ impl ArchEditor {
             if !self.palette.closed("Logos and icons") {
                 list = list.child(
                     div()
-                        .px_2()
+                        .px(px(6.))
                         .py_1()
                         .text_size(px(11.5))
+                        .line_height(px(16.))
                         .text_color(rgb(c_muted()))
                         .child("Search above for thousands of brand and tech logos, such as Postgres, Kafka or Stripe."),
                 );
@@ -3845,9 +3846,9 @@ impl ArchEditor {
         list = list.child(
             div()
                 .id("arch-own-picture")
-                .mt_1()
-                .h(px(28.))
-                .px_2()
+                .mt_2()
+                .h(px(30.))
+                .px(px(6.))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -3858,7 +3859,19 @@ impl ArchEditor {
                 .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
                 .tooltip(tip("Add a PNG, JPG or SVG of your own"))
                 .on_click(cx.listener(|this, _, _, cx| this.pick_picture(cx)))
-                .child(icon(IconName::Image, 13., c_muted()))
+                .child(
+                    div()
+                        .size(px(22.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(22. * 0.26))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(rgb(c_border()))
+                        .child(icon(IconName::Image, 12., c_muted())),
+                )
                 .child("Your own picture…"),
         );
         let unplaced: Vec<(String, String, Kind)> = self
@@ -3875,7 +3888,7 @@ impl ArchEditor {
                     div()
                         .id(("arch-unplaced", i))
                         .h(px(26.))
-                        .px_2()
+                        .px(px(6.))
                         .flex()
                         .items_center()
                         .gap_2()
@@ -3973,13 +3986,16 @@ impl ArchEditor {
             )
             .child(
                 div()
+                    .flex_none()
                     .px_3()
                     .py_2()
                     .border_t_1()
                     .border_color(rgb(c_border()))
+                    .whitespace_normal()
                     .text_size(px(11.))
+                    .line_height(px(15.))
                     .text_color(rgb(c_muted()))
-                    .child("Drag a shape onto the canvas, or click it to add it in the middle."),
+                    .child("Drag a shape onto the canvas, or click to add it in the middle."),
             )
             .into_any_element()
     }
@@ -3989,10 +4005,10 @@ impl ArchEditor {
         let closed = self.palette.closed(name);
         div()
             .id(SharedString::from(format!("arch-group-{name}")))
-            .mt_2()
-            .mb(px(2.))
-            .px_1()
-            .h(px(22.))
+            .mt_3()
+            .mb_1()
+            .px(px(6.))
+            .h(px(20.))
             .flex()
             .items_center()
             .gap_1()
@@ -4015,7 +4031,7 @@ impl ArchEditor {
                 11.,
                 c_muted(),
             ))
-            .child(div().flex_1().child(name.to_uppercase()))
+            .child(div().flex_1().ml(px(4.)).child(name.to_uppercase()))
             .when(count > 0, |el| {
                 el.child(
                     div()
@@ -7505,88 +7521,8 @@ fn thinking_line(secs: Option<u64>, scanning: bool) -> &'static str {
     }
 }
 
-/// A shape's picture in the panel: its outline and marks at the size of `b`, kept to
-/// their proportions and centred, without text.
-fn paint_preview(kind: Kind, theme: &Theme, b: Bounds<Pixels>, window: &mut Window) {
-    let (w, h) = kind.size();
-    let style = super::model::Style::default();
-    let o = shape::outline(kind, &Rect::new(0., 0., w, h), &style);
-    let pt = shape::paint(kind, &style, theme);
-    // Fit what's drawn, not the whole element: a figure's name area stays out.
-    let mut pts: Vec<Pt> = Vec::new();
-    let mut collect = |segs: &[Seg]| {
-        for s in segs {
-            match *s {
-                Seg::Move(x, y) | Seg::Line(x, y) | Seg::Cubic(_, _, _, _, x, y) => {
-                    pts.push((x, y))
-                }
-                Seg::Close => {}
-            }
-        }
-    };
-    if pt.fill.is_some() || pt.stroke.is_some() {
-        collect(&o.fill);
-    }
-    for m in &o.marks {
-        collect(&m.segs);
-    }
-    if kind == Kind::Text {
-        // Text has no outline: show a few lines of it.
-        let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
-        for (i, f) in [0.8_f32, 0.55].iter().enumerate() {
-            let lw = bw * f * 0.7;
-            window.paint_quad(quad(
-                Bounds::new(
-                    point(
-                        b.origin.x + px((bw - lw) / 2.),
-                        b.origin.y + px(bh / 2. - 5. + i as f32 * 7.),
-                    ),
-                    size(px(lw), px(3.)),
-                ),
-                px(1.5),
-                col(theme.muted, 0.8),
-                px(0.),
-                col(0, 0.),
-                BorderStyle::default(),
-            ));
-        }
-        return;
-    }
-    if pts.is_empty() {
-        return;
-    }
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for (x, y) in &pts {
-        x0 = x0.min(*x);
-        y0 = y0.min(*y);
-        x1 = x1.max(*x);
-        y1 = y1.max(*y);
-    }
-    let (bw, bh) = (f32::from(b.size.width) - 4., f32::from(b.size.height) - 4.);
-    let scale = (bw / (x1 - x0).max(1.)).min(bh / (y1 - y0).max(1.));
-    let ox = f32::from(b.origin.x) + (f32::from(b.size.width) - (x1 - x0) * scale) / 2.;
-    let oy = f32::from(b.origin.y) + (f32::from(b.size.height) - (y1 - y0) * scale) / 2.;
-    let tf = move |(x, y): Pt| point(px(ox + (x - x0) * scale), px(oy + (y - y0) * scale));
-    let sd = ShapeDraw {
-        fill: o.fill,
-        detail: o.detail,
-        marks: o
-            .marks
-            .into_iter()
-            .map(|m| (m.segs, pt.ink(m.ink)))
-            .collect(),
-        shadow: false,
-        fill_c: pt.fill,
-        stroke: pt.stroke,
-        opacity: 1.,
-        dashed: pt.dashed,
-        width: 1.2,
-        rect: Rect::new(0., 0., w, h),
-        effect: Effect::default(),
-        radius: 0.,
-    };
-    paint_shape(&sd, &tf, 1., window);
-}
+/// A tile's width in the grid of shapes: three across the panel with its padding.
+const PALETTE_TILE: f32 = 66.;
 
 /// One shape in the panel: a tile with its picture over its name, or a row. Pressing it
 /// starts dragging it onto the canvas; letting go without moving adds it in the middle.
@@ -7596,37 +7532,22 @@ fn preset_item(
     grid: bool,
     cx: &mut Context<ArchEditor>,
 ) -> AnyElement {
-    let theme = Theme {
-        canvas: c_canvas(),
-        text: c_text(),
-        muted: c_muted(),
-        dark: is_dark(),
-    };
-    // A picture of the shape itself, drawn the way the canvas draws it, with the preset's
-    // icon on the C4 kinds that carry one, so a web app and a worker tell apart.
-    let glyph = (p.kind.c4().is_some() && !p.kind.pictured())
-        .then(|| icon_named(p.icon))
-        .flatten();
-    let badge = move |w: f32, h: f32, glyph_size: f32| {
+    let glyph = icon_named(p.icon).unwrap_or_else(|| kind_icon(p.kind));
+    let accent = shape::accent(p.kind);
+    let badge = |size: f32, glyph_size: f32| {
         div()
-            .relative()
-            .w(px(w))
-            .h(px(h))
+            .size(px(size))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |b, _, window, _| paint_preview(p.kind, &theme, b, window),
-                )
-                .absolute()
-                .size_full(),
-            )
-            .when_some(glyph, |el, g| {
-                el.child(icon(g, glyph_size, shape::accent(p.kind)))
-            })
+            .rounded(px(size * 0.26))
+            .bg(rgb(shape::mix(
+                accent,
+                c_canvas(),
+                if is_dark() { 0.25 } else { 0.12 },
+            )))
+            .child(icon(glyph, glyph_size, accent))
     };
     let base = div()
         .id(id)
@@ -7645,22 +7566,22 @@ fn preset_item(
                 cx.notify();
             }),
         );
+    let hint: SharedString = if p.tech.is_empty() {
+        p.label.into()
+    } else {
+        format!("{} · {}", p.label, p.tech).into()
+    };
     if grid {
-        let hint: SharedString = if p.tech.is_empty() {
-            p.label.into()
-        } else {
-            format!("{} · {}", p.label, p.tech).into()
-        };
-        base.w(px(66.))
-            .h(px(72.))
+        base.w(px(PALETTE_TILE))
+            .h(px(70.))
             .v_flex()
             .items_center()
             .justify_center()
-            .gap(px(4.))
+            .gap(px(6.))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)
             })
-            .child(badge(52., 34., 12.))
+            .child(badge(30., 16.))
             .child(
                 div()
                     .w_full()
@@ -7675,14 +7596,19 @@ fn preset_item(
             )
             .into_any_element()
     } else {
-        base.h(px(28.))
-            .px_2()
+        base.h(px(30.))
+            .px(px(6.))
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(10.))
             .text_size(px(12.5))
             .text_color(rgb(c_text()))
-            .child(badge(30., 20., 9.))
+            .when(!p.tech.is_empty(), |el| {
+                el.tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(hint.clone()).build(window, cx)
+                })
+            })
+            .child(badge(22., 13.))
             .child(div().flex_1().min_w_0().truncate().child(p.label))
             .into_any_element()
     }
