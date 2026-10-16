@@ -3831,11 +3831,8 @@ impl RunoApp {
             .items_center()
             .justify_center()
             .rounded_md()
-            .bg(rgb(c_raised()))
-            .border_1()
-            .border_color(rgb(c_border()))
             .cursor_pointer()
-            .hover(|el| el.bg(tint(c_subtle())))
+            .hover(|el| el.bg(tint(c_active())))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
             })
@@ -3952,7 +3949,7 @@ impl RunoApp {
                                     .group_hover("session-row", |el| el.opacity(1.))
                                     .child(self.row_action(
                                         ("pin", id as usize),
-                                        18.,
+                                        22.,
                                         if pinned {
                                             IconName::PinOff
                                         } else {
@@ -3967,7 +3964,7 @@ impl RunoApp {
                                     ))
                                     .child(self.row_action(
                                         ("archive", id as usize),
-                                        18.,
+                                        22.,
                                         IconName::Archive,
                                         "Archive",
                                         cx.listener(move |this, _, _, cx| {
@@ -4044,14 +4041,13 @@ impl RunoApp {
                 continue;
             }
             let color = projects::color_of(project);
-            // Each project is one block: a line above it, its header, and its
-            // sessions hung off a rail in the project's color, so where one
-            // project ends and the next begins reads at a glance.
+            // Each project is one block: its header, and its sessions hung off a
+            // rail in the project's color. Space, not a line, sets projects apart.
             let mut group = div()
                 .v_flex()
                 .mx_1()
                 .py_1()
-                .when(!first, |el| el.border_t_1().border_color(divider()));
+                .when(!first, |el| el.mt(px(6.)));
             first = false;
             group = group.child(
                 div()
@@ -4175,7 +4171,7 @@ impl RunoApp {
                 // Sessions hang off a rail under the chevron, in the project's color.
                 let mut rows = div()
                     .v_flex()
-                    .gap(px(1.))
+                    .gap(px(2.))
                     .ml(px(14.))
                     .mt(px(2.))
                     .mb_1()
