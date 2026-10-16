@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+mod components;
 mod figma;
 
 actions!(
@@ -262,6 +263,13 @@ pub(crate) struct DesignCanvas {
     /// How the Export section exports: pixels per CSS pixel, and the format.
     export_scale: u32,
     export_format: super::export::Format,
+    /// The design's components, and whether the left panel lists them instead of layers.
+    library: Vec<super::library::Component>,
+    assets: bool,
+    /// The selected instance's component name and variant name, as typed.
+    f_comp: Entity<InputState>,
+    f_variant: Entity<InputState>,
+    comp_vals: (String, String),
     f_inline: Entity<InputState>,
     inline_open: bool,
     /// What the text fields were filled for.
@@ -336,6 +344,7 @@ impl DesignCanvas {
             Err(e) => (Canvas::default(), Some(e)),
         };
         let tokens = std::fs::read_to_string(folder(&root).join(TOKENS)).unwrap_or_default();
+        let library = super::library::load(&root);
         let mut subs = Vec::new();
         let f_text = cx.new(|cx| InputState::new(window, cx).placeholder("Text"));
         subs.push(
@@ -393,6 +402,7 @@ impl DesignCanvas {
             }
         }));
         let fields = Self::make_fields(window, cx, &mut subs);
+        let (f_comp, f_variant) = Self::make_component_fields(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -447,6 +457,11 @@ impl DesignCanvas {
             hand: false,
             export_scale: 2,
             export_format: Default::default(),
+            library,
+            assets: false,
+            f_comp,
+            f_variant,
+            comp_vals: Default::default(),
             f_inline,
             inline_open: false,
             loaded: None,
@@ -817,6 +832,7 @@ impl DesignCanvas {
             }
         }
         self.tokens = std::fs::read_to_string(folder(&self.root).join(TOKENS)).unwrap_or_default();
+        self.library = super::library::load(&self.root);
         if shared {
             self.draw_all(cx);
         } else {
@@ -1915,36 +1931,50 @@ impl DesignCanvas {
             cx,
             move |r| r.edit(&id, device, &js),
             move |this, out, cx| match out {
-                Ok(Some((before, shot))) => {
-                    this.undo.push((id2.clone(), before));
-                    if this.undo.len() > UNDO_LIMIT {
-                        this.undo.remove(0);
-                    }
-                    this.redo.clear();
-                    drop_shot(this.shots.insert(id2.clone(), shot), cx);
-                    this.note_writes();
-                    match after {
-                        After::Same => {
-                            let paths = this.selected_paths();
-                            if paths.is_empty() {
-                                this.load_layers(cx);
-                            } else {
-                                this.select_many(&id2, paths, cx);
-                            }
-                        }
-                        After::Path(p) => this.select_path(&id2, p, cx),
-                        After::Paths(ps) => this.select_many(&id2, ps, cx),
-                        After::Clear => {
-                            this.element = None;
-                            this.also.clear();
-                            this.load_layers(cx);
-                        }
-                    }
-                }
+                Ok(Some((before, shot))) => this.landed(id2, before, shot, after, cx),
                 Ok(None) => {}
                 Err(e) => this.say(e),
             },
         );
+    }
+
+    /// Take in an edit made to a screen: keep what it was for undo, show what it is now,
+    /// and select what `after` says.
+    fn landed(
+        &mut self,
+        id: String,
+        before: String,
+        shot: Shot,
+        after: After,
+        cx: &mut Context<Self>,
+    ) {
+        self.undo.push((id.clone(), before));
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        drop_shot(self.shots.insert(id.clone(), shot), cx);
+        self.note_writes();
+        if self.screen.as_ref() != Some(&id) {
+            return;
+        }
+        match after {
+            After::Same => {
+                let paths = self.selected_paths();
+                if paths.is_empty() {
+                    self.load_layers(cx);
+                } else {
+                    self.select_many(&id, paths, cx);
+                }
+            }
+            After::Path(p) => self.select_path(&id, p, cx),
+            After::Paths(ps) => self.select_many(&id, ps, cx),
+            After::Clear => {
+                self.element = None;
+                self.also.clear();
+                self.load_layers(cx);
+            }
+        }
     }
 
     /// A change to the selected element, or to every selected element.
@@ -2120,6 +2150,12 @@ impl DesignCanvas {
         } else {
             (self.clip.clone(), true)
         };
+        self.paste_html(html, known, cx);
+    }
+
+    /// Put pieces of HTML inside the selected container, after the selected element, or
+    /// into the screen. `known` pieces are selected once they land, each one.
+    fn paste_html(&mut self, html: Vec<String>, known: bool, cx: &mut Context<Self>) {
         if html.is_empty() {
             return;
         }
@@ -3193,6 +3229,10 @@ impl DesignCanvas {
                 self.ungroup(cx);
                 true
             }
+            (true, false, true, "k") if self.element.is_some() => {
+                self.create_component(cx);
+                true
+            }
             (false, true, false, "a") if self.element.is_some() => {
                 self.auto_layout(cx);
                 true
@@ -3753,6 +3793,16 @@ impl DesignCanvas {
         ) {
             let (x, y) = self.screen_pt((s.x + el.rect.x, s.y + el.rect.y));
             let (w, h) = (el.rect.w * z, el.rect.h * z);
+            // Instances show in the components' colour, by their component's name.
+            let comp = el
+                .component
+                .as_ref()
+                .and_then(|id| self.library.iter().find(|c| &c.id == id));
+            let tone = if el.component.is_some() {
+                components::PURPLE
+            } else {
+                c_blue()
+            };
             out.push(
                 div()
                     .absolute()
@@ -3761,7 +3811,7 @@ impl DesignCanvas {
                     .w(px(w + 2.))
                     .h(px(h + 2.))
                     .border_1()
-                    .border_color(rgb(c_blue()))
+                    .border_color(rgb(tone))
                     .into_any_element(),
             );
             // Handles at the corners, as in other design tools.
@@ -3773,7 +3823,7 @@ impl DesignCanvas {
                         .top(px(hy - 4.))
                         .size(px(8.))
                         .border_1()
-                        .border_color(rgb(c_blue()))
+                        .border_color(rgb(tone))
                         .bg(rgb(0xffffff))
                         .into_any_element(),
                 );
@@ -3787,8 +3837,11 @@ impl DesignCanvas {
                     .max_w(px(w.max(80.)))
                     .truncate()
                     .text_size(px(10.5))
-                    .text_color(rgb(c_blue()))
-                    .child(el.label.clone())
+                    .text_color(rgb(tone))
+                    .child(match comp {
+                        Some(c) => format!("◇ {}", c.name),
+                        None => el.label.clone(),
+                    })
                     .into_any_element(),
             );
             out.push(
@@ -3804,7 +3857,7 @@ impl DesignCanvas {
                             .px(px(5.))
                             .py(px(1.))
                             .rounded(px(3.))
-                            .bg(rgb(c_blue()))
+                            .bg(rgb(tone))
                             .text_size(px(10.5))
                             .text_color(rgb(0xffffff))
                             .child(format!("{} × {}", el.rect.w.round(), el.rect.h.round())),

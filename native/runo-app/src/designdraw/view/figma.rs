@@ -17,7 +17,7 @@ const TEXT_TAGS: [&str; 13] = [
 ];
 
 /// A section of the right panel: a title, an optional button at its right, then its rows.
-fn sec(title: impl Into<SharedString>, action: Option<AnyElement>) -> Div {
+pub(super) fn sec(title: impl Into<SharedString>, action: Option<AnyElement>) -> Div {
     div()
         .v_flex()
         .gap(px(6.))
@@ -44,7 +44,7 @@ fn sec(title: impl Into<SharedString>, action: Option<AnyElement>) -> Div {
 }
 
 /// A small square button with an icon, for a section's add and remove.
-fn mini(
+pub(super) fn mini(
     id: impl Into<ElementId>,
     name: IconName,
     tooltip: &'static str,
@@ -88,11 +88,43 @@ fn pair(a: impl IntoElement, b: impl IntoElement) -> Div {
     div().flex().gap(px(6.)).child(a).child(b)
 }
 
-fn caption(text: impl Into<SharedString>) -> Div {
+pub(super) fn caption(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(11.5))
         .text_color(rgb(c_muted()))
         .child(text.into())
+}
+
+/// A tab at the top of the left panel: Layers or Assets.
+fn side_tab(
+    id: &'static str,
+    label: &'static str,
+    on: bool,
+    cx: &mut Context<DesignCanvas>,
+) -> Stateful<Div> {
+    let assets = label == "Assets";
+    div()
+        .id(id)
+        .h(px(26.))
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .rounded(px(5.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(if on {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        })
+        .text_color(rgb(if on { c_text() } else { c_muted() }))
+        .when(on, |el| el.bg(tint(c_subtle())))
+        .hover(|el| el.text_color(rgb(c_text())))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.assets = assets;
+            cx.notify();
+        }))
+        .child(label)
 }
 
 fn color_of(hex: &str) -> Option<u32> {
@@ -147,6 +179,7 @@ impl DesignCanvas {
                 self.field_vals.insert(id, v);
             }
         }
+        self.load_component_fields(window, cx);
     }
 
     /// Set what was typed in a field on the selection.
@@ -505,10 +538,13 @@ impl DesignCanvas {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(c_text()))
-                    .child("Layers")
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(2.))
+                            .child(side_tab("design-left-layers", "Layers", !self.assets, cx))
+                            .child(side_tab("design-left-assets", "Assets", self.assets, cx)),
+                    )
                     .child(
                         mini("design-layers-add", IconName::Plus, "New screen (F)", false)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -523,7 +559,11 @@ impl DesignCanvas {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(list),
+                    .child(if self.assets {
+                        self.assets_list(cx)
+                    } else {
+                        list
+                    }),
             )
             .into_any_element()
     }
@@ -536,7 +576,12 @@ impl DesignCanvas {
             _ if !classes.is_empty() => classes.replace('.', " ").into(),
             _ => tag.to_string().into(),
         };
-        let glyph = layer_icon(tag);
+        let glyph = if l.component.is_some() {
+            components::component_icon()
+        } else {
+            layer_icon(tag)
+        };
+        let tone = l.component.is_some().then_some(components::PURPLE);
         let (p1, p2, p3) = (l.path.clone(), l.path.clone(), l.path.clone());
         let dragged = DraggedLayer {
             path: l.path.clone(),
@@ -575,8 +620,19 @@ impl DesignCanvas {
                     this.select_path(&id, p1.clone(), cx);
                 }
             }))
-            .child(icon(glyph, 12., if on { c_blue() } else { c_muted() }))
-            .child(div().flex_1().min_w_0().truncate().child(title))
+            .child(icon(
+                glyph,
+                12.,
+                tone.unwrap_or(if on { c_blue() } else { c_muted() }),
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when_some(tone, |el, c| el.text_color(rgb(c)))
+                    .child(title),
+            )
             .child(
                 div()
                     .flex_none()
@@ -852,7 +908,18 @@ impl DesignCanvas {
                         false,
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.escape(window, cx))),
-                );
+                )
+                .when(el.component.is_none(), |el| {
+                    el.child(
+                        mini(
+                            "design-make-component",
+                            components::component_icon(),
+                            "Create component (⌥⌘K)",
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.create_component(cx))),
+                    )
+                });
         }
         tools = tools
             .child(
@@ -875,11 +942,17 @@ impl DesignCanvas {
                 .child(icon(
                     if multi {
                         IconName::Group
+                    } else if el.component.is_some() {
+                        components::component_icon()
                     } else {
                         layer_icon(&el.tag)
                     },
                     13.,
-                    c_secondary(),
+                    if !multi && el.component.is_some() {
+                        components::PURPLE
+                    } else {
+                        c_secondary()
+                    },
                 ))
                 .child(
                     div()
@@ -893,6 +966,7 @@ impl DesignCanvas {
                 )
                 .child(tools),
         );
+        out = out.children(self.component_section(cx));
 
         // Layout: size and padding.
         out = out.child(
