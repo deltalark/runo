@@ -19,7 +19,10 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-actions!(design_canvas, [DesignEscape, DesignUndo, DesignRedo]);
+actions!(
+    design_canvas,
+    [DesignEscape, DesignUndo, DesignRedo, DesignCopy]
+);
 
 /// Keys the canvas takes before the app's own bindings for them. A text box inside the
 /// canvas keeps its own undo, since its bindings sit deeper.
@@ -30,6 +33,7 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-z", DesignUndo, canvas),
         KeyBinding::new("secondary-shift-z", DesignRedo, canvas),
         KeyBinding::new("secondary-y", DesignRedo, canvas),
+        KeyBinding::new("secondary-c", DesignCopy, canvas),
     ]
 }
 
@@ -107,6 +111,16 @@ enum Drag {
         at: Pt,
         moved: bool,
     },
+    /// Dragging a box across a screen to select what's inside it. Until it moves, it's a
+    /// click on the element under the pointer.
+    Marquee {
+        id: String,
+        from: Pt,
+        at: Pt,
+        moved: bool,
+        /// Shift was held: add to the selection rather than replace it.
+        add: bool,
+    },
     /// Resizing the selected element from its right edge, bottom edge or corner.
     Resize {
         wide: bool,
@@ -128,6 +142,8 @@ struct Drop {
 enum After {
     Same,
     Path(dom::Path),
+    /// Several elements, as after pasting or grouping.
+    Paths(Vec<dom::Path>),
     Clear,
 }
 
@@ -204,6 +220,10 @@ pub(crate) struct DesignCanvas {
     /// The selected screen, and the element picked in it.
     screen: Option<String>,
     element: Option<Element>,
+    /// More elements selected on the same screen with Shift or by dragging a box.
+    also: Vec<Element>,
+    /// Elements copied, as HTML, to paste on any screen.
+    clip: Vec<String>,
     layers: Vec<Layer>,
     /// The screen the layers were read from, or are being read from.
     layers_of: Option<String>,
@@ -389,6 +409,8 @@ impl DesignCanvas {
             drop: None,
             screen: None,
             element: None,
+            also: Vec::new(),
+            clip: Vec::new(),
             layers: Vec::new(),
             layers_of: None,
             layers_loading: false,
@@ -794,6 +816,7 @@ impl DesignCanvas {
             if self.canvas.screen(&id).is_none() {
                 self.screen = None;
                 self.element = None;
+                self.also.clear();
             } else if let Some(el) = &self.element {
                 let path = el.path.clone();
                 self.select_path(&id, path, cx);
@@ -1012,6 +1035,7 @@ impl DesignCanvas {
         ));
         self.screen = Some(base.clone());
         self.element = None;
+        self.also.clear();
         self.undo.clear();
         self.redo.clear();
         self.seen.clear();
@@ -1384,6 +1408,7 @@ impl DesignCanvas {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.element.is_some() {
                                     this.element = None;
+                                    this.also.clear();
                                 } else {
                                     this.screen = None;
                                 }
@@ -1754,6 +1779,7 @@ impl DesignCanvas {
     fn select_screen(&mut self, id: Option<String>) {
         if self.screen != id {
             self.element = None;
+            self.also.clear();
             self.layers.clear();
             self.layers_of = None;
         }
@@ -1774,6 +1800,7 @@ impl DesignCanvas {
                 if this.screen.as_deref() != Some(id2.as_str()) {
                     return;
                 }
+                this.also.clear();
                 this.element = out.ok().and_then(|v| serde_json::from_value(v).ok());
                 if edit_text && this.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     this.inline_open = true;
@@ -1797,6 +1824,7 @@ impl DesignCanvas {
                 if this.screen.as_deref() != Some(id2.as_str()) {
                     return;
                 }
+                this.also.clear();
                 this.element = out.ok().and_then(|v| serde_json::from_value(v).ok());
                 this.load_layers(cx);
             },
@@ -1853,15 +1881,18 @@ impl DesignCanvas {
                     this.note_writes();
                     match after {
                         After::Same => {
-                            if let Some(p) = this.element.as_ref().map(|e| e.path.clone()) {
-                                this.select_path(&id2, p, cx);
-                            } else {
+                            let paths = this.selected_paths();
+                            if paths.is_empty() {
                                 this.load_layers(cx);
+                            } else {
+                                this.select_many(&id2, paths, cx);
                             }
                         }
                         After::Path(p) => this.select_path(&id2, p, cx),
+                        After::Paths(ps) => this.select_many(&id2, ps, cx),
                         After::Clear => {
                             this.element = None;
+                            this.also.clear();
                             this.load_layers(cx);
                         }
                     }
@@ -1872,11 +1903,335 @@ impl DesignCanvas {
         );
     }
 
+    /// A change to the selected element, or to every selected element.
     fn op(&mut self, name: &str, args: &[serde_json::Value], after: After, cx: &mut Context<Self>) {
-        let Some(path) = self.element.as_ref().map(|e| e.path.clone()) else {
+        let paths = self.selected_paths();
+        match paths.as_slice() {
+            [] => {}
+            [path] => self.edit(dom::op(path, name, args), after, cx),
+            _ => {
+                let mut all = vec![json!(paths), json!(name)];
+                all.extend_from_slice(args);
+                self.edit(dom::call("opAll", &all), after, cx);
+            }
+        }
+    }
+
+    /// The selected elements' paths in page order, leaving out any inside another.
+    fn selected_paths(&self) -> Vec<dom::Path> {
+        let all: Vec<dom::Path> = self
+            .element
+            .iter()
+            .chain(&self.also)
+            .map(|e| e.path.clone())
+            .collect();
+        dom::outermost(&all)
+    }
+
+    /// Select several elements of a screen at once.
+    fn select_many(&mut self, id: &str, paths: Vec<dom::Path>, cx: &mut Context<Self>) {
+        let paths = dom::outermost(&paths);
+        if paths.len() <= 1 {
+            match paths.into_iter().next() {
+                Some(p) => self.select_path(id, p, cx),
+                None => {
+                    self.element = None;
+                    self.also.clear();
+                }
+            }
+            return;
+        }
+        let Some(device) = self.canvas.screen(id).map(|s| s.device) else {
             return;
         };
-        self.edit(dom::op(&path, name, args), after, cx);
+        let (id, id2) = (id.to_string(), id.to_string());
+        self.run(
+            cx,
+            move |r| r.eval(&id, device, &dom::call("infos", &[json!(paths)])),
+            move |this, out, cx| {
+                if this.screen.as_deref() != Some(id2.as_str()) {
+                    return;
+                }
+                let mut els: Vec<Element> = out
+                    .ok()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                this.element = (!els.is_empty()).then(|| els.remove(0));
+                this.also = els;
+                this.inline_open = false;
+                this.panel = Panel::Inspect;
+                this.load_layers(cx);
+            },
+        );
+    }
+
+    /// Add the element at `path` to the selection, or take it out if it's in already.
+    fn toggle_pick(&mut self, id: &str, path: dom::Path, cx: &mut Context<Self>) {
+        if self.screen.as_deref() != Some(id) || self.element.is_none() {
+            self.select_screen(Some(id.to_string()));
+            self.select_path(id, path, cx);
+            return;
+        }
+        let mut paths: Vec<dom::Path> = self
+            .element
+            .iter()
+            .chain(&self.also)
+            .map(|e| e.path.clone())
+            .collect();
+        if let Some(i) = paths.iter().position(|p| *p == path) {
+            paths.remove(i);
+        } else {
+            // Picking something inside or around what's selected swaps it in.
+            paths.retain(|p| !p.starts_with(&path) && !path.starts_with(p));
+            paths.push(path);
+        }
+        self.select_many(id, paths, cx);
+    }
+
+    /// Select everything beside the selection, or everything at the top of the screen.
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.screen.clone() else {
+            return;
+        };
+        let parent = self.element.as_ref().and_then(|e| dom::parent(&e.path));
+        let paths: Vec<dom::Path> = match parent {
+            Some(parent) => self
+                .layers
+                .iter()
+                .filter(|l| l.path.len() == parent.len() + 1 && l.path.starts_with(&parent))
+                .map(|l| l.path.clone())
+                .collect(),
+            None => {
+                // A screen is usually one container holding everything: take what's in it.
+                let top: Vec<&Layer> = self.layers.iter().filter(|l| l.depth == 0).collect();
+                let inner: Vec<dom::Path> = match top.as_slice() {
+                    [one] => self
+                        .layers
+                        .iter()
+                        .filter(|l| l.depth == 1 && l.path.starts_with(&one.path))
+                        .map(|l| l.path.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if inner.is_empty() {
+                    top.iter().map(|l| l.path.clone()).collect()
+                } else {
+                    inner
+                }
+            }
+        };
+        self.select_many(&id, paths, cx);
+    }
+
+    /// Copy the selected elements, as HTML, to paste on any screen or into code.
+    fn copy(&mut self, then_delete: bool, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        let Some(id) = self.screen.clone().filter(|_| !paths.is_empty()) else {
+            return;
+        };
+        let Some(device) = self.canvas.screen(&id).map(|s| s.device) else {
+            return;
+        };
+        let n = paths.len();
+        self.run(
+            cx,
+            move |r| r.eval(&id, device, &dom::call("copy", &[json!(paths)])),
+            move |this, out, cx| {
+                let html: Vec<String> = out
+                    .ok()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                if html.is_empty() {
+                    return;
+                }
+                cx.write_to_clipboard(ClipboardItem::new_string(html.join("\n")));
+                this.clip = html;
+                if then_delete {
+                    this.delete_element(cx);
+                } else {
+                    this.say(if n == 1 {
+                        "Copied. Paste it with ⌘V on any screen.".to_string()
+                    } else {
+                        format!("Copied {n} elements. Paste them with ⌘V on any screen.")
+                    });
+                }
+            },
+        );
+    }
+
+    /// Paste what was copied: inside the selected container, after the selected element,
+    /// or into the screen. HTML copied from elsewhere pastes too.
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        if self.screen.is_none() {
+            self.say("Pick a screen to paste on.");
+            return;
+        }
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|c| c.text())
+            .unwrap_or_default();
+        let ours = self.clip.join("\n");
+        let (html, known) = if text.trim_start().starts_with('<') && text != ours {
+            (vec![text], false)
+        } else {
+            (self.clip.clone(), true)
+        };
+        if html.is_empty() {
+            return;
+        }
+        let n = html.len();
+        let (target, inside, first) = match &self.element {
+            Some(el) if self.also.is_empty() && el.is_container() => {
+                let mut first = el.path.clone();
+                first.push(el.children);
+                (el.path.clone(), true, Some(first))
+            }
+            Some(_) => {
+                let last = self.selected_paths().pop().unwrap_or_default();
+                let mut first = last.clone();
+                if let Some(i) = first.last_mut() {
+                    *i += 1;
+                }
+                (last, false, Some(first))
+            }
+            None => {
+                // Into the container that holds most of the screen, as its last piece.
+                let size = |l: &Layer| {
+                    self.layers
+                        .iter()
+                        .filter(|m| m.path.starts_with(&l.path))
+                        .count()
+                };
+                let main = self
+                    .layers
+                    .iter()
+                    .filter(|l| l.depth == 0 && size(l) > 1)
+                    .max_by_key(|l| size(l));
+                match main {
+                    Some(main) => {
+                        let kids = self
+                            .layers
+                            .iter()
+                            .filter(|l| l.depth == 1 && l.path.starts_with(&main.path))
+                            .count();
+                        let mut first = main.path.clone();
+                        first.push(kids);
+                        (main.path.clone(), true, Some(first))
+                    }
+                    None => (Vec::new(), true, None),
+                }
+            }
+        };
+        let after = match first {
+            Some(first) if known => {
+                let paths = (0..n)
+                    .map(|i| {
+                        let mut p = first.clone();
+                        if let Some(last) = p.last_mut() {
+                            *last += i;
+                        }
+                        p
+                    })
+                    .collect();
+                After::Paths(paths)
+            }
+            Some(first) => After::Path(first),
+            None => After::Clear,
+        };
+        self.edit(
+            dom::call("paste", &[json!(target), json!(html), json!(inside)]),
+            after,
+            cx,
+        );
+    }
+
+    /// Wrap the selection in a new element (⌘G). With `flex`, the new element lays its
+    /// children out the way they already sit (auto layout).
+    fn group(&mut self, flex: bool, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        let Some(first) = paths.first().cloned() else {
+            return;
+        };
+        let across = {
+            let rects: Vec<dom::Box> = self
+                .element
+                .iter()
+                .chain(&self.also)
+                .map(|e| e.rect.clone())
+                .collect();
+            dom::side_by_side(&rects)
+        };
+        let html = if flex {
+            format!(
+                "<div style=\"display: flex; flex-direction: {}; gap: var(--space);{}\"></div>",
+                if across { "row" } else { "column" },
+                if across { " align-items: center;" } else { "" }
+            )
+        } else {
+            "<div></div>".to_string()
+        };
+        self.edit(
+            dom::call("group", &[json!(paths), json!(html)]),
+            After::Path(first),
+            cx,
+        );
+    }
+
+    /// Auto layout (⇧A): a lone container lays out its own children; anything else is
+    /// wrapped in a new container that does.
+    fn auto_layout(&mut self, cx: &mut Context<Self>) {
+        match (&self.element, self.also.is_empty()) {
+            (Some(el), true) if el.children > 0 && !el.is_flex() => {
+                let rects: Vec<dom::Box> = self
+                    .shots
+                    .get(self.screen.as_deref().unwrap_or_default())
+                    .map(|s| {
+                        s.boxes
+                            .iter()
+                            .filter(|b| {
+                                b.path.len() == el.path.len() + 1 && b.path.starts_with(&el.path)
+                            })
+                            .map(|b| b.rect.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let across = dom::side_by_side(&rects);
+                let map = json!({
+                    "display": "flex",
+                    "flex-direction": if across { "row" } else { "column" },
+                    "gap": "var(--space)",
+                });
+                self.op("styles", &[map], After::Same, cx);
+            }
+            (Some(el), true) if el.is_flex() => {
+                self.say("This already lays out its children. Change how with the bar under it.")
+            }
+            (Some(_), _) => self.group(true, cx),
+            (None, _) => {}
+        }
+    }
+
+    /// Put the children of each selected element where it was (⇧⌘G).
+    fn ungroup(&mut self, cx: &mut Context<Self>) {
+        let paths = self.selected_paths();
+        let after = match (paths.as_slice(), &self.element) {
+            ([p], Some(el)) if el.children > 0 => After::Paths(
+                (0..el.children)
+                    .map(|i| {
+                        let mut q = p.clone();
+                        if let Some(last) = q.last_mut() {
+                            *last += i;
+                        }
+                        q
+                    })
+                    .collect(),
+            ),
+            _ => After::Clear,
+        };
+        if paths.is_empty() {
+            return;
+        }
+        self.edit(dom::call("ungroup", &[json!(paths)]), after, cx);
     }
 
     fn set_style(&mut self, key: &str, value: &str, cx: &mut Context<Self>) {
@@ -1895,6 +2250,9 @@ impl DesignCanvas {
 
     /// Move the selected element before or after its neighbour.
     fn nudge(&mut self, by: i32, cx: &mut Context<Self>) {
+        if !self.also.is_empty() {
+            return;
+        }
         let Some(mut path) = self.element.as_ref().map(|e| e.path.clone()) else {
             return;
         };
@@ -1909,6 +2267,11 @@ impl DesignCanvas {
     }
 
     fn duplicate_element(&mut self, cx: &mut Context<Self>) {
+        if !self.also.is_empty() {
+            let copies = dom::duplicated(&self.selected_paths());
+            self.op("duplicate", &[], After::Paths(copies), cx);
+            return;
+        }
         let Some(mut path) = self.element.as_ref().map(|e| e.path.clone()) else {
             return;
         };
@@ -1921,7 +2284,7 @@ impl DesignCanvas {
     fn delete_element(&mut self, cx: &mut Context<Self>) {
         let parent = self.element.as_ref().and_then(|e| dom::parent(&e.path));
         let after = match parent {
-            Some(p) if !p.is_empty() => After::Path(p),
+            Some(p) if !p.is_empty() && self.also.is_empty() => After::Path(p),
             _ => After::Clear,
         };
         self.op("remove", &[], after, cx);
@@ -1996,6 +2359,7 @@ impl DesignCanvas {
         self.note_writes();
         self.screen = Some(id.clone());
         self.element = None;
+        self.also.clear();
         self.draw(&id, cx);
         self.load_layers(cx);
         cx.notify();
@@ -2147,6 +2511,7 @@ impl DesignCanvas {
         self.asked.forget();
         self.save_canvas();
         self.element = None;
+        self.also.clear();
         self.draw(&id, cx);
         cx.notify();
     }
@@ -2406,7 +2771,7 @@ impl DesignCanvas {
             };
             return;
         }
-        if e.click_count == 1 {
+        if e.click_count == 1 && !e.modifiers.shift && self.also.is_empty() {
             if let Some((id, r)) = self.picked_rect() {
                 if w.0 >= r.x && w.1 >= r.y && w.0 <= r.x + r.w && w.1 <= r.y + r.h {
                     self.drag = Drag::Element {
@@ -2439,8 +2804,19 @@ impl DesignCanvas {
                     return;
                 };
                 let at = (w.0 - s.x, w.1 - s.y);
-                self.select_screen(Some(id.clone()));
-                self.pick(&id, at, e.click_count >= 2, cx);
+                if e.click_count >= 2 {
+                    self.select_screen(Some(id.clone()));
+                    self.pick(&id, at, true, cx);
+                } else {
+                    // A click picks on release; a drag selects what it boxes in.
+                    self.drag = Drag::Marquee {
+                        id,
+                        from: w,
+                        at: w,
+                        moved: false,
+                        add: e.modifiers.shift,
+                    };
+                }
             }
             None => {
                 self.select_screen(None);
@@ -2484,6 +2860,14 @@ impl DesignCanvas {
                 }
             }
             Drag::Resize { at, .. } => *at = w,
+            Drag::Marquee {
+                from, at, moved, ..
+            } => {
+                *at = w;
+                if (w.0 - from.0).abs() + (w.1 - from.1).abs() > 4. / self.zoom {
+                    *moved = true;
+                }
+            }
             Drag::Pan { from, start } => {
                 self.pan = (start.0 + local.0 - from.0, start.1 + local.1 - from.1);
             }
@@ -2517,6 +2901,51 @@ impl DesignCanvas {
         self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Move { moved: true, .. } => self.save_canvas(),
+            Drag::Marquee {
+                id,
+                from,
+                at,
+                moved,
+                add,
+            } => {
+                let Some(s) = self.canvas.screen(&id) else {
+                    return;
+                };
+                let (sx, sy) = (s.x, s.y);
+                if !moved {
+                    let at = (from.0 - sx, from.1 - sy);
+                    if add {
+                        let path = self
+                            .shots
+                            .get(&id)
+                            .and_then(|shot| dom::under(&shot.boxes, at.0, at.1, None))
+                            .map(|b| b.path.clone());
+                        if let Some(path) = path {
+                            self.toggle_pick(&id, path, cx);
+                        }
+                    } else {
+                        self.select_screen(Some(id.clone()));
+                        self.pick(&id, at, false, cx);
+                    }
+                } else {
+                    let area = dom::Box {
+                        x: from.0.min(at.0) - sx,
+                        y: from.1.min(at.1) - sy,
+                        w: (at.0 - from.0).abs(),
+                        h: (at.1 - from.1).abs(),
+                    };
+                    let mut paths = self
+                        .shots
+                        .get(&id)
+                        .map(|shot| dom::inside(&shot.boxes, &area))
+                        .unwrap_or_default();
+                    if add && self.screen.as_deref() == Some(id.as_str()) {
+                        paths.extend(self.selected_paths());
+                    }
+                    self.select_screen(Some(id.clone()));
+                    self.select_many(&id, paths, cx);
+                }
+            }
             Drag::Element {
                 id,
                 from,
@@ -2696,6 +3125,34 @@ impl DesignCanvas {
         let m = &k.modifiers;
         let sec = m.secondary();
         let handled = match (sec, m.shift, m.alt, k.key.as_str()) {
+            (true, false, false, "c") => {
+                self.copy(false, cx);
+                true
+            }
+            (true, false, false, "x") => {
+                self.copy(true, cx);
+                true
+            }
+            (true, false, false, "v") => {
+                self.paste(cx);
+                true
+            }
+            (true, false, false, "a") if self.screen.is_some() => {
+                self.select_all(cx);
+                true
+            }
+            (true, false, false, "g") if self.element.is_some() => {
+                self.group(false, cx);
+                true
+            }
+            (true, true, false, "g") if self.element.is_some() => {
+                self.ungroup(cx);
+                true
+            }
+            (false, true, false, "a") if self.element.is_some() => {
+                self.auto_layout(cx);
+                true
+            }
             (true, _, _, "d") => {
                 if self.element.is_some() {
                     self.duplicate_element(cx);
@@ -2750,13 +3207,18 @@ impl DesignCanvas {
             self.menu = None;
         } else if !self.focus.is_focused(window) {
             window.focus(&self.focus, cx);
+        } else if !self.also.is_empty() {
+            self.also.clear();
         } else if let Some(el) = &self.element {
             match dom::parent(&el.path).filter(|p| !p.is_empty()) {
                 Some(p) => {
                     let id = self.screen.clone().unwrap_or_default();
                     self.select_path(&id, p, cx);
                 }
-                None => self.element = None,
+                None => {
+                    self.element = None;
+                    self.also.clear();
+                }
             }
         } else {
             self.select_screen(None);
@@ -3254,6 +3716,78 @@ impl DesignCanvas {
                         .into_any_element(),
                 );
             }
+        }
+        // A box being dragged across a screen to select what's in it.
+        if let Drag::Marquee {
+            from,
+            at,
+            moved: true,
+            ..
+        } = &self.drag
+        {
+            let (ax, ay) = self.screen_pt((from.0.min(at.0), from.1.min(at.1)));
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(ax))
+                    .top(px(ay))
+                    .w(px((at.0 - from.0).abs() * z))
+                    .h(px((at.1 - from.1).abs() * z))
+                    .border_1()
+                    .border_color(rgb(c_blue()))
+                    .bg(col(c_blue(), 0.08))
+                    .into_any_element(),
+            );
+        }
+        // The other selected elements, and the box around them all.
+        if let (false, Some(first), Some(s)) = (
+            self.also.is_empty(),
+            &self.element,
+            self.screen.as_ref().and_then(|id| self.canvas.screen(id)),
+        ) {
+            let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for el in std::iter::once(first).chain(&self.also) {
+                let (x, y) = self.screen_pt((s.x + el.rect.x, s.y + el.rect.y));
+                let (w, h) = (el.rect.w * z, el.rect.h * z);
+                (l, t, r, b) = (l.min(x), t.min(y), r.max(x + w), b.max(y + h));
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(x - 1.))
+                        .top(px(y - 1.))
+                        .w(px(w + 2.))
+                        .h(px(h + 2.))
+                        .border_2()
+                        .border_color(rgb(c_blue()))
+                        .into_any_element(),
+                );
+            }
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(l - 4.))
+                    .top(px(t - 4.))
+                    .w(px(r - l + 8.))
+                    .h(px(b - t + 8.))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(col(c_blue(), 0.7))
+                    .into_any_element(),
+            );
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(l - 4.))
+                    .top(px(t - 24.))
+                    .px_1()
+                    .rounded_sm()
+                    .bg(rgb(c_blue()))
+                    .text_size(px(10.5))
+                    .text_color(rgb(0xffffff))
+                    .child(format!("{} selected", self.also.len() + 1))
+                    .into_any_element(),
+            );
+            return out;
         }
         // The picked element.
         if let (Some(el), Some(s)) = (
@@ -4445,6 +4979,9 @@ impl DesignCanvas {
                     .child(section("Insert"))
                     .child(self.blocks(cx));
             }
+            Some(el) if !self.also.is_empty() => {
+                out = out.child(self.selection_panel(el, cx));
+            }
             Some(el) => {
                 out = out.child(section("Element")).child(
                     div()
@@ -4761,6 +5298,130 @@ impl DesignCanvas {
         out
     }
 
+    /// The inspector for several elements: what can be done to them together, and the
+    /// styles that change them all at once.
+    fn selection_panel(&self, el: &Element, cx: &mut Context<Self>) -> Div {
+        let n = self.also.len() + 1;
+        let groups = std::iter::once(el)
+            .chain(&self.also)
+            .any(|e| e.children > 0);
+        let mut actions = div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .child(
+                text_btn("design-group", "Group", Some(IconName::Group), false)
+                    .tooltip(tip("Wrap them in a new container (⌘G)"))
+                    .on_click(cx.listener(|this, _, _, cx| this.group(false, cx))),
+            )
+            .child(
+                text_btn("design-autolayout", "Auto layout", Some(IconName::Columns3), false)
+                    .tooltip(tip(
+                        "Wrap them in a container that lays them out across or down, the way they sit now (⇧A)",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.auto_layout(cx))),
+            );
+        if groups {
+            actions = actions.child(
+                text_btn("design-ungroup", "Ungroup", Some(IconName::Ungroup), false)
+                    .tooltip(tip("Put what's inside each one where it is (⇧⌘G)"))
+                    .on_click(cx.listener(|this, _, _, cx| this.ungroup(cx))),
+            );
+        }
+        actions = actions
+            .child(
+                icon_btn("design-copy", IconName::Copy, "Copy (⌘C)", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.copy(false, cx))),
+            )
+            .child(
+                icon_btn(
+                    "design-dup-all",
+                    IconName::CopyPlus,
+                    "Duplicate (⌘D)",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.duplicate_element(cx))),
+            )
+            .child(
+                icon_btn("design-hide-all", IconName::EyeOff, "Hide or show", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.op("hide", &[], After::Same, cx))),
+            )
+            .child(
+                icon_btn("design-del-all", IconName::Trash, "Delete (⌫)", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_element(cx))),
+            );
+        div()
+            .v_flex()
+            .gap_1()
+            .child(section("Selection"))
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child(format!(
+                        "{n} elements. Shift-click to add or take one out. Changes here apply to all of them."
+                    )),
+            )
+            .child(actions)
+            .child(section("Style all"))
+            .child(label_row("Text colour", self.color_row("color", el, cx)))
+            .child(label_row("Fill", self.color_row("background-color", el, cx)))
+            .child(label_row(
+                "Size",
+                self.choice_row(
+                    "font-size",
+                    el,
+                    &[
+                        ("12", "12px"),
+                        ("14", "14px"),
+                        ("16", "16px"),
+                        ("20", "20px"),
+                        ("24", "24px"),
+                        ("Auto", ""),
+                    ],
+                    cx,
+                ),
+            ))
+            .child(label_row(
+                "Weight",
+                self.choice_row(
+                    "font-weight",
+                    el,
+                    &[
+                        ("Regular", "400"),
+                        ("Medium", "500"),
+                        ("Semibold", "600"),
+                        ("Bold", "700"),
+                        ("Auto", ""),
+                    ],
+                    cx,
+                ),
+            ))
+            .child(label_row(
+                "Corners",
+                self.choice_row(
+                    "border-radius",
+                    el,
+                    &[
+                        ("Square", "0"),
+                        ("Theme", "var(--radius)"),
+                        ("Round", "999px"),
+                        ("Auto", ""),
+                    ],
+                    cx,
+                ),
+            ))
+            .child(label_row(
+                "Width",
+                self.choice_row(
+                    "width",
+                    el,
+                    &[("Hug", "fit-content"), ("Fill", "100%"), ("Auto", "")],
+                    cx,
+                ),
+            ))
+    }
+
     fn blocks(&self, cx: &mut Context<Self>) -> Div {
         let mut row = div().flex().flex_wrap().gap(px(4.));
         for (i, (label, html)) in BLOCKS.iter().enumerate() {
@@ -4792,7 +5453,12 @@ impl DesignCanvas {
                 },
             ));
         }
-        let picked = self.element.as_ref().map(|e| e.path.clone());
+        let picked: Vec<dom::Path> = self
+            .element
+            .iter()
+            .chain(&self.also)
+            .map(|e| e.path.clone())
+            .collect();
         let name = self
             .screen
             .as_ref()
@@ -4816,7 +5482,7 @@ impl DesignCanvas {
                 ),
         );
         for (i, l) in self.layers.iter().enumerate() {
-            let on = picked.as_ref() == Some(&l.path);
+            let on = picked.contains(&l.path);
             let (tag, classes) = l.label.split_once('.').unwrap_or((l.label.as_str(), ""));
             // What a person would call it: its text, else its class, else its tag.
             let title: SharedString = match &l.text {
@@ -4858,9 +5524,13 @@ impl DesignCanvas {
                             this.edit(js, After::Clear, cx);
                         }
                     }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                         let id = this.screen.clone().unwrap_or_default();
-                        this.select_path(&id, p1.clone(), cx);
+                        if e.modifiers().shift {
+                            this.toggle_pick(&id, p1.clone(), cx);
+                        } else {
+                            this.select_path(&id, p1.clone(), cx);
+                        }
                     }))
                     .child(icon(glyph, 12., if on { c_blue() } else { c_muted() }))
                     .child(div().flex_1().min_w_0().truncate().child(title))
@@ -5141,6 +5811,7 @@ impl DesignCanvas {
             .on_action(cx.listener(|this, _: &DesignEscape, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &DesignUndo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &DesignRedo, _, cx| this.redo(cx)))
+            .on_action(cx.listener(|this, _: &DesignCopy, _, cx| this.copy(false, cx)))
             .on_mouse_move(cx.listener(Self::on_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_up))

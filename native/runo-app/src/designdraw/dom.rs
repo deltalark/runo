@@ -103,6 +103,17 @@ if (!window.__runo) window.__runo = (() => {
     t.innerHTML = s.trim();
     return t.content.firstElementChild;
   };
+  const parseAll = (s) => {
+    const t = document.createElement('template');
+    t.innerHTML = s.trim();
+    return Array.from(t.content.children);
+  };
+  // Paths in the order their elements appear on the page.
+  const cmp = (a, b) => {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return a.length - b.length;
+  };
+  const inOrder = (ps) => ps.slice().sort(cmp).map(at).filter(Boolean);
   const ops = {
     text: (el, v) => { el.textContent = v; },
     styles: (el, map) => {
@@ -147,6 +158,38 @@ if (!window.__runo) window.__runo = (() => {
       const el = p.length ? at(p) : document.body;
       if (!el) return null;
       ops[name](el, ...args);
+      return true;
+    },
+    infos: (ps) => ps.map(at).filter(Boolean).map(info),
+    // The same change to several elements, last on the page first, so changing one
+    // doesn't move the ones still to come.
+    opAll: (ps, name, ...args) => {
+      for (const el of inOrder(ps).reverse()) ops[name](el, ...args);
+      return true;
+    },
+    copy: (ps) => inOrder(ps).map((el) => el.outerHTML),
+    // Pieces of HTML added inside the element at `p` (at its end), or after it.
+    paste: (p, htmls, inside) => {
+      const el = p.length ? at(p) : document.body;
+      if (!el) return null;
+      const nodes = htmls.flatMap(parseAll);
+      if (inside) el.append(...nodes); else el.after(...nodes);
+      return nodes.length;
+    },
+    // Wrap elements in a new one, put where the first of them was.
+    group: (ps, html) => {
+      const els = inOrder(ps);
+      const g = parse(html);
+      if (!els.length || !g) return null;
+      els[0].before(g);
+      g.append(...els);
+      return true;
+    },
+    // Put each element's children where it was.
+    ungroup: (ps) => {
+      for (const el of inOrder(ps).reverse()) {
+        if (el.children.length) el.replaceWith(...el.childNodes);
+      }
       return true;
     },
   };
@@ -347,6 +390,80 @@ pub(crate) fn moved_path(from: &Path, to: &Path, after: bool) -> Path {
     t
 }
 
+/// Paths in page order, without repeats or anything inside another of them: changing an
+/// element changes what's inside it too.
+pub(crate) fn outermost(paths: &[Path]) -> Vec<Path> {
+    let mut out: Vec<Path> = paths
+        .iter()
+        .filter(|p| {
+            !p.is_empty()
+                && !paths
+                    .iter()
+                    .any(|q| q.len() < p.len() && p.starts_with(q) && !q.is_empty())
+        })
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Where the copies land when each element is duplicated in place: just after its
+/// original, with the copies before it pushing it along.
+pub(crate) fn duplicated(paths: &[Path]) -> Vec<Path> {
+    let paths = outermost(paths);
+    paths
+        .iter()
+        .map(|p| {
+            let mut out = p.clone();
+            for m in &paths {
+                let d = m.len() - 1;
+                if m != p && p.len() > d && p[..d] == m[..d] && p[d] > m[d] {
+                    out[d] += 1;
+                }
+            }
+            if let Some(last) = out.last_mut() {
+                *last += 1;
+            }
+            out
+        })
+        .collect()
+}
+
+/// The outermost elements lying wholly inside a box, as a drag across a screen picks them.
+pub(crate) fn inside(boxes: &[Bx], area: &Box) -> Vec<Path> {
+    let within: Vec<Path> = boxes
+        .iter()
+        .filter(|b| {
+            !b.path.is_empty()
+                && b.rect.x >= area.x
+                && b.rect.y >= area.y
+                && b.rect.x + b.rect.w <= area.x + area.w
+                && b.rect.y + b.rect.h <= area.y + area.h
+        })
+        .map(|b| b.path.clone())
+        .collect();
+    outermost(&within)
+}
+
+/// Whether boxes sit side by side rather than one above another, to lay them out the way
+/// they already are.
+pub(crate) fn side_by_side(rects: &[Box]) -> bool {
+    if rects.len() < 2 {
+        return false;
+    }
+    let span = |lo: fn(&Box) -> f32, hi: fn(&Box) -> f32| {
+        let a = rects.iter().map(lo).fold(f32::MAX, f32::min);
+        let b = rects.iter().map(hi).fold(f32::MIN, f32::max);
+        b - a
+    };
+    let wide = span(|r| r.x, |r| r.x + r.w);
+    let tall = span(|r| r.y, |r| r.y + r.h);
+    let widest = rects.iter().map(|r| r.w).fold(0., f32::max);
+    let tallest = rects.iter().map(|r| r.h).fold(0., f32::max);
+    wide - widest > tall - tallest
+}
+
 /// An element that opens another screen.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct Link {
@@ -466,6 +583,62 @@ mod tests {
         assert_eq!(beside[0].2, 20.);
         let below = spacing(&r(0., 0., 10., 10.), &r(0., 16., 10., 10.));
         assert_eq!(below[0].2, 6.);
+    }
+
+    #[test]
+    fn a_selection_keeps_its_outermost_elements_in_page_order() {
+        let got = outermost(&[vec![2], vec![0, 1], vec![2, 3], vec![0, 1], vec![]]);
+        assert_eq!(got, vec![vec![0, 1], vec![2]]);
+    }
+
+    #[test]
+    fn copies_land_after_their_originals() {
+        // Two siblings: the first copy pushes the second original along.
+        assert_eq!(
+            duplicated(&[vec![0, 1], vec![0, 3]]),
+            vec![vec![0, 2], vec![0, 5]]
+        );
+        // A copy of an earlier element shifts a later one's container.
+        assert_eq!(
+            duplicated(&[vec![0], vec![1, 2]]),
+            vec![vec![1], vec![2, 3]]
+        );
+    }
+
+    #[test]
+    fn a_drag_box_picks_what_is_wholly_inside_it() {
+        let b = |path: Vec<usize>, x, y, w, h| Bx {
+            path,
+            rect: Box { x, y, w, h },
+            ..Default::default()
+        };
+        let boxes = vec![
+            b(vec![0], 0., 0., 390., 800.),
+            b(vec![0, 0], 10., 10., 100., 40.),
+            b(vec![0, 0, 0], 12., 12., 20., 20.),
+            b(vec![0, 1], 10., 60., 100., 40.),
+            b(vec![0, 2], 10., 110., 100., 40.),
+        ];
+        let area = Box {
+            x: 0.,
+            y: 0.,
+            w: 200.,
+            h: 105.,
+        };
+        assert_eq!(inside(&boxes, &area), vec![vec![0, 0], vec![0, 1]]);
+    }
+
+    #[test]
+    fn layout_follows_how_things_sit() {
+        let r = |x, y| Box {
+            x,
+            y,
+            w: 50.,
+            h: 20.,
+        };
+        assert!(side_by_side(&[r(0., 0.), r(60., 0.), r(120., 2.)]));
+        assert!(!side_by_side(&[r(0., 0.), r(0., 30.), r(4., 60.)]));
+        assert!(!side_by_side(&[r(0., 0.)]));
     }
 
     #[test]
