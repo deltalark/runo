@@ -2,6 +2,10 @@
 
 A release is a `v*` tag. Pushing one runs `.github/workflows/release.yml`, which builds `Runo.app` for Apple silicon and Intel Macs and attaches a zip and a disk image of each to a GitHub release. Runo's update check reads `releases/latest` and offers the download for the user's Mac.
 
+## Test builds
+
+To build the app without releasing it, open the repository's Actions tab, pick **Release**, and click **Run workflow** on any branch. The run builds the same zip and disk image for both Macs, named with the commit (for example `Runo-0.1.0-macos-arm64-a2831ac.dmg`), and keeps them as downloadable artifacts on the run's page instead of creating a release. Pull requests that change the workflow run it the same way.
+
 ## Signing and notarization
 
 Without these repository secrets, the build is signed ad hoc and macOS asks before opening it the first time (right-click → Open). With them, the app and disk image are signed with your Developer ID and notarized.
