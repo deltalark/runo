@@ -3831,11 +3831,8 @@ impl RunoApp {
             .items_center()
             .justify_center()
             .rounded_md()
-            .bg(rgb(c_raised()))
-            .border_1()
-            .border_color(rgb(c_border()))
             .cursor_pointer()
-            .hover(|el| el.bg(tint(c_subtle())))
+            .hover(|el| el.bg(tint(c_active())))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
             })
@@ -3865,6 +3862,16 @@ impl RunoApp {
                 .unwrap_or_default(),
         };
         let stats = self.stats.get(&id).copied();
+        let color = self
+            .state
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .and_then(projects::color_of);
+        // "local folder" is where most sessions run, so it only adds noise; a branch
+        // or worktree still shows.
+        let branch = (!session.branch.is_empty() && session.branch != "local folder")
+            .then(|| session.branch.clone());
         div()
             .id(("session", id as usize))
             .on_mouse_down(
@@ -3875,12 +3882,17 @@ impl RunoApp {
             .group("session-row")
             .mx_1()
             .px_2()
-            .py(px(7.))
+            .py(px(6.))
             .v_flex()
             .gap(px(2.))
             .rounded_md()
             .cursor_pointer()
-            .when(selected, |el| el.bg(tint(c_active())))
+            .when(selected, |el| {
+                el.bg(match color {
+                    Some(c) => rgba((c << 8) | 0x24),
+                    None => tint(c_active()),
+                })
+            })
             .when(!selected, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .when(self.cursor == Some(id), |el| el.bg(tint(c_selected())))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -3903,7 +3915,11 @@ impl RunoApp {
                             } else {
                                 FontWeight::NORMAL
                             })
-                            .text_color(rgb(c_text()))
+                            .text_color(rgb(if selected || unread {
+                                c_text()
+                            } else {
+                                c_secondary()
+                            }))
                             .child(session.title.clone()),
                     )
                     .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted())))
@@ -3952,7 +3968,7 @@ impl RunoApp {
                                     .group_hover("session-row", |el| el.opacity(1.))
                                     .child(self.row_action(
                                         ("pin", id as usize),
-                                        18.,
+                                        22.,
                                         if pinned {
                                             IconName::PinOff
                                         } else {
@@ -3967,7 +3983,7 @@ impl RunoApp {
                                     ))
                                     .child(self.row_action(
                                         ("archive", id as usize),
-                                        18.,
+                                        22.,
                                         IconName::Archive,
                                         "Archive",
                                         cx.listener(move |this, _, _, cx| {
@@ -3998,25 +4014,11 @@ impl RunoApp {
                                 None => provider.name.to_string(),
                             }),
                     )
-                    .when(!session.branch.is_empty(), |el| {
-                        el.child(icon(
-                            if session.branch == "local folder" {
-                                IconName::Folder
-                            } else {
-                                IconName::GitBranch
-                            },
-                            11.,
-                            c_muted(),
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(session.branch.clone()),
-                        )
+                    .when_some(branch, |el, branch| {
+                        el.child(icon(IconName::GitBranch, 11., c_muted()))
+                            .child(div().min_w_0().truncate().child(branch))
                     })
-                    .when(session.branch.is_empty(), |el| el.child(div().flex_1()))
+                    .child(div().flex_1())
                     .when_some(stats.filter(|s| s.0 > 0), |el, (_, a, r)| {
                         el.child(
                             div()
@@ -4044,14 +4046,9 @@ impl RunoApp {
                 continue;
             }
             let color = projects::color_of(project);
-            // Each project is one block: a line above it, its header, and its
-            // sessions hung off a rail in the project's color, so where one
-            // project ends and the next begins reads at a glance.
-            let mut group = div()
-                .v_flex()
-                .mx_1()
-                .py_1()
-                .when(!first, |el| el.border_t_1().border_color(divider()));
+            // Each project is one block: its header, then its sessions hung off a
+            // rail in the project's color. Space between blocks keeps them apart.
+            let mut group = div().v_flex().mx_1().when(!first, |el| el.mt(px(10.)));
             first = false;
             group = group.child(
                 div()
@@ -4128,6 +4125,28 @@ impl RunoApp {
                                 .child(icon(IconName::TriangleAlert, 12., c_amber())),
                         )
                     })
+                    .when(!open, |el| {
+                        // A folded project still says when a session inside needs you
+                        // or is running.
+                        let need = sessions.iter().find_map(|s| self.need(s));
+                        let working = sessions.iter().any(|s| s.status == Status::Working);
+                        el.when_some(need, |el, need| {
+                            el.child(div().size(px(7.)).flex_none().rounded_full().bg(rgb(
+                                match need {
+                                    shell::Need::Blocked => c_amber(),
+                                    shell::Need::Failed => c_red(),
+                                    shell::Need::Finished => c_blue(),
+                                },
+                            )))
+                        })
+                        .when(need.is_none() && working, |el| {
+                            el.child(self.status_dot(
+                                Status::Working,
+                                ("project-dot", pid as usize),
+                                7.,
+                            ))
+                        })
+                    })
                     .when(!sessions.is_empty(), |el| {
                         el.child(
                             div()
@@ -4175,14 +4194,14 @@ impl RunoApp {
                 // Sessions hang off a rail under the chevron, in the project's color.
                 let mut rows = div()
                     .v_flex()
-                    .gap(px(1.))
+                    .gap(px(2.))
                     .ml(px(14.))
                     .mt(px(2.))
                     .mb_1()
                     .pl(px(2.))
                     .border_l_2()
                     .border_color(match color {
-                        Some(c) => rgba((c << 8) | 0x8c),
+                        Some(c) => rgba((c << 8) | 0x73),
                         None => rgb(c_border()),
                     });
                 if sessions.is_empty() {
