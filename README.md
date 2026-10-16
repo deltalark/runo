@@ -37,7 +37,7 @@ Run them on your Mac, in a VM or on your own server, and move them between the t
 
 <br />
 
-<img src="docs/images/main.png" alt="Runo with a Claude Code session open: the conversation in the middle, changes and a diff on the right, and permission and plan cards in the corner" width="920" />
+<img src="docs/images/main.png" alt="Runo with a Claude Code session open: projects with colored rails in the sidebar, the conversation in the middle, and the changes and a diff on the right" width="920" />
 
 </div>
 
@@ -94,7 +94,7 @@ Approve permissions, plans and questions from any session, undo any turn, and ca
 
 ### Sessions and worktrees
 
-<img src="docs/images/new-session.png" alt="The New session dialog with a project, a grid of agents, and a choice between an isolated worktree and the project directory" width="920" />
+<img src="docs/images/new-session.png" alt="The New session dialog with five projects, Claude Code, Codex, OpenCode and Gemini to pick from, and a choice between an isolated worktree and the project directory" width="920" />
 
 - **Projects and sessions.** Add any local folder and start sessions on it. The sidebar groups sessions under each project, on a rail in the project's color, with live status dots, unread markers and `+/-` line counts. Group them by status instead when you'd rather see what needs you.
 - **Isolated worktrees.** A session can run in its own branch and folder under `.runo-worktrees/`, or right in your checkout. A setup command runs in each new worktree, in a terminal tab where you can answer its prompts, before the agent starts, and git-ignored files listed in `.worktreeinclude` (such as `.env`) are copied in.
@@ -157,6 +157,13 @@ Every session has two views of the same conversation. **Chat** is Runo's own int
 
 Two canvases for the current project, each with an **Ask AI** bar that hands the change to an agent and keeps the conversation going.
 
+<table>
+<tr>
+<td width="50%"><img src="docs/images/design.png" alt="The Design canvas with four phone screens side by side: Sign in, Dashboard, List and Detail" /></td>
+<td width="50%"><img src="docs/images/architecture.png" alt="The Architecture canvas with a C4 diagram of Runo: the developer, the native UI, the session manager, local state, git worktrees, coding agents, a remote server and GitHub" /></td>
+</tr>
+</table>
+
 - **Design** is a canvas of real HTML screens, one file each in `design/screens/`, drawn side by side to pan and zoom (with WebKit on macOS). Edit them like in Figma, link screens together and press **Play** for a clickable prototype that moves between screens the way iOS, Android or desktop apps do. Start from pictures, mockups or sketches, keep design rules in `docs/design.md`, and run **Checks** for contrast, text size and tap targets.
 - **Architecture** is a diagram canvas with C4, flowchart and infrastructure shapes, thousands of brand and technology logos, connectors that route around boxes, and animated flows you can play step by step. A **Code map** drafts the diagram from the project's own code, **Beautify** tidies a tangle in one click, and diagrams export to draw.io and Mermaid.
 
@@ -164,7 +171,7 @@ A new project can start from either canvas, before any code exists.
 
 ### Playbooks and automations
 
-<img src="docs/images/playbooks.png" alt="The Playbooks page with a saved playbook, templates and a form to create a new one" width="920" />
+<img src="docs/images/playbooks.png" alt="The Playbooks page with two saved playbooks, Find bugs and Review my changes, and the templates to start from" width="920" />
 
 Save a task once and run it in any project: from the Playbooks page, from Quick open, by right-clicking a project, or as a slash command inside the agent. Give a playbook a schedule and Runo runs it on a timer while it is open. Templates cover finding bugs, scanning for vulnerabilities, updating docs, adding tests, reviewing changes and upgrading dependencies.
 
@@ -318,7 +325,7 @@ Runo also stops keeping your computer awake while only remote turns are running.
 
 ### Agents can use connections too
 
-<img src="docs/images/connections.png" alt="Settings, Connections: This machine, an SSH server that tested fine, and the form to add another" width="920" />
+<img src="docs/images/connections.png" alt="Settings, Connections: this machine, buttons to add an SSH server or a Cove VM, and the Cove options" width="920" />
 
 Runo's MCP server works in every session, in Cove VMs and on servers too: the agent there talks to a small relay script, and Runo answers it over the connection, so nothing listens on a port. Through it, agents get `list_connections` and `run_on`, so they can run a heavy build, a test matrix or some research on another machine without moving the whole session. With **Let agents use Cove** on, agents on your machine also get Cove's own tools and can make throwaway VMs for untrusted code. Each connection has an **Agents may use it** switch, and only the API keys you list for a connection ever reach it.
 
