@@ -91,6 +91,9 @@ All notable changes to Runo are documented here.
 
 ### Fixed
 
+- The terminal answers when a program asks where the cursor is or what terminal it is, the way other terminals do. Prompts such as gh's Y/n waited for that answer and took every key as part of it, Ctrl-C included, so the terminal looked frozen. Typing never blocks the window either, even when the program stops reading.
+- The Design canvas no longer freezes the window for seconds while screens are being drawn. Undo, renaming a screen, changing its device, the theme or dark mode, and files changed by an agent used to wait for the drawing in progress, and on macOS that wait stalled until it timed out. Redraws also free the old screen images, so memory stops growing as you edit, and a canvas you're not looking at stops checking its folder.
+
 - ⌘Z and ⇧⌘Z undo and redo on the Design canvas wherever you last clicked in it, and ⌘Z also takes back an AI change that isn't kept yet, like Undo on the ask bar.
 - The Layers tab on the Design canvas shows the selected screen's layers however the screen was selected, instead of staying on "Reading the screen…". Layers show an icon for what each element is and its text or class, and the panel's tabs share the width so the Checks count fits.
 - The agent and model menu on the canvas ask bars keeps its size while you hover agents with fewer models.
