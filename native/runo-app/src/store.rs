@@ -1020,10 +1020,12 @@ impl State {
 impl State {
     /// Sample workspace shown until the first real project is added.
     pub fn demo() -> Self {
+        // Each sample project gets its own color so the sidebar shows the project rails.
         let project = |id: u64, name: &str| Project {
             id,
             name: name.into(),
             path: format!("/demo/{name}"),
+            color: ["blue", "violet", "teal", "orange", "pink"][(id as usize - 1) % 5].into(),
             ..Default::default()
         };
         let session =
