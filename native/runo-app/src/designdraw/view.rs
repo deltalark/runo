@@ -7,7 +7,7 @@ use super::checks;
 use super::dom::{self, Element, Layer};
 use super::model::Canvas;
 use super::model::*;
-use super::render::{Renderer, Shot};
+use super::render::{Asked, Renderer, Shot};
 use crate::archdraw::view::{chip_btn, col, icon_btn, label_row, section, text_btn, tip};
 use crate::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -156,6 +156,13 @@ impl Render for DraggedLayer {
     }
 }
 
+/// Edits kept to undo. Each holds a whole screen's HTML, so a long session can't keep
+/// every one.
+const UNDO_LIMIT: usize = 200;
+
+/// Work for the renderer, started when the one before it is done.
+type Job = Box<dyn FnOnce(&mut DesignCanvas, &mut Context<DesignCanvas>)>;
+
 pub(crate) struct DesignCanvas {
     root: PathBuf,
     /// Pictures to design from, kept in `.runo/design`, and the ones going with the next ask.
@@ -167,6 +174,16 @@ pub(crate) struct DesignCanvas {
     rules_loading: bool,
     canvas: Canvas,
     renderer: Arc<Mutex<Renderer>>,
+    /// Changes for the renderer that don't wait on it: it can be busy loading a page for
+    /// seconds, and on macOS that work needs this thread, so locking it here would freeze
+    /// the window until it timed out.
+    asked: Arc<Asked>,
+    /// Renderer work waiting its turn, started one at a time so a theme change across many
+    /// screens doesn't park a background thread per screen on the renderer's lock.
+    jobs: std::collections::VecDeque<Job>,
+    job_running: bool,
+    /// Whether the canvas is on screen, so its folder is worth watching.
+    watching: bool,
     shots: HashMap<String, Shot>,
     /// Screens being drawn now, and screens to draw again once they are.
     drawing: HashSet<String>,
@@ -345,13 +362,15 @@ impl DesignCanvas {
                 this.save_rules(cx);
             }
         }));
+        let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
             refs_picked: Vec::new(),
             refs_open: false,
             f_rules,
             rules_loading: false,
-            renderer: Arc::new(Mutex::new(Renderer::new(root.clone()))),
+            asked: renderer.asked(),
+            renderer: Arc::new(Mutex::new(renderer)),
             root,
             canvas,
             shots: HashMap::new(),
@@ -399,6 +418,9 @@ impl DesignCanvas {
             ai: None,
             ask_new: None,
             pick: crate::agent_pick::AgentPick::new(cx),
+            jobs: Default::default(),
+            job_running: false,
+            watching: true,
             _subs: subs,
         };
         this.load_rules(window, cx);
@@ -421,20 +443,36 @@ impl DesignCanvas {
         done: impl FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
     ) {
         let r = self.renderer.clone();
-        cx.spawn(async move |this, cx| {
-            let out = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut g = r.lock().unwrap_or_else(|e| e.into_inner());
-                    work(&mut g)
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                done(this, out, cx);
-                cx.notify();
-            });
-        })
-        .detach();
+        self.jobs.push_back(Box::new(move |this, cx| {
+            this.job_running = true;
+            cx.spawn(async move |this, cx| {
+                let out = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let mut g = r.lock().unwrap_or_else(|e| e.into_inner());
+                        work(&mut g)
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.job_running = false;
+                    done(this, out, cx);
+                    this.next_job(cx);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }));
+        self.next_job(cx);
+    }
+
+    /// Start the next renderer job, unless one is running.
+    fn next_job(&mut self, cx: &mut Context<Self>) {
+        if self.job_running {
+            return;
+        }
+        if let Some(job) = self.jobs.pop_front() {
+            job(self, cx);
+        }
     }
 
     /// Draw a screen from its file, again if it's being drawn now.
@@ -455,7 +493,7 @@ impl DesignCanvas {
                 this.drawing.remove(&id2);
                 match out {
                     Ok(shot) => {
-                        this.shots.insert(id2.clone(), shot);
+                        drop_shot(this.shots.insert(id2.clone(), shot), cx);
                         this.error = None;
                     }
                     Err(e) => this.error = Some(e),
@@ -500,7 +538,12 @@ impl DesignCanvas {
             cx.background_executor()
                 .timer(Duration::from_millis(1500))
                 .await;
-            if this.update(cx, |this, cx| this.check_files(cx)).is_err() {
+            let check = |this: &mut Self, cx: &mut Context<Self>| {
+                if this.watching {
+                    this.check_files(cx);
+                }
+            };
+            if this.update(cx, check).is_err() {
                 break;
             }
         })
@@ -512,6 +555,19 @@ impl DesignCanvas {
     pub(crate) fn use_agent(&mut self, agent: usize, model: String) {
         self.pick.agent = agent;
         self.pick.model = model;
+    }
+
+    /// Watch the folder while the canvas is on screen, catching up when it comes back. A
+    /// canvas out of sight doesn't read its folder every second and a half.
+    pub(crate) fn set_watching(&mut self, on: bool, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.watching, on) || !on {
+            return;
+        }
+        self.check_files(cx);
+    }
+
+    pub(crate) fn watching(&self) -> bool {
+        self.watching
     }
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
@@ -674,10 +730,7 @@ impl DesignCanvas {
         if let Some(ai) = &mut self.ai {
             ai.changed = true;
         }
-        self.renderer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .forget();
+        self.asked.forget();
         let shared = changed
             .iter()
             .any(|p| p.extension().is_some_and(|e| e == "css" || e == "js"));
@@ -701,7 +754,15 @@ impl DesignCanvas {
                     .collect();
                 self.canvas.screens.retain(|s| ids.contains(&s.id));
             }
-            self.shots.retain(|id, _| self.canvas.screen(id).is_some());
+            let gone: Vec<String> = self
+                .shots
+                .keys()
+                .filter(|id| self.canvas.screen(id).is_none())
+                .cloned()
+                .collect();
+            for id in gone {
+                drop_shot(self.shots.remove(&id), cx);
+            }
             let added: Vec<String> = self
                 .canvas
                 .screens
@@ -1784,8 +1845,11 @@ impl DesignCanvas {
             move |this, out, cx| match out {
                 Ok(Some((before, shot))) => {
                     this.undo.push((id2.clone(), before));
+                    if this.undo.len() > UNDO_LIMIT {
+                        this.undo.remove(0);
+                    }
                     this.redo.clear();
-                    this.shots.insert(id2.clone(), shot);
+                    drop_shot(this.shots.insert(id2.clone(), shot), cx);
                     this.note_writes();
                     match after {
                         After::Same => {
@@ -1924,14 +1988,11 @@ impl DesignCanvas {
         } else {
             self.undo.push((id.clone(), now));
         }
-        let res = self
-            .renderer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .write(&id, &html);
-        if let Err(e) = res {
-            self.say(e);
+        let file = screen_path(&self.root, &id);
+        if let Err(e) = std::fs::write(&file, &html) {
+            self.say(format!("Couldn't save {}: {e}", file.display()));
         }
+        self.asked.forget();
         self.note_writes();
         self.screen = Some(id.clone());
         self.element = None;
@@ -2033,7 +2094,7 @@ impl DesignCanvas {
             return;
         }
         self.canvas.screens.retain(|s| s.id != id);
-        self.shots.remove(&id);
+        drop_shot(self.shots.remove(&id), cx);
         self.save_canvas();
         self.select_screen(None);
         self.ai = Some(AiChange::by_hand(format!("Deleted {name}"), before));
@@ -2054,10 +2115,7 @@ impl DesignCanvas {
         if let Ok(html) = std::fs::read_to_string(&file) {
             let _ = std::fs::write(&file, with_title(&html, &name));
         }
-        self.renderer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .forget();
+        self.asked.forget();
         self.save_canvas();
         cx.notify();
     }
@@ -2086,10 +2144,7 @@ impl DesignCanvas {
             }
             let _ = std::fs::write(&file, out);
         }
-        self.renderer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .forget();
+        self.asked.forget();
         self.save_canvas();
         self.element = None;
         self.draw(&id, cx);
@@ -2153,20 +2208,14 @@ impl DesignCanvas {
         }
         self.tokens = out;
         self.note_writes();
-        self.renderer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .forget();
+        self.asked.forget();
         self.draw_all(cx);
         cx.notify();
     }
 
     fn set_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
         self.dark = dark;
-        self.renderer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .set_dark(dark);
+        self.asked.set_dark(dark);
         self.draw_all(cx);
         cx.notify();
     }
@@ -2217,11 +2266,13 @@ impl DesignCanvas {
         self.run(
             cx,
             move |r| r.tap(&id, device, at),
-            move |this, out, _| {
+            move |this, out, cx| {
                 this.play_tapping = false;
                 if let Ok(shot) = out {
                     if this.playing.as_deref() == Some(tapped.as_str()) {
-                        this.play_shots.insert(tapped, shot);
+                        drop_shot(this.play_shots.insert(tapped, shot), cx);
+                    } else {
+                        drop_shot(Some(shot), cx);
                     }
                 }
             },
@@ -2251,7 +2302,9 @@ impl DesignCanvas {
         self.playing = first;
         self.play_back.clear();
         self.play_move = None;
-        self.play_shots.clear();
+        for (_, shot) in self.play_shots.drain() {
+            drop_shot(Some(shot), cx);
+        }
         cx.notify();
     }
 
@@ -2263,7 +2316,7 @@ impl DesignCanvas {
             return;
         };
         let how = Move::of(link, screen.device, &self.canvas.platform);
-        self.play_shots.remove(to);
+        drop_shot(self.play_shots.remove(to), cx);
         if let Some(now) = self.playing.replace(to.to_string()) {
             self.play_back.push((now.clone(), how));
             self.animate_move(now, how, false, cx);
@@ -2276,7 +2329,7 @@ impl DesignCanvas {
         let Some((prev, how)) = self.play_back.pop() else {
             return;
         };
-        self.play_shots.remove(&prev);
+        drop_shot(self.play_shots.remove(&prev), cx);
         if let Some(now) = self.playing.replace(prev) {
             self.animate_move(now, how, true, cx);
         }
@@ -5539,6 +5592,15 @@ fn hot_dot(id: impl Into<ElementId>, at: (f32, f32), n: usize) -> Vec<AnyElement
         .shadow_sm()
         .into_any_element();
     vec![ring, dot]
+}
+
+/// Free a drawn screen's texture once it's replaced or gone. GPUI keeps every image it has
+/// painted until it's told, and a screen is megabytes, so redraws would pile up. This
+/// waits until the update ends, when every window can be reached.
+fn drop_shot(shot: Option<Shot>, cx: &mut App) {
+    if let Some(shot) = shot {
+        cx.defer(move |cx| cx.drop_image(shot.image, None));
+    }
 }
 
 #[cfg(test)]

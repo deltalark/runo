@@ -75,6 +75,7 @@ All notable changes to Runo are documented here.
 
 ### Changed
 
+- The working row at the end of a chat has a new animation: a small comet circles a softly breathing dot while a glint of the accent colour sweeps across "Working", with the elapsed time beside it. It replaces the spinner and three dots, reads well in light and dark, and holds still when animations are off in Settings.
 - Projects in the sidebar are easier to tell apart when several are open. Each project gets a bolder name with its icon on a tinted tile and a count badge, its sessions hang off a rail in the project's color, and a little space sets projects apart. Session rows take two lines instead of three: the title and time, then the agent and branch ("local folder" is no longer repeated on every row). The open session is tinted in its project's color, a folded project shows a dot when a session inside needs you or is running, and the pin and archive buttons on hover are lighter and easier to hit.
 - The sample workspace shown before you add a project now gives each project its own color, so it previews the colored project rails in the sidebar. The README screenshots show the current app, with new ones for the Design and Architecture canvases.
 - On macOS the Design canvas draws, picks and edits screens with WebKit, the engine built into the Mac and behind Safari, instead of a Chrome it starts in the background. It no longer needs Chrome, Edge, Brave or Chromium installed, screens draw as Safari shows them, and redrawing after an edit is quicker. Windows and Linux still use a Chromium-based browser.
@@ -89,6 +90,9 @@ All notable changes to Runo are documented here.
 - The Browser button in the session header only shows once something is served for the session: a dev server on a usual port (3000, 5173, 8080 and the like), or a local URL printed in its terminal.
 
 ### Fixed
+
+- The terminal answers when a program asks where the cursor is or what terminal it is, the way other terminals do. Prompts such as gh's Y/n waited for that answer and took every key as part of it, Ctrl-C included, so the terminal looked frozen. Typing never blocks the window either, even when the program stops reading.
+- The Design canvas no longer freezes the window for seconds while screens are being drawn. Undo, renaming a screen, changing its device, the theme or dark mode, and files changed by an agent used to wait for the drawing in progress, and on macOS that wait stalled until it timed out. Redraws also free the old screen images, so memory stops growing as you edit, and a canvas you're not looking at stops checking its folder.
 
 - ⌘Z and ⇧⌘Z undo and redo on the Design canvas wherever you last clicked in it, and ⌘Z also takes back an AI change that isn't kept yet, like Undo on the ask bar.
 - The Layers tab on the Design canvas shows the selected screen's layers however the screen was selected, instead of staying on "Reading the screen…". Layers show an icon for what each element is and its text or class, and the panel's tabs share the width so the Checks count fits.

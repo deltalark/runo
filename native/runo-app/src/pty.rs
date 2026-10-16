@@ -3,6 +3,7 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 /// Lines kept above the visible screen, from the Terminal settings.
@@ -66,7 +67,9 @@ pub struct Shell {
     pub session: u64,
     pub title: String,
     parser: Arc<Mutex<vt100::Parser>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// Bytes for the program, written in order by the shell's writer thread so a program
+    /// that stops reading never blocks the window.
+    input: Sender<Vec<u8>>,
     master: Box<dyn MasterPty + Send>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     exited: Arc<AtomicBool>,
@@ -183,25 +186,54 @@ impl Shell {
             cols,
             SCROLLBACK.load(Ordering::Relaxed),
         )));
+        let (input, inbox) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut writer = writer;
+            for bytes in inbox {
+                if writer
+                    .write_all(&bytes)
+                    .and_then(|_| writer.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let exited = Arc::new(AtomicBool::new(false));
         let dirty = Arc::new(AtomicBool::new(false));
         let last_output = Arc::new(AtomicU64::new(now_ms()));
         {
-            let (parser, exited, dirty, last) = (
+            let (parser, exited, dirty, last, answers) = (
                 parser.clone(),
                 exited.clone(),
                 dirty.clone(),
                 last_output.clone(),
+                input.clone(),
             );
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
+                let mut queries = Queries::default();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             last.store(now_ms(), Ordering::Release);
+                            let mut reply = Vec::new();
                             if let Ok(mut p) = parser.lock() {
-                                p.process(&buf[..n]);
+                                // Answer each question after the output before it, so a
+                                // cursor report says where that output left the cursor.
+                                let mut start = 0;
+                                for i in 0..n {
+                                    if let Some(q) = queries.feed(buf[i]) {
+                                        p.process(&buf[start..=i]);
+                                        start = i + 1;
+                                        reply.extend(q.answer(p.screen()));
+                                    }
+                                }
+                                p.process(&buf[start..n]);
+                            }
+                            if !reply.is_empty() {
+                                let _ = answers.send(reply);
                             }
                             if !dirty.swap(true, Ordering::AcqRel) {
                                 wake(id);
@@ -225,7 +257,7 @@ impl Shell {
             session,
             title: name,
             parser,
-            writer: Mutex::new(writer),
+            input,
             master: pair.master,
             child: Mutex::new(child),
             exited,
@@ -239,10 +271,7 @@ impl Shell {
 
     pub fn write(&self, bytes: &[u8]) {
         self.last_input.store(now_ms(), Ordering::Release);
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(bytes);
-            let _ = w.flush();
-        }
+        let _ = self.input.send(bytes.to_vec());
         // Typing jumps back to the live screen and drops the selection.
         self.scroll_to(0);
         if let Ok(mut v) = self.view.lock() {
@@ -354,10 +383,7 @@ impl Shell {
     /// Send bytes the program asked for, such as mouse reports, without the side effects
     /// of typing.
     pub fn write_raw(&self, bytes: &[u8]) {
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(bytes);
-            let _ = w.flush();
-        }
+        let _ = self.input.send(bytes.to_vec());
     }
 
     /// Paste text, wrapped in bracketed-paste markers when the program asked for them.
@@ -466,6 +492,83 @@ impl Shell {
 impl Drop for Shell {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+/// A question a program asks the terminal itself rather than the person.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Query {
+    /// `CSI 5 n`: are you working?
+    Status,
+    /// `CSI 6 n`, or `CSI ? 6 n`: where is the cursor?
+    Cursor { private: bool },
+    /// `CSI c`: what kind of terminal are you?
+    Primary,
+    /// `CSI > c`: which version?
+    Secondary,
+}
+
+impl Query {
+    /// What xterm would reply.
+    fn answer(self, screen: &vt100::Screen) -> Vec<u8> {
+        match self {
+            Query::Status => b"\x1b[0n".to_vec(),
+            Query::Cursor { private } => {
+                let (row, col) = screen.cursor_position();
+                let mark = if private { "?" } else { "" };
+                format!("\x1b[{mark}{};{}R", row + 1, col + 1).into_bytes()
+            }
+            Query::Primary => b"\x1b[?62;22c".to_vec(),
+            Query::Secondary => b"\x1b[>0;10;1c".to_vec(),
+        }
+    }
+}
+
+/// Spots questions in a program's output as it streams in, across reads. Prompts such
+/// as gh's Y/n ask where the cursor is and take every key as part of the answer until
+/// one arrives, so a terminal that stays silent looks frozen, Ctrl-C included.
+#[derive(Default)]
+struct Queries {
+    /// 0 outside a sequence, 1 after ESC, 2 inside a CSI sequence.
+    state: u8,
+    params: Vec<u8>,
+}
+
+impl Queries {
+    /// Take one byte of output; returns the question it completes, if any.
+    fn feed(&mut self, b: u8) -> Option<Query> {
+        match (self.state, b) {
+            (_, 0x1b) => {
+                self.state = 1;
+                self.params.clear();
+                None
+            }
+            (1, b'[') => {
+                self.state = 2;
+                None
+            }
+            (2, 0x20..=0x3f) => {
+                if self.params.len() < 16 {
+                    self.params.push(b);
+                }
+                None
+            }
+            (2, 0x40..=0x7e) => {
+                self.state = 0;
+                match (b, self.params.as_slice()) {
+                    (b'n', b"5") => Some(Query::Status),
+                    (b'n', b"6") => Some(Query::Cursor { private: false }),
+                    (b'n', b"?6") => Some(Query::Cursor { private: true }),
+                    (b'c', b"" | b"0") => Some(Query::Primary),
+                    (b'c', b">" | b">0") => Some(Query::Secondary),
+                    _ => None,
+                }
+            }
+            _ => {
+                self.state = 0;
+                None
+            }
+        }
     }
 }
 
@@ -719,6 +822,68 @@ mod tests {
         assert_eq!(k("shift", None, false, false), None);
         assert_eq!(palette(196, true), 0xff0000);
         assert_eq!(palette(232, true), 0x080808);
+    }
+
+    /// Questions to the terminal are spotted even when they arrive split across reads.
+    #[test]
+    fn queries_are_found_across_reads() {
+        let mut q = Queries::default();
+        let found = |q: &mut Queries, bytes: &[u8]| -> Vec<Query> {
+            bytes.iter().filter_map(|b| q.feed(*b)).collect()
+        };
+        assert_eq!(found(&mut q, b"hi \x1b[6"), vec![]);
+        assert_eq!(
+            found(&mut q, b"n there"),
+            vec![Query::Cursor { private: false }]
+        );
+        assert_eq!(
+            found(&mut q, b"\x1b[c\x1b[>c\x1b[5n\x1b[?6n"),
+            vec![
+                Query::Primary,
+                Query::Secondary,
+                Query::Status,
+                Query::Cursor { private: true }
+            ]
+        );
+        // Colours, cursor moves and other sequences are not questions.
+        assert_eq!(
+            found(&mut q, b"\x1b[31m\x1b[2J\x1b[6;1H\x1b]0;t\x07"),
+            vec![]
+        );
+    }
+
+    /// A program that asks where the cursor is, the way gh's prompts do, gets an answer
+    /// and goes on to read the person's keys.
+    #[cfg(unix)]
+    #[test]
+    fn programs_asking_for_the_cursor_get_an_answer() {
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            "stty raw -echo; printf 'ab\\033[6n'; r=$(dd bs=1 count=6 2>/dev/null); \
+             k=$(dd bs=1 count=1 2>/dev/null); stty sane; echo; echo \"at${r#?} key $k\"",
+        ]);
+        let dir = std::env::temp_dir();
+        let shell = Shell::spawn_program(
+            1,
+            1,
+            dir.to_str().unwrap(),
+            10,
+            40,
+            Some(Program::of(&command)),
+            |_| {},
+        )
+        .unwrap();
+        let start = Instant::now();
+        while !shell.text().contains("ab") && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        shell.write(b"y");
+        while !shell.exited() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(shell.text().contains("at[1;3R key y"), "{}", shell.text());
     }
 
     /// A setup command runs in a terminal that can ask questions, and its result is known.

@@ -165,6 +165,17 @@ impl RunoApp {
         let back = !std::mem::replace(&mut self.design.shown, true);
         self.ensure_design_canvas(&project, back, window, cx);
         self.design.project = Some(project.id);
+        self.watch_design(Some(project.id), cx);
+    }
+
+    /// Let only the canvas on screen watch its folder.
+    pub(crate) fn watch_design(&mut self, shown: Option<u64>, cx: &mut Context<Self>) {
+        for (id, canvas) in &self.design.canvases {
+            let on = shown == Some(*id);
+            if canvas.read(cx).watching() != on {
+                canvas.update(cx, |c, cx| c.set_watching(on, cx));
+            }
+        }
     }
 
     /// Make the project's design canvas, or read its files again when the page comes back.
