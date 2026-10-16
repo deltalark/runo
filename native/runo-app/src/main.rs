@@ -854,38 +854,107 @@ fn stagger<E: IntoElement + Styled + 'static>(
     )
 }
 
-/// "Working" row: spinning loader, label and three dots that pulse in sequence.
-fn working_indicator(label: impl Into<SharedString>) -> impl IntoElement {
-    let mut dots = div().flex().items_center().gap(px(3.));
-    for i in 0..3usize {
-        dots = dots.child(
+/// "Working" row: a small orbit (a comet circling a breathing core) and the label with
+/// a soft accent glint sweeping across it, then the elapsed time. With animations off
+/// both hold still: the comet rests on the ring and the label is plain.
+fn working_indicator(elapsed: Option<String>) -> impl IntoElement {
+    const BOX: f32 = 16.;
+    const RING: f32 = 6.;
+    // Brighter in dark mode, where the accent alone sits too close to the canvas.
+    let accent = if is_dark() {
+        mix(c_blue(), 0xffffff, 0.6)
+    } else {
+        c_blue()
+    };
+    // Where a point `t` of the way round the orbit sits, as the top-left of a dot of `size`.
+    let at = |t: f32, size: f32| {
+        let a = (t - 0.25) * std::f32::consts::TAU;
+        let c = BOX / 2. - size / 2.;
+        (px(c + RING * a.cos()), px(c + RING * a.sin()))
+    };
+    let mut orbit = div()
+        .relative()
+        .flex_none()
+        .size(px(BOX))
+        .child(
             div()
-                .id(("wd", i))
-                .size(px(5.))
+                .absolute()
+                .left(px(BOX / 2. - RING))
+                .top(px(BOX / 2. - RING))
+                .size(px(RING * 2.))
                 .rounded_full()
-                .bg(rgb(c_muted()))
+                .border_1()
+                .border_color(rgb(mix(accent, c_canvas(), 0.22))),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(BOX / 2. - 2.))
+                .top(px(BOX / 2. - 2.))
+                .size(px(4.))
+                .rounded_full()
+                .bg(rgb(accent))
                 .animated(
-                    ("wd-anim", i),
-                    Animation::new(Duration::from_millis(1200)).repeat(),
-                    move |el, d| {
-                        let p = (d + i as f32 * 0.18) % 1.0;
-                        el.opacity(0.2 + 0.8 * (p * std::f32::consts::PI).sin())
+                    "working-core",
+                    Animation::new(Duration::from_millis(1600))
+                        .repeat()
+                        .with_easing(pulsating_between(0.35, 1.)),
+                    |el, t| el.opacity(t),
+                ),
+        );
+    // The comet: a head and a fading tail a few steps behind it.
+    for (i, (lag, size, alpha)) in [(0., 3.5, 1.), (0.07, 2.6, 0.55), (0.14, 1.8, 0.28)]
+        .into_iter()
+        .enumerate()
+    {
+        let (x, y) = at(-lag, size);
+        orbit = orbit.child(
+            div()
+                .absolute()
+                .left(x)
+                .top(y)
+                .size(px(size))
+                .rounded_full()
+                .bg(rgb(accent))
+                .opacity(alpha)
+                .animated(
+                    ("working-comet", i),
+                    Animation::new(Duration::from_millis(1100))
+                        .repeat()
+                        .with_easing(ease_in_out_cubic),
+                    move |el, t| {
+                        let (x, y) = at(t - lag, size);
+                        el.left(x).top(y)
                     },
                 ),
         );
+    }
+    // The label, one letter at a time so a glint can pass along it.
+    let word = "Working";
+    let base = c_secondary();
+    let n = word.chars().count() as f32;
+    let mut label = div().flex().items_center();
+    for (i, ch) in word.chars().enumerate() {
+        label = label.child(div().text_color(rgb(base)).child(ch.to_string()).animated(
+            ("working-glint", i),
+            Animation::new(Duration::from_millis(2000)).repeat(),
+            move |el, t| {
+                // The glint travels from before the first letter to past the last one.
+                let pos = t * (n + 6.) - 3.;
+                let near = (1. - (i as f32 - pos).abs() / 2.5).max(0.);
+                el.text_color(rgb(mix(accent, base, near * near)))
+            },
+        ));
     }
     div()
         .flex()
         .items_center()
         .gap_2()
-        .text_color(rgb(c_secondary()))
-        .child(icon(IconName::Loader, 14., c_blue()).animated(
-            "working-spin",
-            Animation::new(Duration::from_millis(900)).repeat(),
-            |i, d| i.rotate(percentage(d)),
-        ))
-        .child(label.into())
-        .child(dots)
+        .child(orbit)
+        .child(label)
+        .when_some(elapsed, |row, e| {
+            row.child(div().text_color(rgb(c_muted())).child(format!("· {e}")))
+        })
 }
 
 /// Most files listed for a folder that is not a git repository; the Files tab says so
@@ -5123,11 +5192,8 @@ impl RunoApp {
         }
         // While the agent works, the chat ends with what it is doing and for how long.
         if working && !self.pending_start.contains_key(&id) {
-            let label = match self.started.get(&id) {
-                Some(start) => format!("Working · {}", elapsed(start.elapsed())),
-                None => "Working".to_string(),
-            };
-            list = list.child(div().text_size(px(13.)).child(working_indicator(label)));
+            let since = self.started.get(&id).map(|start| elapsed(start.elapsed()));
+            list = list.child(div().text_size(px(13.)).child(working_indicator(since)));
         }
         let header = div()
             .h(px(44.))
