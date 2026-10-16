@@ -259,6 +259,9 @@ pub(crate) struct DesignCanvas {
     field_vals: HashMap<&'static str, String>,
     /// The hand tool: dragging anywhere pans.
     hand: bool,
+    /// How the Export section exports: pixels per CSS pixel, and the format.
+    export_scale: u32,
+    export_format: super::export::Format,
     f_inline: Entity<InputState>,
     inline_open: bool,
     /// What the text fields were filled for.
@@ -442,6 +445,8 @@ impl DesignCanvas {
             fields,
             field_vals: HashMap::new(),
             hand: false,
+            export_scale: 2,
+            export_format: Default::default(),
             f_inline,
             inline_open: false,
             loaded: None,
