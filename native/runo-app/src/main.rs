@@ -8320,7 +8320,9 @@ impl Render for RunoApp {
             View::Design => self.prepare_design(window, cx),
             View::Architecture => self.prepare_architecture(window, cx),
             _ => {
-                self.design.shown = false;
+                if std::mem::take(&mut self.design.shown) {
+                    self.watch_design(None, cx);
+                }
                 self.arch.shown = false;
             }
         }

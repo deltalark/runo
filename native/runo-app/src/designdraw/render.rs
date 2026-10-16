@@ -9,6 +9,7 @@ use super::model::{screen_path, Device};
 use gpui_kit::RenderImage;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -152,8 +153,30 @@ impl Surface {
     }
 }
 
+/// Changes the canvas asks for without waiting on the renderer, which can be busy loading
+/// a page for seconds. The renderer takes them up before its next job.
+#[derive(Default)]
+pub(crate) struct Asked {
+    forget: AtomicBool,
+    /// 0 for no change, 1 for light, 2 for dark.
+    dark: AtomicU8,
+}
+
+impl Asked {
+    /// Forget what the page holds, after a file changed outside the canvas.
+    pub(crate) fn forget(&self) {
+        self.forget.store(true, Ordering::Release);
+    }
+
+    /// Prefer the dark colour scheme in every screen drawn from now on.
+    pub(crate) fn set_dark(&self, dark: bool) {
+        self.dark.store(1 + dark as u8, Ordering::Release);
+    }
+}
+
 pub(crate) struct Renderer {
     root: PathBuf,
+    asked: Arc<Asked>,
     surface: Option<Surface>,
     /// The screen loaded in the page, and whether the page shows it as saved.
     current: Option<String>,
@@ -166,10 +189,27 @@ impl Renderer {
     pub(crate) fn new(root: PathBuf) -> Self {
         Self {
             root,
+            asked: Arc::default(),
             surface: None,
             current: None,
             dark: false,
             played: false,
+        }
+    }
+
+    /// Where the canvas leaves changes for this renderer without locking it.
+    pub(crate) fn asked(&self) -> Arc<Asked> {
+        self.asked.clone()
+    }
+
+    /// Take up what the canvas asked for since the last job.
+    fn catch_up(&mut self) {
+        match self.asked.dark.swap(0, Ordering::AcqRel) {
+            0 => {}
+            v => self.set_dark(v == 2),
+        }
+        if self.asked.forget.swap(false, Ordering::AcqRel) {
+            self.forget();
         }
     }
 
@@ -194,6 +234,7 @@ impl Renderer {
         device: Device,
         fresh: bool,
     ) -> Result<&mut Surface, String> {
+        self.catch_up();
         if fresh || self.current.as_deref() != Some(id) {
             self.current = None;
             let file = screen_path(&self.root, id);
@@ -219,6 +260,7 @@ impl Renderer {
     /// The page keeps its state between taps on the same screen; anything else that
     /// reads the page loads the file again first, so Play never ends up saved.
     pub(crate) fn tap(&mut self, id: &str, device: Device, at: (f32, f32)) -> Result<Shot, String> {
+        self.catch_up();
         let fresh = self.current.as_deref() != Some(id) || !self.played;
         self.played = true;
         let engine = self.open_as_is(id, device, fresh)?;
