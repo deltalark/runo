@@ -270,7 +270,10 @@ fn test_command(provider: &str, bin: &str, model: &str) -> Command {
             command.args(["run", flag, model, PROMPT]);
         }
         "cursor" => {
-            command.args(["-p", "--output-format", "text", flag, model, PROMPT]);
+            command.args(["-p", "--output-format", "text"]);
+            command.args(crate::agent::cursor_trust());
+            command.args(crate::agent::cursor_mode("ask"));
+            command.args([flag, model, PROMPT]);
         }
         "droid" => {
             command.args(["exec", flag, model, PROMPT]);

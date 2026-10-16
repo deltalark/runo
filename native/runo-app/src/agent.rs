@@ -439,11 +439,15 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
         }
         "cursor" => {
             args.extend([s("-p"), s("--output-format"), s("stream-json")]);
+            args.extend(cursor_trust());
             if spec.resume && !spec.session_id.is_empty() {
                 args.extend([s("--resume"), spec.session_id.to_string()]);
             }
-            // Without `--force` print mode only proposes changes.
-            if mode != "plan" {
+            // Plan only runs in Cursor's plan mode once the CLI has one; before that,
+            // print mode without `--force` only proposes changes.
+            if mode == "plan" {
+                args.extend(cursor_mode("plan"));
+            } else {
                 args.push(s("--force"));
             }
             // Servers from the project file wait for approval unless approved up front.
@@ -741,6 +745,26 @@ fn conversation_args(spec: &RunSpec) -> Vec<String> {
     }
 }
 
+/// Cursor's headless runs stop at a workspace trust prompt in a folder it hasn't seen,
+/// such as a new worktree, unless the CLI is told to trust it.
+pub(crate) fn cursor_trust() -> Vec<String> {
+    if crate::caps::mentions("cursor", "--trust") {
+        vec!["--trust".into()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Cursor's `--mode plan` or `--mode ask`, once its help lists the flag (`--model` also
+/// starts with `--mode`, so the flag is matched with its argument).
+pub(crate) fn cursor_mode(mode: &str) -> Vec<String> {
+    if crate::caps::mentions("cursor", "--mode <") {
+        vec!["--mode".into(), mode.into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Arguments that open the agent's interactive CLI on this session's conversation, with
 /// the same model, mode and tools as the chat. `spec.resume` picks up the conversation
 /// in `spec.session_id`; otherwise a new one starts (named up front for Claude Code).
@@ -774,6 +798,9 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
                 "-m"
             };
             let mut args = with_model(Vec::new(), flag);
+            if spec.provider == "cursor" && spec.sel.get("mode").is_some_and(|m| m == "plan") {
+                args.extend(cursor_mode("plan"));
+            }
             if resume {
                 args.extend([s("--resume"), id]);
             } else if !spec.resume && !id.is_empty() && names_conversation(spec.provider) {
@@ -1261,7 +1288,10 @@ pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Comman
             command.args(["run", prompt]);
         }
         "cursor" => {
-            command.args(["-p", "--output-format", "text", prompt]);
+            command.args(["-p", "--output-format", "text"]);
+            command.args(cursor_trust());
+            command.args(cursor_mode("ask"));
+            command.arg(prompt);
         }
         "amp" => {
             command.args(["-x", prompt]);
@@ -2216,6 +2246,32 @@ mod arg_tests {
             file_servers(&remote).is_empty(),
             "no local programs elsewhere"
         );
+    }
+
+    #[test]
+    fn cursor_trusts_the_folder_and_plans_once_its_help_lists_the_flags() {
+        crate::caps::set(
+            "cursor",
+            crate::caps::Caps {
+                help: "--model <model>  Model\n--mode <mode>  plan or ask\n--trust  Trust the workspace".into(),
+                ..Default::default()
+            },
+        );
+        let plan = run_args("cursor", "plan", false, &[]);
+        assert!(plan.contains(&"--trust".to_string()));
+        assert!(plan.windows(2).any(|w| w == ["--mode", "plan"]));
+        assert!(!plan.contains(&"--force".to_string()));
+        let full = run_args("cursor", "full", true, &[]);
+        assert!(full.contains(&"--trust".to_string()));
+        assert!(full.contains(&"--force".to_string()));
+        assert!(!full.contains(&"--mode".to_string()));
+        let ask = ask_command("cursor", "", "why?");
+        let ask: Vec<String> = ask
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(ask.windows(2).any(|w| w == ["--mode", "ask"]));
+        assert_eq!(ask.last().unwrap(), "why?");
     }
 
     #[test]

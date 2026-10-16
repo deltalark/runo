@@ -49,9 +49,11 @@ The composer's Permission chip offers Runo's three levels where the CLI can hold
 | Copilot | `--allow-all-tools --deny-tool shell` | also `--deny-tool write` | `--allow-all-tools` |
 | OpenCode | its default agent | `--agent plan` | `--auto` |
 | Droid | `--auto medium` | read-only (no `--auto`) | `--auto high` |
-| Cursor | not offered (edits come with commands) | without `--force` | `--force` |
+| Cursor | not offered (edits come with commands) | `--mode plan` (or without `--force` on older CLIs) | `--force` |
 | Amp | its default | not offered (no read-only mode) | `--dangerously-allow-all` |
 | Grok | not offered | not offered | always |
+
+Cursor runs get `--trust` when the CLI has it, so a new worktree doesn't stop the run at a workspace trust prompt, and one-off questions and model tests run in `--mode ask`.
 
 Codex has no Approval chip: `codex exec` never stops to ask, so an approval policy changes nothing in Chat. The policy in your Codex config still applies in the CLI view.
 
