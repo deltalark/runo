@@ -43,7 +43,12 @@ pub(crate) fn context(c: &Canvas) -> String {
          .tab, or any child of an element with data-select, becomes the one with .on, \
          data-toggle=\"class\" toggles that class on the element, data-show=\"#id\" shows or \
          hides another element (menus, accordions, sheets), and checkboxes, radios and inputs \
-         work as they are. New screen files show up on the canvas by themselves. Make the \
+         work as they are. Reusable pieces are components in {FOLDER}/components/<id>.html, \
+         one <template data-variant=\"…\"> per variant; an element marked \
+         data-component=\"<id>\" data-variant=\"…\" on a screen is an instance of one, so \
+         build with them, keep the marks, and when you change a component's file, change its \
+         instances on every screen the same way, keeping their own text. \
+         New screen files show up on the canvas by themselves. Make the \
          change by editing these files directly: Runo shows it live and the user keeps or \
          undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for this \
          request."

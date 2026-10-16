@@ -61,6 +61,7 @@ if (!window.__runo) window.__runo = (() => {
       computed, inline, goto: el.dataset.goto || null, hidden: el.hidden,
       transition: el.dataset.transition || null, speed: el.dataset.speed || null,
       children: kids(el).length,
+      component: el.dataset.component || null, variant: el.dataset.variant || null,
     };
   };
   const tree = () => {
@@ -70,7 +71,7 @@ if (!window.__runo) window.__runo = (() => {
         if (out.length >= 600) return;
         const t = ownText(c);
         out.push({ path: pathOf(c), label: label(c), depth, hidden: c.hidden,
-          text: t ? t.slice(0, 40) : null });
+          text: t ? t.slice(0, 40) : null, component: c.dataset.component || null });
         walk(c, depth + 1);
       }
     };
@@ -116,6 +117,30 @@ if (!window.__runo) window.__runo = (() => {
     return a.length - b.length;
   };
   const inOrder = (ps) => ps.slice().sort(cmp).map(at).filter(Boolean);
+  // What an instance keeps when its component changes: its text, and the links and sources
+  // of its elements, as long as it's still built the same way.
+  const texts = (el) => {
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const out = [];
+    while (w.nextNode()) if (w.currentNode.data.trim()) out.push(w.currentNode);
+    return out;
+  };
+  const OWN = ['src', 'alt', 'href', 'placeholder', 'value', 'data-goto', 'data-transition',
+    'data-speed'];
+  const keep = (old, n) => {
+    const a = [old, ...old.querySelectorAll('*')];
+    const b = [n, ...n.querySelectorAll('*')];
+    if (a.length === b.length && a.every((e, i) => e.tagName === b[i].tagName)) {
+      a.forEach((e, i) => {
+        for (const k of OWN) if (e.hasAttribute(k)) b[i].setAttribute(k, e.getAttribute(k));
+      });
+    }
+    const ta = texts(old);
+    const tb = texts(n);
+    if (ta.length === tb.length) ta.forEach((t, i) => { tb[i].data = t.data; });
+  };
+  const instances = (id) => Array.from(document.querySelectorAll('[data-component]'))
+    .filter((el) => el.dataset.component === id);
   const ops = {
     text: (el, v) => { el.textContent = v; },
     styles: (el, map) => {
@@ -186,6 +211,43 @@ if (!window.__runo) window.__runo = (() => {
       els[0].before(g);
       g.append(...els);
       return true;
+    },
+    // Make an element an instance of a component, or with no id, no longer one.
+    mark: (p, id, variant) => {
+      const el = at(p);
+      if (!el) return null;
+      if (id) { el.dataset.component = id; el.dataset.variant = variant; }
+      else { delete el.dataset.component; delete el.dataset.variant; }
+      return true;
+    },
+    // Put a variant's HTML in place of the instance at `p`, keeping its text with `own`.
+    swap: (p, html, own) => {
+      const el = at(p);
+      const n = parse(html);
+      if (!el || !n) return null;
+      if (own) keep(el, n);
+      el.replaceWith(n);
+      return true;
+    },
+    // Bring every instance of a component up to date with its variants, by name.
+    sync: (id, variants) => {
+      const names = Object.keys(variants);
+      let changed = 0;
+      for (const el of instances(id)) {
+        if (!el.isConnected || !names.length) continue;
+        const n = parse(variants[el.dataset.variant] ?? variants[names[0]]);
+        if (!n) continue;
+        keep(el, n);
+        if (n.outerHTML !== el.outerHTML) { el.replaceWith(n); changed++; }
+      }
+      return changed || null;
+    },
+    renameVariant: (id, from, to) => {
+      let changed = 0;
+      for (const el of instances(id)) {
+        if (el.dataset.variant === from) { el.dataset.variant = to; changed++; }
+      }
+      return changed || null;
     },
     // Put each element's children where it was.
     ungroup: (ps) => {
@@ -259,6 +321,11 @@ pub(crate) struct Element {
     pub hidden: bool,
     #[serde(default)]
     pub children: usize,
+    /// The component it's an instance of, and which variant.
+    #[serde(default)]
+    pub component: Option<String>,
+    #[serde(default)]
+    pub variant: Option<String>,
 }
 
 impl Element {
@@ -304,6 +371,9 @@ pub(crate) struct Layer {
     #[serde(default)]
     pub hidden: bool,
     pub text: Option<String>,
+    /// The component it's an instance of.
+    #[serde(default)]
+    pub component: Option<String>,
 }
 
 /// An element on the page: where it sits, and whether its children run across.

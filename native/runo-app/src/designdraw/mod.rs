@@ -6,6 +6,7 @@ pub(crate) mod checks;
 pub(crate) mod dom;
 pub(crate) mod export;
 pub(crate) mod fields;
+pub(crate) mod library;
 pub(crate) mod model;
 pub(crate) mod render;
 pub(crate) mod view;
