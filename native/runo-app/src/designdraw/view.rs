@@ -22,9 +22,15 @@ use std::time::{Duration, Instant, SystemTime};
 mod comments;
 mod components;
 mod figma;
+mod grids;
+mod handoff;
 mod insert;
 mod layers;
 mod looks;
+mod motion;
+mod pictures;
+mod shapes;
+mod vars;
 
 actions!(
     design_canvas,
@@ -85,6 +91,8 @@ enum Panel {
     Prototype,
     Theme,
     Checks,
+    /// What a developer needs to build the picked layer.
+    Code,
 }
 
 enum Drag {
@@ -134,6 +142,20 @@ enum Drag {
         tall: bool,
         from: Pt,
         at: Pt,
+    },
+    /// Dragging guide `index` of screen `id` to `at`, in page units.
+    Guide {
+        id: String,
+        index: usize,
+        vertical: bool,
+        at: f32,
+    },
+    /// Dragging out a shape on a screen with a shape tool.
+    Draw {
+        id: String,
+        from: Pt,
+        at: Pt,
+        shape: shapes::Shape,
     },
 }
 
@@ -254,6 +276,11 @@ pub(crate) struct DesignCanvas {
     /// The move under way in Play, and a count that tells one move's animation from the next.
     play_move: Option<(String, Move, bool)>,
     play_n: usize,
+    /// Counts the screens Present shows, so a delayed link knows if it's still wanted.
+    play_visit: usize,
+    /// The Code tab's code for the picked layer, and the layer it was last asked for.
+    code: Option<(handoff::CodeKey, dom::Code)>,
+    code_asked: std::cell::RefCell<Option<handoff::CodeKey>>,
     /// Screens as tapping in Play left them, shown over their drawings until Play stops.
     play_shots: HashMap<String, Shot>,
     play_tapping: bool,
@@ -264,6 +291,13 @@ pub(crate) struct DesignCanvas {
     field_vals: HashMap<&'static str, String>,
     /// The hand tool: dragging anywhere pans.
     hand: bool,
+    /// Whether layout grids are drawn and snapped to.
+    show_grids: bool,
+    /// The shape tool picked, if any, and the path the pen is placing: its screen, its
+    /// points in canvas units, and where the next would go.
+    shape: Option<shapes::Shape>,
+    pen: Option<(String, Vec<Pt>)>,
+    pen_at: Option<Pt>,
     /// How the Export section exports: pixels per CSS pixel, and the format.
     export_scale: u32,
     export_format: super::export::Format,
@@ -295,6 +329,13 @@ pub(crate) struct DesignCanvas {
     /// after it. Without a choice, inside anything that already holds pieces.
     insert_at: Option<(dom::Path, bool)>,
     f_look: Entity<InputState>,
+    /// The variant property being renamed, and the value of it when it's a value, and its
+    /// name field.
+    renaming_prop: Option<(String, Option<String>)>,
+    f_prop: Entity<InputState>,
+    /// The variable being edited in the Theme tab, which part of it, and its field.
+    editing_var: Option<(String, vars::Part)>,
+    f_var: Entity<InputState>,
     /// Who's commenting, found out when they first comment.
     author: String,
     f_inline: Entity<InputState>,
@@ -437,6 +478,8 @@ impl DesignCanvas {
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
         let f_icon = Self::make_icon_field(window, cx, &mut subs);
         let f_look = Self::make_look_field(window, cx, &mut subs);
+        let f_prop = Self::make_prop_field(window, cx, &mut subs);
+        let f_var = Self::make_var_field(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -482,6 +525,9 @@ impl DesignCanvas {
             play_back: Vec::new(),
             play_move: None,
             play_n: 0,
+            play_visit: 0,
+            code: None,
+            code_asked: Default::default(),
             play_shots: HashMap::new(),
             play_tapping: false,
             f_text,
@@ -489,6 +535,10 @@ impl DesignCanvas {
             fields,
             field_vals: HashMap::new(),
             hand: false,
+            show_grids: true,
+            shape: None,
+            pen: None,
+            pen_at: None,
             export_scale: 2,
             export_format: Default::default(),
             library,
@@ -511,6 +561,10 @@ impl DesignCanvas {
             renaming_style: None,
             insert_at: None,
             f_look,
+            renaming_prop: None,
+            f_prop,
+            editing_var: None,
+            f_var,
             author: String::new(),
             f_inline,
             inline_open: false,
@@ -1985,7 +2039,9 @@ impl DesignCanvas {
                 if edit_text && this.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     this.inline_open = true;
                 }
-                this.panel = Panel::Design;
+                if !matches!(this.panel, Panel::Prototype | Panel::Code) {
+                    this.panel = Panel::Design;
+                }
                 this.load_layers(cx);
             },
         );
@@ -2153,7 +2209,9 @@ impl DesignCanvas {
                 this.element = (!els.is_empty()).then(|| els.remove(0));
                 this.also = els;
                 this.inline_open = false;
-                this.panel = Panel::Design;
+                if !matches!(this.panel, Panel::Prototype | Panel::Code) {
+                    this.panel = Panel::Design;
+                }
                 this.load_layers(cx);
             },
         );
@@ -2594,6 +2652,7 @@ impl DesignCanvas {
             device: self.new_device,
             x,
             y,
+            ..Default::default()
         });
         self.tokens = std::fs::read_to_string(folder(&self.root).join(TOKENS)).unwrap_or_default();
         self.save_canvas();
@@ -2639,6 +2698,7 @@ impl DesignCanvas {
             device: s.device,
             x: s.x + w + GAP,
             y: s.y,
+            ..Default::default()
         });
         self.save_canvas();
         self.select_screen(Some(id.clone()));
@@ -2878,6 +2938,7 @@ impl DesignCanvas {
         for (_, shot) in self.play_shots.drain() {
             drop_shot(Some(shot), cx);
         }
+        self.arm_delay(cx);
         cx.notify();
     }
 
@@ -2898,6 +2959,7 @@ impl DesignCanvas {
             self.play_back.push((now.clone(), how));
             self.animate_move(now, how, false, cx);
         }
+        self.arm_delay(cx);
         cx.notify();
     }
 
@@ -2910,6 +2972,7 @@ impl DesignCanvas {
         if let Some(now) = self.playing.replace(prev) {
             self.animate_move(now, how, true, cx);
         }
+        self.arm_delay(cx);
         cx.notify();
     }
 
@@ -2946,6 +3009,24 @@ impl DesignCanvas {
         if self.commenting && e.button == MouseButton::Left {
             self.comment_down(w, cx);
             return;
+        }
+        if e.button == MouseButton::Left && self.shape_down(w, e.click_count, cx) {
+            return;
+        }
+        if e.button == MouseButton::Left && !self.hand {
+            if let Some((id, index, vertical)) = self.guide_hit(w) {
+                if let Some(s) = self.canvas.screen(&id) {
+                    let at = if vertical { w.0 - s.x } else { w.1 - s.y };
+                    self.drag = Drag::Guide {
+                        id,
+                        index,
+                        vertical,
+                        at,
+                    };
+                    cx.notify();
+                    return;
+                }
+            }
         }
         if e.button == MouseButton::Middle || (self.hand && e.button == MouseButton::Left) {
             self.drag = Drag::Pan {
@@ -3048,6 +3129,11 @@ impl DesignCanvas {
     fn on_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let local = self.local(e.position);
         let w = self.world(local);
+        if matches!(self.drag, Drag::None) && self.pen.is_some() {
+            self.pen_at = Some(w);
+            cx.notify();
+            return;
+        }
         if matches!(self.drag, Drag::None) {
             let hover = self.box_at(w, None);
             let measure = e.modifiers.alt;
@@ -3062,20 +3148,58 @@ impl DesignCanvas {
             }
             return;
         }
+        // Snapping: a shape's corner, a floating layer's edges and a resized edge go to the
+        // guides and the grid nearby.
+        let floating = self.floating();
+        let snapped = match &self.drag {
+            Drag::Draw { id, .. } => self.snap_point(id, w),
+            Drag::Element { id, from, .. } if floating => {
+                let r = &self
+                    .element
+                    .as_ref()
+                    .map(|e| e.rect.clone())
+                    .unwrap_or_default();
+                let (x, y) = (r.x + w.0 - from.0, r.y + w.1 - from.1);
+                (
+                    w.0 + self.snap(id, true, &[x, x + r.w / 2., x + r.w]),
+                    w.1 + self.snap(id, false, &[y, y + r.h / 2., y + r.h]),
+                )
+            }
+            Drag::Resize { from, .. } => match (&self.screen, &self.element) {
+                (Some(id), Some(el)) => {
+                    let r = &el.rect;
+                    (
+                        w.0 + self.snap(id, true, &[r.x + r.w + w.0 - from.0]),
+                        w.1 + self.snap(id, false, &[r.y + r.h + w.1 - from.1]),
+                    )
+                }
+                _ => w,
+            },
+            _ => w,
+        };
+        let guide_off = match &self.drag {
+            Drag::Guide { id, .. } => self.canvas.screen(id).map(|s| (s.x, s.y)),
+            _ => None,
+        };
         match &mut self.drag {
             Drag::None => return,
+            Drag::Guide { vertical, at, .. } => {
+                if let Some((sx, sy)) = guide_off {
+                    *at = if *vertical { w.0 - sx } else { w.1 - sy };
+                }
+            }
             Drag::Element {
                 at, from, moved, ..
             } => {
-                *at = w;
+                *at = snapped;
                 if (w.0 - from.0).abs() + (w.1 - from.1).abs() > 4. / self.zoom {
                     *moved = true;
                 }
-                if *moved {
+                if *moved && !floating {
                     self.drop = self.drop_at(w);
                 }
             }
-            Drag::Resize { at, .. } => *at = w,
+            Drag::Resize { at, .. } => *at = snapped,
             Drag::Marquee {
                 from, at, moved, ..
             } => {
@@ -3108,6 +3232,15 @@ impl DesignCanvas {
                 }
             }
             Drag::Link { to, .. } | Drag::Relink { to, .. } => *to = w,
+            Drag::Draw {
+                from, at, shape, ..
+            } => {
+                *at = if e.modifiers.shift {
+                    shapes::constrain(*shape, *from, w)
+                } else {
+                    snapped
+                };
+            }
         }
         cx.notify();
     }
@@ -3117,6 +3250,12 @@ impl DesignCanvas {
         self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Move { moved: true, .. } => self.save_canvas(),
+            Drag::Draw {
+                id,
+                from,
+                at,
+                shape,
+            } => self.draw_shape(&id, shape, &[from, at], false, cx),
             Drag::Marquee {
                 id,
                 from,
@@ -3174,6 +3313,13 @@ impl DesignCanvas {
                     self.pick(&id, at, false, cx);
                 }
             }
+            Drag::Element {
+                moved: true,
+                from,
+                at,
+                ..
+            } if self.floating() => self.move_floating(at.0 - from.0, at.1 - from.1, cx),
+            Drag::Guide { id, index, at, .. } => self.drop_guide(id, index, at, cx),
             Drag::Element { moved: true, .. } => {
                 if let (Some(d), Some(path)) = (drop, self.element.as_ref().map(|e| e.path.clone()))
                 {
@@ -3406,6 +3552,10 @@ impl DesignCanvas {
                 self.nudge(1, cx);
                 true
             }
+            (false, _, _, "enter") if self.pen.is_some() => {
+                self.finish_pen(false, cx);
+                true
+            }
             (false, false, false, "enter") => {
                 if self.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     self.inline_open = true;
@@ -3433,19 +3583,46 @@ impl DesignCanvas {
                 self.zoom_step(1. / 1.25);
                 true
             }
+            (false, false, false, "r") => {
+                self.set_shape(Some(shapes::Shape::Rect), cx);
+                true
+            }
+            (false, false, false, "o") => {
+                self.set_shape(Some(shapes::Shape::Ellipse), cx);
+                true
+            }
+            (false, false, false, "l") => {
+                self.set_shape(Some(shapes::Shape::Line), cx);
+                true
+            }
+            (false, true, false, "l") => {
+                self.set_shape(Some(shapes::Shape::Arrow), cx);
+                true
+            }
+            (false, true, false, "g") => {
+                self.show_grids = !self.show_grids;
+                true
+            }
+            (false, false, false, "p") => {
+                self.set_shape(Some(shapes::Shape::Pen), cx);
+                true
+            }
             (false, false, false, "v") => {
+                self.set_shape(None, cx);
                 self.hand = false;
                 self.commenting = false;
                 self.comment_open = None;
                 true
             }
             (false, false, false, "h") => {
+                self.set_shape(None, cx);
                 self.hand = !self.hand;
                 self.commenting = false;
                 self.comment_open = None;
                 true
             }
             (false, false, false, "c") => {
+                self.set_shape(None, cx);
                 self.toggle_commenting(cx);
                 true
             }
@@ -3469,6 +3646,10 @@ impl DesignCanvas {
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.playing.is_some() {
             self.playing = None;
+        } else if self.pen.is_some() {
+            self.finish_pen(false, cx);
+        } else if self.shape.is_some() {
+            self.shape = None;
         } else if self.inline_open {
             self.inline_open = false;
         } else if self.comment_open.is_some() {
@@ -4478,11 +4659,14 @@ impl DesignCanvas {
         let moving = self
             .play_move
             .as_ref()
-            .and_then(|(from, how, back)| Some((picture(from)?, *how, *back)));
+            .and_then(|(from, how, back)| Some((picture(from)?, from.clone(), *how, *back)));
         match (moving, picture(&id)) {
-            (Some((old, how, back)), Some(new)) => {
+            (Some((old, from, how, back)), Some(new)) => {
                 for layer in how.layers(old, new, back, (dw, dh), self.play_n) {
                     frame = frame.child(layer);
+                }
+                if how.kind == MoveKind::Smart {
+                    frame = frame.children(self.smart_layers(&from, &id, how, scale, dw));
                 }
             }
             (_, Some(new)) => frame = frame.child(new),
@@ -4680,6 +4864,7 @@ impl DesignCanvas {
     fn canvas_area(&self, cx: &mut Context<Self>) -> AnyElement {
         let bounds = self.bounds.clone();
         let (links, dragging) = self.paint_links();
+        let sketch = self.sketch();
         let notice = self
             .notice
             .as_ref()
@@ -4735,6 +4920,9 @@ impl DesignCanvas {
                 .size_full(),
             )
             .children(self.artboards(cx))
+            .children(self.grid_marks())
+            .children(self.shape_marks())
+            .when(self.shape.is_some(), |a| a.cursor_crosshair())
             .child(
                 canvas(
                     |_, _, _| {},
@@ -4747,6 +4935,9 @@ impl DesignCanvas {
                         }
                         if let Some((a, z, _)) = dragging {
                             paint_arrow(a, z, &tf, col(c_blue(), 1.), window);
+                        }
+                        if let Some((pts, arrow)) = &sketch {
+                            shapes::paint_sketch(pts, *arrow, &tf, window);
                         }
                     },
                 )
@@ -5115,6 +5306,7 @@ impl DesignCanvas {
             .child(label_row("Corner radius", radius))
             .child(label_row("Density", density))
             .child(label_row("Preview", mode))
+            .child(self.variables_section(cx))
             .child(section("Design rules"))
             .child(
                 div()
@@ -5850,13 +6042,17 @@ pub(crate) enum MoveKind {
     Fade,
     /// The old screen slips back and fades out as the new one slips in, as in Material.
     Axis,
+    /// Layers on both screens move from where they were to where they land, and the rest
+    /// fades.
+    Smart,
     None,
 }
 
 /// The moves a link can pick, with their `data-transition` values; empty for the
 /// platform's own.
-pub(crate) const MOVES: [(&str, &str); 6] = [
+pub(crate) const MOVES: [(&str, &str); 7] = [
     ("Platform", ""),
+    ("Smart animate", "smart"),
     ("Push", "push"),
     ("Sheet", "sheet"),
     ("Fade", "fade"),
@@ -5871,6 +6067,7 @@ pub(crate) const SPEEDS: [(&str, &str); 3] = [("Quick", "fast"), ("Normal", ""),
 pub(crate) struct Move {
     pub kind: MoveKind,
     pub ms: u64,
+    pub ease: motion::Ease,
 }
 
 impl Move {
@@ -5881,6 +6078,7 @@ impl Move {
             "sheet" | "modal" => MoveKind::Sheet,
             "fade" => MoveKind::Fade,
             "axis" => MoveKind::Axis,
+            "smart" => MoveKind::Smart,
             "none" => MoveKind::None,
             _ if device == Device::Desktop => MoveKind::Fade,
             _ if platform == "android" => MoveKind::Axis,
@@ -5891,6 +6089,7 @@ impl Move {
             MoveKind::Sheet => 400.,
             MoveKind::Fade => 220.,
             MoveKind::Axis => 300.,
+            MoveKind::Smart => 450.,
             MoveKind::None => 0.,
         };
         let speed = match link.speed.as_str() {
@@ -5901,7 +6100,14 @@ impl Move {
         Self {
             kind,
             ms: (base * speed) as u64,
+            ease: motion::Ease::of(&link.ease),
         }
+    }
+
+    /// The timing of this move.
+    pub(crate) fn animation(self) -> Animation {
+        Animation::new(Duration::from_millis(self.ms.max(1)))
+            .with_easing(move |t: f32| self.ease.at(t))
     }
 
     /// The old and new screens (and a shade between them) as they move. `back` plays the
@@ -5915,10 +6121,7 @@ impl Move {
         (w, h): (f32, f32),
         n: usize,
     ) -> Vec<AnyElement> {
-        let anim = || {
-            Animation::new(Duration::from_millis(self.ms.max(1)))
-                .with_easing(|t: f32| 1. - (1. - t).powi(3))
-        };
+        let anim = || self.animation();
         let shade = |most: f32, rising: bool| {
             div()
                 .absolute()
@@ -5994,7 +6197,7 @@ impl Move {
                     .into_any_element(),
                 ]
             }
-            (MoveKind::Fade, _) => vec![
+            (MoveKind::Fade | MoveKind::Smart, _) => vec![
                 old.into_any_element(),
                 new.with_animation(id("design-move-new"), anim(), |el, d| el.opacity(d))
                     .into_any_element(),
@@ -6016,6 +6219,7 @@ mod move_tests {
             path: Vec::new(),
             transition: transition.into(),
             speed: speed.into(),
+            ..Default::default()
         }
     }
 

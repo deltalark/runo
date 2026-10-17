@@ -20,7 +20,7 @@ pub(super) fn kit_icons() -> &'static [String] {
 }
 
 /// Whether an element shows a picture: an image, or a box that stands in for one.
-fn takes_picture(el: &Element) -> bool {
+pub(super) fn takes_picture(el: &Element) -> bool {
     el.tag == "img"
         || el
             .label
@@ -217,7 +217,11 @@ impl DesignCanvas {
                 ),
             );
         }
-        Some(sec("Picture", None).child(row))
+        let mut out = sec("Picture", None).child(row);
+        if has {
+            out = out.child(self.picture_controls(el, cx));
+        }
+        Some(out.children(self.picture_library(cx)))
     }
 
     /// The Image tool: a picture from a file, onto the screen.
