@@ -59,6 +59,60 @@ pub(crate) struct Screen {
     pub x: f32,
     #[serde(default)]
     pub y: f32,
+    /// The layout grid drawn over it, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<Grid>,
+    /// Lines to line things up against, across or down the screen.
+    #[serde(default, rename = "guide", skip_serializing_if = "Vec::is_empty")]
+    pub guides: Vec<Guide>,
+}
+
+/// A layout grid: columns or rows with gutters between and margins at the sides, or a
+/// square grid.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Grid {
+    /// "columns", "rows" or "square".
+    pub kind: String,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub gutter: f32,
+    #[serde(default)]
+    pub margin: f32,
+    /// The square grid's step.
+    #[serde(default)]
+    pub size: f32,
+}
+
+impl Grid {
+    pub(crate) fn columns() -> Self {
+        Self {
+            kind: "columns".into(),
+            count: 4,
+            gutter: 16.,
+            margin: 16.,
+            size: 8.,
+        }
+    }
+
+    /// The bands of a columns or rows grid across `span`, as (start, length).
+    pub(crate) fn bands(&self, span: f32) -> Vec<(f32, f32)> {
+        let n = self.count.max(1) as f32;
+        let each = (span - 2. * self.margin - (n - 1.) * self.gutter) / n;
+        if each <= 0. {
+            return vec![];
+        }
+        (0..self.count.max(1))
+            .map(|i| (self.margin + i as f32 * (each + self.gutter), each))
+            .collect()
+    }
+}
+
+/// A guide: a line at `at` pixels from the left (vertical) or the top.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Guide {
+    pub vertical: bool,
+    pub at: f32,
 }
 
 /// Everything about the canvas that isn't in the screens themselves.
@@ -256,6 +310,7 @@ pub(crate) fn load(root: &Path) -> Result<Canvas, String> {
                 id,
                 x,
                 y,
+                ..Default::default()
             });
         }
     }

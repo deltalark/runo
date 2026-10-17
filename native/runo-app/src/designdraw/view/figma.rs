@@ -986,6 +986,7 @@ impl DesignCanvas {
                     .child(pair(readout("W", w), readout("H", h)))
                     .child(caption(format!("{FOLDER}/screens/{}.html", s.id))),
             )
+            .child(self.grid_sections(s, cx))
             .child(sec("Actions", None).child(actions))
             .child(self.export_section(&s.name, cx))
             .child(sec("Insert", None).child(self.blocks(cx)))

@@ -209,7 +209,11 @@ impl DesignCanvas {
                 } else if clicks >= 2 {
                     self.finish_pen(false, cx);
                 } else {
-                    pts.push(w);
+                    let id = self.pen.as_ref().map(|p| p.0.clone()).unwrap_or_default();
+                    let w = self.snap_point(&id, w);
+                    if let Some((_, pts)) = &mut self.pen {
+                        pts.push(w);
+                    }
                 }
                 cx.notify();
                 return true;
@@ -218,6 +222,7 @@ impl DesignCanvas {
         match self.screen_at(w) {
             Some((id, false)) => {
                 self.select_screen(Some(id.clone()));
+                let w = self.snap_point(&id, w);
                 if shape == Shape::Pen {
                     self.pen = Some((id, vec![w]));
                 } else {

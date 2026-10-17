@@ -22,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 mod comments;
 mod components;
 mod figma;
+mod grids;
 mod handoff;
 mod insert;
 mod layers;
@@ -141,6 +142,13 @@ enum Drag {
         tall: bool,
         from: Pt,
         at: Pt,
+    },
+    /// Dragging guide `index` of screen `id` to `at`, in page units.
+    Guide {
+        id: String,
+        index: usize,
+        vertical: bool,
+        at: f32,
     },
     /// Dragging out a shape on a screen with a shape tool.
     Draw {
@@ -283,6 +291,8 @@ pub(crate) struct DesignCanvas {
     field_vals: HashMap<&'static str, String>,
     /// The hand tool: dragging anywhere pans.
     hand: bool,
+    /// Whether layout grids are drawn and snapped to.
+    show_grids: bool,
     /// The shape tool picked, if any, and the path the pen is placing: its screen, its
     /// points in canvas units, and where the next would go.
     shape: Option<shapes::Shape>,
@@ -525,6 +535,7 @@ impl DesignCanvas {
             fields,
             field_vals: HashMap::new(),
             hand: false,
+            show_grids: true,
             shape: None,
             pen: None,
             pen_at: None,
@@ -2641,6 +2652,7 @@ impl DesignCanvas {
             device: self.new_device,
             x,
             y,
+            ..Default::default()
         });
         self.tokens = std::fs::read_to_string(folder(&self.root).join(TOKENS)).unwrap_or_default();
         self.save_canvas();
@@ -2686,6 +2698,7 @@ impl DesignCanvas {
             device: s.device,
             x: s.x + w + GAP,
             y: s.y,
+            ..Default::default()
         });
         self.save_canvas();
         self.select_screen(Some(id.clone()));
@@ -3000,6 +3013,21 @@ impl DesignCanvas {
         if e.button == MouseButton::Left && self.shape_down(w, e.click_count, cx) {
             return;
         }
+        if e.button == MouseButton::Left && !self.hand {
+            if let Some((id, index, vertical)) = self.guide_hit(w) {
+                if let Some(s) = self.canvas.screen(&id) {
+                    let at = if vertical { w.0 - s.x } else { w.1 - s.y };
+                    self.drag = Drag::Guide {
+                        id,
+                        index,
+                        vertical,
+                        at,
+                    };
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         if e.button == MouseButton::Middle || (self.hand && e.button == MouseButton::Left) {
             self.drag = Drag::Pan {
                 from: local,
@@ -3120,20 +3148,58 @@ impl DesignCanvas {
             }
             return;
         }
+        // Snapping: a shape's corner, a floating layer's edges and a resized edge go to the
+        // guides and the grid nearby.
+        let floating = self.floating();
+        let snapped = match &self.drag {
+            Drag::Draw { id, .. } => self.snap_point(id, w),
+            Drag::Element { id, from, .. } if floating => {
+                let r = &self
+                    .element
+                    .as_ref()
+                    .map(|e| e.rect.clone())
+                    .unwrap_or_default();
+                let (x, y) = (r.x + w.0 - from.0, r.y + w.1 - from.1);
+                (
+                    w.0 + self.snap(id, true, &[x, x + r.w / 2., x + r.w]),
+                    w.1 + self.snap(id, false, &[y, y + r.h / 2., y + r.h]),
+                )
+            }
+            Drag::Resize { from, .. } => match (&self.screen, &self.element) {
+                (Some(id), Some(el)) => {
+                    let r = &el.rect;
+                    (
+                        w.0 + self.snap(id, true, &[r.x + r.w + w.0 - from.0]),
+                        w.1 + self.snap(id, false, &[r.y + r.h + w.1 - from.1]),
+                    )
+                }
+                _ => w,
+            },
+            _ => w,
+        };
+        let guide_off = match &self.drag {
+            Drag::Guide { id, .. } => self.canvas.screen(id).map(|s| (s.x, s.y)),
+            _ => None,
+        };
         match &mut self.drag {
             Drag::None => return,
+            Drag::Guide { vertical, at, .. } => {
+                if let Some((sx, sy)) = guide_off {
+                    *at = if *vertical { w.0 - sx } else { w.1 - sy };
+                }
+            }
             Drag::Element {
                 at, from, moved, ..
             } => {
-                *at = w;
+                *at = snapped;
                 if (w.0 - from.0).abs() + (w.1 - from.1).abs() > 4. / self.zoom {
                     *moved = true;
                 }
-                if *moved {
+                if *moved && !floating {
                     self.drop = self.drop_at(w);
                 }
             }
-            Drag::Resize { at, .. } => *at = w,
+            Drag::Resize { at, .. } => *at = snapped,
             Drag::Marquee {
                 from, at, moved, ..
             } => {
@@ -3172,7 +3238,7 @@ impl DesignCanvas {
                 *at = if e.modifiers.shift {
                     shapes::constrain(*shape, *from, w)
                 } else {
-                    w
+                    snapped
                 };
             }
         }
@@ -3247,6 +3313,13 @@ impl DesignCanvas {
                     self.pick(&id, at, false, cx);
                 }
             }
+            Drag::Element {
+                moved: true,
+                from,
+                at,
+                ..
+            } if self.floating() => self.move_floating(at.0 - from.0, at.1 - from.1, cx),
+            Drag::Guide { id, index, at, .. } => self.drop_guide(id, index, at, cx),
             Drag::Element { moved: true, .. } => {
                 if let (Some(d), Some(path)) = (drop, self.element.as_ref().map(|e| e.path.clone()))
                 {
@@ -3524,6 +3597,10 @@ impl DesignCanvas {
             }
             (false, true, false, "l") => {
                 self.set_shape(Some(shapes::Shape::Arrow), cx);
+                true
+            }
+            (false, true, false, "g") => {
+                self.show_grids = !self.show_grids;
                 true
             }
             (false, false, false, "p") => {
@@ -4843,6 +4920,7 @@ impl DesignCanvas {
                 .size_full(),
             )
             .children(self.artboards(cx))
+            .children(self.grid_marks())
             .children(self.shape_marks())
             .when(self.shape.is_some(), |a| a.cursor_crosshair())
             .child(
