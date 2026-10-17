@@ -226,7 +226,26 @@ fn unattr(s: &str) -> String {
 
 /// Every component of the design, by name.
 pub(crate) fn load(root: &Path) -> Vec<Component> {
-    let mut out: Vec<Component> = std::fs::read_dir(folder(root))
+    let mut out = read_folder(&folder(root), "");
+    // Libraries added from other projects, each in a folder of its own.
+    for e in std::fs::read_dir(folder(root))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let path = e.path();
+        if let Some(lib) = path.is_dir().then(|| path.file_name()?.to_str()).flatten() {
+            out.extend(read_folder(&path, &format!("{lib}/")));
+        }
+    }
+    // This project's own first, then each library's.
+    out.sort_by_key(|c| (library_of(&c.id).map(str::to_string), c.name.to_lowercase()));
+    out
+}
+
+/// The components in one folder, their ids starting with `prefix`.
+fn read_folder(dir: &Path, prefix: &str) -> Vec<Component> {
+    std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -235,14 +254,17 @@ pub(crate) fn load(root: &Path) -> Vec<Component> {
             if path.extension().and_then(|x| x.to_str()) != Some("html") {
                 return None;
             }
-            let id = path.file_stem()?.to_str()?.to_string();
+            let id = format!("{prefix}{}", path.file_stem()?.to_str()?);
             let text = std::fs::read_to_string(&path).ok()?;
             Some(Component::read(&id, &text))
         })
         .filter(|c| !c.variants.is_empty())
-        .collect();
-    out.sort_by_key(|c| c.name.to_lowercase());
-    out
+        .collect()
+}
+
+/// The library a component comes from, when it was added from another project.
+pub(crate) fn library_of(id: &str) -> Option<&str> {
+    id.split_once('/').map(|(lib, _)| lib)
 }
 
 pub(crate) fn save(root: &Path, c: &Component) -> Result<(), String> {

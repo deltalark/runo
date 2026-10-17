@@ -599,6 +599,9 @@ impl DesignCanvas {
         else {
             return;
         };
+        if let Some(lib) = library::library_of(id) {
+            self.use_library_sheet(lib, cx);
+        }
         self.paste_html(vec![html], true, cx);
     }
 
@@ -640,6 +643,9 @@ impl DesignCanvas {
                     ),
             );
         };
+        if let Some(lib) = library::library_of(&c.id) {
+            return Some(self.library_instance(c, &variant, lib, cx));
+        }
         let name_box = div()
             .flex_1()
             .min_w_0()
@@ -767,17 +773,100 @@ impl DesignCanvas {
         )
     }
 
+    /// The right panel's section for an instance of a component from another project's
+    /// library: it can switch variants, and is changed only where the library comes from.
+    fn library_instance(
+        &self,
+        c: &Component,
+        variant: &str,
+        lib: &str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut chips = div().flex().flex_wrap().gap(px(4.));
+        for (i, v) in c.variants.iter().enumerate() {
+            let name = v.name.clone();
+            chips = chips.child(
+                chip(("design-variant", i), v.name.clone(), v.name == variant).on_click(
+                    cx.listener(move |this, _, _, cx| this.swap_variant(&name, true, cx)),
+                ),
+            );
+        }
+        let lib_name = self
+            .added_libs
+            .iter()
+            .find(|l| l.id == lib)
+            .map_or(lib.to_string(), |l| l.name.clone());
+        figma::sec(
+            "Instance",
+            Some(
+                figma::mini("design-detach", named("unlink"), "Detach instance", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.detach_instance(cx)))
+                    .into_any_element(),
+            ),
+        )
+        .child(
+            div()
+                .h(px(28.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded(px(5.))
+                .bg(tint(c_subtle()))
+                .text_size(px(12.))
+                .text_color(rgb(c_text()))
+                .child(icon(component_icon(), 12., PURPLE))
+                .child(div().flex_1().min_w_0().truncate().child(c.name.clone())),
+        )
+        .child(chips)
+        .child(
+            button_like("design-reset", "Reset", false)
+                .tooltip(tip("Make it match its variant again"))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some((_, v)) = this.instance() {
+                        this.swap_variant(&v, false, cx);
+                    }
+                })),
+        )
+        .child(figma::caption(format!(
+            "From the {lib_name} library. Change it in the project it comes from and publish \
+             an update, or detach this one to change it here."
+        )))
+    }
+
     /// The left panel's Assets tab: every component and its variants. Clicking one puts
     /// an instance on the selected screen.
     pub(super) fn assets_list(&self, cx: &mut Context<Self>) -> Div {
-        let mut list = div().v_flex().px_1().pb_3();
+        let mut list = div()
+            .v_flex()
+            .px_1()
+            .pb_3()
+            .child(self.libraries_section(cx));
         if self.library.is_empty() {
             return list.child(div().px_2().pt_2().child(figma::caption(
                 "Components show here. Select an element and press ⌥⌘K, or Create component \
                  in the Design panel, to reuse it on any screen.",
             )));
         }
+        let has_libs = self
+            .library
+            .iter()
+            .any(|c| library::library_of(&c.id).is_some());
+        let mut shown_lib: Option<Option<&str>> = None;
         for (ci, c) in self.library.iter().enumerate() {
+            let lib = library::library_of(&c.id);
+            if shown_lib != Some(lib) && has_libs {
+                let title = match lib {
+                    Some(l) => self
+                        .added_libs
+                        .iter()
+                        .find(|a| a.id == l)
+                        .map_or(l.to_string(), |a| a.name.clone()),
+                    None => "This project".to_string(),
+                };
+                list = list.child(asset_heading(title));
+            }
+            shown_lib = Some(lib);
             let (id, first) = (
                 c.id.clone(),
                 c.variants
@@ -811,7 +900,9 @@ impl DesignCanvas {
                         div()
                             .flex_none()
                             .invisible()
-                            .group_hover("design-asset", |el| el.visible())
+                            .when(lib.is_none(), |el| {
+                                el.group_hover("design-asset", |el| el.visible())
+                            })
                             .child(
                                 figma::mini(
                                     ("design-asset-del", ci),
@@ -857,6 +948,18 @@ impl DesignCanvas {
         }
         list
     }
+}
+
+/// A heading over a library's components in the Assets tab.
+pub(super) fn asset_heading(title: impl Into<SharedString>) -> Div {
+    div()
+        .px_2()
+        .pt_3()
+        .pb_1()
+        .text_size(px(10.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(c_muted()))
+        .child(title.into())
 }
 
 pub(super) fn component_icon() -> IconName {

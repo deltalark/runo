@@ -405,6 +405,16 @@ if (!window.__runo) window.__runo = (() => {
     // where it was drawn. Gives back its path.
     // Each shape's outline as Design draws it: an svg's path data and where its units sit
     // on the page, or a box with its corner radius; and the first one's fill and stroke.
+    // Link a stylesheet into the page unless it's linked already.
+    useSheet: (href) => {
+      const have = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
+      if (have.some((l) => l.getAttribute('href') === href)) return false;
+      const l = document.createElement('link');
+      l.rel = 'stylesheet';
+      l.href = href;
+      document.head.appendChild(l);
+      return true;
+    },
     // Show only the elements at `ps`, on a page of colour `bg`; with no `bg`, everything again.
     solo: (ps, bg) => {
       const html = document.documentElement, body = document.body;

@@ -123,6 +123,9 @@ fn side_tab(
         .hover(|el| el.text_color(rgb(c_text())))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.assets = assets;
+            if assets {
+                this.refresh_libraries();
+            }
             cx.notify();
         }))
         .child(label)

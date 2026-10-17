@@ -26,6 +26,7 @@ mod grids;
 mod handoff;
 mod insert;
 mod layers;
+mod libraries;
 mod looks;
 mod motion;
 mod pictures;
@@ -321,6 +322,11 @@ pub(crate) struct DesignCanvas {
     assets: bool,
     /// The selected instance's component name and variant name, as typed.
     f_comp: Entity<InputState>,
+    /// The name this project's library is published under.
+    f_lib: Entity<InputState>,
+    /// The libraries published from every project, and those this one added.
+    published: Vec<super::shared::Library>,
+    added_libs: Vec<super::shared::Library>,
     f_variant: Entity<InputState>,
     comp_vals: (String, String),
     /// The comment tool, the design's comments, the one open, and its text box.
@@ -489,6 +495,7 @@ impl DesignCanvas {
         }));
         let fields = Self::make_fields(window, cx, &mut subs);
         let (f_comp, f_variant) = Self::make_component_fields(window, cx, &mut subs);
+        let f_lib = Self::make_library_field(&root, window, cx);
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
         let f_icon = Self::make_icon_field(window, cx, &mut subs);
@@ -562,6 +569,9 @@ impl DesignCanvas {
             library,
             assets: false,
             f_comp,
+            f_lib,
+            published: super::shared::published(),
+            added_libs: Vec::new(),
             f_variant,
             comp_vals: Default::default(),
             commenting: false,
@@ -598,6 +608,7 @@ impl DesignCanvas {
             watching: true,
             _subs: subs,
         };
+        this.refresh_libraries();
         this.load_rules(window, cx);
         this.seen = this.file_times();
         let ids: Vec<String> = this.canvas.screens.iter().map(|s| s.id.clone()).collect();
@@ -701,6 +712,17 @@ impl DesignCanvas {
                         out.insert(p, t);
                     }
                 }
+            }
+        }
+        // The styles of libraries added from other projects.
+        for e in std::fs::read_dir(dir.join("components"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let p = e.path().join(super::shared::SHEET);
+            if let Ok(t) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+                out.insert(p, t);
             }
         }
         out
