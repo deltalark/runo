@@ -46,7 +46,8 @@ if (!window.__runo) window.__runo = (() => {
     'justify-content', 'width', 'height', 'opacity', 'line-height', 'letter-spacing',
     'border-top-width', 'border-top-color', 'border-top-style', 'border-top-left-radius',
     'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'right', 'bottom', 'z-index', 'background-image',
-    'fill', 'stroke', 'stroke-width'];
+    'fill', 'stroke', 'stroke-width', 'filter', 'object-fit', 'object-position', 'object-view-box',
+    'background-size', 'background-position', 'background-repeat'];
   // The one icon an element is or holds, as an icon button or a tab does.
   const iconEl = (el) => {
     const all = el.matches('.icon') ? [el] : Array.from(el.querySelectorAll('.icon'));

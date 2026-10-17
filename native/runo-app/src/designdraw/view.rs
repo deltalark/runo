@@ -27,6 +27,7 @@ mod insert;
 mod layers;
 mod looks;
 mod motion;
+mod pictures;
 mod shapes;
 mod vars;
 

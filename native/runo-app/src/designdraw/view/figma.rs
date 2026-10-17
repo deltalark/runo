@@ -1513,17 +1513,22 @@ impl DesignCanvas {
                 .child(self.fill_kinds(el, cx));
                 match kind {
                     "gradient" => body.child(self.gradient_editor(el, cx)),
-                    "picture" => body.child(
-                        text_btn(
-                            "design-fill-pic",
-                            "Replace picture",
-                            Some(IconName::Image),
-                            false,
+                    "picture" => body
+                        .child(
+                            text_btn(
+                                "design-fill-pic",
+                                "Replace picture",
+                                Some(IconName::Image),
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.choose_picture(super::insert::PictureFor::Picked, cx)
+                            })),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.choose_picture(super::insert::PictureFor::Picked, cx)
-                        })),
-                    ),
+                        .when(!super::insert::takes_picture(el), |body| {
+                            body.child(self.picture_controls(el, cx))
+                                .children(self.picture_library(cx))
+                        }),
                     _ => body
                         .child(self.color_fld("fill", el))
                         .child(self.token_swatches("background-color", cx)),
