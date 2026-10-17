@@ -304,6 +304,29 @@ impl Renderer {
         self.surface()
     }
 
+    /// Draw a screen from another file, such as a version kept of it. The page goes back
+    /// to the canvas's screens on the next job.
+    pub(crate) fn shoot_file(&mut self, file: &Path, device: Device) -> Result<Shot, String> {
+        self.catch_up();
+        self.current = None;
+        let folder = file
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let dark = self.dark;
+        let surface = self.surface()?;
+        if !surface.load(file, &folder, device.size(), Duration::from_secs(8)) {
+            return Err(format!("{} didn't load.", file.display()));
+        }
+        surface.color_scheme(dark);
+        let name = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("screen");
+        Self::capture(surface, name, device)
+    }
+
     /// Draw the screen from its file.
     pub(crate) fn shoot(&mut self, id: &str, device: Device) -> Result<Shot, String> {
         let engine = self.open(id, device, true)?;

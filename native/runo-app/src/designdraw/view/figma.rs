@@ -96,7 +96,7 @@ pub(super) fn caption(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// A tab at the top of the left panel: Layers or Assets.
+/// A tab at the top of the left panel: Layers, Assets or History.
 fn side_tab(
     id: &'static str,
     label: &'static str,
@@ -104,6 +104,7 @@ fn side_tab(
     cx: &mut Context<DesignCanvas>,
 ) -> Stateful<Div> {
     let assets = label == "Assets";
+    let history = label == "History";
     div()
         .id(id)
         .h(px(26.))
@@ -123,6 +124,11 @@ fn side_tab(
         .hover(|el| el.text_color(rgb(c_text())))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.assets = assets;
+            this.history = history;
+            if history {
+                this.versions = crate::designdraw::versions::list(&this.root);
+                this.version_open = None;
+            }
             if assets {
                 this.refresh_libraries();
             }
@@ -592,8 +598,14 @@ impl DesignCanvas {
                         div()
                             .flex()
                             .gap(px(2.))
-                            .child(side_tab("design-left-layers", "Layers", !self.assets, cx))
-                            .child(side_tab("design-left-assets", "Assets", self.assets, cx)),
+                            .child(side_tab(
+                                "design-left-layers",
+                                "Layers",
+                                !self.assets && !self.history,
+                                cx,
+                            ))
+                            .child(side_tab("design-left-assets", "Assets", self.assets, cx))
+                            .child(side_tab("design-left-history", "History", self.history, cx)),
                     )
                     .child(
                         mini("design-layers-add", IconName::Plus, "New screen (F)", false)
@@ -603,16 +615,19 @@ impl DesignCanvas {
                             })),
                     ),
             )
-            .when(!self.assets && !self.canvas.screens.is_empty(), |el| {
-                el.child(self.find_box())
-            })
+            .when(
+                !self.assets && !self.history && !self.canvas.screens.is_empty(),
+                |el| el.child(self.find_box()),
+            )
             .child(
                 div()
                     .id("design-layers-list")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(if self.assets {
+                    .child(if self.history {
+                        self.history_list(cx)
+                    } else if self.assets {
                         self.assets_list(cx)
                     } else {
                         list

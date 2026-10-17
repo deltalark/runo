@@ -24,6 +24,7 @@ mod components;
 mod figma;
 mod grids;
 mod handoff;
+mod history;
 mod insert;
 mod layers;
 mod libraries;
@@ -331,6 +332,14 @@ pub(crate) struct DesignCanvas {
     /// The libraries published from every project, and those this one added.
     published: Vec<super::shared::Library>,
     added_libs: Vec<super::shared::Library>,
+    /// The History tab: whether it's showing, the versions, the one open with what changed
+    /// since, its name box, the screen being compared, and when a version last saved itself.
+    history: bool,
+    versions: Vec<super::versions::Version>,
+    version_open: Option<(String, super::versions::Changes)>,
+    f_version: Entity<InputState>,
+    comparing: Option<history::Compare>,
+    version_due: Option<Instant>,
     f_variant: Entity<InputState>,
     comp_vals: (String, String),
     /// The comment tool, the design's comments, the one open, and its text box.
@@ -502,6 +511,7 @@ impl DesignCanvas {
         let fields = Self::make_fields(window, cx, &mut subs);
         let (f_comp, f_variant) = Self::make_component_fields(window, cx, &mut subs);
         let f_lib = Self::make_library_field(&root, window, cx);
+        let f_version = Self::make_version_field(window, cx, &mut subs);
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
         let f_icon = Self::make_icon_field(window, cx, &mut subs);
@@ -581,6 +591,12 @@ impl DesignCanvas {
             f_lib,
             published: super::shared::published(),
             added_libs: Vec::new(),
+            history: false,
+            versions: Vec::new(),
+            version_open: None,
+            f_version,
+            comparing: None,
+            version_due: None,
             f_variant,
             comp_vals: Default::default(),
             commenting: false,
@@ -619,6 +635,8 @@ impl DesignCanvas {
             _subs: subs,
         };
         this.refresh_libraries();
+        this.autosave();
+        this.versions = super::versions::list(&this.root);
         this.load_rules(window, cx);
         this.seen = this.file_times();
         let ids: Vec<String> = this.canvas.screens.iter().map(|s| s.id.clone()).collect();
@@ -1051,6 +1069,7 @@ impl DesignCanvas {
     /// Remember our own writes so they don't read as outside changes.
     fn note_writes(&mut self) {
         self.seen = self.file_times();
+        self.autosave();
     }
 
     fn save_canvas(&mut self) {
@@ -3739,7 +3758,9 @@ impl DesignCanvas {
 
     /// Escape: leave play, then the text being edited, then step out to the parent.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.points.is_some() {
+        if self.comparing.is_some() {
+            self.drop_compare(cx);
+        } else if self.points.is_some() {
             self.points = None;
         } else if self.playing.is_some() {
             self.playing = None;
@@ -5140,6 +5161,7 @@ impl DesignCanvas {
             // Comments in Present go over the screen playing.
             area = area.children(self.comment_layer(cx));
         }
+        area = area.children(self.compare_view(cx));
         // The status sits in a strip under the canvas, so nothing drawn over the canvas covers it.
         div()
             .flex_1()
