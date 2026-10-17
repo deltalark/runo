@@ -22,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 mod comments;
 mod components;
 mod figma;
+mod layers;
 
 actions!(
     design_canvas,
@@ -278,6 +279,11 @@ pub(crate) struct DesignCanvas {
     comment_focus: bool,
     show_resolved: bool,
     f_comment: Entity<InputState>,
+    /// The layer being named in place, its name box, and the layers find box.
+    renaming: Option<dom::Path>,
+    f_layer: Entity<InputState>,
+    f_find: Entity<InputState>,
+    layer_query: String,
     /// Who's commenting, found out when they first comment.
     author: String,
     f_inline: Entity<InputState>,
@@ -417,6 +423,7 @@ impl DesignCanvas {
         let fields = Self::make_fields(window, cx, &mut subs);
         let (f_comp, f_variant) = Self::make_component_fields(window, cx, &mut subs);
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
+        let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -482,6 +489,10 @@ impl DesignCanvas {
             comment_focus: false,
             show_resolved: false,
             f_comment,
+            renaming: None,
+            f_layer,
+            f_find,
+            layer_query: String::new(),
             author: String::new(),
             f_inline,
             inline_open: false,
@@ -3328,6 +3339,15 @@ impl DesignCanvas {
                 self.create_component(cx);
                 true
             }
+            (true, false, false, "r") if self.element.is_some() => {
+                self.rename_selected(window, cx);
+                true
+            }
+            (true, true, false, "l") if self.element.is_some() => {
+                self.lock_selected(cx);
+                true
+            }
+
             (false, true, false, "a") if self.element.is_some() => {
                 self.auto_layout(cx);
                 true
@@ -3947,7 +3967,7 @@ impl DesignCanvas {
                     .text_color(rgb(tone))
                     .child(match comp {
                         Some(c) => format!("◇ {}", c.name),
-                        None => el.label.clone(),
+                        None => el.name.clone().unwrap_or_else(|| el.label.clone()),
                     })
                     .into_any_element(),
             );

@@ -62,6 +62,7 @@ if (!window.__runo) window.__runo = (() => {
       transition: el.dataset.transition || null, speed: el.dataset.speed || null,
       children: kids(el).length,
       component: el.dataset.component || null, variant: el.dataset.variant || null,
+      name: el.dataset.name || null, locked: el.hasAttribute('data-locked'),
     };
   };
   const tree = () => {
@@ -71,7 +72,8 @@ if (!window.__runo) window.__runo = (() => {
         if (out.length >= 600) return;
         const t = ownText(c);
         out.push({ path: pathOf(c), label: label(c), depth, hidden: c.hidden,
-          text: t ? t.slice(0, 40) : null, component: c.dataset.component || null });
+          text: t ? t.slice(0, 40) : null, component: c.dataset.component || null,
+          name: c.dataset.name || null, locked: c.hasAttribute('data-locked') });
         walk(c, depth + 1);
       }
     };
@@ -88,6 +90,7 @@ if (!window.__runo) window.__runo = (() => {
       if (r.width === 0 || r.height === 0) continue;
       const cs = getComputedStyle(el);
       if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      if (el.closest('[data-locked]')) continue;
       const path = pathOf(el);
       if (!path) continue;
       const row = (cs.display.includes('flex') && cs.flexDirection.startsWith('row'))
@@ -153,6 +156,16 @@ if (!window.__runo) window.__runo = (() => {
       if (!el.getAttribute('style')) el.removeAttribute('style'); },
     attr: (el, k, v) => { if (v === null || v === '') el.removeAttribute(k); else el.setAttribute(k, v); },
     hide: (el) => { el.hidden = !el.hidden; },
+    lock: (el) => { el.toggleAttribute('data-locked'); },
+    // A text style is a class: the one given replaces any of `all`, and the type set on the
+    // element itself goes, so the style shows.
+    textStyle: (el, cls, all) => {
+      for (const c of all) el.classList.remove(c);
+      if (cls) el.classList.add(cls);
+      for (const k of ['font-size', 'font-weight', 'line-height', 'letter-spacing']) el.style.removeProperty(k);
+      if (!el.getAttribute('style')) el.removeAttribute('style');
+      if (!el.getAttribute('class')) el.removeAttribute('class');
+    },
     remove: (el) => { el.remove(); },
     duplicate: (el) => { el.after(el.cloneNode(true)); },
     move: (el, d) => {
@@ -175,6 +188,8 @@ if (!window.__runo) window.__runo = (() => {
       // A point below the fold is scrolled into view first: only what shows can be hit.
       if (y - scrollY < 0 || y - scrollY >= innerHeight) scrollTo(0, Math.max(0, y - innerHeight / 2));
       let el = document.elementFromPoint(x - scrollX, y - scrollY);
+      // A locked element can't be picked on the canvas: what holds it is picked instead.
+      while (el && el.closest('[data-locked]')) el = el.closest('[data-locked]').parentElement;
       if (!el || el === document.documentElement || el === document.body) return null;
       return info(el);
     },
@@ -326,6 +341,11 @@ pub(crate) struct Element {
     pub component: Option<String>,
     #[serde(default)]
     pub variant: Option<String>,
+    /// Its name in the layers panel (`data-name`), and whether it's locked.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 impl Element {
@@ -374,6 +394,12 @@ pub(crate) struct Layer {
     /// The component it's an instance of.
     #[serde(default)]
     pub component: Option<String>,
+    /// What it was named in the layers panel (`data-name`).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Locked (`data-locked`): it can't be picked on the canvas.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// An element on the page: where it sits, and whether its children run across.

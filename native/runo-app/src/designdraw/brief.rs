@@ -60,6 +60,10 @@ pub(crate) fn context(c: &Canvas) -> String {
          build with them, keep the marks, and when you change a component's file, change its \
          instances on every screen the same way, keeping their own text. People's comments \
          on the screens are in {FOLDER}/comments.toml, each pinned at x, y on a screen. \
+         data-name is a layer's name and data-locked marks a layer people locked: keep both, \
+         and leave locked layers as they are unless asked. Text styles are classes: the kit's \
+         (display, big, small, tiny, eyebrow) and any listed after \"Text styles made in \
+         Design\" in components.css; use them for type rather than setting sizes. \
          New screen files show up on the canvas by themselves. Make the \
          change by editing these files directly: Runo shows it live and the user keeps or \
          undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for this \

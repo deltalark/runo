@@ -10,6 +10,7 @@ pub(crate) mod library;
 pub(crate) mod model;
 pub(crate) mod notes;
 pub(crate) mod render;
+pub(crate) mod styles;
 pub(crate) mod view;
 #[cfg(target_os = "macos")]
 pub(crate) mod webkit;
