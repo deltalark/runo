@@ -734,13 +734,13 @@ impl DesignCanvas {
             div()
                 .id(id)
                 .h(px(28.))
-                .px(px(8.))
+                .px(px(5.))
                 .flex()
                 .items_center()
                 .gap(px(4.))
                 .rounded(px(5.))
                 .cursor_pointer()
-                .text_size(px(12.))
+                .text_size(px(11.5))
                 .font_weight(if on {
                     FontWeight::SEMIBOLD
                 } else {
@@ -815,6 +815,7 @@ impl DesignCanvas {
             Panel::Prototype => self.prototype_panel(cx),
             Panel::Theme => div().px_3().child(self.theme_panel(cx)),
             Panel::Checks => div().px_3().child(self.checks_panel(cx)),
+            Panel::Code => div().px_3().child(self.code_panel(cx)),
         };
         let issues: usize = self.findings().iter().map(|f| f.2.len()).sum();
         div()
@@ -829,10 +830,10 @@ impl DesignCanvas {
                 div()
                     .h(px(36.))
                     .flex_none()
-                    .px_2()
+                    .px_1()
                     .flex()
                     .items_center()
-                    .gap(px(2.))
+                    .gap(px(1.))
                     .border_b_1()
                     .border_color(rgb(c_border()))
                     .child(tab("design-tab-design", "Design", 0, Panel::Design, cx))
@@ -850,7 +851,8 @@ impl DesignCanvas {
                         issues,
                         Panel::Checks,
                         cx,
-                    )),
+                    ))
+                    .child(tab("design-tab-code", "Code", 0, Panel::Code, cx)),
             )
             .child(
                 div()

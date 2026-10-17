@@ -57,6 +57,55 @@ if (!window.__runo) window.__runo = (() => {
     const c = i && Array.from(i.classList).find((c) => c.startsWith('i-'));
     return c ? c.slice(2) : null;
   };
+  // The styles written for an element, from the rules that match it and its own style,
+  // as a developer would copy them; the variables they use, and its markup.
+  // Declarations as written, shorthands kept whole: split the text at semicolons that
+  // aren't inside brackets.
+  const written = (style) => {
+    const out = [];
+    let depth = 0, from = 0;
+    const t = style.cssText;
+    const take = (end) => {
+      const d = t.slice(from, end), i = d.indexOf(':');
+      if (i > 0) out.push([d.slice(0, i).trim(), d.slice(i + 1).trim()]);
+      from = end + 1;
+    };
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] === '(') depth++;
+      else if (t[i] === ')') depth--;
+      else if (t[i] === ';' && depth === 0) take(i);
+    }
+    take(t.length);
+    return out;
+  };
+  // Linked style sheets can't be read from a file page, so their text comes along.
+  const code = (el, text) => {
+    const decls = new Map();
+    const visit = (rules) => {
+      for (const r of rules) {
+        if (!r.selectorText) {
+          if (r.cssRules && (!r.media || matchMedia(r.media.mediaText).matches)) visit(r.cssRules);
+          continue;
+        }
+        if (/^\s*(\*|html\b|body\b|:root\b)/.test(r.selectorText) && !el.matches('body')) continue;
+        let hit = false;
+        try { hit = el.matches(r.selectorText); } catch (e) { hit = false; }
+        if (!hit) continue;
+        for (const [k, v] of written(r.style)) if (!k.startsWith('--')) decls.set(k, v);
+      }
+    };
+    for (const sheet of document.styleSheets) { try { visit(sheet.cssRules); } catch (e) {} }
+    if (text) { try { const s = new CSSStyleSheet(); s.replaceSync(text); visit(s.cssRules); } catch (e) {} }
+    for (const [k, v] of written(el.style)) decls.set(k, v);
+    const css = Array.from(decls, ([k, v]) => ({ k, v }));
+    const root = getComputedStyle(document.documentElement);
+    const names = new Set();
+    for (const d of css) for (const m of d.v.matchAll(/var\((--[\w-]+)/g)) names.add(m[1]);
+    const vars = Array.from(names, (k) => ({ k, v: root.getPropertyValue(k).trim() }));
+    let html = el.outerHTML;
+    if (html.length > 4000) html = html.slice(0, 4000) + '\n…';
+    return { css, vars, html };
+  };
   const info = (el) => {
     const cs = getComputedStyle(el);
     const computed = {};
@@ -338,6 +387,7 @@ if (!window.__runo) window.__runo = (() => {
       return info(el);
     },
     info: (p) => { const el = at(p); return el ? info(el) : null; },
+    code: (p, text) => { const el = at(p); return el ? code(el, text) : null; },
     // Put a drawn shape at a point on the page, in the box that holds that spot, floating
     // where it was drawn. Gives back its path.
     drawShape: (x, y, s) => {
@@ -629,6 +679,24 @@ pub(crate) struct Layer {
     pub locked: bool,
     #[serde(default)]
     pub id: Option<String>,
+}
+
+/// An element as code: the declarations written for it, the variables they use with their
+/// values, and its markup.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct Code {
+    #[serde(default)]
+    pub css: Vec<Decl>,
+    #[serde(default)]
+    pub vars: Vec<Decl>,
+    #[serde(default)]
+    pub html: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct Decl {
+    pub k: String,
+    pub v: String,
 }
 
 /// An element on the page: where it sits, and whether its children run across.

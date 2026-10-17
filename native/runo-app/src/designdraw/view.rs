@@ -22,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 mod comments;
 mod components;
 mod figma;
+mod handoff;
 mod insert;
 mod layers;
 mod looks;
@@ -88,6 +89,8 @@ enum Panel {
     Prototype,
     Theme,
     Checks,
+    /// What a developer needs to build the picked layer.
+    Code,
 }
 
 enum Drag {
@@ -266,6 +269,9 @@ pub(crate) struct DesignCanvas {
     play_n: usize,
     /// Counts the screens Present shows, so a delayed link knows if it's still wanted.
     play_visit: usize,
+    /// The Code tab's code for the picked layer, and the layer it was last asked for.
+    code: Option<(handoff::CodeKey, dom::Code)>,
+    code_asked: std::cell::RefCell<Option<handoff::CodeKey>>,
     /// Screens as tapping in Play left them, shown over their drawings until Play stops.
     play_shots: HashMap<String, Shot>,
     play_tapping: bool,
@@ -509,6 +515,8 @@ impl DesignCanvas {
             play_move: None,
             play_n: 0,
             play_visit: 0,
+            code: None,
+            code_asked: Default::default(),
             play_shots: HashMap::new(),
             play_tapping: false,
             f_text,
@@ -2019,7 +2027,9 @@ impl DesignCanvas {
                 if edit_text && this.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     this.inline_open = true;
                 }
-                this.panel = Panel::Design;
+                if !matches!(this.panel, Panel::Prototype | Panel::Code) {
+                    this.panel = Panel::Design;
+                }
                 this.load_layers(cx);
             },
         );
@@ -2187,7 +2197,9 @@ impl DesignCanvas {
                 this.element = (!els.is_empty()).then(|| els.remove(0));
                 this.also = els;
                 this.inline_open = false;
-                this.panel = Panel::Design;
+                if !matches!(this.panel, Panel::Prototype | Panel::Code) {
+                    this.panel = Panel::Design;
+                }
                 this.load_layers(cx);
             },
         );
