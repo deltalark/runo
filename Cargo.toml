@@ -31,6 +31,23 @@ strip = "symbols"
 [profile.dev.package.vt100]
 overflow-checks = false
 
+# Screens are drawn as PNGs and decoded on every change; unoptimised, decoding takes
+# hundreds of milliseconds a picture.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+
 # Keep profiling builds representative of release performance while retaining
 # symbols for Instruments, perf and flamegraph.
 [profile.profiling]

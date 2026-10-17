@@ -58,10 +58,19 @@ impl Ease {
     }
 }
 
-/// The layers on both screens, by name, id or text, that Smart animate carries across:
-/// where each is on the screen being left and where it lands. A layer inside one that is
-/// carried goes with it.
-pub(crate) fn pairs(old: &[dom::Bx], new: &[dom::Bx]) -> Vec<(dom::Box, dom::Box)> {
+/// A layer Smart animate carries: where it is on the screen being left and on the one
+/// landed on, and where it moves from and to.
+#[derive(Clone, Debug)]
+pub(crate) struct Carry {
+    pub from: dom::Path,
+    pub to: dom::Path,
+    pub a: dom::Box,
+    pub b: dom::Box,
+}
+
+/// The layers on both screens, by name, id or text, that Smart animate carries across
+/// because they moved or changed size. A layer inside one that is carried goes with it.
+pub(crate) fn pairs(old: &[dom::Bx], new: &[dom::Bx]) -> Vec<Carry> {
     fn count(boxes: &[dom::Bx]) -> HashMap<&str, usize> {
         let mut n: HashMap<&str, usize> = HashMap::new();
         for b in boxes {
@@ -72,8 +81,7 @@ pub(crate) fn pairs(old: &[dom::Bx], new: &[dom::Bx]) -> Vec<(dom::Box, dom::Box
         n
     }
     let (in_old, in_new) = (count(old), count(new));
-    let mut carried: Vec<&dom::Path> = vec![];
-    let mut out = vec![];
+    let mut out: Vec<Carry> = vec![];
     for b in new {
         let Some(k) = b.key.as_deref() else {
             continue;
@@ -81,27 +89,199 @@ pub(crate) fn pairs(old: &[dom::Bx], new: &[dom::Bx]) -> Vec<(dom::Box, dom::Box
         if in_old.get(k) != Some(&1) || in_new.get(k) != Some(&1) {
             continue;
         }
-        if carried.iter().any(|p| b.path.starts_with(p)) {
+        if out.iter().any(|c| b.path.starts_with(&c.to)) {
             continue;
         }
         let Some(a) = old.iter().find(|o| o.key.as_deref() == Some(k)) else {
             continue;
         };
-        carried.push(&b.path);
         let same = (a.rect.x - b.rect.x).abs() < 0.5
             && (a.rect.y - b.rect.y).abs() < 0.5
             && (a.rect.w - b.rect.w).abs() < 0.5
             && (a.rect.h - b.rect.h).abs() < 0.5;
         if !same && out.len() < 40 {
-            out.push((a.rect.clone(), b.rect.clone()));
+            out.push(Carry {
+                from: a.path.clone(),
+                to: b.path.clone(),
+                a: a.rect.clone(),
+                b: b.rect.clone(),
+            });
         }
     }
     out
 }
 
+/// A Smart animate move ready to play: both screens drawn without the layers it carries,
+/// so each layer is seen once, moving, while the rest of one screen gives way to the other.
+pub(crate) struct Smart {
+    /// The screen landed on.
+    pub to: String,
+    pub plates: Plates,
+    pub carries: Vec<Carry>,
+}
+
 impl DesignCanvas {
+    /// Get a Smart animate move from the screen playing to `to` ready, then `go`. When the
+    /// move isn't Smart animate, or nothing moves, it goes at once.
+    pub(super) fn smart_then(
+        &mut self,
+        to: &str,
+        how: Move,
+        cx: &mut Context<Self>,
+        go: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) {
+        self.drop_smart(cx);
+        let from = self.playing.clone().unwrap_or_default();
+        let shot = |id: &str| self.play_shots.get(id).or_else(|| self.shots.get(id));
+        let carries = match (shot(&from), self.shots.get(to)) {
+            (Some(o), Some(n)) if how.kind == MoveKind::Smart && anim_on() => {
+                pairs(&o.boxes, &n.boxes)
+            }
+            _ => vec![],
+        };
+        let devices = self
+            .canvas
+            .screen(&from)
+            .map(|s| s.device)
+            .zip(self.canvas.screen(to).map(|s| s.device));
+        let Some((fd, td)) = devices.filter(|_| !carries.is_empty()) else {
+            go(self, cx);
+            return;
+        };
+        let to = to.to_string();
+        let (hide_old, hide_new) = hides(&carries);
+        self.play_tapping = true;
+        self.run(
+            cx,
+            {
+                let to = to.clone();
+                move |r| r.plates((&from, fd, &hide_old), (&to, td, &hide_new))
+            },
+            move |this, out, cx| {
+                this.play_tapping = false;
+                if let Ok(plates) = out {
+                    this.play_smart = Some(Smart {
+                        to,
+                        plates,
+                        carries,
+                    });
+                }
+                go(this, cx);
+            },
+        );
+    }
+
+    /// After a tap on the screen playing moved layers about, move them there from where
+    /// they were, then show `shot`.
+    pub(super) fn smart_tap(
+        &mut self,
+        id: String,
+        before: &[dom::Bx],
+        shot: Shot,
+        cx: &mut Context<Self>,
+    ) {
+        let carries = if anim_on() {
+            pairs(before, &shot.boxes)
+        } else {
+            vec![]
+        };
+        let device = self.canvas.screen(&id).map(|s| s.device);
+        let Some(device) = device.filter(|_| !carries.is_empty()) else {
+            drop_shot(self.play_shots.insert(id, shot), cx);
+            return;
+        };
+        self.drop_smart(cx);
+        let (hide_old, hide_new) = hides(&carries);
+        let taps = self.play_taps.clone();
+        self.play_tapping = true;
+        let id2 = id.clone();
+        self.run(
+            cx,
+            move |r| r.tap_plates(&id2, device, &taps, (&hide_old, &hide_new)),
+            move |this, out, cx| {
+                this.play_tapping = false;
+                if this.playing.as_deref() != Some(id.as_str()) {
+                    drop_shot(Some(shot), cx);
+                    return;
+                }
+                drop_shot(this.play_shots.insert(id.clone(), shot), cx);
+                if let Ok(plates) = out {
+                    this.play_smart = Some(Smart {
+                        to: id.clone(),
+                        plates,
+                        carries,
+                    });
+                    let how = Move {
+                        kind: MoveKind::Smart,
+                        ms: 320,
+                        ease: Ease::InOut,
+                    };
+                    this.animate_move(id, how, false, cx);
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Let go of the pictures of a Smart animate move that's done.
+    pub(super) fn drop_smart(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.play_smart.take() {
+            let images = s.plates.images();
+            cx.defer(move |cx| {
+                for image in images {
+                    cx.drop_image(image, None);
+                }
+            });
+        }
+    }
+
+    /// A Smart animate move as it plays: the screen landed on, the one left fading off it,
+    /// and the layers carried moving across both, cut from the screen landed on.
+    pub(super) fn smart_frame(
+        &self,
+        how: Move,
+        scale: f32,
+        (w, h): (f32, f32),
+    ) -> Option<Vec<AnyElement>> {
+        let sm = self.play_smart.as_ref()?;
+        let shot = self
+            .play_shots
+            .get(&sm.to)
+            .or_else(|| self.shots.get(&sm.to))?;
+        let n = self.play_n;
+        let plate = |p: &Plate| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(w))
+                .h(px(h))
+                .overflow_hidden()
+                .bg(rgb(0xffffff))
+                .child(
+                    img(ImageSource::Render(p.0.clone()))
+                        .w(px(w))
+                        .h(px(p.1 * scale)),
+                )
+        };
+        let mut out = vec![
+            plate(&sm.plates.new).into_any_element(),
+            plate(&sm.plates.old)
+                .with_animation(("design-smart-old", n), how.animation(), |el, d| {
+                    el.opacity(1. - d.clamp(0., 1.))
+                })
+                .into_any_element(),
+        ];
+        let (image, tall) = match &sm.plates.layers {
+            Some(layers) => (layers, sm.plates.new.1),
+            None => (&shot.image, shot.size.1),
+        };
+        out.extend(carried(&sm.carries, image, tall * scale, how, scale, w, n));
+        Some(out)
+    }
+
     /// The layers Smart animate moves from screen `from` to screen `to`, drawn at `scale`
-    /// over the new screen as it fades in.
+    /// over the new screen as it fades in, when the screens couldn't be drawn without them.
     pub(super) fn smart_layers(
         &self,
         from: &str,
@@ -114,41 +294,16 @@ impl DesignCanvas {
         let (Some(old), Some(new)) = (shot(from), shot(to)) else {
             return vec![];
         };
-        let tall = new.size.1 * scale;
-        let n = self.play_n;
-        pairs(&old.boxes, &new.boxes)
-            .into_iter()
-            .enumerate()
-            .map(|(i, (a, b))| {
-                let lerp = move |x: f32, y: f32, d: f32| (x + (y - x) * d) * scale;
-                div()
-                    .absolute()
-                    .left(px(a.x * scale))
-                    .top(px(a.y * scale))
-                    .w(px(a.w * scale))
-                    .h(px(a.h * scale))
-                    .overflow_hidden()
-                    .child(
-                        img(ImageSource::Render(new.image.clone()))
-                            .absolute()
-                            .left(px(-b.x * scale))
-                            .top(px(-b.y * scale))
-                            .w(px(width))
-                            .h(px(tall)),
-                    )
-                    .with_animation(
-                        ("design-smart", n * 64 + i),
-                        how.animation(),
-                        move |el, d| {
-                            el.left(px(lerp(a.x, b.x, d)))
-                                .top(px(lerp(a.y, b.y, d)))
-                                .w(px(lerp(a.w, b.w, d).max(0.)))
-                                .h(px(lerp(a.h, b.h, d).max(0.)))
-                        },
-                    )
-                    .into_any_element()
-            })
-            .collect()
+        let carries = pairs(&old.boxes, &new.boxes);
+        carried(
+            &carries,
+            &new.image,
+            new.size.1 * scale,
+            how,
+            scale,
+            width,
+            self.play_n,
+        )
     }
 
     /// When the screen playing has a link that follows itself after a delay, follow it then,
@@ -250,6 +405,61 @@ impl DesignCanvas {
     }
 }
 
+/// The paths to hide on each screen: the layers carried.
+fn hides(carries: &[Carry]) -> (Vec<dom::Path>, Vec<dom::Path>) {
+    carries
+        .iter()
+        .map(|c| (c.from.clone(), c.to.clone()))
+        .unzip()
+}
+
+/// Each carried layer, cut from `image` of the screen landed on (drawn `tall` high), moving
+/// from where it was to where it lands.
+fn carried(
+    carries: &[Carry],
+    image: &Arc<RenderImage>,
+    tall: f32,
+    how: Move,
+    scale: f32,
+    width: f32,
+    n: usize,
+) -> Vec<AnyElement> {
+    carries
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (a, b) = (c.a.clone(), c.b.clone());
+            let lerp = move |x: f32, y: f32, d: f32| (x + (y - x) * d) * scale;
+            div()
+                .absolute()
+                .left(px(a.x * scale))
+                .top(px(a.y * scale))
+                .w(px(a.w * scale))
+                .h(px(a.h * scale))
+                .overflow_hidden()
+                .child(
+                    img(ImageSource::Render(image.clone()))
+                        .absolute()
+                        .left(px(-b.x * scale))
+                        .top(px(-b.y * scale))
+                        .w(px(width))
+                        .h(px(tall)),
+                )
+                .with_animation(
+                    ("design-smart", n * 64 + i),
+                    how.animation(),
+                    move |el, d| {
+                        el.left(px(lerp(a.x, b.x, d)))
+                            .top(px(lerp(a.y, b.y, d)))
+                            .w(px(lerp(a.w, b.w, d).max(0.)))
+                            .h(px(lerp(a.h, b.h, d).max(0.)))
+                    },
+                )
+                .into_any_element()
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{pairs, Ease};
@@ -286,7 +496,26 @@ mod tests {
         let moved = pairs(&old, &new);
         // The card moves, its title goes with it, the logo stays put, and the rest fades.
         assert_eq!(moved.len(), 1);
-        assert_eq!((moved[0].0.y, moved[0].1.y), (100., 40.));
+        assert_eq!((moved[0].a.y, moved[0].b.y), (100., 40.));
+        assert_eq!(
+            (moved[0].from.clone(), moved[0].to.clone()),
+            (vec![0], vec![3])
+        );
+    }
+
+    #[test]
+    fn a_layer_moving_inside_one_that_stays_is_carried() {
+        let old = vec![
+            bx(vec![0], "Card", 0., 100.),
+            bx(vec![0, 0], "Badge", 10., 110.),
+        ];
+        let new = vec![
+            bx(vec![0], "Card", 0., 100.),
+            bx(vec![0, 0], "Badge", 30., 110.),
+        ];
+        let moved = pairs(&old, &new);
+        assert_eq!(moved.len(), 1);
+        assert_eq!((moved[0].a.x, moved[0].b.x), (10., 30.));
     }
 
     #[test]

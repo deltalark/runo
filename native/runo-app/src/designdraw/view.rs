@@ -7,7 +7,7 @@ use super::checks;
 use super::dom::{self, Element, Layer};
 use super::model::Canvas;
 use super::model::*;
-use super::render::{Asked, Renderer, Shot};
+use super::render::{Asked, Plate, Plates, Renderer, Shot};
 use crate::archdraw::view::{chip_btn, col, icon_btn, label_row, section, text_btn, tip};
 use crate::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -24,13 +24,16 @@ mod components;
 mod figma;
 mod grids;
 mod handoff;
+mod history;
 mod insert;
 mod layers;
+mod libraries;
 mod looks;
 mod motion;
 mod pictures;
 mod shapes;
 mod vars;
+mod vectors;
 
 actions!(
     design_canvas,
@@ -97,6 +100,13 @@ enum Panel {
 
 enum Drag {
     None,
+    /// Moving one point of the path being edited.
+    Point {
+        contour: usize,
+        index: usize,
+        from: Pt,
+        at: Pt,
+    },
     Pan {
         from: Pt,
         start: Pt,
@@ -275,12 +285,21 @@ pub(crate) struct DesignCanvas {
     play_back: Vec<(String, Move)>,
     /// The move under way in Play, and a count that tells one move's animation from the next.
     play_move: Option<(String, Move, bool)>,
+    /// The Smart animate move playing, drawn ready.
+    play_smart: Option<motion::Smart>,
+    /// Where the screen playing was tapped since it opened, to tap again when it's drawn
+    /// afresh.
+    play_taps: Vec<(f32, f32)>,
     play_n: usize,
     /// Counts the screens Present shows, so a delayed link knows if it's still wanted.
     play_visit: usize,
     /// The Code tab's code for the picked layer, and the layer it was last asked for.
     code: Option<(handoff::CodeKey, dom::Code)>,
     code_asked: std::cell::RefCell<Option<handoff::CodeKey>>,
+    /// What the Code tab writes the layer as, and the React or SwiftUI last written.
+    code_lang: handoff::Lang,
+    code_gen: Option<(handoff::CodeKey, handoff::Lang, handoff::Written)>,
+    gen_asked: std::cell::RefCell<Option<(handoff::CodeKey, handoff::Lang)>>,
     /// Screens as tapping in Play left them, shown over their drawings until Play stops.
     play_shots: HashMap<String, Shot>,
     play_tapping: bool,
@@ -293,6 +312,8 @@ pub(crate) struct DesignCanvas {
     hand: bool,
     /// Whether layout grids are drawn and snapped to.
     show_grids: bool,
+    /// The vector path whose points are being edited.
+    points: Option<vectors::PointEdit>,
     /// The shape tool picked, if any, and the path the pen is placing: its screen, its
     /// points in canvas units, and where the next would go.
     shape: Option<shapes::Shape>,
@@ -306,6 +327,19 @@ pub(crate) struct DesignCanvas {
     assets: bool,
     /// The selected instance's component name and variant name, as typed.
     f_comp: Entity<InputState>,
+    /// The name this project's library is published under.
+    f_lib: Entity<InputState>,
+    /// The libraries published from every project, and those this one added.
+    published: Vec<super::shared::Library>,
+    added_libs: Vec<super::shared::Library>,
+    /// The History tab: whether it's showing, the versions, the one open with what changed
+    /// since, its name box, the screen being compared, and when a version last saved itself.
+    history: bool,
+    versions: Vec<super::versions::Version>,
+    version_open: Option<(String, super::versions::Changes)>,
+    f_version: Entity<InputState>,
+    comparing: Option<history::Compare>,
+    version_due: Option<Instant>,
     f_variant: Entity<InputState>,
     comp_vals: (String, String),
     /// The comment tool, the design's comments, the one open, and its text box.
@@ -338,6 +372,8 @@ pub(crate) struct DesignCanvas {
     f_var: Entity<InputState>,
     /// Who's commenting, found out when they first comment.
     author: String,
+    /// Who comments can mention.
+    people: Vec<String>,
     f_inline: Entity<InputState>,
     inline_open: bool,
     /// What the text fields were filled for.
@@ -474,6 +510,8 @@ impl DesignCanvas {
         }));
         let fields = Self::make_fields(window, cx, &mut subs);
         let (f_comp, f_variant) = Self::make_component_fields(window, cx, &mut subs);
+        let f_lib = Self::make_library_field(&root, window, cx);
+        let f_version = Self::make_version_field(window, cx, &mut subs);
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
         let f_icon = Self::make_icon_field(window, cx, &mut subs);
@@ -524,10 +562,15 @@ impl DesignCanvas {
             playing: None,
             play_back: Vec::new(),
             play_move: None,
+            play_smart: None,
+            play_taps: Vec::new(),
             play_n: 0,
             play_visit: 0,
             code: None,
             code_asked: Default::default(),
+            code_lang: Default::default(),
+            code_gen: None,
+            gen_asked: Default::default(),
             play_shots: HashMap::new(),
             play_tapping: false,
             f_text,
@@ -536,6 +579,7 @@ impl DesignCanvas {
             field_vals: HashMap::new(),
             hand: false,
             show_grids: true,
+            points: None,
             shape: None,
             pen: None,
             pen_at: None,
@@ -544,6 +588,15 @@ impl DesignCanvas {
             library,
             assets: false,
             f_comp,
+            f_lib,
+            published: super::shared::published(),
+            added_libs: Vec::new(),
+            history: false,
+            versions: Vec::new(),
+            version_open: None,
+            f_version,
+            comparing: None,
+            version_due: None,
             f_variant,
             comp_vals: Default::default(),
             commenting: false,
@@ -566,6 +619,7 @@ impl DesignCanvas {
             editing_var: None,
             f_var,
             author: String::new(),
+            people: Vec::new(),
             f_inline,
             inline_open: false,
             loaded: None,
@@ -580,6 +634,9 @@ impl DesignCanvas {
             watching: true,
             _subs: subs,
         };
+        this.refresh_libraries();
+        this.autosave();
+        this.versions = super::versions::list(&this.root);
         this.load_rules(window, cx);
         this.seen = this.file_times();
         let ids: Vec<String> = this.canvas.screens.iter().map(|s| s.id.clone()).collect();
@@ -683,6 +740,17 @@ impl DesignCanvas {
                         out.insert(p, t);
                     }
                 }
+            }
+        }
+        // The styles of libraries added from other projects.
+        for e in std::fs::read_dir(dir.join("components"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let p = e.path().join(super::shared::SHEET);
+            if let Ok(t) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+                out.insert(p, t);
             }
         }
         out
@@ -1001,6 +1069,7 @@ impl DesignCanvas {
     /// Remember our own writes so they don't read as outside changes.
     fn note_writes(&mut self) {
         self.seen = self.file_times();
+        self.autosave();
     }
 
     fn save_canvas(&mut self) {
@@ -2896,14 +2965,21 @@ impl DesignCanvas {
         }
         self.play_tapping = true;
         let tapped = id.clone();
+        let before = self.play_taps.clone();
         self.run(
             cx,
-            move |r| r.tap(&id, device, at),
+            move |r| r.tap(&id, device, &before, at),
             move |this, out, cx| {
                 this.play_tapping = false;
                 if let Ok(shot) = out {
                     if this.playing.as_deref() == Some(tapped.as_str()) {
-                        drop_shot(this.play_shots.insert(tapped, shot), cx);
+                        this.play_taps.push(at);
+                        let was = this
+                            .play_shots
+                            .get(&tapped)
+                            .or_else(|| this.shots.get(&tapped));
+                        let before = was.map(|s| s.boxes.clone()).unwrap_or_default();
+                        this.smart_tap(tapped, &before, shot, cx);
                     } else {
                         drop_shot(Some(shot), cx);
                     }
@@ -2935,6 +3011,8 @@ impl DesignCanvas {
         self.playing = first;
         self.play_back.clear();
         self.play_move = None;
+        self.play_taps.clear();
+        self.drop_smart(cx);
         for (_, shot) in self.play_shots.drain() {
             drop_shot(Some(shot), cx);
         }
@@ -2953,33 +3031,47 @@ impl DesignCanvas {
             cx.notify();
             return;
         };
-        let how = Move::of(link, screen.device, &self.canvas.platform);
-        drop_shot(self.play_shots.remove(to), cx);
-        if let Some(now) = self.playing.replace(to.to_string()) {
-            self.play_back.push((now.clone(), how));
-            self.animate_move(now, how, false, cx);
+        if self.play_tapping {
+            return;
         }
-        self.arm_delay(cx);
-        cx.notify();
+        let how = Move::of(link, screen.device, &self.canvas.platform);
+        let to = to.to_string();
+        self.smart_then(&to.clone(), how, cx, move |this, cx| {
+            drop_shot(this.play_shots.remove(&to), cx);
+            this.play_taps.clear();
+            if let Some(now) = this.playing.replace(to) {
+                this.play_back.push((now.clone(), how));
+                this.animate_move(now, how, false, cx);
+            }
+            this.arm_delay(cx);
+            cx.notify();
+        });
     }
 
     /// Go back to the screen before, undoing the move that left it.
     fn play_return(&mut self, cx: &mut Context<Self>) {
+        if self.play_tapping {
+            return;
+        }
         let Some((prev, how)) = self.play_back.pop() else {
             return;
         };
-        drop_shot(self.play_shots.remove(&prev), cx);
-        if let Some(now) = self.playing.replace(prev) {
-            self.animate_move(now, how, true, cx);
-        }
-        self.arm_delay(cx);
-        cx.notify();
+        self.smart_then(&prev.clone(), how, cx, move |this, cx| {
+            drop_shot(this.play_shots.remove(&prev), cx);
+            this.play_taps.clear();
+            if let Some(now) = this.playing.replace(prev) {
+                this.animate_move(now, how, true, cx);
+            }
+            this.arm_delay(cx);
+            cx.notify();
+        });
     }
 
     /// Run a move from screen `from` to the one playing now, and drop it when it's done.
     fn animate_move(&mut self, from: String, how: Move, back: bool, cx: &mut Context<Self>) {
         if how.kind == MoveKind::None || !anim_on() {
             self.play_move = None;
+            self.drop_smart(cx);
             return;
         }
         self.play_n += 1;
@@ -2992,6 +3084,7 @@ impl DesignCanvas {
             let _ = this.update(cx, |this, cx| {
                 if this.play_n == n {
                     this.play_move = None;
+                    this.drop_smart(cx);
                     cx.notify();
                 }
             });
@@ -3008,6 +3101,9 @@ impl DesignCanvas {
         let w = self.world(local);
         if self.commenting && e.button == MouseButton::Left {
             self.comment_down(w, cx);
+            return;
+        }
+        if e.button == MouseButton::Left && self.points_down(w, e.modifiers.alt, cx) {
             return;
         }
         if e.button == MouseButton::Left && self.shape_down(w, e.click_count, cx) {
@@ -3183,6 +3279,7 @@ impl DesignCanvas {
         };
         match &mut self.drag {
             Drag::None => return,
+            Drag::Point { at, .. } => *at = w,
             Drag::Guide { vertical, at, .. } => {
                 if let Some((sx, sy)) = guide_off {
                     *at = if *vertical { w.0 - sx } else { w.1 - sy };
@@ -3320,6 +3417,12 @@ impl DesignCanvas {
                 ..
             } if self.floating() => self.move_floating(at.0 - from.0, at.1 - from.1, cx),
             Drag::Guide { id, index, at, .. } => self.drop_guide(id, index, at, cx),
+            Drag::Point {
+                contour,
+                index,
+                from,
+                at,
+            } => self.drop_point(contour, index, from, at, cx),
             Drag::Element { moved: true, .. } => {
                 if let (Some(d), Some(path)) = (drop, self.element.as_ref().map(|e| e.path.clone()))
                 {
@@ -3556,6 +3659,17 @@ impl DesignCanvas {
                 self.finish_pen(false, cx);
                 true
             }
+            (false, false, false, "enter") if self.points.is_some() => {
+                self.points = None;
+                cx.notify();
+                true
+            }
+            (false, false, false, "enter")
+                if self.element.as_ref().is_some_and(|e| e.tag == "svg") =>
+            {
+                self.start_points(cx);
+                true
+            }
             (false, false, false, "enter") => {
                 if self.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     self.inline_open = true;
@@ -3644,7 +3758,11 @@ impl DesignCanvas {
 
     /// Escape: leave play, then the text being edited, then step out to the parent.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.playing.is_some() {
+        if self.comparing.is_some() {
+            self.drop_compare(cx);
+        } else if self.points.is_some() {
+            self.points = None;
+        } else if self.playing.is_some() {
             self.playing = None;
         } else if self.pen.is_some() {
             self.finish_pen(false, cx);
@@ -4662,11 +4780,18 @@ impl DesignCanvas {
             .and_then(|(from, how, back)| Some((picture(from)?, from.clone(), *how, *back)));
         match (moving, picture(&id)) {
             (Some((old, from, how, back)), Some(new)) => {
-                for layer in how.layers(old, new, back, (dw, dh), self.play_n) {
-                    frame = frame.child(layer);
-                }
-                if how.kind == MoveKind::Smart {
-                    frame = frame.children(self.smart_layers(&from, &id, how, scale, dw));
+                let smart = self
+                    .smart_frame(how, scale, (dw, dh))
+                    .filter(|_| how.kind == MoveKind::Smart);
+                if let Some(smart) = smart {
+                    frame = frame.children(smart);
+                } else {
+                    for layer in how.layers(old, new, back, (dw, dh), self.play_n) {
+                        frame = frame.child(layer);
+                    }
+                    if how.kind == MoveKind::Smart {
+                        frame = frame.children(self.smart_layers(&from, &id, how, scale, dw));
+                    }
                 }
             }
             (_, Some(new)) => frame = frame.child(new),
@@ -4683,11 +4808,15 @@ impl DesignCanvas {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                            this.play_tap(e.position, cx);
+                            if this.commenting {
+                                this.play_comment_down(e.position, cx);
+                            } else {
+                                this.play_tap(e.position, cx);
+                            }
                         }),
                     ),
             );
-            for (i, l) in shot.links.iter().enumerate() {
+            for (i, l) in shot.links.iter().enumerate().filter(|_| !self.commenting) {
                 let link = l.clone();
                 frame = frame.child(
                     div()
@@ -4765,10 +4894,23 @@ impl DesignCanvas {
                                 .flex_1()
                                 .text_size(px(13.))
                                 .text_color(rgb(c_text()))
-                                .child(format!(
-                                    "{}  ·  click the linked parts to move through the design",
-                                    s.name
-                                )),
+                                .child(if self.commenting {
+                                    format!("{}  ·  click anywhere to comment", s.name)
+                                } else {
+                                    format!(
+                                        "{}  ·  click the linked parts to move through the design",
+                                        s.name
+                                    )
+                                }),
+                        )
+                        .child(
+                            icon_btn(
+                                "design-play-comment",
+                                comments::comment_icon(),
+                                "Comment (C)",
+                                self.commenting,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_commenting(cx))),
                         )
                         .child(platforms),
                 )
@@ -4865,6 +5007,7 @@ impl DesignCanvas {
         let bounds = self.bounds.clone();
         let (links, dragging) = self.paint_links();
         let sketch = self.sketch();
+        let point_lines = self.point_lines();
         let notice = self
             .notice
             .as_ref()
@@ -4939,6 +5082,13 @@ impl DesignCanvas {
                         if let Some((pts, arrow)) = &sketch {
                             shapes::paint_sketch(pts, *arrow, &tf, window);
                         }
+                        for (pts, closed) in &point_lines {
+                            let mut pts = pts.clone();
+                            if *closed && !pts.is_empty() {
+                                pts.push(pts[0]);
+                            }
+                            shapes::paint_sketch(&pts, false, &tf, window);
+                        }
                     },
                 )
                 .absolute()
@@ -4946,9 +5096,12 @@ impl DesignCanvas {
                 .left_0()
                 .size_full(),
             )
+            .children(self.point_handles())
             .children(self.empty_state(cx))
             .children(self.thinking())
-            .children(self.comment_layer(cx));
+            .when(self.playing.is_none(), |a| {
+                a.children(self.comment_layer(cx))
+            });
         if let Some(e) = &self.error {
             area = area.child(
                 div()
@@ -5004,6 +5157,11 @@ impl DesignCanvas {
             area = area.child(self.screen_menu(*at, cx));
         }
         area = area.children(self.player(cx));
+        if self.playing.is_some() {
+            // Comments in Present go over the screen playing.
+            area = area.children(self.comment_layer(cx));
+        }
+        area = area.children(self.compare_view(cx));
         // The status sits in a strip under the canvas, so nothing drawn over the canvas covers it.
         div()
             .flex_1()

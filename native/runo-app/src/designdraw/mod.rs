@@ -3,6 +3,7 @@
 
 pub(crate) mod brief;
 pub(crate) mod checks;
+pub(crate) mod codegen;
 pub(crate) mod dom;
 pub(crate) mod export;
 pub(crate) mod fields;
@@ -11,7 +12,10 @@ pub(crate) mod model;
 pub(crate) mod notes;
 pub(crate) mod parts;
 pub(crate) mod render;
+pub(crate) mod shared;
 pub(crate) mod styles;
+pub(crate) mod vector;
+pub(crate) mod versions;
 pub(crate) mod view;
 #[cfg(target_os = "macos")]
 pub(crate) mod webkit;

@@ -100,9 +100,9 @@ fn markup(shape: Shape, pts: &[Pt], closed: bool) -> (String, Pt) {
             (
                 format!(
                     "<svg data-name=\"{name}\" width=\"{w}\" height=\"{h}\" \
-                     viewBox=\"0 0 {w} {h}\" style=\"fill:{fill};stroke:var(--text);\
+                     viewBox=\"0 0 {w} {h}\" preserveAspectRatio=\"none\" style=\"fill:{fill};stroke:var(--text);\
                      stroke-width:2px;overflow:visible\"><path d=\"{d}\" \
-                     stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+                     vector-effect=\"non-scaling-stroke\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
                 ),
                 (ox, oy),
             )

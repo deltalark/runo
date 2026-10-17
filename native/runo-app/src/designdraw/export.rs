@@ -10,16 +10,31 @@ pub(crate) enum Format {
     Png,
     Jpg,
     Html,
+    React,
+    SwiftUi,
 }
 
 impl Format {
-    pub(crate) const ALL: [Format; 3] = [Format::Png, Format::Jpg, Format::Html];
+    pub(crate) const ALL: [Format; 5] = [
+        Format::Png,
+        Format::Jpg,
+        Format::Html,
+        Format::React,
+        Format::SwiftUi,
+    ];
+
+    /// Whether it's a picture, drawn at a scale.
+    pub(crate) fn picture(self) -> bool {
+        matches!(self, Format::Png | Format::Jpg)
+    }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Format::Png => "PNG",
             Format::Jpg => "JPG",
             Format::Html => "HTML",
+            Format::React => "React",
+            Format::SwiftUi => "SwiftUI",
         }
     }
 
@@ -28,6 +43,8 @@ impl Format {
             Format::Png => "png",
             Format::Jpg => "jpg",
             Format::Html => "html",
+            Format::React => "tsx",
+            Format::SwiftUi => "swift",
         }
     }
 }
@@ -45,6 +62,7 @@ pub(crate) fn file_name(screen: &str, part: Option<&str>, scale: u32, format: Fo
     };
     match format {
         Format::Html => format!("{base}.html"),
+        Format::React | Format::SwiftUi => format!("{base}.{}", format.ext()),
         _ if scale == 1 => format!("{base}.{}", format.ext()),
         _ => format!("{base}@{scale}x.{}", format.ext()),
     }

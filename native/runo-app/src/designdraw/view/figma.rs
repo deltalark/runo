@@ -96,7 +96,7 @@ pub(super) fn caption(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// A tab at the top of the left panel: Layers or Assets.
+/// A tab at the top of the left panel: Layers, Assets or History.
 fn side_tab(
     id: &'static str,
     label: &'static str,
@@ -104,6 +104,7 @@ fn side_tab(
     cx: &mut Context<DesignCanvas>,
 ) -> Stateful<Div> {
     let assets = label == "Assets";
+    let history = label == "History";
     div()
         .id(id)
         .h(px(26.))
@@ -123,6 +124,14 @@ fn side_tab(
         .hover(|el| el.text_color(rgb(c_text())))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.assets = assets;
+            this.history = history;
+            if history {
+                this.versions = crate::designdraw::versions::list(&this.root);
+                this.version_open = None;
+            }
+            if assets {
+                this.refresh_libraries();
+            }
             cx.notify();
         }))
         .child(label)
@@ -589,8 +598,14 @@ impl DesignCanvas {
                         div()
                             .flex()
                             .gap(px(2.))
-                            .child(side_tab("design-left-layers", "Layers", !self.assets, cx))
-                            .child(side_tab("design-left-assets", "Assets", self.assets, cx)),
+                            .child(side_tab(
+                                "design-left-layers",
+                                "Layers",
+                                !self.assets && !self.history,
+                                cx,
+                            ))
+                            .child(side_tab("design-left-assets", "Assets", self.assets, cx))
+                            .child(side_tab("design-left-history", "History", self.history, cx)),
                     )
                     .child(
                         mini("design-layers-add", IconName::Plus, "New screen (F)", false)
@@ -600,16 +615,19 @@ impl DesignCanvas {
                             })),
                     ),
             )
-            .when(!self.assets && !self.canvas.screens.is_empty(), |el| {
-                el.child(self.find_box())
-            })
+            .when(
+                !self.assets && !self.history && !self.canvas.screens.is_empty(),
+                |el| el.child(self.find_box()),
+            )
             .child(
                 div()
                     .id("design-layers-list")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(if self.assets {
+                    .child(if self.history {
+                        self.history_list(cx)
+                    } else if self.assets {
                         self.assets_list(cx)
                     } else {
                         list
@@ -1113,6 +1131,7 @@ impl DesignCanvas {
                 )
                 .child(tools.ml(px(-4.))),
         );
+        out = out.children(self.vector_tools(el, cx));
         out = out.children(self.component_section(cx));
         if !multi {
             out = out.child(self.style_section(el, cx));
@@ -1706,7 +1725,7 @@ impl DesignCanvas {
 
     /// The Export section: a scale and a format, then export to a file or copy.
     fn export_section(&self, what: &str, cx: &mut Context<Self>) -> Div {
-        let picture = self.export_format != Format::Html;
+        let picture = self.export_format.picture();
         let mut scales = div().flex().gap(px(4.));
         for n in [1u32, 2, 3] {
             scales = scales.child(
@@ -1722,7 +1741,7 @@ impl DesignCanvas {
                 })),
             );
         }
-        let mut formats = div().flex().gap(px(4.));
+        let mut formats = div().flex().flex_wrap().gap(px(4.));
         for (i, f) in Format::ALL.into_iter().enumerate() {
             formats = formats.child(
                 chip_btn(
@@ -1738,7 +1757,7 @@ impl DesignCanvas {
         }
         let label = format!("Export {what}");
         sec("Export", None)
-            .child(div().flex().gap(px(8.)).child(scales).child(formats))
+            .child(div().v_flex().gap(px(6.)).child(formats).child(scales))
             .child(
                 div()
                     .flex()
@@ -1777,6 +1796,22 @@ impl DesignCanvas {
             self.export_format
         };
         let name = export::file_name(&id, part.as_deref(), self.export_scale, format);
+        if matches!(format, Format::React | Format::SwiftUi) {
+            let path = picked.first().map(|e| e.path.clone()).unwrap_or_default();
+            let lang = if format == Format::React {
+                handoff::Lang::React
+            } else {
+                handoff::Lang::Swift
+            };
+            self.write_code(
+                id,
+                path,
+                lang,
+                move |this, code, cx| this.save_code_export(lang, code, cx),
+                cx,
+            );
+            return;
+        }
         if format == Format::Html {
             let design = folder(&self.root);
             let html = std::fs::read_to_string(screen_path(&self.root, &id)).unwrap_or_default();
@@ -1849,7 +1884,7 @@ impl DesignCanvas {
         }
     }
 
-    fn save_export(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+    pub(super) fn save_export(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let dir = export::folder(&self.root);
         let file = dir.join(name);
         match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, bytes)) {
