@@ -24,6 +24,7 @@ mod components;
 mod figma;
 mod grids;
 mod handoff;
+mod handoffs;
 mod history;
 mod insert;
 mod layers;
@@ -340,6 +341,14 @@ pub(crate) struct DesignCanvas {
     f_version: Entity<InputState>,
     comparing: Option<history::Compare>,
     version_due: Option<Instant>,
+    /// The handoffs made, newest first, the stacks they're built with, whether one is being
+    /// made, and what changed since the last, kept until files change again.
+    handoffs: Vec<super::spec::Handoff>,
+    handoff_settings: super::spec::Settings,
+    handing_off: bool,
+    handoff_pending: std::cell::RefCell<Option<((u64, u32), super::versions::Changes)>>,
+    /// Counts the times the design's files changed, ours or from outside.
+    files_changed: u64,
     f_variant: Entity<InputState>,
     comp_vals: (String, String),
     /// The comment tool, the design's comments, the one open, and its text box.
@@ -597,6 +606,11 @@ impl DesignCanvas {
             f_version,
             comparing: None,
             version_due: None,
+            handoffs: Vec::new(),
+            handoff_settings: Default::default(),
+            handing_off: false,
+            handoff_pending: Default::default(),
+            files_changed: 0,
             f_variant,
             comp_vals: Default::default(),
             commenting: false,
@@ -635,6 +649,7 @@ impl DesignCanvas {
             _subs: subs,
         };
         this.refresh_libraries();
+        this.refresh_handoffs();
         this.autosave();
         this.versions = super::versions::list(&this.root);
         this.load_rules(window, cx);
@@ -952,6 +967,7 @@ impl DesignCanvas {
             .chain(self.seen.keys().filter(|p| !now.contains_key(*p)).cloned())
             .collect();
         self.seen = now;
+        self.files_changed += 1;
         if let Some(ai) = &mut self.ai {
             ai.changed = true;
         }
@@ -1069,6 +1085,7 @@ impl DesignCanvas {
     /// Remember our own writes so they don't read as outside changes.
     fn note_writes(&mut self) {
         self.seen = self.file_times();
+        self.files_changed += 1;
         self.autosave();
     }
 

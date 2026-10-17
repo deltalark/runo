@@ -16,6 +16,8 @@ pub(crate) const HELPER: &str = r#"
 if (!window.__runo) window.__runo = (() => {
   const SKIP = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'TITLE', 'TEMPLATE']);
   const kids = (el) => Array.from(el.children).filter((c) => !SKIP.has(c.tagName));
+  // Markup as it's copied or shown, without the layer ids that tie it to this screen.
+  const noRid = (h) => h.replace(/ data-rid="[^"]*"/g, '');
   const pathOf = (el) => {
     const p = [];
     while (el && el !== document.body) {
@@ -103,7 +105,7 @@ if (!window.__runo) window.__runo = (() => {
     const names = new Set();
     for (const d of css) for (const m of d.v.matchAll(/var\((--[\w-]+)/g)) names.add(m[1]);
     const vars = Array.from(names, (k) => ({ k, v: root.getPropertyValue(k).trim() }));
-    let html = el.outerHTML;
+    let html = noRid(el.outerHTML);
     if (html.length > 4000) html = html.slice(0, 4000) + '\n…';
     return { css, vars, html };
   };
@@ -201,7 +203,7 @@ if (!window.__runo) window.__runo = (() => {
     return out;
   };
   const OWN = ['src', 'alt', 'href', 'placeholder', 'value', 'data-goto', 'data-transition',
-    'data-speed'];
+    'data-speed', 'data-rid'];
   const keep = (old, n) => {
     const a = [old, ...old.querySelectorAll('*')];
     const b = [n, ...n.querySelectorAll('*')];
@@ -210,6 +212,7 @@ if (!window.__runo) window.__runo = (() => {
         for (const k of OWN) if (e.hasAttribute(k)) b[i].setAttribute(k, e.getAttribute(k));
       });
     }
+    if (old.dataset.rid) n.dataset.rid = old.dataset.rid;
     const ta = texts(old);
     const tb = texts(n);
     if (ta.length === tb.length) ta.forEach((t, i) => { tb[i].data = t.data; });
@@ -459,6 +462,27 @@ if (!window.__runo) window.__runo = (() => {
       }
       return { node: nodeOf(el, true), comps: parsed };
     },
+    // Give every layer an id of its own that stays with it through edits, so the code built
+    // from it can name it: ones without, and copies that came with another's, get a new one.
+    ensureIds: () => {
+      const seen = new Set();
+      let changed = 0;
+      const fresh = () => {
+        let id;
+        do id = Math.random().toString(36).slice(2, 10); while (seen.has(id) || id.length < 6);
+        return id;
+      };
+      for (const el of document.body.querySelectorAll('*')) {
+        if (SKIP.has(el.tagName) || el.closest('svg') !== null && el.tagName !== 'svg') continue;
+        const id = el.dataset.rid;
+        if (id && !seen.has(id)) { seen.add(id); continue; }
+        const n = fresh();
+        seen.add(n);
+        el.dataset.rid = n;
+        changed++;
+      }
+      return changed || null;
+    },
     // Link a stylesheet into the page unless it's linked already.
     useSheet: (href) => {
       const have = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
@@ -582,7 +606,7 @@ if (!window.__runo) window.__runo = (() => {
       for (const el of inOrder(ps).reverse()) ops[name](el, ...args);
       return true;
     },
-    copy: (ps) => inOrder(ps).map((el) => el.outerHTML),
+    copy: (ps) => inOrder(ps).map((el) => noRid(el.outerHTML)),
     // Pieces of HTML added inside the element at `p` (at its end), or after it.
     paste: (p, htmls, inside) => {
       const el = p.length ? at(p) : document.body;
@@ -614,6 +638,7 @@ if (!window.__runo) window.__runo = (() => {
       const n = parse(html);
       if (!el || !n) return null;
       if (own) keep(el, n);
+      else if (el.dataset.rid) n.dataset.rid = el.dataset.rid;
       el.replaceWith(n);
       return true;
     },

@@ -208,7 +208,7 @@ impl React<'_> {
         let svg = tag == "svg" || tag == "path";
         let mut open = format!("{pad}<{tag}");
         for (k, v) in attrs {
-            if k == "data-library" || k == "data-variant" {
+            if k == "data-library" || k == "data-variant" || k == "data-rid" {
                 continue;
             }
             let k2 = jsx_attr(k, svg);
