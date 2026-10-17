@@ -50,7 +50,8 @@ pub(crate) fn context(c: &Canvas) -> String {
          desktop), and link screens for the prototype with data-goto=\"<other screen id>\" on \
          what's clicked (add data-transition=\"sheet\" for a screen that opens as a modal \
          sheet; push, fade, axis and none also work, and the platform's own is used \
-         otherwise). Make controls work when tapped in Play: a .switch flips its .on class, a \
+         otherwise; data-goto=\"back\" goes back to the screen before). Pictures people \
+         added are in {FOLDER}/assets/, used as ../assets/<file>. Make controls work when tapped in Play: a .switch flips its .on class, a \
          .tab, or any child of an element with data-select, becomes the one with .on, \
          data-toggle=\"class\" toggles that class on the element, data-show=\"#id\" shows or \
          hides another element (menus, accordions, sheets), and checkboxes, radios and inputs \

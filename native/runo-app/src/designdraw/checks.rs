@@ -223,7 +223,11 @@ pub(crate) fn review(facts: &Facts, device: Device, screens: &HashSet<String>) -
                 ),
             );
         }
-        if let Some(to) = f.goto.as_deref().filter(|g| !screens.contains(*g)) {
+        if let Some(to) = f
+            .goto
+            .as_deref()
+            .filter(|g| !screens.contains(*g) && *g != super::model::BACK)
+        {
             add(
                 Kind::DeadLink,
                 format!("{} links to a screen that isn't there ({to})", name(f)),

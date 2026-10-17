@@ -325,9 +325,8 @@ impl DesignCanvas {
                     .on_click(cx.listener(|this, _, _, cx| this.insert("<p>Text</p>", cx))),
             )
             .child(
-                tool("design-tool-image", IconName::Image, "Image", false).on_click(
-                    cx.listener(|this, _, _, cx| this.insert("<div class=\"image\"></div>", cx)),
-                ),
+                tool("design-tool-image", IconName::Image, "Image", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.image_tool(cx))),
             )
             .child(
                 tool("design-tool-hand", IconName::Hand, "Hand (H)", hand).on_click(cx.listener(
@@ -1078,6 +1077,11 @@ impl DesignCanvas {
                 .child(tools.ml(px(-4.))),
         );
         out = out.children(self.component_section(cx));
+        if !multi {
+            out = out
+                .children(self.icon_section(el, cx))
+                .children(self.picture_section(el, cx));
+        }
 
         // Layout: size and padding.
         out = out.child(
@@ -1298,7 +1302,8 @@ impl DesignCanvas {
         );
 
         // Typography.
-        if el.text.is_some() || TEXT_TAGS.contains(&el.tag.as_str()) {
+        let just_icon = el.label.split('.').skip(1).any(|c| c == "icon");
+        if (el.text.is_some() || TEXT_TAGS.contains(&el.tag.as_str())) && !just_icon {
             let align = el.style("text-align");
             let mut aligns = div()
                 .flex()
@@ -1705,6 +1710,16 @@ impl DesignCanvas {
                 |this, _, _, cx| this.op("attr", &[json!("data-goto"), json!("")], After::Same, cx),
             )),
         );
+        opens = opens.child(
+            chip_btn(
+                ("design-goto-back", 0usize),
+                "Back",
+                el.goto.as_deref() == Some(BACK),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.op("attr", &[json!("data-goto"), json!(BACK)], After::Same, cx)
+            })),
+        );
         for (i, t) in self.canvas.screens.iter().enumerate() {
             if Some(&t.id) == self.screen.as_ref() {
                 continue;
@@ -1726,6 +1741,7 @@ impl DesignCanvas {
                 .child(caption("On click, navigate to"))
                 .child(opens),
         );
+        out = out.children(self.overlay_section(el, cx));
         if el.goto.is_some() {
             let mut moves = div().flex().flex_wrap().gap(px(4.));
             let now = el.transition.clone().unwrap_or_default();
