@@ -22,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 mod comments;
 mod components;
 mod figma;
+mod insert;
 mod layers;
 
 actions!(
@@ -284,6 +285,9 @@ pub(crate) struct DesignCanvas {
     f_layer: Entity<InputState>,
     f_find: Entity<InputState>,
     layer_query: String,
+    /// The icon finder's box, and what's typed in it.
+    f_icon: Entity<InputState>,
+    icon_query: String,
     /// Who's commenting, found out when they first comment.
     author: String,
     f_inline: Entity<InputState>,
@@ -424,6 +428,7 @@ impl DesignCanvas {
         let (f_comp, f_variant) = Self::make_component_fields(window, cx, &mut subs);
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
+        let f_icon = Self::make_icon_field(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -493,6 +498,8 @@ impl DesignCanvas {
             f_layer,
             f_find,
             layer_query: String::new(),
+            f_icon,
+            icon_query: String::new(),
             author: String::new(),
             f_inline,
             inline_open: false,
@@ -1214,7 +1221,7 @@ impl DesignCanvas {
                 .unwrap_or_default()
             {
                 let pair = (s.id.clone(), l.goto.clone());
-                if l.goto != s.id && !flow.contains(&pair) {
+                if l.goto != s.id && l.goto != BACK && !flow.contains(&pair) {
                     flow.push(pair);
                 }
             }
@@ -2721,7 +2728,7 @@ impl DesignCanvas {
             if let Some(shot) = self.shots.get(&s.id) {
                 for l in &shot.links {
                     let pair = (s.id.clone(), l.goto.clone());
-                    if !out.contains(&pair) {
+                    if l.goto != BACK && !out.contains(&pair) {
                         out.push(pair);
                     }
                 }
@@ -2857,6 +2864,10 @@ impl DesignCanvas {
 
     fn play_go(&mut self, link: &dom::Link, cx: &mut Context<Self>) {
         let to = link.goto.as_str();
+        if to == BACK {
+            self.play_return(cx);
+            return;
+        }
         let Some(screen) = self.canvas.screen(to) else {
             self.say(format!("{to}.html doesn't exist yet."));
             cx.notify();
@@ -4680,6 +4691,9 @@ impl DesignCanvas {
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.drop_pictures(paths.paths(), cx)
+            }))
             .on_pinch(cx.listener(|this, e: &PinchEvent, _, cx| {
                 let local = this.local(e.position);
                 this.zoom_at(local, 1. + e.delta);
@@ -4896,15 +4910,7 @@ impl DesignCanvas {
     }
 
     fn blocks(&self, cx: &mut Context<Self>) -> Div {
-        let mut row = div().flex().flex_wrap().gap(px(4.));
-        for (i, (label, html)) in BLOCKS.iter().enumerate() {
-            let html: &'static str = html;
-            row = row.child(
-                chip_btn(("design-block", i), *label, false)
-                    .on_click(cx.listener(move |this, _, _, cx| this.insert(html, cx))),
-            );
-        }
-        row
+        self.parts_library(cx)
     }
 
     /// What the design checks found on each screen.
@@ -5411,6 +5417,72 @@ fn wireframe(kind: &str, device: Device) -> Div {
             .rounded(px(2.))
             .bg(rgb(c_blue()))
     };
+    let img_box = |frac: f32, h: f32| {
+        div()
+            .w(relative(frac))
+            .h(px(h))
+            .flex_none()
+            .rounded(px(2.))
+            .bg(rgb(mix(c_blue(), c_canvas(), 0.3)))
+    };
+    let img = |frac: f32| {
+        div()
+            .w_full()
+            .h(relative(frac))
+            .flex_none()
+            .rounded(px(2.))
+            .bg(rgb(mix(c_blue(), c_canvas(), 0.3)))
+    };
+    let chips = || {
+        div()
+            .flex()
+            .flex_none()
+            .gap(px(2.))
+            .child(bar(0.22, 4., ink))
+            .child(bar(0.22, 4., faint))
+            .child(bar(0.22, 4., faint))
+    };
+    let thumb_row = |frac: f32| {
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(3.))
+            .child(
+                div()
+                    .size(px(6.))
+                    .flex_none()
+                    .rounded(px(1.5))
+                    .bg(rgb(faint)),
+            )
+            .child(line(frac))
+    };
+    let bubble = |mine: bool, frac: f32| {
+        div()
+            .w(relative(frac))
+            .h(px(6.))
+            .flex_none()
+            .rounded(px(2.))
+            .when(mine, |el| el.ml_auto().bg(rgb(c_blue())))
+            .when(!mine, |el| el.bg(rgb(faint)))
+    };
+    let tabs = || {
+        div()
+            .mt_auto()
+            .w_full()
+            .flex()
+            .flex_none()
+            .justify_around()
+            .pt(px(2.))
+            .border_t_1()
+            .border_color(rgb(faint))
+            .children((0..4).map(|i| {
+                div()
+                    .size(px(3.5))
+                    .rounded_full()
+                    .bg(rgb(if i == 0 { c_blue() } else { faint }))
+            }))
+    };
     let frame = div()
         .w(px(w))
         .h(px(h))
@@ -5549,6 +5621,96 @@ fn wireframe(kind: &str, device: Device) -> Div {
                 .child(line(0.8))
                 .child(line(0.6))
         }
+        "Onboarding" => frame
+            .child(img(0.45))
+            .child(title(0.7))
+            .child(line(0.85))
+            .child(div().flex_1())
+            .child(button(1.)),
+        "Home" => frame
+            .child(title(0.45))
+            .child(field())
+            .child(chips())
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .gap(px(3.))
+                    .child(img_box(0.6, 11.))
+                    .child(img_box(0.4, 11.)),
+            )
+            .child(line(0.7))
+            .child(line(0.5))
+            .child(tabs()),
+        "Shop" => frame
+            .child(title(0.4))
+            .child(field())
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .gap(px(3.))
+                    .child(img_box(0.5, 11.))
+                    .child(img_box(0.5, 11.)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .gap(px(3.))
+                    .child(img_box(0.5, 11.))
+                    .child(img_box(0.5, 11.)),
+            )
+            .child(tabs()),
+        "Checkout" => frame
+            .child(title(0.5))
+            .child(thumb_row(0.6))
+            .child(thumb_row(0.5))
+            .child(line(0.9))
+            .child(line(0.7))
+            .child(div().flex_1())
+            .child(button(1.)),
+        "Profile" => frame
+            .items_center()
+            .child(
+                div()
+                    .size(px(11.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(rgb(faint)),
+            )
+            .child(title(0.5))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_none()
+                    .gap(px(2.))
+                    .child(img_box(0.33, 6.))
+                    .child(img_box(0.33, 6.))
+                    .child(img_box(0.33, 6.)),
+            )
+            .child(line(0.9))
+            .child(line(0.9))
+            .child(tabs()),
+        "Chat" => frame
+            .child(title(0.4))
+            .child(bubble(false, 0.6))
+            .child(bubble(true, 0.55))
+            .child(bubble(false, 0.45))
+            .child(div().flex_1())
+            .child(field()),
+        "Notifications" => frame
+            .child(title(0.55))
+            .child(thumb_row(0.6))
+            .child(thumb_row(0.7))
+            .child(thumb_row(0.5)),
+        "Search" => frame
+            .child(field())
+            .child(chips())
+            .child(thumb_row(0.6))
+            .child(thumb_row(0.5))
+            .child(tabs()),
         "Empty state" => frame
             .items_center()
             .justify_center()

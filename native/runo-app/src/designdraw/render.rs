@@ -322,6 +322,16 @@ impl Renderer {
         device: Device,
         js: &str,
     ) -> Result<Option<(String, Shot)>, String> {
+        Ok(self.edit_giving(id, device, js)?.map(|(b, s, _)| (b, s)))
+    }
+
+    /// `edit`, also giving what `js` answered.
+    pub(crate) fn edit_giving(
+        &mut self,
+        id: &str,
+        device: Device,
+        js: &str,
+    ) -> Result<Option<(String, Shot, Value)>, String> {
         let before = self.html(id, device)?;
         let done = self.eval(id, device, js)?;
         if done.is_null() {
@@ -332,7 +342,7 @@ impl Renderer {
             return Ok(None);
         }
         self.write(id, &after)?;
-        Ok(Some((before, self.shoot(id, device)?)))
+        Ok(Some((before, self.shoot(id, device)?, done)))
     }
 
     /// The screen's HTML as the page holds it now.

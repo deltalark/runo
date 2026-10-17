@@ -189,6 +189,36 @@ pub(crate) fn folder(root: &Path) -> PathBuf {
     root.join(FOLDER)
 }
 
+/// Where pictures put on screens are kept, next to `screens/`.
+pub(crate) const ASSETS: &str = "assets";
+
+/// Copy a picture into the design's assets, under a name not taken yet, and give the URL a
+/// screen uses for it: `../assets/<name>`.
+pub(crate) fn add_picture(root: &Path, from: &Path) -> Result<String, String> {
+    let dir = folder(root).join(ASSETS);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stem = slug(&from.file_stem().unwrap_or_default().to_string_lossy());
+    let stem = if stem.is_empty() {
+        "picture".to_string()
+    } else {
+        stem
+    };
+    let ext = from
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| "png".into());
+    let name = (1..)
+        .map(|n| match n {
+            1 => format!("{stem}.{ext}"),
+            n => format!("{stem}-{n}.{ext}"),
+        })
+        .find(|n| !dir.join(n).exists())
+        .unwrap_or_default();
+    std::fs::copy(from, dir.join(&name))
+        .map_err(|e| format!("Couldn't copy {}: {e}", from.display()))?;
+    Ok(format!("../{ASSETS}/{name}"))
+}
+
 pub(crate) fn screen_path(root: &Path, id: &str) -> PathBuf {
     folder(root).join(SCREENS).join(format!("{id}.html"))
 }
@@ -256,7 +286,10 @@ pub(crate) fn seed(root: &Path) -> std::io::Result<()> {
         let file = dir.join(name);
         let was = std::fs::read_to_string(&file).ok();
         let old = match name {
-            PROTOTYPE => was.as_deref() == Some(PROTOTYPE_JS_V1),
+            PROTOTYPE => {
+                was.as_deref() == Some(PROTOTYPE_JS_V1)
+                    || was.as_deref() == Some(prototype_js_v2().as_str())
+            }
             COMPONENTS => was.as_deref() == Some(COMPONENTS_CSS_V1),
             _ => false,
         };
@@ -448,19 +481,172 @@ impl Theme {
 // ---- Templates
 
 /// Screens a new one can start from.
-pub(crate) const TEMPLATES: [(&str, &str); 7] = [
+pub(crate) const TEMPLATES: [(&str, &str); 15] = [
     ("Blank", "An empty screen with a title"),
+    ("Onboarding", "A picture, a promise and Get started"),
     ("Sign in", "Email, password and a primary button"),
+    ("Home", "Greeting, chips, a carousel and tabs"),
     ("List", "A header, search and a list of rows"),
     ("Detail", "A hero, facts and actions for one item"),
+    ("Shop", "Search, categories and a product grid"),
+    ("Checkout", "Items, totals and a pay button"),
+    ("Profile", "Avatar, stats and account rows"),
+    ("Chat", "Messages and a box to write in"),
+    ("Notifications", "Grouped updates with icons"),
+    ("Search", "Recent searches and results"),
     ("Settings", "Grouped rows with switches"),
     ("Dashboard", "Stat cards and a recent list"),
     ("Empty state", "Nothing here yet, with one action"),
 ];
 
+/// A screen that sits over a tab bar: the screen's content grows so the bar stays at the
+/// bottom, whatever the content's height.
+fn with_tabs(top: &str, content: &str, on: usize) -> String {
+    let tabs = [
+        ("house", "Home"),
+        ("search", "Search"),
+        ("heart", "Saved"),
+        ("user", "Profile"),
+    ];
+    let tabs: String = tabs
+        .iter()
+        .enumerate()
+        .map(|(i, (icon, label))| {
+            format!(
+                "<a class=\"tab{}\"><i class=\"icon i-{icon}\"></i>{label}</a>",
+                if i == on { " on" } else { "" }
+            )
+        })
+        .collect();
+    format!(
+        "<div class=\"stack\" style=\"min-height: 100vh\">\n{top}<main class=\"screen stack gap-lg grow\">\n{content}\n</main>\n<nav class=\"tabbar\">{tabs}</nav>\n</div>"
+    )
+}
+
 /// A new screen's HTML.
 pub(crate) fn template(kind: &str, name: &str, device: Device) -> String {
     let body = match kind {
+        "Onboarding" => r##"<main class="screen center">
+  <div class="stack gap-lg center-text">
+    <div class="image dusk w-full"></div>
+    <div class="stack gap-sm">
+      <h1>Plan less, live more</h1>
+      <p class="muted">Everything you need for the week, in one calm place.</p>
+    </div>
+    <div class="cluster" style="justify-content: center"><span class="dot"></span><span class="dot" style="opacity: 0.3"></span><span class="dot" style="opacity: 0.3"></span></div>
+    <button class="button primary block lg">Get started</button>
+    <a class="link">I already have an account</a>
+  </div>
+</main>"##
+            .to_string(),
+        "Home" => with_tabs(
+            "<header class=\"bar plain\"><div class=\"stack\"><span class=\"small muted\">Good morning</span><strong class=\"bar-title\">Alex</strong></div><div class=\"avatar\">A</div></header>\n",
+            r##"  <div class="search-box"><i class="icon i-search"></i><input class="search" type="search" placeholder="Search"></div>
+  <div class="scroll-x"><span class="chip on">All</span><span class="chip">Popular</span><span class="chip">New</span><span class="chip">Nearby</span></div>
+  <section class="section">
+    <div class="section-head"><h3>For you</h3><a class="link small">See all</a></div>
+    <div class="scroll-x">
+      <div class="stack gap-xs" style="width: 220px"><div class="image cool"></div><strong>Morning run</strong><span class="small muted">25 min · Easy</span></div>
+      <div class="stack gap-xs" style="width: 220px"><div class="image warm"></div><strong>Sunset yoga</strong><span class="small muted">40 min · Calm</span></div>
+    </div>
+  </section>
+  <section class="section">
+    <h3>Today</h3>
+    <ul class="list card">
+      <li class="row"><span class="icon-tile"><i class="icon i-calendar"></i></span><div class="grow"><strong>Team sync</strong><p class="small muted">10:00</p></div><i class="icon i-chevron-right"></i></li>
+      <li class="row"><span class="icon-tile"><i class="icon i-shopping-bag"></i></span><div class="grow"><strong>Groceries</strong><p class="small muted">6 items</p></div><i class="icon i-chevron-right"></i></li>
+    </ul>
+  </section>"##,
+            0,
+        ),
+        "Shop" => with_tabs(
+            "<header class=\"bar plain\"><h1>Shop</h1><button class=\"icon-button filled\"><i class=\"icon i-shopping-cart\"></i></button></header>\n",
+            r##"  <div class="search-box"><i class="icon i-search"></i><input class="search" type="search" placeholder="Search products"></div>
+  <div class="scroll-x"><span class="chip on">All</span><span class="chip">Shoes</span><span class="chip">Bags</span><span class="chip">Hats</span></div>
+  <div class="grid-2">
+    <div class="stack gap-xs"><div class="image square warm"></div><strong>Canvas tote</strong><span class="muted">$38</span></div>
+    <div class="stack gap-xs"><div class="image square cool"></div><strong>Trail runner</strong><span class="muted">$120</span></div>
+    <div class="stack gap-xs"><div class="image square green"></div><strong>Wool cap</strong><span class="muted">$24</span></div>
+    <div class="stack gap-xs"><div class="image square dusk"></div><strong>Day pack</strong><span class="muted">$86</span></div>
+  </div>"##,
+            0,
+        ),
+        "Checkout" => r##"<header class="bar"><button class="icon-button" data-goto="back"><i class="icon i-chevron-left"></i></button><strong class="bar-title">Checkout</strong><span style="width: 44px"></span></header>
+<main class="screen stack gap-lg">
+  <ul class="list">
+    <li class="row"><div class="image square warm" style="width: 56px"></div><div class="grow"><strong>Canvas tote</strong><p class="small muted">Qty 1</p></div><strong>$38</strong></li>
+    <li class="row"><div class="image square cool" style="width: 56px"></div><div class="grow"><strong>Trail runner</strong><p class="small muted">Qty 1</p></div><strong>$120</strong></li>
+  </ul>
+  <div class="card stack gap-sm">
+    <div class="row-between"><span class="muted">Subtotal</span><span>$158</span></div>
+    <div class="row-between"><span class="muted">Delivery</span><span>Free</span></div>
+    <hr class="divider">
+    <div class="row-between"><strong>Total</strong><strong>$158</strong></div>
+  </div>
+  <div class="card list"><div class="row"><i class="icon i-credit-card"></i><span class="grow">Visa ending 4242</span><a class="link small">Change</a></div></div>
+  <button class="button primary block lg">Pay $158</button>
+</main>"##
+            .to_string(),
+        "Profile" => with_tabs(
+            "<header class=\"bar plain\"><span></span><button class=\"icon-button\"><i class=\"icon i-settings\"></i></button></header>\n",
+            r##"  <div class="stack gap-sm center-text"><div class="avatar lg">AL</div><h2>Alex Lee</h2><p class="muted">alex@example.com</p></div>
+  <div class="grid-3">
+    <div class="card stat center-text"><span class="value">24</span><span class="small muted">Trips</span></div>
+    <div class="card stat center-text"><span class="value">9</span><span class="small muted">Saved</span></div>
+    <div class="card stat center-text"><span class="value">4.9</span><span class="small muted">Rating</span></div>
+  </div>
+  <ul class="list card">
+    <li class="row"><i class="icon i-user"></i><span class="grow">Personal details</span><i class="icon i-chevron-right"></i></li>
+    <li class="row"><i class="icon i-credit-card"></i><span class="grow">Payments</span><i class="icon i-chevron-right"></i></li>
+    <li class="row"><i class="icon i-bell"></i><span class="grow">Notifications</span><i class="icon i-chevron-right"></i></li>
+    <li class="row"><i class="icon i-log-out"></i><span class="grow">Sign out</span></li>
+  </ul>"##,
+            3,
+        ),
+        "Chat" => r##"<div class="stack" style="min-height: 100vh">
+<header class="bar"><button class="icon-button" data-goto="back"><i class="icon i-chevron-left"></i></button><div class="cluster grow"><div class="avatar sm">S</div><strong>Sam</strong></div><button class="icon-button"><i class="icon i-phone"></i></button></header>
+<main class="screen stack gap-sm grow">
+  <p class="tiny muted center-text">Today 09:41</p>
+  <div class="card" style="align-self: flex-start; max-width: 75%">Are we still on for tonight?</div>
+  <div class="card accent" style="align-self: flex-end; max-width: 75%">Yes! 7pm at the usual place.</div>
+  <div class="card" style="align-self: flex-start; max-width: 75%">Perfect, see you there.</div>
+</main>
+<div class="bar" style="border-top: 1px solid var(--border); border-bottom: none"><input class="input grow" placeholder="Message"><button class="icon-button filled"><i class="icon i-send"></i></button></div>
+</div>"##
+            .to_string(),
+        "Notifications" => r##"<header class="bar"><strong class="bar-title">Notifications</strong><a class="link small">Mark all read</a></header>
+<main class="screen stack gap-lg">
+  <section class="section">
+    <h3 class="muted">Today</h3>
+    <ul class="list">
+      <li class="row"><span class="icon-tile"><i class="icon i-heart"></i></span><div class="grow"><strong>Sam liked your post</strong><p class="small muted">2 min ago</p></div><span class="dot"></span></li>
+      <li class="row"><span class="icon-tile"><i class="icon i-message-circle"></i></span><div class="grow"><strong>New comment</strong><p class="small muted">1 h ago</p></div><span class="dot"></span></li>
+    </ul>
+  </section>
+  <section class="section">
+    <h3 class="muted">Earlier</h3>
+    <ul class="list">
+      <li class="row"><span class="icon-tile"><i class="icon i-gift"></i></span><div class="grow"><strong>You earned a reward</strong><p class="small muted">Yesterday</p></div></li>
+    </ul>
+  </section>
+</main>"##
+            .to_string(),
+        "Search" => with_tabs(
+            "",
+            r##"  <div class="search-box"><i class="icon i-search"></i><input class="search" type="search" placeholder="Search" value="coffee"></div>
+  <section class="section">
+    <h3 class="muted">Recent</h3>
+    <div class="cluster"><span class="chip">Brunch</span><span class="chip">Parks</span><span class="chip">Bookshops</span></div>
+  </section>
+  <section class="section">
+    <h3>Results</h3>
+    <ul class="list">
+      <li class="row"><div class="image square warm" style="width: 48px"></div><div class="grow"><strong>Corner Roasters</strong><p class="small muted">0.4 km · Open now</p></div><span class="badge">4.8</span></li>
+      <li class="row"><div class="image square green" style="width: 48px"></div><div class="grow"><strong>Leaf &amp; Bean</strong><p class="small muted">1.1 km · Open now</p></div><span class="badge">4.6</span></li>
+    </ul>
+  </section>"##,
+            1,
+        ),
         "Sign in" => r##"<main class="screen center">
   <div class="stack gap-lg">
     <div class="stack gap-sm">
@@ -484,7 +670,7 @@ pub(crate) fn template(kind: &str, name: &str, device: Device) -> String {
   </ul>
 </main>"##
             .to_string(),
-        "Detail" => r##"<header class="bar"><a class="link" href="#">Back</a></header>
+        "Detail" => r##"<header class="bar"><button class="icon-button" data-goto="back"><i class="icon i-chevron-left"></i></button><strong class="bar-title">Details</strong><button class="icon-button"><i class="icon i-heart"></i></button></header>
 <main class="screen stack gap-lg">
   <div class="hero"></div>
   <div class="stack gap-sm">
@@ -559,19 +745,8 @@ pub(crate) fn template(kind: &str, name: &str, device: Device) -> String {
     )
 }
 
-/// Pieces the inspector can insert, as HTML using `components.css`.
-pub(crate) const BLOCKS: [(&str, &str); 10] = [
-    ("Heading", "<h2>Heading</h2>"),
-    ("Text", "<p>Some text.</p>"),
-    ("Button", "<button class=\"button primary\">Button</button>"),
-    ("Input", "<label class=\"field\"><span>Label</span><input placeholder=\"Placeholder\"></label>"),
-    ("Image", "<div class=\"image\"></div>"),
-    ("Card", "<div class=\"card stack gap-sm\"><strong>Card title</strong><p class=\"muted\">Card text.</p></div>"),
-    ("Row", "<div class=\"row\"><div class=\"avatar\">A</div><div class=\"grow\"><strong>Title</strong><p class=\"muted\">Subtitle</p></div></div>"),
-    ("Stack", "<div class=\"stack gap-sm\"><p>First</p><p>Second</p></div>"),
-    ("Divider", "<hr class=\"divider\">"),
-    ("Tab bar", "<nav class=\"tabbar\"><a class=\"tab on\">Home</a><a class=\"tab\">Search</a><a class=\"tab\">Profile</a></nav>"),
-];
+/// What `data-goto` says to go back to the screen before.
+pub(crate) const BACK: &str = "back";
 
 /// Colours the inspector offers, as the tokens they come from.
 pub(crate) const COLOR_TOKENS: [&str; 7] = [
@@ -682,6 +857,14 @@ pub(crate) const UI_JS: &str = r#"// Controls work when clicked: a .switch flips
 })();
 "#;
 
+/// What `prototype.js` was before links could go back, replaced when a design still has it.
+fn prototype_js_v2() -> String {
+    prototype_js().replace(
+        "  if (el.dataset.goto === 'back') { history.back(); return; }\n",
+        "",
+    )
+}
+
 /// Clicking through links, then the controls' behaviour.
 fn prototype_js() -> String {
     format!(
@@ -691,6 +874,7 @@ document.addEventListener('click', (e) => {{
   const el = e.target.closest('[data-goto]');
   if (!el) return;
   e.preventDefault();
+  if (el.dataset.goto === 'back') {{ history.back(); return; }}
   location.href = el.dataset.goto.replace(/\.html$/, '') + '.html';
 }});
 
@@ -710,6 +894,32 @@ mod tests {
     }
 
     #[test]
+    fn every_template_uses_classes_the_kit_has() {
+        for (kind, _) in TEMPLATES {
+            let html = template(kind, kind, Device::Phone);
+            assert_eq!(
+                super::super::parts::missing_classes(&html),
+                Vec::<String>::new(),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn pictures_are_copied_into_the_design_under_free_names() {
+        let root = temp("pictures");
+        let from = root.join("My Photo.PNG");
+        std::fs::write(&from, b"png").unwrap();
+        assert_eq!(add_picture(&root, &from).unwrap(), "../assets/my-photo.png");
+        assert_eq!(
+            add_picture(&root, &from).unwrap(),
+            "../assets/my-photo-2.png"
+        );
+        assert!(folder(&root).join("assets/my-photo-2.png").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn an_old_prototype_script_is_upgraded_but_an_edited_one_is_kept() {
         let root = temp("proto");
         seed(&root).unwrap();
@@ -718,6 +928,12 @@ mod tests {
         std::fs::write(&file, PROTOTYPE_JS_V1).unwrap();
         seed(&root).unwrap();
         assert!(std::fs::read_to_string(&file).unwrap().contains("__runoUi"));
+        assert_ne!(prototype_js_v2(), prototype_js());
+        std::fs::write(&file, prototype_js_v2()).unwrap();
+        seed(&root).unwrap();
+        assert!(std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("history.back()"));
         std::fs::write(&file, "// mine").unwrap();
         seed(&root).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "// mine");

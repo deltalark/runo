@@ -42,9 +42,11 @@ impl DesignCanvas {
     /// else its tag.
     pub(super) fn layer_title(l: &Layer) -> String {
         let (tag, classes) = l.label.split_once('.').unwrap_or((l.label.as_str(), ""));
+        let glyph = classes.split('.').find_map(|c| c.strip_prefix("i-"));
         match (&l.name, &l.text) {
             (Some(n), _) if !n.is_empty() => n.clone(),
             (_, Some(t)) if !t.is_empty() => t.clone(),
+            _ if glyph.is_some() => format!("{} icon", glyph.unwrap_or_default()),
             _ if !classes.is_empty() => classes.replace('.', " "),
             _ => tag.to_string(),
         }
