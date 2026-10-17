@@ -25,6 +25,7 @@ mod figma;
 mod insert;
 mod layers;
 mod looks;
+mod motion;
 mod shapes;
 mod vars;
 
@@ -263,6 +264,8 @@ pub(crate) struct DesignCanvas {
     /// The move under way in Play, and a count that tells one move's animation from the next.
     play_move: Option<(String, Move, bool)>,
     play_n: usize,
+    /// Counts the screens Present shows, so a delayed link knows if it's still wanted.
+    play_visit: usize,
     /// Screens as tapping in Play left them, shown over their drawings until Play stops.
     play_shots: HashMap<String, Shot>,
     play_tapping: bool,
@@ -505,6 +508,7 @@ impl DesignCanvas {
             play_back: Vec::new(),
             play_move: None,
             play_n: 0,
+            play_visit: 0,
             play_shots: HashMap::new(),
             play_tapping: false,
             f_text,
@@ -2908,6 +2912,7 @@ impl DesignCanvas {
         for (_, shot) in self.play_shots.drain() {
             drop_shot(Some(shot), cx);
         }
+        self.arm_delay(cx);
         cx.notify();
     }
 
@@ -2928,6 +2933,7 @@ impl DesignCanvas {
             self.play_back.push((now.clone(), how));
             self.animate_move(now, how, false, cx);
         }
+        self.arm_delay(cx);
         cx.notify();
     }
 
@@ -2940,6 +2946,7 @@ impl DesignCanvas {
         if let Some(now) = self.playing.replace(prev) {
             self.animate_move(now, how, true, cx);
         }
+        self.arm_delay(cx);
         cx.notify();
     }
 
@@ -4562,11 +4569,14 @@ impl DesignCanvas {
         let moving = self
             .play_move
             .as_ref()
-            .and_then(|(from, how, back)| Some((picture(from)?, *how, *back)));
+            .and_then(|(from, how, back)| Some((picture(from)?, from.clone(), *how, *back)));
         match (moving, picture(&id)) {
-            (Some((old, how, back)), Some(new)) => {
+            (Some((old, from, how, back)), Some(new)) => {
                 for layer in how.layers(old, new, back, (dw, dh), self.play_n) {
                     frame = frame.child(layer);
+                }
+                if how.kind == MoveKind::Smart {
+                    frame = frame.children(self.smart_layers(&from, &id, how, scale, dw));
                 }
             }
             (_, Some(new)) => frame = frame.child(new),
@@ -5941,13 +5951,17 @@ pub(crate) enum MoveKind {
     Fade,
     /// The old screen slips back and fades out as the new one slips in, as in Material.
     Axis,
+    /// Layers on both screens move from where they were to where they land, and the rest
+    /// fades.
+    Smart,
     None,
 }
 
 /// The moves a link can pick, with their `data-transition` values; empty for the
 /// platform's own.
-pub(crate) const MOVES: [(&str, &str); 6] = [
+pub(crate) const MOVES: [(&str, &str); 7] = [
     ("Platform", ""),
+    ("Smart animate", "smart"),
     ("Push", "push"),
     ("Sheet", "sheet"),
     ("Fade", "fade"),
@@ -5962,6 +5976,7 @@ pub(crate) const SPEEDS: [(&str, &str); 3] = [("Quick", "fast"), ("Normal", ""),
 pub(crate) struct Move {
     pub kind: MoveKind,
     pub ms: u64,
+    pub ease: motion::Ease,
 }
 
 impl Move {
@@ -5972,6 +5987,7 @@ impl Move {
             "sheet" | "modal" => MoveKind::Sheet,
             "fade" => MoveKind::Fade,
             "axis" => MoveKind::Axis,
+            "smart" => MoveKind::Smart,
             "none" => MoveKind::None,
             _ if device == Device::Desktop => MoveKind::Fade,
             _ if platform == "android" => MoveKind::Axis,
@@ -5982,6 +5998,7 @@ impl Move {
             MoveKind::Sheet => 400.,
             MoveKind::Fade => 220.,
             MoveKind::Axis => 300.,
+            MoveKind::Smart => 450.,
             MoveKind::None => 0.,
         };
         let speed = match link.speed.as_str() {
@@ -5992,7 +6009,14 @@ impl Move {
         Self {
             kind,
             ms: (base * speed) as u64,
+            ease: motion::Ease::of(&link.ease),
         }
+    }
+
+    /// The timing of this move.
+    pub(crate) fn animation(self) -> Animation {
+        Animation::new(Duration::from_millis(self.ms.max(1)))
+            .with_easing(move |t: f32| self.ease.at(t))
     }
 
     /// The old and new screens (and a shade between them) as they move. `back` plays the
@@ -6006,10 +6030,7 @@ impl Move {
         (w, h): (f32, f32),
         n: usize,
     ) -> Vec<AnyElement> {
-        let anim = || {
-            Animation::new(Duration::from_millis(self.ms.max(1)))
-                .with_easing(|t: f32| 1. - (1. - t).powi(3))
-        };
+        let anim = || self.animation();
         let shade = |most: f32, rising: bool| {
             div()
                 .absolute()
@@ -6085,7 +6106,7 @@ impl Move {
                     .into_any_element(),
                 ]
             }
-            (MoveKind::Fade, _) => vec![
+            (MoveKind::Fade | MoveKind::Smart, _) => vec![
                 old.into_any_element(),
                 new.with_animation(id("design-move-new"), anim(), |el, d| el.opacity(d))
                     .into_any_element(),
@@ -6107,6 +6128,7 @@ mod move_tests {
             path: Vec::new(),
             transition: transition.into(),
             speed: speed.into(),
+            ..Default::default()
         }
     }
 

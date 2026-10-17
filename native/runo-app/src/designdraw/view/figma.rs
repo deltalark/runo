@@ -1931,7 +1931,12 @@ impl DesignCanvas {
         }
         let mut out = div().v_flex().child(
             sec("Interaction", None)
-                .child(caption("On click, navigate to"))
+                .child(self.trigger_rows(el, cx))
+                .child(caption(if el.trigger.as_deref() == Some("delay") {
+                    "After the delay, navigate to"
+                } else {
+                    "On click, navigate to"
+                }))
                 .child(opens),
         );
         out = out.children(self.overlay_section(el, cx));
@@ -1970,6 +1975,7 @@ impl DesignCanvas {
             }
             out = out
                 .child(sec("Animation", None).child(moves))
+                .child(sec("Easing", None).child(self.ease_row(el, cx)))
                 .child(sec("Speed", None).child(speeds));
         }
         out

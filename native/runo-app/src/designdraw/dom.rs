@@ -71,6 +71,8 @@ if (!window.__runo) window.__runo = (() => {
       text: ownText(el), classes: Array.from(el.classList), rect: rect(el),
       computed, inline, goto: el.dataset.goto || null, hidden: el.hidden,
       transition: el.dataset.transition || null, speed: el.dataset.speed || null,
+      ease: el.dataset.ease || null, trigger: el.dataset.trigger || null,
+      delay: el.dataset.delay || null,
       children: kids(el).length,
       component: el.dataset.component || null, variant: el.dataset.variant || null,
       name: el.dataset.name || null, locked: el.hasAttribute('data-locked'),
@@ -109,13 +111,19 @@ if (!window.__runo) window.__runo = (() => {
       if (!path) continue;
       const row = (cs.display.includes('flex') && cs.flexDirection.startsWith('row'))
         || cs.display.includes('grid') || cs.display === 'inline';
-      out.push({ path, rect: rect(el), row, tag: el.tagName.toLowerCase() });
+      // What it's called, so Smart animate can find it on the next screen.
+      const t = ownText(el);
+      const key = el.dataset.name || (el.id ? '#' + el.id : null)
+        || (t ? el.tagName.toLowerCase() + ':' + t.slice(0, 60) : null);
+      out.push({ path, rect: rect(el), row, tag: el.tagName.toLowerCase(), key });
     }
     return out;
   };
   const links = () => Array.from(document.querySelectorAll('[data-goto]'))
     .map((el) => ({ path: pathOf(el), goto: el.dataset.goto.replace(/\.html$/, ''), rect: rect(el),
-      transition: el.dataset.transition || '', speed: el.dataset.speed || '' }))
+      transition: el.dataset.transition || '', speed: el.dataset.speed || '',
+      ease: el.dataset.ease || '', trigger: el.dataset.trigger || '',
+      delay: Number(el.dataset.delay) || 0 }))
     .filter((l) => l.path);
   const html = () => '<!doctype html>\n' + document.documentElement.outerHTML + '\n';
   const parse = (s) => {
@@ -529,6 +537,12 @@ pub(crate) struct Element {
     #[serde(default)]
     pub speed: Option<String>,
     #[serde(default)]
+    pub ease: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub delay: Option<String>,
+    #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
     pub children: usize,
@@ -627,6 +641,9 @@ pub(crate) struct Bx {
     pub row: bool,
     #[serde(default)]
     pub tag: String,
+    /// Its name, id or text: the same key on two screens is the same layer.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// The deepest element under a point, leaving out `skip` and what's inside it.
@@ -792,6 +809,15 @@ pub(crate) struct Link {
     pub transition: String,
     #[serde(default)]
     pub speed: String,
+    /// `data-ease`, how the move eases; empty for ease out.
+    #[serde(default)]
+    pub ease: String,
+    /// `data-trigger` and `data-delay`: "delay" follows the link by itself after `delay`
+    /// milliseconds; empty for a click.
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub delay: u64,
 }
 
 /// The parent's path, or None at the top.
