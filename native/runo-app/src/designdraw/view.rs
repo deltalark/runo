@@ -25,6 +25,7 @@ mod figma;
 mod insert;
 mod layers;
 mod looks;
+mod vars;
 
 actions!(
     design_canvas,
@@ -299,6 +300,9 @@ pub(crate) struct DesignCanvas {
     /// name field.
     renaming_prop: Option<(String, Option<String>)>,
     f_prop: Entity<InputState>,
+    /// The variable being edited in the Theme tab, which part of it, and its field.
+    editing_var: Option<(String, vars::Part)>,
+    f_var: Entity<InputState>,
     /// Who's commenting, found out when they first comment.
     author: String,
     f_inline: Entity<InputState>,
@@ -442,6 +446,7 @@ impl DesignCanvas {
         let f_icon = Self::make_icon_field(window, cx, &mut subs);
         let f_look = Self::make_look_field(window, cx, &mut subs);
         let f_prop = Self::make_prop_field(window, cx, &mut subs);
+        let f_var = Self::make_var_field(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -518,6 +523,8 @@ impl DesignCanvas {
             f_look,
             renaming_prop: None,
             f_prop,
+            editing_var: None,
+            f_var,
             author: String::new(),
             f_inline,
             inline_open: false,
@@ -5122,6 +5129,7 @@ impl DesignCanvas {
             .child(label_row("Corner radius", radius))
             .child(label_row("Density", density))
             .child(label_row("Preview", mode))
+            .child(self.variables_section(cx))
             .child(section("Design rules"))
             .child(
                 div()

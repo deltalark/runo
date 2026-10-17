@@ -1623,11 +1623,19 @@ impl DesignCanvas {
             .map(|e| e.style(key))
             .unwrap_or_default();
         let mut row = div().flex().flex_wrap().gap(px(4.));
-        for (i, t) in COLOR_TOKENS.iter().enumerate() {
-            let t: &'static str = t;
+        let names: Vec<String> = COLOR_TOKENS
+            .iter()
+            .map(|t| t.to_string())
+            .chain(self.own_colours())
+            .collect();
+        for (i, t) in names.into_iter().enumerate() {
             let value = format!("var({t})");
             let on = now.trim() == value;
-            let c = self.token_color(t).unwrap_or(0x888888);
+            let c = self.token_color(&t).unwrap_or(0x888888);
+            let name: SharedString = match token_name(&t) {
+                "Colour" => t.trim_start_matches("--").to_string().into(),
+                n => n.into(),
+            };
             row = row.child(
                 div()
                     .id((key, i))
@@ -1638,7 +1646,9 @@ impl DesignCanvas {
                     .when(on, |el| el.border_2())
                     .bg(rgb(c))
                     .cursor_pointer()
-                    .tooltip(tip(token_name(t)))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx)
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.set_style(key, &value, cx))),
             );
         }
