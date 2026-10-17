@@ -25,6 +25,7 @@ mod figma;
 mod insert;
 mod layers;
 mod looks;
+mod shapes;
 mod vars;
 
 actions!(
@@ -135,6 +136,13 @@ enum Drag {
         tall: bool,
         from: Pt,
         at: Pt,
+    },
+    /// Dragging out a shape on a screen with a shape tool.
+    Draw {
+        id: String,
+        from: Pt,
+        at: Pt,
+        shape: shapes::Shape,
     },
 }
 
@@ -265,6 +273,11 @@ pub(crate) struct DesignCanvas {
     field_vals: HashMap<&'static str, String>,
     /// The hand tool: dragging anywhere pans.
     hand: bool,
+    /// The shape tool picked, if any, and the path the pen is placing: its screen, its
+    /// points in canvas units, and where the next would go.
+    shape: Option<shapes::Shape>,
+    pen: Option<(String, Vec<Pt>)>,
+    pen_at: Option<Pt>,
     /// How the Export section exports: pixels per CSS pixel, and the format.
     export_scale: u32,
     export_format: super::export::Format,
@@ -499,6 +512,9 @@ impl DesignCanvas {
             fields,
             field_vals: HashMap::new(),
             hand: false,
+            shape: None,
+            pen: None,
+            pen_at: None,
             export_scale: 2,
             export_format: Default::default(),
             library,
@@ -2961,6 +2977,9 @@ impl DesignCanvas {
             self.comment_down(w, cx);
             return;
         }
+        if e.button == MouseButton::Left && self.shape_down(w, e.click_count, cx) {
+            return;
+        }
         if e.button == MouseButton::Middle || (self.hand && e.button == MouseButton::Left) {
             self.drag = Drag::Pan {
                 from: local,
@@ -3062,6 +3081,11 @@ impl DesignCanvas {
     fn on_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let local = self.local(e.position);
         let w = self.world(local);
+        if matches!(self.drag, Drag::None) && self.pen.is_some() {
+            self.pen_at = Some(w);
+            cx.notify();
+            return;
+        }
         if matches!(self.drag, Drag::None) {
             let hover = self.box_at(w, None);
             let measure = e.modifiers.alt;
@@ -3122,6 +3146,15 @@ impl DesignCanvas {
                 }
             }
             Drag::Link { to, .. } | Drag::Relink { to, .. } => *to = w,
+            Drag::Draw {
+                from, at, shape, ..
+            } => {
+                *at = if e.modifiers.shift {
+                    shapes::constrain(*shape, *from, w)
+                } else {
+                    w
+                };
+            }
         }
         cx.notify();
     }
@@ -3131,6 +3164,12 @@ impl DesignCanvas {
         self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Move { moved: true, .. } => self.save_canvas(),
+            Drag::Draw {
+                id,
+                from,
+                at,
+                shape,
+            } => self.draw_shape(&id, shape, &[from, at], false, cx),
             Drag::Marquee {
                 id,
                 from,
@@ -3420,6 +3459,10 @@ impl DesignCanvas {
                 self.nudge(1, cx);
                 true
             }
+            (false, _, _, "enter") if self.pen.is_some() => {
+                self.finish_pen(false, cx);
+                true
+            }
             (false, false, false, "enter") => {
                 if self.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     self.inline_open = true;
@@ -3447,19 +3490,42 @@ impl DesignCanvas {
                 self.zoom_step(1. / 1.25);
                 true
             }
+            (false, false, false, "r") => {
+                self.set_shape(Some(shapes::Shape::Rect), cx);
+                true
+            }
+            (false, false, false, "o") => {
+                self.set_shape(Some(shapes::Shape::Ellipse), cx);
+                true
+            }
+            (false, false, false, "l") => {
+                self.set_shape(Some(shapes::Shape::Line), cx);
+                true
+            }
+            (false, true, false, "l") => {
+                self.set_shape(Some(shapes::Shape::Arrow), cx);
+                true
+            }
+            (false, false, false, "p") => {
+                self.set_shape(Some(shapes::Shape::Pen), cx);
+                true
+            }
             (false, false, false, "v") => {
+                self.set_shape(None, cx);
                 self.hand = false;
                 self.commenting = false;
                 self.comment_open = None;
                 true
             }
             (false, false, false, "h") => {
+                self.set_shape(None, cx);
                 self.hand = !self.hand;
                 self.commenting = false;
                 self.comment_open = None;
                 true
             }
             (false, false, false, "c") => {
+                self.set_shape(None, cx);
                 self.toggle_commenting(cx);
                 true
             }
@@ -3483,6 +3549,10 @@ impl DesignCanvas {
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.playing.is_some() {
             self.playing = None;
+        } else if self.pen.is_some() {
+            self.finish_pen(false, cx);
+        } else if self.shape.is_some() {
+            self.shape = None;
         } else if self.inline_open {
             self.inline_open = false;
         } else if self.comment_open.is_some() {
@@ -4694,6 +4764,7 @@ impl DesignCanvas {
     fn canvas_area(&self, cx: &mut Context<Self>) -> AnyElement {
         let bounds = self.bounds.clone();
         let (links, dragging) = self.paint_links();
+        let sketch = self.sketch();
         let notice = self
             .notice
             .as_ref()
@@ -4749,6 +4820,8 @@ impl DesignCanvas {
                 .size_full(),
             )
             .children(self.artboards(cx))
+            .children(self.shape_marks())
+            .when(self.shape.is_some(), |a| a.cursor_crosshair())
             .child(
                 canvas(
                     |_, _, _| {},
@@ -4761,6 +4834,9 @@ impl DesignCanvas {
                         }
                         if let Some((a, z, _)) = dragging {
                             paint_arrow(a, z, &tf, col(c_blue(), 1.), window);
+                        }
+                        if let Some((pts, arrow)) = &sketch {
+                            shapes::paint_sketch(pts, *arrow, &tf, window);
                         }
                     },
                 )

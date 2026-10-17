@@ -2,6 +2,7 @@
 //! the left, and on the right a Design tab of typed fields grouped into sections, a
 //! Prototype tab, the theme and the checks.
 
+use super::shapes::Shape;
 use super::*;
 use crate::designdraw::export::{self, Format};
 use crate::designdraw::fields::{self, FIELDS, SHADOWS};
@@ -299,9 +300,10 @@ impl DesignCanvas {
                     "design-tool-move",
                     IconName::MousePointer2,
                     "Move (V)",
-                    !hand && !self.commenting,
+                    !hand && !self.commenting && self.shape.is_none(),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_shape(None, cx);
                     this.hand = false;
                     this.commenting = false;
                     this.comment_open = None;
@@ -319,6 +321,38 @@ impl DesignCanvas {
                     this.new_open = !this.new_open;
                     cx.notify();
                 })),
+            )
+            .children(
+                [
+                    (
+                        Shape::Rect,
+                        "design-tool-rect",
+                        IconName::Square,
+                        "Rectangle (R)",
+                    ),
+                    (
+                        Shape::Ellipse,
+                        "design-tool-ellipse",
+                        IconName::Circle,
+                        "Ellipse (O)",
+                    ),
+                    (Shape::Line, "design-tool-line", IconName::Minus, "Line (L)"),
+                    (
+                        Shape::Arrow,
+                        "design-tool-arrow",
+                        IconName::MoveUpRight,
+                        "Arrow (Shift+L)",
+                    ),
+                    (Shape::Pen, "design-tool-pen", IconName::PenTool, "Pen (P)"),
+                ]
+                .map(|(shape, id, name, text)| {
+                    tool(id, name, text, self.shape == Some(shape)).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            let on = this.shape == Some(shape);
+                            this.set_shape((!on).then_some(shape), cx);
+                        },
+                    ))
+                }),
             )
             .child(
                 tool("design-tool-text", IconName::Type, "Text (T)", false)
@@ -1436,115 +1470,120 @@ impl DesignCanvas {
             out = out.child(text);
         }
 
-        // Fill: a colour, a gradient or a picture.
-        let fill = fields::field("fill")
-            .map(|f| fields::display(f, el))
-            .unwrap_or_default();
-        let kind = Self::fill_kind(el);
-        out = out.child(if fill.is_empty() && kind == "solid" {
-            sec(
-                "Fill",
-                Some(
-                    mini("design-fill-add", IconName::Plus, "Add a fill", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_style("background-color", "var(--surface)", cx)
-                        }))
-                        .into_any_element(),
-                ),
-            )
+        // A drawing is filled and stroked as a vector.
+        if el.tag == "svg" {
+            out = out.child(self.vector_section(el, cx));
         } else {
-            let body = sec(
-                "Fill",
-                Some(
-                    mini("design-fill-off", IconName::Minus, "Remove the fill", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_styles(
-                                &[
-                                    ("background-color", "transparent"),
-                                    ("background-image", ""),
-                                    ("background", ""),
-                                ],
-                                cx,
-                            )
-                        }))
-                        .into_any_element(),
-                ),
-            )
-            .child(self.fill_kinds(el, cx));
-            match kind {
-                "gradient" => body.child(self.gradient_editor(el, cx)),
-                "picture" => body.child(
-                    text_btn(
-                        "design-fill-pic",
-                        "Replace picture",
-                        Some(IconName::Image),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.choose_picture(super::insert::PictureFor::Picked, cx)
-                    })),
-                ),
-                _ => body
-                    .child(self.color_fld("fill", el))
-                    .child(self.token_swatches("background-color", cx)),
-            }
-        });
-
-        // Stroke.
-        let stroked = el.style("border-top-style") != "none"
-            && fields::field("stroke-w")
+            // Fill: a colour, a gradient or a picture.
+            let fill = fields::field("fill")
                 .map(|f| fields::display(f, el))
-                .is_some_and(|w| w != "0" && w != "Auto");
-        out = out.child(if stroked {
-            sec(
-                "Stroke",
-                Some(
-                    mini(
-                        "design-stroke-off",
-                        IconName::Minus,
-                        "Remove the stroke",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_styles(
-                            &[
-                                ("border-style", "none"),
-                                ("border-width", ""),
-                                ("border-color", ""),
-                            ],
-                            cx,
+                .unwrap_or_default();
+            let kind = Self::fill_kind(el);
+            out = out.child(if fill.is_empty() && kind == "solid" {
+                sec(
+                    "Fill",
+                    Some(
+                        mini("design-fill-add", IconName::Plus, "Add a fill", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_style("background-color", "var(--surface)", cx)
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+            } else {
+                let body = sec(
+                    "Fill",
+                    Some(
+                        mini("design-fill-off", IconName::Minus, "Remove the fill", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_styles(
+                                    &[
+                                        ("background-color", "transparent"),
+                                        ("background-image", ""),
+                                        ("background", ""),
+                                    ],
+                                    cx,
+                                )
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+                .child(self.fill_kinds(el, cx));
+                match kind {
+                    "gradient" => body.child(self.gradient_editor(el, cx)),
+                    "picture" => body.child(
+                        text_btn(
+                            "design-fill-pic",
+                            "Replace picture",
+                            Some(IconName::Image),
+                            false,
                         )
-                    }))
-                    .into_any_element(),
-                ),
-            )
-            .child(pair(
-                self.color_fld("stroke", el),
-                div()
-                    .w(px(84.))
-                    .flex_none()
-                    .flex()
-                    .child(self.fld("stroke-w", mark_icon(IconName::Minus))),
-            ))
-        } else {
-            sec(
-                "Stroke",
-                Some(
-                    mini("design-stroke-add", IconName::Plus, "Add a stroke", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.choose_picture(super::insert::PictureFor::Picked, cx)
+                        })),
+                    ),
+                    _ => body
+                        .child(self.color_fld("fill", el))
+                        .child(self.token_swatches("background-color", cx)),
+                }
+            });
+
+            // Stroke.
+            let stroked = el.style("border-top-style") != "none"
+                && fields::field("stroke-w")
+                    .map(|f| fields::display(f, el))
+                    .is_some_and(|w| w != "0" && w != "Auto");
+            out = out.child(if stroked {
+                sec(
+                    "Stroke",
+                    Some(
+                        mini(
+                            "design-stroke-off",
+                            IconName::Minus,
+                            "Remove the stroke",
+                            false,
+                        )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_styles(
                                 &[
-                                    ("border-style", "solid"),
-                                    ("border-width", "1px"),
-                                    ("border-color", "var(--border)"),
+                                    ("border-style", "none"),
+                                    ("border-width", ""),
+                                    ("border-color", ""),
                                 ],
                                 cx,
                             )
                         }))
                         .into_any_element(),
-                ),
-            )
-        });
+                    ),
+                )
+                .child(pair(
+                    self.color_fld("stroke", el),
+                    div()
+                        .w(px(84.))
+                        .flex_none()
+                        .flex()
+                        .child(self.fld("stroke-w", mark_icon(IconName::Minus))),
+                ))
+            } else {
+                sec(
+                    "Stroke",
+                    Some(
+                        mini("design-stroke-add", IconName::Plus, "Add a stroke", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_styles(
+                                    &[
+                                        ("border-style", "solid"),
+                                        ("border-width", "1px"),
+                                        ("border-color", "var(--border)"),
+                                    ],
+                                    cx,
+                                )
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+            });
+        }
 
         // Effects.
         out = out.child(
@@ -1616,7 +1655,7 @@ impl DesignCanvas {
     }
 
     /// The theme's colours as swatches that set a style to the token.
-    fn token_swatches(&self, key: &'static str, cx: &mut Context<Self>) -> Div {
+    pub(super) fn token_swatches(&self, key: &'static str, cx: &mut Context<Self>) -> Div {
         let now = self
             .element
             .as_ref()

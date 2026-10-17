@@ -45,7 +45,8 @@ if (!window.__runo) window.__runo = (() => {
     'margin-bottom', 'gap', 'border-radius', 'display', 'flex-direction', 'align-items',
     'justify-content', 'width', 'height', 'opacity', 'line-height', 'letter-spacing',
     'border-top-width', 'border-top-color', 'border-top-style', 'border-top-left-radius',
-    'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'right', 'bottom', 'z-index', 'background-image'];
+    'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'right', 'bottom', 'z-index', 'background-image',
+    'fill', 'stroke', 'stroke-width'];
   // The one icon an element is or holds, as an icon button or a tab does.
   const iconEl = (el) => {
     const all = el.matches('.icon') ? [el] : Array.from(el.querySelectorAll('.icon'));
@@ -86,7 +87,8 @@ if (!window.__runo) window.__runo = (() => {
         out.push({ path: pathOf(c), label: label(c), depth, hidden: c.hidden,
           text: t ? t.slice(0, 40) : null, component: c.dataset.component || null,
           name: c.dataset.name || null, locked: c.hasAttribute('data-locked'), id: c.id || null });
-        walk(c, depth + 1);
+        // A drawing is one layer: what it's drawn with stays out of the list.
+        if (!(c instanceof SVGElement)) walk(c, depth + 1);
       }
     };
     walk(document.body, 0);
@@ -102,7 +104,7 @@ if (!window.__runo) window.__runo = (() => {
       if (r.width === 0 || r.height === 0) continue;
       const cs = getComputedStyle(el);
       if (cs.display === 'none' || cs.visibility === 'hidden') continue;
-      if (el.closest('[data-locked]')) continue;
+      if (el.closest('[data-locked]') || el.ownerSVGElement) continue;
       const path = pathOf(el);
       if (!path) continue;
       const row = (cs.display.includes('flex') && cs.flexDirection.startsWith('row'))
@@ -321,12 +323,38 @@ if (!window.__runo) window.__runo = (() => {
       // A point below the fold is scrolled into view first: only what shows can be hit.
       if (y - scrollY < 0 || y - scrollY >= innerHeight) scrollTo(0, Math.max(0, y - innerHeight / 2));
       let el = document.elementFromPoint(x - scrollX, y - scrollY);
+      while (el && el.ownerSVGElement) el = el.ownerSVGElement;
       // A locked element can't be picked on the canvas: what holds it is picked instead.
       while (el && el.closest('[data-locked]')) el = el.closest('[data-locked]').parentElement;
       if (!el || el === document.documentElement || el === document.body) return null;
       return info(el);
     },
     info: (p) => { const el = at(p); return el ? info(el) : null; },
+    // Put a drawn shape at a point on the page, in the box that holds that spot, floating
+    // where it was drawn. Gives back its path.
+    drawShape: (x, y, s) => {
+      const n = parse(s);
+      if (!n) return null;
+      if (y - scrollY < 0 || y - scrollY >= innerHeight) scrollTo(0, Math.max(0, y - innerHeight / 2));
+      const LEAF = new Set(['IMG', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'P', 'SPAN', 'A',
+        'LABEL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'I', 'B', 'STRONG', 'EM', 'SMALL', 'VIDEO']);
+      let el = document.elementFromPoint(x - scrollX, y - scrollY) || document.body;
+      // Not inside a component's copy, a locked layer, text, a picture or a drawing.
+      for (;;) {
+        const fixed = el.closest('[data-component], [data-locked]');
+        if (fixed && fixed !== document.body) { el = fixed.parentElement; continue; }
+        if (el instanceof SVGElement || LEAF.has(el.tagName) || el.matches('.icon')) { el = el.parentElement; continue; }
+        break;
+      }
+      if (!el || el === document.documentElement) el = document.body;
+      if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
+      const r = el.getBoundingClientRect();
+      n.style.position = 'absolute';
+      n.style.left = Math.round(x - scrollX - r.left - el.clientLeft + el.scrollLeft) + 'px';
+      n.style.top = Math.round(y - scrollY - r.top - el.clientTop + el.scrollTop) + 'px';
+      el.appendChild(n);
+      return pathOf(n);
+    },
     // Put a part where it belongs on a screen with nothing picked: bars at the top, tab
     // bars, overlays and floating buttons at the end, anything else at the end of the
     // screen's content. Gives back its path.
