@@ -54,6 +54,60 @@ fn clear_old_profiles() {
     }
 }
 
+/// A screen drawn for Smart animate, and how tall it's drawn.
+pub(crate) type Plate = (Arc<RenderImage>, f32);
+
+/// What a Smart animate move is drawn from: both screens without the layers it carries,
+/// and those layers alone, see-through around them, as they look where they land.
+pub(crate) struct Plates {
+    pub old: Plate,
+    pub new: Plate,
+    pub layers: Option<Arc<RenderImage>>,
+}
+
+impl Plates {
+    pub(crate) fn images(self) -> Vec<Arc<RenderImage>> {
+        [self.old.0, self.new.0]
+            .into_iter()
+            .chain(self.layers)
+            .collect()
+    }
+}
+
+/// A picture drawn on white and again on black made one, with the page see-through: what
+/// shows through of the white says how see-through each pixel is.
+fn matte(white: &RenderImage, black: &RenderImage) -> Option<Arc<RenderImage>> {
+    let (w, b) = (white.as_bytes(0)?, black.as_bytes(0)?);
+    let size = white.size(0);
+    if w.len() != b.len() || size != black.size(0) {
+        return None;
+    }
+    let mut out = vec![0u8; w.len()];
+    for ((o, pw), pb) in out
+        .chunks_exact_mut(4)
+        .zip(w.chunks_exact(4))
+        .zip(b.chunks_exact(4))
+    {
+        if pw[..3] == pb[..3] {
+            // The same on both: solid.
+            o.copy_from_slice(pb);
+            o[3] = 255;
+            continue;
+        }
+        let through = (pw[0].saturating_sub(pb[0]) as u32
+            + pw[1].saturating_sub(pb[1]) as u32
+            + pw[2].saturating_sub(pb[2]) as u32)
+            / 3;
+        let a = 255 - through;
+        for i in 0..3 {
+            o[i] = (pb[i] as u32 * 255).checked_div(a).unwrap_or(0).min(255) as u8;
+        }
+        o[3] = a as u8;
+    }
+    let rgba = image::RgbaImage::from_raw(size.width.0 as u32, size.height.0 as u32, out)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
+}
+
 /// A screen as last drawn.
 #[derive(Clone)]
 pub(crate) struct Shot {
@@ -259,30 +313,137 @@ impl Renderer {
     /// Tap the screen at a point in Play, as a person would, and draw what it shows then.
     /// The page keeps its state between taps on the same screen; anything else that
     /// reads the page loads the file again first, so Play never ends up saved.
-    pub(crate) fn tap(&mut self, id: &str, device: Device, at: (f32, f32)) -> Result<Shot, String> {
+    /// `before` are the taps made on this visit already, made again when the page had to
+    /// be loaded afresh.
+    pub(crate) fn tap(
+        &mut self,
+        id: &str,
+        device: Device,
+        before: &[(f32, f32)],
+        at: (f32, f32),
+    ) -> Result<Shot, String> {
         self.catch_up();
         let fresh = self.current.as_deref() != Some(id) || !self.played;
         self.played = true;
         let engine = self.open_as_is(id, device, fresh)?;
         engine.eval(super::model::UI_JS);
+        if fresh {
+            for p in before {
+                Self::click(engine, *p);
+            }
+        }
+        Self::click(engine, at);
+        // Let CSS transitions settle.
+        std::thread::sleep(Duration::from_millis(200));
+        Self::capture(engine, id, device)
+    }
+
+    fn click(engine: &mut Surface, at: (f32, f32)) {
         engine.eval(&format!(
             "(() => {{ const el = document.elementFromPoint({}, {}); \
              if (!el || el.closest('[data-goto]')) return false; \
              if (el.focus) el.focus(); el.click(); return true; }})()",
             at.0, at.1
         ));
-        // Let CSS transitions settle.
-        std::thread::sleep(Duration::from_millis(200));
-        Self::capture(engine, id, device)
     }
 
-    fn capture(engine: &mut Surface, id: &str, device: Device) -> Result<Shot, String> {
-        let (w, h) = device.size();
+    /// How tall the page is drawn: the device's height, or the page's if taller.
+    fn height(engine: &mut Surface, device: Device) -> f32 {
+        let h = device.size().1;
         let page_h = engine
             .eval(&dom::call("size", &[]))
             .and_then(|v| v["h"].as_f64())
             .unwrap_or(h as f64) as f32;
-        let height = page_h.clamp(h, h * MAX_SCREENS_TALL);
+        page_h.clamp(h, h * MAX_SCREENS_TALL)
+    }
+
+    /// The page as it is, without the elements at `hide`, and how tall it's drawn.
+    fn plate(engine: &mut Surface, device: Device, hide: &[dom::Path]) -> Option<Plate> {
+        engine.eval(&dom::call("hide", &[serde_json::json!(hide), true.into()]));
+        let height = Self::height(engine, device);
+        let image = engine.capture(device.size().0, height);
+        engine.eval(&dom::call("hide", &[serde_json::json!(hide), false.into()]));
+        Some((image?, height))
+    }
+
+    /// Only the elements at `show`, see-through around them.
+    fn cutout(
+        engine: &mut Surface,
+        device: Device,
+        show: &[dom::Path],
+        height: f32,
+    ) -> Option<Arc<RenderImage>> {
+        let w = device.size().0;
+        let mut on = |bg: &str| {
+            engine.eval(&dom::call("solo", &[serde_json::json!(show), bg.into()]));
+            engine.capture(w, height)
+        };
+        let (white, black) = (on("#fff"), on("#000"));
+        engine.eval(&dom::call("solo", &[serde_json::json!(show), Value::Null]));
+        matte(&*white?, &*black?)
+    }
+
+    /// The screen landed on drawn without `hide` and with only `hide`.
+    fn landing(
+        engine: &mut Surface,
+        device: Device,
+        hide: &[dom::Path],
+    ) -> Option<(Plate, Option<Arc<RenderImage>>)> {
+        let plate = Self::plate(engine, device, hide)?;
+        let layers = Self::cutout(engine, device, hide, plate.1);
+        Some((plate, layers))
+    }
+
+    /// The two screens of a Smart animate move as saved, each without the layers it
+    /// carries, for the layers to move over as one gives way to the other.
+    pub(crate) fn plates(
+        &mut self,
+        from: (&str, Device, &[dom::Path]),
+        to: (&str, Device, &[dom::Path]),
+    ) -> Result<Plates, String> {
+        let engine = self.open(from.0, from.1, true)?;
+        let old = Self::plate(engine, from.1, from.2);
+        let engine = self.open(to.0, to.1, true)?;
+        let new = Self::landing(engine, to.1, to.2);
+        old.zip(new)
+            .map(|(old, (new, layers))| Plates { old, new, layers })
+            .ok_or_else(|| format!("Couldn't draw {}.html.", to.0))
+    }
+
+    /// The same for a tap that moves layers about on the screen playing: the screen before
+    /// the last of `taps` and after it. The page is left as Play had it.
+    pub(crate) fn tap_plates(
+        &mut self,
+        id: &str,
+        device: Device,
+        taps: &[(f32, f32)],
+        hide: (&[dom::Path], &[dom::Path]),
+    ) -> Result<Plates, String> {
+        let Some((last, before)) = taps.split_last() else {
+            return Err("Nothing was tapped.".into());
+        };
+        self.catch_up();
+        self.played = true;
+        let engine = self.open_as_is(id, device, true)?;
+        engine.eval(super::model::UI_JS);
+        for p in before {
+            Self::click(engine, *p);
+        }
+        if !before.is_empty() {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let old = Self::plate(engine, device, hide.0);
+        Self::click(engine, *last);
+        std::thread::sleep(Duration::from_millis(200));
+        let new = Self::landing(engine, device, hide.1);
+        old.zip(new)
+            .map(|(old, (new, layers))| Plates { old, new, layers })
+            .ok_or_else(|| format!("Couldn't draw {id}.html."))
+    }
+
+    fn capture(engine: &mut Surface, id: &str, device: Device) -> Result<Shot, String> {
+        let w = device.size().0;
+        let height = Self::height(engine, device);
         let image = engine
             .capture(w, height)
             .ok_or_else(|| format!("Couldn't draw {id}.html."))?;
@@ -471,5 +632,28 @@ mod tests {
             file_url(std::path::Path::new("/a b/#1/x.html")),
             "file:///a%20b/%231/x.html"
         );
+    }
+}
+
+#[cfg(test)]
+mod matte_tests {
+    use super::matte;
+    use gpui_kit::RenderImage;
+
+    fn picture(px: [u8; 4]) -> RenderImage {
+        let rgba = image::RgbaImage::from_raw(1, 1, px.to_vec()).unwrap();
+        RenderImage::new(vec![image::Frame::new(rgba)])
+    }
+
+    #[test]
+    fn the_page_comes_out_see_through_and_layers_solid() {
+        let clear = matte(&picture([255, 255, 255, 255]), &picture([0, 0, 0, 255])).unwrap();
+        assert_eq!(clear.as_bytes(0).unwrap()[3], 0);
+        let solid = matte(&picture([40, 80, 120, 255]), &picture([40, 80, 120, 255])).unwrap();
+        assert_eq!(solid.as_bytes(0).unwrap(), &[40, 80, 120, 255]);
+        // Half see-through: half the white comes through.
+        let half = matte(&picture([178, 178, 178, 255]), &picture([50, 50, 50, 255])).unwrap();
+        let b = half.as_bytes(0).unwrap();
+        assert!((b[3] as i32 - 127).abs() <= 1 && (b[0] as i32 - 100).abs() <= 1);
     }
 }

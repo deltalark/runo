@@ -405,6 +405,22 @@ if (!window.__runo) window.__runo = (() => {
     // where it was drawn. Gives back its path.
     // Each shape's outline as Design draws it: an svg's path data and where its units sit
     // on the page, or a box with its corner radius; and the first one's fill and stroke.
+    // Show only the elements at `ps`, on a page of colour `bg`; with no `bg`, everything again.
+    solo: (ps, bg) => {
+      const html = document.documentElement, body = document.body;
+      if (bg) html.style.setProperty('background', bg, 'important');
+      else html.style.removeProperty('background');
+      body.style.visibility = bg ? 'hidden' : '';
+      for (const p of ps) { const el = at(p); if (el) el.style.visibility = bg ? 'visible' : ''; }
+      if (!html.getAttribute('style')) html.removeAttribute('style');
+      if (!body.getAttribute('style')) body.removeAttribute('style');
+      return true;
+    },
+    // Hide the elements at `ps`, or show them again, to draw a screen without them.
+    hide: (ps, on) => {
+      for (const p of ps) { const el = at(p); if (el) el.style.visibility = on ? 'hidden' : ''; }
+      return true;
+    },
     outlines: (ps) => ps.map((p) => {
       const el = at(p);
       if (!el) return null;

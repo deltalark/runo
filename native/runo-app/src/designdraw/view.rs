@@ -7,7 +7,7 @@ use super::checks;
 use super::dom::{self, Element, Layer};
 use super::model::Canvas;
 use super::model::*;
-use super::render::{Asked, Renderer, Shot};
+use super::render::{Asked, Plate, Plates, Renderer, Shot};
 use crate::archdraw::view::{chip_btn, col, icon_btn, label_row, section, text_btn, tip};
 use crate::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -283,6 +283,11 @@ pub(crate) struct DesignCanvas {
     play_back: Vec<(String, Move)>,
     /// The move under way in Play, and a count that tells one move's animation from the next.
     play_move: Option<(String, Move, bool)>,
+    /// The Smart animate move playing, drawn ready.
+    play_smart: Option<motion::Smart>,
+    /// Where the screen playing was tapped since it opened, to tap again when it's drawn
+    /// afresh.
+    play_taps: Vec<(f32, f32)>,
     play_n: usize,
     /// Counts the screens Present shows, so a delayed link knows if it's still wanted.
     play_visit: usize,
@@ -534,6 +539,8 @@ impl DesignCanvas {
             playing: None,
             play_back: Vec::new(),
             play_move: None,
+            play_smart: None,
+            play_taps: Vec::new(),
             play_n: 0,
             play_visit: 0,
             code: None,
@@ -2907,14 +2914,21 @@ impl DesignCanvas {
         }
         self.play_tapping = true;
         let tapped = id.clone();
+        let before = self.play_taps.clone();
         self.run(
             cx,
-            move |r| r.tap(&id, device, at),
+            move |r| r.tap(&id, device, &before, at),
             move |this, out, cx| {
                 this.play_tapping = false;
                 if let Ok(shot) = out {
                     if this.playing.as_deref() == Some(tapped.as_str()) {
-                        drop_shot(this.play_shots.insert(tapped, shot), cx);
+                        this.play_taps.push(at);
+                        let was = this
+                            .play_shots
+                            .get(&tapped)
+                            .or_else(|| this.shots.get(&tapped));
+                        let before = was.map(|s| s.boxes.clone()).unwrap_or_default();
+                        this.smart_tap(tapped, &before, shot, cx);
                     } else {
                         drop_shot(Some(shot), cx);
                     }
@@ -2946,6 +2960,8 @@ impl DesignCanvas {
         self.playing = first;
         self.play_back.clear();
         self.play_move = None;
+        self.play_taps.clear();
+        self.drop_smart(cx);
         for (_, shot) in self.play_shots.drain() {
             drop_shot(Some(shot), cx);
         }
@@ -2964,33 +2980,47 @@ impl DesignCanvas {
             cx.notify();
             return;
         };
-        let how = Move::of(link, screen.device, &self.canvas.platform);
-        drop_shot(self.play_shots.remove(to), cx);
-        if let Some(now) = self.playing.replace(to.to_string()) {
-            self.play_back.push((now.clone(), how));
-            self.animate_move(now, how, false, cx);
+        if self.play_tapping {
+            return;
         }
-        self.arm_delay(cx);
-        cx.notify();
+        let how = Move::of(link, screen.device, &self.canvas.platform);
+        let to = to.to_string();
+        self.smart_then(&to.clone(), how, cx, move |this, cx| {
+            drop_shot(this.play_shots.remove(&to), cx);
+            this.play_taps.clear();
+            if let Some(now) = this.playing.replace(to) {
+                this.play_back.push((now.clone(), how));
+                this.animate_move(now, how, false, cx);
+            }
+            this.arm_delay(cx);
+            cx.notify();
+        });
     }
 
     /// Go back to the screen before, undoing the move that left it.
     fn play_return(&mut self, cx: &mut Context<Self>) {
+        if self.play_tapping {
+            return;
+        }
         let Some((prev, how)) = self.play_back.pop() else {
             return;
         };
-        drop_shot(self.play_shots.remove(&prev), cx);
-        if let Some(now) = self.playing.replace(prev) {
-            self.animate_move(now, how, true, cx);
-        }
-        self.arm_delay(cx);
-        cx.notify();
+        self.smart_then(&prev.clone(), how, cx, move |this, cx| {
+            drop_shot(this.play_shots.remove(&prev), cx);
+            this.play_taps.clear();
+            if let Some(now) = this.playing.replace(prev) {
+                this.animate_move(now, how, true, cx);
+            }
+            this.arm_delay(cx);
+            cx.notify();
+        });
     }
 
     /// Run a move from screen `from` to the one playing now, and drop it when it's done.
     fn animate_move(&mut self, from: String, how: Move, back: bool, cx: &mut Context<Self>) {
         if how.kind == MoveKind::None || !anim_on() {
             self.play_move = None;
+            self.drop_smart(cx);
             return;
         }
         self.play_n += 1;
@@ -3003,6 +3033,7 @@ impl DesignCanvas {
             let _ = this.update(cx, |this, cx| {
                 if this.play_n == n {
                     this.play_move = None;
+                    this.drop_smart(cx);
                     cx.notify();
                 }
             });
@@ -4696,11 +4727,18 @@ impl DesignCanvas {
             .and_then(|(from, how, back)| Some((picture(from)?, from.clone(), *how, *back)));
         match (moving, picture(&id)) {
             (Some((old, from, how, back)), Some(new)) => {
-                for layer in how.layers(old, new, back, (dw, dh), self.play_n) {
-                    frame = frame.child(layer);
-                }
-                if how.kind == MoveKind::Smart {
-                    frame = frame.children(self.smart_layers(&from, &id, how, scale, dw));
+                let smart = self
+                    .smart_frame(how, scale, (dw, dh))
+                    .filter(|_| how.kind == MoveKind::Smart);
+                if let Some(smart) = smart {
+                    frame = frame.children(smart);
+                } else {
+                    for layer in how.layers(old, new, back, (dw, dh), self.play_n) {
+                        frame = frame.child(layer);
+                    }
+                    if how.kind == MoveKind::Smart {
+                        frame = frame.children(self.smart_layers(&from, &id, how, scale, dw));
+                    }
                 }
             }
             (_, Some(new)) => frame = frame.child(new),
