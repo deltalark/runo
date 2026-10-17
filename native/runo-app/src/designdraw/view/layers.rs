@@ -160,7 +160,7 @@ impl DesignCanvas {
 
     // ---- Text styles
 
-    fn css(&self) -> String {
+    pub(super) fn css(&self) -> String {
         std::fs::read_to_string(styles::css_path(&self.root)).unwrap_or_default()
     }
 
@@ -223,7 +223,8 @@ impl DesignCanvas {
             .filter(|(k, v)| !(*k == "letter-spacing" && v == "normal"))
             .collect();
         let path = styles::css_path(&self.root);
-        if let Err(e) = std::fs::write(&path, styles::add(&css, &style, &decls)) {
+        if let Err(e) = std::fs::write(&path, styles::add(&css, styles::Kind::Text, &style, &decls))
+        {
             self.error = Some(format!("Couldn't save {}: {e}", path.display()));
             cx.notify();
             return;

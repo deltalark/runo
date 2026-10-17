@@ -22,7 +22,7 @@ pub(crate) struct Field {
     pub unit: Unit,
 }
 
-pub(crate) const FIELDS: [Field; 14] = [
+pub(crate) const FIELDS: [Field; 18] = [
     px("w", "width", &["width"]),
     px("h", "height", &["height"]),
     px("gap", "gap", &["gap"]),
@@ -47,6 +47,10 @@ pub(crate) const FIELDS: [Field; 14] = [
         unit: Unit::Color,
     },
     px("stroke-w", "border-top-width", &["border-width"]),
+    px("x", "left", &["left"]),
+    px("y", "top", &["top"]),
+    px("r", "right", &["right"]),
+    px("b", "bottom", &["bottom"]),
 ];
 
 const fn px(id: &'static str, reads: &'static str, sets: &'static [&'static str]) -> Field {
