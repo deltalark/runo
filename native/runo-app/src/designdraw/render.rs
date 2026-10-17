@@ -84,9 +84,11 @@ fn matte(white: &RenderImage, black: &RenderImage) -> Option<Arc<RenderImage>> {
     }
     let mut out = vec![0u8; w.len()];
     for ((o, pw), pb) in out
-        .chunks_exact_mut(4)
-        .zip(w.chunks_exact(4))
-        .zip(b.chunks_exact(4))
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(w.as_chunks::<4>().0)
+        .zip(b.as_chunks::<4>().0)
     {
         if pw[..3] == pb[..3] {
             // The same on both: solid.
