@@ -1136,7 +1136,40 @@ impl DesignCanvas {
         }
         let mut position = sec("Position", None).child(places);
         if !place.is_empty() {
-            position = position.child(pair(self.fld("x", mark("X")), self.fld("y", mark("Y"))));
+            // The edges it keeps its distance to, and how far.
+            let set = |k: &str| !el.inline.get(k).is_none_or(|v| v.trim().is_empty());
+            let right = set("right") && !set("left");
+            let bottom = set("bottom") && !set("top");
+            let mut sides = div().flex().flex_wrap().gap(px(4.));
+            let mut choices = vec![("Top", "top", !bottom), ("Bottom", "bottom", bottom)];
+            if place != "sticky" {
+                choices.splice(0..0, [("Left", "left", !right), ("Right", "right", right)]);
+            }
+            for (i, (label, side, on)) in choices.into_iter().enumerate() {
+                sides = sides.child(
+                    chip_btn(("design-anchor", i), label, on)
+                        .tooltip(tip("Keep its distance to this edge"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.op("anchor", &[json!(side)], After::Same, cx)
+                        })),
+                );
+            }
+            position = position.child(sides);
+            let across = if right {
+                self.fld("r", mark("R"))
+            } else {
+                self.fld("x", mark("X"))
+            };
+            let down = if bottom {
+                self.fld("b", mark("B"))
+            } else {
+                self.fld("y", mark("Y"))
+            };
+            position = position.child(if place == "sticky" {
+                div().flex().child(down)
+            } else {
+                pair(across, down)
+            });
         }
         out = out.child(position);
 
@@ -1549,17 +1582,37 @@ impl DesignCanvas {
         );
 
         out.child(self.export_section(if multi { "selection" } else { &el.label }, cx))
-            .child(
-                sec(
-                    if el.is_container() && !multi {
-                        "Insert inside"
-                    } else {
-                        "Insert after"
-                    },
-                    None,
-                )
-                .child(self.blocks(cx)),
-            )
+            .child(self.insert_section(el, multi, cx))
+    }
+
+    /// The building blocks, going inside the selection or after it. Anything that can hold
+    /// pieces gets the choice, so an empty box can be filled and a card can be followed.
+    fn insert_section(&self, el: &Element, multi: bool, cx: &mut Context<Self>) -> Div {
+        let inside = !multi && self.goes_inside(el);
+        let mut out = sec(
+            if inside {
+                "Insert inside"
+            } else {
+                "Insert after"
+            },
+            None,
+        );
+        if !multi && el.can_hold() {
+            let mut row = div().flex().gap(px(4.));
+            for (i, (label, want)) in [("Inside", true), ("After", false)].into_iter().enumerate() {
+                let path = el.path.clone();
+                row = row.child(
+                    chip_btn(("design-insert-at", i), label, inside == want).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.insert_at = Some((path.clone(), want));
+                            cx.notify();
+                        },
+                    )),
+                );
+            }
+            out = out.child(row);
+        }
+        out.child(self.blocks(cx))
     }
 
     /// The theme's colours as swatches that set a style to the token.

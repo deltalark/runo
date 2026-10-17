@@ -45,7 +45,7 @@ if (!window.__runo) window.__runo = (() => {
     'margin-bottom', 'gap', 'border-radius', 'display', 'flex-direction', 'align-items',
     'justify-content', 'width', 'height', 'opacity', 'line-height', 'letter-spacing',
     'border-top-width', 'border-top-color', 'border-top-style', 'border-top-left-radius',
-    'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'z-index', 'background-image'];
+    'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'right', 'bottom', 'z-index', 'background-image'];
   // The one icon an element is or holds, as an icon button or a tab does.
   const iconEl = (el) => {
     const all = el.matches('.icon') ? [el] : Array.from(el.querySelectorAll('.icon'));
@@ -226,6 +226,26 @@ if (!window.__runo) window.__runo = (() => {
         el.style.setProperty('width', Math.round(wide) + 'px');
       }
       if (!el.getAttribute('style')) el.removeAttribute('style');
+    },
+    // Which edges of what holds it a floating or pinned element keeps its distance to, so
+    // it stays in its corner when that changes size. Sticky ones stick at the top or bottom.
+    anchor: (el, side) => {
+      const other = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' }[side];
+      if (!other) return;
+      const set = (v) => {
+        el.style.setProperty(side, Math.round(v) + 'px');
+        el.style.removeProperty(other);
+      };
+      const how = getComputedStyle(el).position;
+      if (how === 'sticky') return set(0);
+      const r = el.getBoundingClientRect();
+      const p = how === 'fixed' ? null : el.offsetParent || el.parentElement;
+      const box = p ? p.getBoundingClientRect() : { left: 0, top: 0 };
+      const w = p ? p.clientWidth : innerWidth;
+      const h = p ? p.clientHeight : innerHeight;
+      const x = r.left - box.left - (p ? p.clientLeft : 0);
+      const y = r.top - box.top - (p ? p.clientTop : 0);
+      set({ left: x, right: w - x - r.width, top: y, bottom: h - y - r.height }[side]);
     },
     styles: (el, map) => {
       for (const [k, v] of Object.entries(map)) {
@@ -516,8 +536,13 @@ impl Element {
             .is_some_and(|d| d.contains("flex"))
     }
 
-    /// Whether new pieces go inside it rather than after it.
+    /// Whether new pieces go inside it rather than after it, unless the person says.
     pub(crate) fn is_container(&self) -> bool {
+        self.can_hold() && (self.children > 0 || self.is_flex())
+    }
+
+    /// Whether pieces can go inside it at all, even while it's empty.
+    pub(crate) fn can_hold(&self) -> bool {
         matches!(
             self.tag.as_str(),
             "main"
@@ -530,7 +555,7 @@ impl Element {
                 | "footer"
                 | "aside"
                 | "form"
-        ) && (self.children > 0 || self.is_flex())
+        )
     }
 }
 

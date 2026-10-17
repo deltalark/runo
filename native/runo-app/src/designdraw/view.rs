@@ -291,6 +291,9 @@ pub(crate) struct DesignCanvas {
     icon_query: String,
     /// The style being renamed, by class, and its name field.
     renaming_style: Option<String>,
+    /// Where the person chose new pieces go for the element at this path: inside it, or
+    /// after it. Without a choice, inside anything that already holds pieces.
+    insert_at: Option<(dom::Path, bool)>,
     f_look: Entity<InputState>,
     /// Who's commenting, found out when they first comment.
     author: String,
@@ -506,6 +509,7 @@ impl DesignCanvas {
             f_icon,
             icon_query: String::new(),
             renaming_style: None,
+            insert_at: None,
             f_look,
             author: String::new(),
             f_inline,
@@ -2277,7 +2281,7 @@ impl DesignCanvas {
         }
         let n = html.len();
         let (target, inside, first) = match &self.element {
-            Some(el) if self.also.is_empty() && el.is_container() => {
+            Some(el) if self.also.is_empty() && self.goes_inside(el) => {
                 let mut first = el.path.clone();
                 first.push(el.children);
                 (el.path.clone(), true, Some(first))
@@ -2486,12 +2490,20 @@ impl DesignCanvas {
         self.op("remove", &[], after, cx);
     }
 
+    /// Whether new pieces go inside `el` rather than after it.
+    fn goes_inside(&self, el: &Element) -> bool {
+        match &self.insert_at {
+            Some((path, inside)) if *path == el.path => *inside && el.can_hold(),
+            _ => el.is_container(),
+        }
+    }
+
     /// Add a building block inside the selected container, or after the selected element,
     /// or at the end of the screen.
     fn insert(&mut self, html: &str, cx: &mut Context<Self>) {
         match &self.element {
             Some(el) => {
-                let inside = el.is_container();
+                let inside = self.goes_inside(el);
                 let mut path = el.path.clone();
                 if inside {
                     path.push(el.children);
