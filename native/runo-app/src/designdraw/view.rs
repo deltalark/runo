@@ -295,6 +295,10 @@ pub(crate) struct DesignCanvas {
     /// after it. Without a choice, inside anything that already holds pieces.
     insert_at: Option<(dom::Path, bool)>,
     f_look: Entity<InputState>,
+    /// The variant property being renamed, and the value of it when it's a value, and its
+    /// name field.
+    renaming_prop: Option<(String, Option<String>)>,
+    f_prop: Entity<InputState>,
     /// Who's commenting, found out when they first comment.
     author: String,
     f_inline: Entity<InputState>,
@@ -437,6 +441,7 @@ impl DesignCanvas {
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
         let f_icon = Self::make_icon_field(window, cx, &mut subs);
         let f_look = Self::make_look_field(window, cx, &mut subs);
+        let f_prop = Self::make_prop_field(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -511,6 +516,8 @@ impl DesignCanvas {
             renaming_style: None,
             insert_at: None,
             f_look,
+            renaming_prop: None,
+            f_prop,
             author: String::new(),
             f_inline,
             inline_open: false,

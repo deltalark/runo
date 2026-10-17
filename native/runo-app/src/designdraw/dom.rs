@@ -424,6 +424,14 @@ if (!window.__runo) window.__runo = (() => {
       }
       return changed || null;
     },
+    renameVariants: (id, map) => {
+      let changed = 0;
+      for (const el of instances(id)) {
+        const to = map[el.dataset.variant];
+        if (to) { el.dataset.variant = to; changed++; }
+      }
+      return changed || null;
+    },
     // Put each element's children where it was.
     ungroup: (ps) => {
       for (const el of inOrder(ps).reverse()) {
