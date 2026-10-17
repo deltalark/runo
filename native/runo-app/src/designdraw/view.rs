@@ -315,6 +315,8 @@ struct AiChange {
     reviewed: bool,
     /// Waiting for the changed screens to be drawn, to show the agent how they look.
     review_due: bool,
+    /// The comments it was asked to fix, resolved when it's kept.
+    comments: Vec<u32>,
 }
 
 impl AiChange {
@@ -330,6 +332,7 @@ impl AiChange {
             asked: String::new(),
             reviewed: true,
             review_due: false,
+            comments: Vec::new(),
         }
     }
 
@@ -995,6 +998,7 @@ impl DesignCanvas {
             asked: task.clone(),
             reviewed: false,
             review_due: false,
+            comments: Vec::new(),
         });
         // Leave the keys to the New session dialog that opens next.
         window.blur(cx);
@@ -1037,6 +1041,15 @@ impl DesignCanvas {
             return;
         };
         let task = brief::states_task(&s.id, &s.name);
+        self.ask(task, window, cx);
+    }
+
+    /// Have AI lay the selected screen out for another device, beside it.
+    fn adapt_with_ai(&mut self, to: Device, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
+            return;
+        };
+        let task = brief::adapt_task(&s.id, &s.name, s.device, to);
         self.ask(task, window, cx);
     }
 
@@ -1159,7 +1172,47 @@ impl DesignCanvas {
                 path.join(" > ")
             )
         });
+        let say = |el: &Element| {
+            let path: Vec<String> = el
+                .path
+                .iter()
+                .map(|i| format!(":nth-child({})", i + 1))
+                .collect();
+            format!("{} at `body > {}`", el.label, path.join(" > "))
+        };
+        let also = selected
+            .map(|_| self.also.iter().map(say).collect())
+            .unwrap_or_default();
+        let library = self
+            .library
+            .iter()
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    c.name.clone(),
+                    c.variants.iter().map(|v| v.name.clone()).collect(),
+                )
+            })
+            .collect();
+        let mut flow: Vec<(String, String)> = Vec::new();
+        for s in &self.canvas.screens {
+            for l in self
+                .shots
+                .get(&s.id)
+                .map(|s| &s.links[..])
+                .unwrap_or_default()
+            {
+                let pair = (s.id.clone(), l.goto.clone());
+                if l.goto != s.id && !flow.contains(&pair) {
+                    flow.push(pair);
+                }
+            }
+        }
         brief::context(&brief::Canvas {
+            also,
+            library,
+            flow,
+            comments: self.open_comment_lines(),
             screens: self
                 .canvas
                 .screens
@@ -1177,7 +1230,9 @@ impl DesignCanvas {
 
     /// Keep what the agent changed.
     fn keep_ai(&mut self, cx: &mut Context<Self>) {
-        self.ai = None;
+        if let Some(ai) = self.ai.take() {
+            self.resolve_fixed(&ai.comments, &ai.task);
+        }
         self.undo.clear();
         self.redo.clear();
         cx.notify();
@@ -1231,6 +1286,9 @@ impl DesignCanvas {
         }
         // Read what it wrote now rather than at the next look, and draw it.
         self.check_files(cx);
+        if let Some(before) = self.ai.as_ref().map(|ai| ai.before.clone()) {
+            self.sync_changed_components(&before, cx);
+        }
         if self.ai.as_ref().is_some_and(|ai| !ai.changed) {
             self.ai = None;
             self.say("AI finished without changing the design.");
@@ -1502,6 +1560,18 @@ impl DesignCanvas {
                 }
                 let ideas: &[&'static str] = if self.ask_new.is_some() {
                     &["A sign-in screen", "A profile with stats", "A checkout"]
+                } else if self.element.is_some() && !self.also.is_empty() {
+                    &[
+                        "Make these consistent",
+                        "Turn them into a list",
+                        "Space them evenly",
+                    ]
+                } else if self.element.as_ref().is_some_and(|e| e.component.is_some()) {
+                    &[
+                        "Add the states it needs",
+                        "Make it stand out",
+                        "Rewrite the text",
+                    ]
                 } else if self.element.is_some() {
                     &["Make it stand out", "Rewrite the text", "Add an icon to it"]
                 } else if screen.is_some() {

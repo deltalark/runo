@@ -26,7 +26,18 @@ pub(crate) struct Canvas<'a> {
     pub tokens: &'a str,
     /// A picture of the selected screen as it looks now, attached to the ask.
     pub picture: Option<String>,
+    /// More selected elements than `element`, said the same way.
+    pub also: Vec<String>,
+    /// The components there are to reuse: id, name and the names of its variants.
+    pub library: Vec<(String, String, Vec<String>)>,
+    /// How the prototype's screens link up: from one screen id to another.
+    pub flow: Vec<(String, String)>,
+    /// The comments people left that are still open, one line each.
+    pub comments: Vec<String>,
 }
+
+/// The most open comments an ask carries.
+const MOST_COMMENTS: usize = 12;
 
 /// Everything an agent needs to change the design.
 pub(crate) fn context(c: &Canvas) -> String {
@@ -77,6 +88,43 @@ pub(crate) fn context(c: &Canvas) -> String {
                 device.label().to_lowercase()
             ));
         }
+        if !c.flow.is_empty() {
+            p.push_str("\nThe prototype's links (data-goto):");
+            for (from, to) in &c.flow {
+                p.push_str(&format!(" {from} → {to};"));
+            }
+            p.pop();
+            p.push('.');
+        }
+        parts.push(p);
+    }
+    if !c.library.is_empty() {
+        let mut p = String::from(
+            "Components to reuse rather than rebuild. Put one on a screen by copying a \
+             variant's element from its file as it is, marks and all, then change its text:",
+        );
+        for (id, name, variants) in &c.library {
+            p.push_str(&format!(
+                "\n- {name} ({FOLDER}/components/{id}.html): {}",
+                variants.join(", ")
+            ));
+        }
+        parts.push(p);
+    }
+    if !c.comments.is_empty() {
+        let mut p = String::from(
+            "Open comments people left on the design. Bear them in mind; address them when \
+             the request is about them:",
+        );
+        for line in c.comments.iter().take(MOST_COMMENTS) {
+            p.push_str(&format!("\n- {line}"));
+        }
+        if c.comments.len() > MOST_COMMENTS {
+            p.push_str(&format!(
+                "\n- and {} more in {FOLDER}/comments.toml",
+                c.comments.len() - MOST_COMMENTS
+            ));
+        }
         parts.push(p);
     }
     match c.selected {
@@ -85,15 +133,32 @@ pub(crate) fn context(c: &Canvas) -> String {
                 "Selected on the canvas (\"this\" means it): the screen {name} \
                  ({FOLDER}/screens/{id}.html)"
             );
-            if let Some(el) = &c.element {
-                p.push_str(&format!(", and on it the element {el}"));
+            match (&c.element, c.also.is_empty()) {
+                (Some(el), true) => p.push_str(&format!(", and on it the element {el}")),
+                (Some(el), false) => {
+                    p.push_str(&format!(
+                        ", and on it {} elements:\n- {el}",
+                        c.also.len() + 1
+                    ));
+                    for more in &c.also {
+                        p.push_str(&format!("\n- {more}"));
+                    }
+                }
+                (None, _) => {}
             }
-            p.push('.');
-            if c.element.is_some() {
+            if !(c.element.is_some() && !c.also.is_empty()) {
+                p.push('.');
+            }
+            if c.element.is_some() && c.also.is_empty() {
                 p.push_str(
                     "\nChange only that element unless asked otherwise. If what's asked for \
                      isn't on the screen yet, add it inside that element when it's a \
                      container, else right after it.",
+                );
+            } else if c.element.is_some() {
+                p.push_str(
+                    "\nChange only those elements unless asked otherwise, treating them as \
+                     one group: make them consistent with each other.",
                 );
             }
             if let Some(pic) = &c.picture {
@@ -248,6 +313,48 @@ pub(crate) fn states_task(id: &str, name: &str) -> String {
     )
 }
 
+/// The task for AI to make a version of a screen for another device.
+pub(crate) fn adapt_task(id: &str, name: &str, from: Device, to: Device) -> String {
+    let (from, to_label) = (from.label().to_lowercase(), to.label().to_lowercase());
+    let how = match to {
+        Device::Desktop => {
+            "Use the width: a sidebar or top navigation in place of a bottom tab bar, \
+             several columns, content side by side rather than stacked, tables where \
+             there are lists of data, and a sensible line length."
+        }
+        Device::Tablet => {
+            "Use the extra room: two columns or a list beside its detail where that \
+             fits, larger touch targets kept, navigation in a sidebar or a top bar."
+        }
+        Device::Phone => {
+            "Fit one column 390px wide: stack what sat side by side, a bottom tab bar \
+             for top-level places, actions in thumb reach and 44px tap targets."
+        }
+    };
+    format!(
+        "Make a {to_label} version of the {from} screen {name} ({FOLDER}/screens/{id}.html) \
+         as a new screen {FOLDER}/screens/{id}-{to_label}.html, titled \"{name} · \
+         {to_label}\" with <meta name=\"runo:device\" content=\"{to_label}\">. Keep its \
+         purpose, content, components and links, but lay it out the way people expect on a \
+         {to_label}, not a stretched copy. {how} Don't change {id}.html itself."
+    )
+}
+
+/// The task for AI to add the usual interaction states to a component as variants.
+pub(crate) fn component_states_task(id: &str, name: &str, have: &[String]) -> String {
+    format!(
+        "Add variants to the component {name} ({FOLDER}/components/{id}.html), which has \
+         {}. Add the states it needs that it doesn't have yet, each a new <template \
+         data-variant=\"…\"> holding the same element: for something tapped, Hover, Pressed \
+         and Disabled; for a field, Focused, Filled, Error and Disabled; for a row, card or \
+         item, Selected and Disabled. Keep the root element's data-component=\"{id}\" and \
+         set its data-variant to the variant's name. Make each state clearly different using \
+         the theme's tokens, keep the same size and structure so instances can switch, and \
+         don't change the existing variants or any screen.",
+        have.join(", ")
+    )
+}
+
 /// The screen `id` is a state of: `inbox-empty` is a state of `inbox`, and which one.
 pub(crate) fn state_of(id: &str) -> Option<(String, usize)> {
     STATES.iter().enumerate().find_map(|(i, s)| {
@@ -372,6 +479,40 @@ mod tests {
         let lean = crate::shell::lean_context(&text, &rest);
         assert!(lean.contains("Nothing is selected"));
         assert!(!lean.contains("How to design well"));
+    }
+
+    #[test]
+    fn the_library_flow_comments_and_a_group_are_described() {
+        let c = Canvas {
+            screens: vec![
+                ("Inbox", "inbox", Device::Phone),
+                ("Mail", "mail", Device::Phone),
+            ],
+            selected: Some(("Inbox", "inbox")),
+            element: Some("div.row at `body > :nth-child(1)`".into()),
+            also: vec!["div.row at `body > :nth-child(2)`".into()],
+            library: vec![(
+                "row".into(),
+                "Setting row".into(),
+                vec!["Default".into(), "Off".into()],
+            )],
+            flow: vec![("inbox".into(), "mail".into())],
+            comments: (0..14).map(|i| format!("comment {i}")).collect(),
+            components: COMPONENTS_CSS,
+            ..Default::default()
+        };
+        let text = context(&c);
+        assert!(text.contains("links (data-goto): inbox → mail."));
+        assert!(text.contains("- Setting row (design/components/row.html): Default, Off"));
+        assert!(text.contains("2 elements:\n- div.row at `body > :nth-child(1)`\n- div.row"));
+        assert!(text.contains("treating them as one group"));
+        assert!(text.contains("- comment 11\n- and 2 more"));
+        assert!(!text.contains("comment 12"));
+        let t = adapt_task("inbox", "Inbox", Device::Phone, Device::Desktop);
+        assert!(t.contains("design/screens/inbox-desktop.html"));
+        assert!(t.contains("sidebar or top navigation"));
+        let t = component_states_task("row", "Setting row", &["Default".into()]);
+        assert!(t.contains("which has Default"));
     }
 
     #[test]

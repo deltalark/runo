@@ -204,26 +204,74 @@ impl DesignCanvas {
         });
     }
 
-    /// Hand a comment to AI to change the design.
-    fn fix_comment(&mut self, id: u32, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(c) = self.comments.iter().find(|c| c.id == id).cloned() else {
-            return;
-        };
-        let Some(name) = self.canvas.screen(&c.screen).map(|s| s.name.clone()) else {
-            self.say("That comment's screen is gone.");
-            return;
-        };
+    /// A comment as an agent reads it: where it's pinned, on what, and what was said.
+    fn comment_line(&self, c: &Comment) -> Option<String> {
+        let name = self.canvas.screen(&c.screen)?.name.clone();
         let under = self
             .shots
             .get(&c.screen)
             .and_then(|s| dom::under(&s.boxes, c.x, c.y, None))
             .map(|b| b.tag.clone());
-        self.select_screen(Some(c.screen.clone()));
-        if self.ask(notes::task(&c, &name, under.as_deref()), window, cx) {
+        Some(notes::line(c, &name, under.as_deref()))
+    }
+
+    /// Every open comment as an agent reads it, for the context of an ask.
+    pub(super) fn open_comment_lines(&self) -> Vec<String> {
+        notes::load(&self.root)
+            .iter()
+            .filter(|c| !c.resolved)
+            .filter_map(|c| self.comment_line(c))
+            .collect()
+    }
+
+    /// Hand comments to AI to change the design. Keeping its change resolves them.
+    pub(super) fn fix_comments(
+        &mut self,
+        ids: Vec<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.comments = notes::load(&self.root);
+        let picked: Vec<Comment> = self
+            .comments
+            .iter()
+            .filter(|c| ids.contains(&c.id) && !c.resolved)
+            .cloned()
+            .collect();
+        let lines: Vec<String> = picked.iter().filter_map(|c| self.comment_line(c)).collect();
+        if lines.is_empty() {
+            self.say("Those comments' screens are gone.");
+            cx.notify();
+            return;
+        }
+        if let [one] = picked.as_slice() {
+            self.select_screen(Some(one.screen.clone()));
+        }
+        if self.ask(notes::task(&lines), window, cx) {
+            if let Some(ai) = self.ai.as_mut() {
+                ai.comments = picked.iter().map(|c| c.id).collect();
+            }
             self.comment_open = None;
-            self.say("AI is on it. Resolve the comment once the change looks right.");
+            self.say("AI is on it. Keeping its change resolves the comment.");
         }
         cx.notify();
+    }
+
+    /// Mark the comments an AI change answered as resolved, once it's kept.
+    pub(super) fn resolve_fixed(&mut self, ids: &[u32], what: &str) {
+        if ids.is_empty() {
+            return;
+        }
+        self.comments = notes::load(&self.root);
+        for c in self.comments.iter_mut().filter(|c| ids.contains(&c.id)) {
+            c.resolved = true;
+            c.replies.push(Reply {
+                author: "AI".into(),
+                text: format!("Fixed: {what}"),
+                at: notes::now(),
+            });
+        }
+        self.save_comments();
     }
 
     /// Show a comment's thread, from the list.
@@ -459,9 +507,9 @@ impl DesignCanvas {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_text()))
                     .hover(|el| el.bg(tint(c_subtle())))
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.fix_comment(id, window, cx)),
-                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.fix_comments(vec![id], window, cx)
+                    }))
                     .child(icon(IconName::Sparkles, 13., c_blue()))
                     .child("Fix with AI"),
             );
@@ -554,6 +602,41 @@ impl DesignCanvas {
                             })
                             .when(c.resolved, |el| el.child("Resolved")),
                     ),
+            );
+        }
+        let open_ids: Vec<u32> = self
+            .comments
+            .iter()
+            .filter(|c| !c.resolved)
+            .map(|c| c.id)
+            .collect();
+        if open_ids.len() > 1 {
+            out = out.child(
+                div().px_3().pt_3().child(
+                    div()
+                        .id("design-comments-fix-all")
+                        .h(px(30.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(6.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .border_1()
+                        .border_color(rgb(c_border()))
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c_text()))
+                        .hover(|el| el.bg(tint(c_subtle())))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.fix_comments(open_ids.clone(), window, cx)
+                        }))
+                        .child(icon(IconName::Sparkles, 13., c_blue()))
+                        .child(format!(
+                            "Fix all {} with AI",
+                            self.comments.iter().filter(|c| !c.resolved).count()
+                        )),
+                ),
             );
         }
         if done > 0 {
