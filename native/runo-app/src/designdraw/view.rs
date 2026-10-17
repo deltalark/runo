@@ -24,6 +24,7 @@ mod components;
 mod figma;
 mod insert;
 mod layers;
+mod looks;
 
 actions!(
     design_canvas,
@@ -288,6 +289,9 @@ pub(crate) struct DesignCanvas {
     /// The icon finder's box, and what's typed in it.
     f_icon: Entity<InputState>,
     icon_query: String,
+    /// The style being renamed, by class, and its name field.
+    renaming_style: Option<String>,
+    f_look: Entity<InputState>,
     /// Who's commenting, found out when they first comment.
     author: String,
     f_inline: Entity<InputState>,
@@ -429,6 +433,7 @@ impl DesignCanvas {
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
         let f_icon = Self::make_icon_field(window, cx, &mut subs);
+        let f_look = Self::make_look_field(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -500,6 +505,8 @@ impl DesignCanvas {
             layer_query: String::new(),
             f_icon,
             icon_query: String::new(),
+            renaming_style: None,
+            f_look,
             author: String::new(),
             f_inline,
             inline_open: false,

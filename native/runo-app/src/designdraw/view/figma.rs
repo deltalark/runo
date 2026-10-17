@@ -207,7 +207,7 @@ impl DesignCanvas {
         self.op("styles", &[serde_json::Value::Object(map)], After::Same, cx);
     }
 
-    fn set_styles(&mut self, pairs: &[(&str, &str)], cx: &mut Context<Self>) {
+    pub(super) fn set_styles(&mut self, pairs: &[(&str, &str)], cx: &mut Context<Self>) {
         let mut map = serde_json::Map::new();
         for (k, v) in pairs {
             map.insert(k.to_string(), json!(v));
@@ -1078,6 +1078,9 @@ impl DesignCanvas {
         );
         out = out.children(self.component_section(cx));
         if !multi {
+            out = out.child(self.style_section(el, cx));
+        }
+        if !multi {
             out = out
                 .children(self.icon_section(el, cx))
                 .children(self.picture_section(el, cx));
@@ -1101,6 +1104,41 @@ impl DesignCanvas {
                     self.fld("pad-y", mark_icon(IconName::MoveVertical)),
                 )),
         );
+
+        // Position: in the flow, floating over what holds it, stuck on scroll, or pinned.
+        let place = match el.style("position").as_str() {
+            "absolute" => "absolute",
+            "sticky" => "sticky",
+            "fixed" => "fixed",
+            _ => "",
+        };
+        let mut places = div().flex().flex_wrap().gap(px(4.));
+        for (i, (label, mode, hint)) in [
+            ("In flow", "", "Laid out with what's around it"),
+            (
+                "Floating",
+                "absolute",
+                "Over what holds it, where it is now",
+            ),
+            ("Sticky", "sticky", "Stays at the top as the screen scrolls"),
+            ("Pinned", "fixed", "Fixed to the screen"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            places = places.child(
+                chip_btn(("design-position", i), label, place == mode)
+                    .tooltip(tip(hint))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.op("position", &[json!(mode)], After::Same, cx)
+                    })),
+            );
+        }
+        let mut position = sec("Position", None).child(places);
+        if !place.is_empty() {
+            position = position.child(pair(self.fld("x", mark("X")), self.fld("y", mark("Y"))));
+        }
+        out = out.child(position);
 
         // Auto layout.
         if el.is_flex() {
@@ -1365,11 +1403,12 @@ impl DesignCanvas {
             out = out.child(text);
         }
 
-        // Fill.
+        // Fill: a colour, a gradient or a picture.
         let fill = fields::field("fill")
             .map(|f| fields::display(f, el))
             .unwrap_or_default();
-        out = out.child(if fill.is_empty() {
+        let kind = Self::fill_kind(el);
+        out = out.child(if fill.is_empty() && kind == "solid" {
             sec(
                 "Fill",
                 Some(
@@ -1381,18 +1420,41 @@ impl DesignCanvas {
                 ),
             )
         } else {
-            sec(
+            let body = sec(
                 "Fill",
                 Some(
                     mini("design-fill-off", IconName::Minus, "Remove the fill", false)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_style("background-color", "transparent", cx)
+                            this.set_styles(
+                                &[
+                                    ("background-color", "transparent"),
+                                    ("background-image", ""),
+                                    ("background", ""),
+                                ],
+                                cx,
+                            )
                         }))
                         .into_any_element(),
                 ),
             )
-            .child(self.color_fld("fill", el))
-            .child(self.token_swatches("background-color", cx))
+            .child(self.fill_kinds(el, cx));
+            match kind {
+                "gradient" => body.child(self.gradient_editor(el, cx)),
+                "picture" => body.child(
+                    text_btn(
+                        "design-fill-pic",
+                        "Replace picture",
+                        Some(IconName::Image),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.choose_picture(super::insert::PictureFor::Picked, cx)
+                    })),
+                ),
+                _ => body
+                    .child(self.color_fld("fill", el))
+                    .child(self.token_swatches("background-color", cx)),
+            }
         });
 
         // Stroke.
@@ -1452,10 +1514,39 @@ impl DesignCanvas {
         });
 
         // Effects.
-        out = out.child(sec("Effects", None).child(label_row(
-            "Drop shadow",
-            self.choice_row("box-shadow", el, &SHADOWS, cx),
-        )));
+        out = out.child(
+            sec("Effects", None)
+                .child(label_row(
+                    "Drop shadow",
+                    self.choice_row("box-shadow", el, &SHADOWS, cx),
+                ))
+                .child(label_row(
+                    "Blur",
+                    self.choice_row(
+                        "filter",
+                        el,
+                        &[
+                            ("None", ""),
+                            ("Soft", "blur(4px)"),
+                            ("Strong", "blur(12px)"),
+                        ],
+                        cx,
+                    ),
+                ))
+                .child(label_row(
+                    "Background blur",
+                    self.choice_row(
+                        "backdrop-filter",
+                        el,
+                        &[
+                            ("None", ""),
+                            ("Glass", "blur(16px)"),
+                            ("Frost", "blur(32px)"),
+                        ],
+                        cx,
+                    ),
+                )),
+        );
 
         out.child(self.export_section(if multi { "selection" } else { &el.label }, cx))
             .child(
