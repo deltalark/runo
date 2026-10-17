@@ -1710,7 +1710,7 @@ impl DesignCanvas {
 
     /// The Export section: a scale and a format, then export to a file or copy.
     fn export_section(&self, what: &str, cx: &mut Context<Self>) -> Div {
-        let picture = self.export_format != Format::Html;
+        let picture = self.export_format.picture();
         let mut scales = div().flex().gap(px(4.));
         for n in [1u32, 2, 3] {
             scales = scales.child(
@@ -1726,7 +1726,7 @@ impl DesignCanvas {
                 })),
             );
         }
-        let mut formats = div().flex().gap(px(4.));
+        let mut formats = div().flex().flex_wrap().gap(px(4.));
         for (i, f) in Format::ALL.into_iter().enumerate() {
             formats = formats.child(
                 chip_btn(
@@ -1742,7 +1742,7 @@ impl DesignCanvas {
         }
         let label = format!("Export {what}");
         sec("Export", None)
-            .child(div().flex().gap(px(8.)).child(scales).child(formats))
+            .child(div().v_flex().gap(px(6.)).child(formats).child(scales))
             .child(
                 div()
                     .flex()
@@ -1781,6 +1781,22 @@ impl DesignCanvas {
             self.export_format
         };
         let name = export::file_name(&id, part.as_deref(), self.export_scale, format);
+        if matches!(format, Format::React | Format::SwiftUi) {
+            let path = picked.first().map(|e| e.path.clone()).unwrap_or_default();
+            let lang = if format == Format::React {
+                handoff::Lang::React
+            } else {
+                handoff::Lang::Swift
+            };
+            self.write_code(
+                id,
+                path,
+                lang,
+                move |this, code, cx| this.save_code_export(lang, code, cx),
+                cx,
+            );
+            return;
+        }
         if format == Format::Html {
             let design = folder(&self.root);
             let html = std::fs::read_to_string(screen_path(&self.root, &id)).unwrap_or_default();
@@ -1853,7 +1869,7 @@ impl DesignCanvas {
         }
     }
 
-    fn save_export(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+    pub(super) fn save_export(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let dir = export::folder(&self.root);
         let file = dir.join(name);
         match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, bytes)) {

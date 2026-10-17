@@ -295,6 +295,10 @@ pub(crate) struct DesignCanvas {
     /// The Code tab's code for the picked layer, and the layer it was last asked for.
     code: Option<(handoff::CodeKey, dom::Code)>,
     code_asked: std::cell::RefCell<Option<handoff::CodeKey>>,
+    /// What the Code tab writes the layer as, and the React or SwiftUI last written.
+    code_lang: handoff::Lang,
+    code_gen: Option<(handoff::CodeKey, handoff::Lang, handoff::Written)>,
+    gen_asked: std::cell::RefCell<Option<(handoff::CodeKey, handoff::Lang)>>,
     /// Screens as tapping in Play left them, shown over their drawings until Play stops.
     play_shots: HashMap<String, Shot>,
     play_tapping: bool,
@@ -554,6 +558,9 @@ impl DesignCanvas {
             play_visit: 0,
             code: None,
             code_asked: Default::default(),
+            code_lang: Default::default(),
+            code_gen: None,
+            gen_asked: Default::default(),
             play_shots: HashMap::new(),
             play_tapping: false,
             f_text,

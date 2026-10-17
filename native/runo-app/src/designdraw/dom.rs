@@ -405,6 +405,60 @@ if (!window.__runo) window.__runo = (() => {
     // where it was drawn. Gives back its path.
     // Each shape's outline as Design draws it: an svg's path data and where its units sit
     // on the page, or a box with its corner radius; and the first one's fill and stroke.
+    // The layer at `p` (or the whole screen) as a tree for writing it as code: each
+    // element's tag, attributes and what's inside, and how it's laid out and styled; and
+    // the variants of `comps` ({id: {variant: html}}) as trees, for their code.
+    codeTree: (p, comps) => {
+      const STY = ['display', 'flex-direction', 'flex-wrap', 'row-gap', 'column-gap',
+        'align-items', 'justify-content', 'align-self', 'flex-grow', 'padding-top',
+        'padding-right', 'padding-bottom', 'padding-left', 'background-color',
+        'background-image', 'color', 'font-size', 'font-weight', 'font-style', 'line-height',
+        'text-align', 'text-transform', 'letter-spacing', 'border-top-left-radius',
+        'border-top-width', 'border-top-style', 'border-top-color', 'box-shadow', 'opacity',
+        'position', 'left', 'top', 'grid-template-columns', 'object-fit', 'overflow',
+        'text-decoration-line', 'visibility'];
+      const nodeOf = (el, styled) => {
+        const kids = [];
+        for (const c of el.childNodes) {
+          if (c.nodeType === 3) {
+            const t = c.textContent.replace(/\s+/g, ' ');
+            if (t.trim()) kids.push({ t: 'text', text: t });
+          } else if (c.nodeType === 1 && !SKIP.has(c.tagName)) {
+            kids.push(nodeOf(c, styled));
+          }
+        }
+        const out = { t: 'el', tag: el.tagName.toLowerCase(), kids,
+          attrs: Array.from(el.attributes, (a) => [a.name, a.value]) };
+        if (styled && el.getBoundingClientRect) {
+          const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+          out.s = {};
+          for (const k of STY) out.s[k] = cs.getPropertyValue(k);
+          out.w = r.width; out.h = r.height;
+          out.shown = cs.display !== 'none' && !el.hidden;
+          const par = el.parentElement;
+          if (par) {
+            const ps = getComputedStyle(par), pr = par.getBoundingClientRect();
+            const inner = pr.width - parseFloat(ps.paddingLeft) - parseFloat(ps.paddingRight);
+            out.fill = Math.abs(r.width - inner) < 1.5;
+          }
+          out.sized = !!(el.style.width || el.style.height);
+        }
+        return out;
+      };
+      const el = p && p.length ? at(p) : document.body;
+      if (!el) return null;
+      const parsed = {};
+      for (const [id, vs] of Object.entries(comps || {})) {
+        parsed[id] = {};
+        for (const [v, html] of Object.entries(vs)) {
+          const t = document.createElement('template');
+          t.innerHTML = html;
+          const first = t.content.firstElementChild;
+          if (first) parsed[id][v] = nodeOf(first, false);
+        }
+      }
+      return { node: nodeOf(el, true), comps: parsed };
+    },
     // Link a stylesheet into the page unless it's linked already.
     useSheet: (href) => {
       const have = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));

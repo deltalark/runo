@@ -3,6 +3,7 @@
 
 pub(crate) mod brief;
 pub(crate) mod checks;
+pub(crate) mod codegen;
 pub(crate) mod dom;
 pub(crate) mod export;
 pub(crate) mod fields;
