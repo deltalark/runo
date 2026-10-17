@@ -181,7 +181,7 @@ impl DesignCanvas {
             c.set(&v, &html);
             this.save_component(&c);
             let js = dom::call("sync", &[json!(c.id), serde_json::Value::Object(c.map())]);
-            this.on_every_screen(js, format!("{} updated", c.name), cx);
+            this.on_every_screen(js, format!("{} updated", c.name), false, cx);
         });
     }
 
@@ -273,11 +273,11 @@ impl DesignCanvas {
         self.save_component(&c);
         self.comp_vals.1 = to.clone();
         let js = dom::call("renameVariant", &[json!(c.id), json!(from), json!(to)]);
-        self.on_every_screen(js, format!("Renamed the variant to {to}"), cx);
+        self.on_every_screen(js, format!("Renamed the variant to {to}"), false, cx);
     }
 
     /// Change every screen with `js`, each a step of undo, and say `what` happened.
-    fn on_every_screen(&mut self, js: String, what: String, cx: &mut Context<Self>) {
+    fn on_every_screen(&mut self, js: String, what: String, quiet: bool, cx: &mut Context<Self>) {
         let screens: Vec<(String, Device)> = self
             .canvas
             .screens
@@ -300,6 +300,9 @@ impl DesignCanvas {
                 for (id, before, shot) in out {
                     this.landed(id, before, shot, After::Same, cx);
                 }
+                if quiet && n == 0 {
+                    return;
+                }
                 this.say(match n {
                     0 => format!("{what}. Its instances already matched."),
                     1 => format!("{what} on 1 screen."),
@@ -307,6 +310,46 @@ impl DesignCanvas {
                 });
             },
         );
+    }
+
+    /// Have AI add the states the selected instance's component needs, as variants.
+    fn component_states_with_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((c, _)) = self.instance() else {
+            return;
+        };
+        let have: Vec<String> = c.variants.iter().map(|v| v.name.clone()).collect();
+        let task = brief::component_states_task(&c.id, &c.name, &have);
+        self.ask(task, window, cx);
+    }
+
+    /// After an agent changed components' files, bring their instances on every screen up
+    /// to date, each keeping its own text, so a component change never leaves screens
+    /// behind.
+    pub(super) fn sync_changed_components(
+        &mut self,
+        before: &HashMap<PathBuf, Vec<u8>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.library = library::load(&self.root);
+        let dir = library::folder(&self.root);
+        let changed: Vec<Component> = self
+            .library
+            .iter()
+            .filter(|c| {
+                let file = dir.join(format!("{}.html", c.id));
+                before.get(&file) != std::fs::read(&file).ok().as_ref()
+            })
+            .cloned()
+            .collect();
+        for c in changed {
+            let js = dom::call("sync", &[json!(c.id), serde_json::Value::Object(c.map())]);
+            self.on_every_screen(
+                js,
+                format!("Brought {}'s instances up to date", c.name),
+                true,
+                cx,
+            );
+        }
     }
 
     /// Put an instance of a component's variant on the selected screen.
@@ -434,6 +477,20 @@ impl DesignCanvas {
                     ),
             )
             .child(chips)
+            .child(
+                text_btn(
+                    "design-component-states",
+                    "States with AI",
+                    Some(IconName::Sparkles),
+                    false,
+                )
+                .tooltip(tip(
+                    "AI adds the hover, pressed, disabled or other states it needs as variants",
+                ))
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.component_states_with_ai(window, cx)),
+                ),
+            )
             .child(
                 div()
                     .flex()
