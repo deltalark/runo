@@ -359,6 +359,8 @@ pub(crate) struct DesignCanvas {
     f_var: Entity<InputState>,
     /// Who's commenting, found out when they first comment.
     author: String,
+    /// Who comments can mention.
+    people: Vec<String>,
     f_inline: Entity<InputState>,
     inline_open: bool,
     /// What the text fields were filled for.
@@ -594,6 +596,7 @@ impl DesignCanvas {
             editing_var: None,
             f_var,
             author: String::new(),
+            people: Vec::new(),
             f_inline,
             inline_open: false,
             loaded: None,
@@ -4777,11 +4780,15 @@ impl DesignCanvas {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, e: &MouseDownEvent, _, cx| {
-                            this.play_tap(e.position, cx);
+                            if this.commenting {
+                                this.play_comment_down(e.position, cx);
+                            } else {
+                                this.play_tap(e.position, cx);
+                            }
                         }),
                     ),
             );
-            for (i, l) in shot.links.iter().enumerate() {
+            for (i, l) in shot.links.iter().enumerate().filter(|_| !self.commenting) {
                 let link = l.clone();
                 frame = frame.child(
                     div()
@@ -4859,10 +4866,23 @@ impl DesignCanvas {
                                 .flex_1()
                                 .text_size(px(13.))
                                 .text_color(rgb(c_text()))
-                                .child(format!(
-                                    "{}  ·  click the linked parts to move through the design",
-                                    s.name
-                                )),
+                                .child(if self.commenting {
+                                    format!("{}  ·  click anywhere to comment", s.name)
+                                } else {
+                                    format!(
+                                        "{}  ·  click the linked parts to move through the design",
+                                        s.name
+                                    )
+                                }),
+                        )
+                        .child(
+                            icon_btn(
+                                "design-play-comment",
+                                comments::comment_icon(),
+                                "Comment (C)",
+                                self.commenting,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_commenting(cx))),
                         )
                         .child(platforms),
                 )
@@ -5051,7 +5071,9 @@ impl DesignCanvas {
             .children(self.point_handles())
             .children(self.empty_state(cx))
             .children(self.thinking())
-            .children(self.comment_layer(cx));
+            .when(self.playing.is_none(), |a| {
+                a.children(self.comment_layer(cx))
+            });
         if let Some(e) = &self.error {
             area = area.child(
                 div()
@@ -5107,6 +5129,10 @@ impl DesignCanvas {
             area = area.child(self.screen_menu(*at, cx));
         }
         area = area.children(self.player(cx));
+        if self.playing.is_some() {
+            // Comments in Present go over the screen playing.
+            area = area.children(self.comment_layer(cx));
+        }
         // The status sits in a strip under the canvas, so nothing drawn over the canvas covers it.
         div()
             .flex_1()
