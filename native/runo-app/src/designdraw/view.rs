@@ -31,6 +31,7 @@ mod motion;
 mod pictures;
 mod shapes;
 mod vars;
+mod vectors;
 
 actions!(
     design_canvas,
@@ -97,6 +98,13 @@ enum Panel {
 
 enum Drag {
     None,
+    /// Moving one point of the path being edited.
+    Point {
+        contour: usize,
+        index: usize,
+        from: Pt,
+        at: Pt,
+    },
     Pan {
         from: Pt,
         start: Pt,
@@ -293,6 +301,8 @@ pub(crate) struct DesignCanvas {
     hand: bool,
     /// Whether layout grids are drawn and snapped to.
     show_grids: bool,
+    /// The vector path whose points are being edited.
+    points: Option<vectors::PointEdit>,
     /// The shape tool picked, if any, and the path the pen is placing: its screen, its
     /// points in canvas units, and where the next would go.
     shape: Option<shapes::Shape>,
@@ -536,6 +546,7 @@ impl DesignCanvas {
             field_vals: HashMap::new(),
             hand: false,
             show_grids: true,
+            points: None,
             shape: None,
             pen: None,
             pen_at: None,
@@ -3010,6 +3021,9 @@ impl DesignCanvas {
             self.comment_down(w, cx);
             return;
         }
+        if e.button == MouseButton::Left && self.points_down(w, e.modifiers.alt, cx) {
+            return;
+        }
         if e.button == MouseButton::Left && self.shape_down(w, e.click_count, cx) {
             return;
         }
@@ -3183,6 +3197,7 @@ impl DesignCanvas {
         };
         match &mut self.drag {
             Drag::None => return,
+            Drag::Point { at, .. } => *at = w,
             Drag::Guide { vertical, at, .. } => {
                 if let Some((sx, sy)) = guide_off {
                     *at = if *vertical { w.0 - sx } else { w.1 - sy };
@@ -3320,6 +3335,12 @@ impl DesignCanvas {
                 ..
             } if self.floating() => self.move_floating(at.0 - from.0, at.1 - from.1, cx),
             Drag::Guide { id, index, at, .. } => self.drop_guide(id, index, at, cx),
+            Drag::Point {
+                contour,
+                index,
+                from,
+                at,
+            } => self.drop_point(contour, index, from, at, cx),
             Drag::Element { moved: true, .. } => {
                 if let (Some(d), Some(path)) = (drop, self.element.as_ref().map(|e| e.path.clone()))
                 {
@@ -3556,6 +3577,17 @@ impl DesignCanvas {
                 self.finish_pen(false, cx);
                 true
             }
+            (false, false, false, "enter") if self.points.is_some() => {
+                self.points = None;
+                cx.notify();
+                true
+            }
+            (false, false, false, "enter")
+                if self.element.as_ref().is_some_and(|e| e.tag == "svg") =>
+            {
+                self.start_points(cx);
+                true
+            }
             (false, false, false, "enter") => {
                 if self.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     self.inline_open = true;
@@ -3644,7 +3676,9 @@ impl DesignCanvas {
 
     /// Escape: leave play, then the text being edited, then step out to the parent.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.playing.is_some() {
+        if self.points.is_some() {
+            self.points = None;
+        } else if self.playing.is_some() {
             self.playing = None;
         } else if self.pen.is_some() {
             self.finish_pen(false, cx);
@@ -4865,6 +4899,7 @@ impl DesignCanvas {
         let bounds = self.bounds.clone();
         let (links, dragging) = self.paint_links();
         let sketch = self.sketch();
+        let point_lines = self.point_lines();
         let notice = self
             .notice
             .as_ref()
@@ -4939,6 +4974,13 @@ impl DesignCanvas {
                         if let Some((pts, arrow)) = &sketch {
                             shapes::paint_sketch(pts, *arrow, &tf, window);
                         }
+                        for (pts, closed) in &point_lines {
+                            let mut pts = pts.clone();
+                            if *closed && !pts.is_empty() {
+                                pts.push(pts[0]);
+                            }
+                            shapes::paint_sketch(&pts, false, &tf, window);
+                        }
                     },
                 )
                 .absolute()
@@ -4946,6 +4988,7 @@ impl DesignCanvas {
                 .left_0()
                 .size_full(),
             )
+            .children(self.point_handles())
             .children(self.empty_state(cx))
             .children(self.thinking())
             .children(self.comment_layer(cx));

@@ -307,6 +307,18 @@ if (!window.__runo) window.__runo = (() => {
       const y = r.top - box.top - (p ? p.clientTop : 0);
       set({ left: x, right: w - x - r.width, top: y, bottom: h - y - r.height }[side]);
     },
+    // A drawing's new outline: its path data and size, moved by (dx, dy).
+    reshape: (el, dx, dy, w, h, d) => {
+      const q = el.querySelector('path');
+      if (q) q.setAttribute('d', d);
+      el.setAttribute('width', w); el.setAttribute('height', h);
+      if (el.style.width) el.style.width = w + 'px';
+      if (el.style.height) el.style.height = h + 'px';
+      el.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+      const move = (k, by) => { const v = parseFloat(el.style[k]); el.style[k] = Math.round((isNaN(v) ? 0 : v) + by) + 'px'; };
+      if (el.style.right && !el.style.left) move('right', -dx); else move('left', dx);
+      if (el.style.bottom && !el.style.top) move('bottom', -dy); else move('top', dy);
+    },
     styles: (el, map) => {
       for (const [k, v] of Object.entries(map)) {
         if (v) el.style.setProperty(k, v); else el.style.removeProperty(k);
@@ -391,6 +403,40 @@ if (!window.__runo) window.__runo = (() => {
     code: (p, text) => { const el = at(p); return el ? code(el, text) : null; },
     // Put a drawn shape at a point on the page, in the box that holds that spot, floating
     // where it was drawn. Gives back its path.
+    // Each shape's outline as Design draws it: an svg's path data and where its units sit
+    // on the page, or a box with its corner radius; and the first one's fill and stroke.
+    outlines: (ps) => ps.map((p) => {
+      const el = at(p);
+      if (!el) return null;
+      const r = rect(el), cs = getComputedStyle(el);
+      if (el.tagName.toLowerCase() === 'svg') {
+        const vb = el.viewBox && el.viewBox.baseVal;
+        const sx = vb && vb.width ? r.w / vb.width : 1, sy = vb && vb.height ? r.h / vb.height : 1;
+        const d = Array.from(el.querySelectorAll('path')).map((q) => q.getAttribute('d') || '').join(' ');
+        return { kind: 'path', d, x: r.x - (vb ? vb.x * sx : 0), y: r.y - (vb ? vb.y * sy : 0), sx, sy, rect: r,
+          fill: el.style.fill || cs.fill, stroke: el.style.stroke || 'none' };
+      }
+      const radius = parseFloat(cs.borderTopLeftRadius) || 0;
+      const round = cs.borderTopLeftRadius.endsWith('%') && parseFloat(cs.borderTopLeftRadius) >= 50;
+      return { kind: round ? 'ellipse' : 'rect', radius: Math.min(radius, r.w / 2, r.h / 2), rect: r,
+        fill: el.style.background || el.style.backgroundColor || cs.backgroundColor, stroke: 'none' };
+    }),
+    // Put `s` where the shapes at `ps` were, in the first one's box, floating at page point
+    // (x, y), and take the shapes away. Gives back its path.
+    replaceShapes: (ps, x, y, s) => {
+      const n = parse(s);
+      const els = ps.map(at).filter(Boolean);
+      if (!n || !els.length) return null;
+      const parent = els[0].parentElement;
+      if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+      const r = parent.getBoundingClientRect();
+      n.style.position = 'absolute';
+      n.style.left = Math.round(x - scrollX - r.left - parent.clientLeft + parent.scrollLeft) + 'px';
+      n.style.top = Math.round(y - scrollY - r.top - parent.clientTop + parent.scrollTop) + 'px';
+      els[0].before(n);
+      for (const e of els) e.remove();
+      return pathOf(n);
+    },
     drawShape: (x, y, s) => {
       const n = parse(s);
       if (!n) return null;

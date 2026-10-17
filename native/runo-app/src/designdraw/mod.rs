@@ -12,6 +12,7 @@ pub(crate) mod notes;
 pub(crate) mod parts;
 pub(crate) mod render;
 pub(crate) mod styles;
+pub(crate) mod vector;
 pub(crate) mod view;
 #[cfg(target_os = "macos")]
 pub(crate) mod webkit;

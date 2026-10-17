@@ -1113,6 +1113,7 @@ impl DesignCanvas {
                 )
                 .child(tools.ml(px(-4.))),
         );
+        out = out.children(self.vector_tools(el, cx));
         out = out.children(self.component_section(cx));
         if !multi {
             out = out.child(self.style_section(el, cx));
