@@ -116,6 +116,7 @@ pub(crate) fn standalone(html: &str, design: &Path, body: Option<&str>) -> Strin
         rest = &rest[i + end + 1..];
     }
     out.push_str(rest);
+    let mut out = with_pictures(&out, design);
     // The prototype's links go nowhere on their own.
     if let Some(i) = out.find("<script src=\"../prototype.js\"") {
         if let Some(end) = out[i..].find("</script>") {
@@ -136,6 +137,43 @@ pub(crate) fn standalone(html: &str, design: &Path, body: Option<&str>) -> Strin
     }
 }
 
+/// `html` with the pictures it uses from the design's assets written into it.
+fn with_pictures(html: &str, design: &Path) -> String {
+    use base64::Engine;
+    const AT: &str = "../assets/";
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find(AT) {
+        out.push_str(&rest[..i]);
+        let name_len = rest[i + AT.len()..]
+            .find(|c: char| matches!(c, '"' | '\'' | ')' | '&' | '<') || c.is_whitespace())
+            .unwrap_or(rest.len() - i - AT.len());
+        let name = &rest[i + AT.len()..i + AT.len() + name_len];
+        let kind = match name
+            .rsplit('.')
+            .next()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            Some("svg") => "image/svg+xml",
+            _ => "image/png",
+        };
+        match std::fs::read(design.join("assets").join(name)) {
+            Ok(bytes) if !name.contains('/') => out.push_str(&format!(
+                "data:{kind};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )),
+            _ => out.push_str(&rest[i..i + AT.len() + name_len]),
+        }
+        rest = &rest[i + AT.len() + name_len..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The design file a `<link rel="stylesheet">` points at, when it's one of the design's
 /// own: `../tokens.css` gives `tokens.css`.
 fn sheet_of(tag: &str) -> Option<&str> {
@@ -151,6 +189,18 @@ fn sheet_of(tag: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_go_into_a_standalone_page() {
+        let dir = std::env::temp_dir().join(format!("runo-export-pics-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        std::fs::write(dir.join("assets/cat.png"), b"png").unwrap();
+        let html = "<div style=\"background-image: url(&quot;../assets/cat.png&quot;)\"></div><img src=\"../assets/gone.jpg\">";
+        let out = standalone(html, &dir, None);
+        assert!(out.contains("url(&quot;data:image/png;base64,cG5n&quot;)"));
+        assert!(out.contains("src=\"../assets/gone.jpg\""));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn exports_are_named_for_what_and_how_big() {

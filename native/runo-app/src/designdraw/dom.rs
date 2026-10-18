@@ -46,6 +46,16 @@ if (!window.__runo) window.__runo = (() => {
     'justify-content', 'width', 'height', 'opacity', 'line-height', 'letter-spacing',
     'border-top-width', 'border-top-color', 'border-top-style', 'border-top-left-radius',
     'box-shadow', 'flex-wrap'];
+  // The one icon an element is or holds, as an icon button or a tab does.
+  const iconEl = (el) => {
+    const all = el.matches('.icon') ? [el] : Array.from(el.querySelectorAll('.icon'));
+    return all.length === 1 ? all[0] : null;
+  };
+  const iconOf = (el) => {
+    const i = iconEl(el);
+    const c = i && Array.from(i.classList).find((c) => c.startsWith('i-'));
+    return c ? c.slice(2) : null;
+  };
   const info = (el) => {
     const cs = getComputedStyle(el);
     const computed = {};
@@ -63,6 +73,8 @@ if (!window.__runo) window.__runo = (() => {
       children: kids(el).length,
       component: el.dataset.component || null, variant: el.dataset.variant || null,
       name: el.dataset.name || null, locked: el.hasAttribute('data-locked'),
+      icon: iconOf(el), src: el.getAttribute('src'),
+      show: el.dataset.show || null,
     };
   };
   const tree = () => {
@@ -73,7 +85,7 @@ if (!window.__runo) window.__runo = (() => {
         const t = ownText(c);
         out.push({ path: pathOf(c), label: label(c), depth, hidden: c.hidden,
           text: t ? t.slice(0, 40) : null, component: c.dataset.component || null,
-          name: c.dataset.name || null, locked: c.hasAttribute('data-locked') });
+          name: c.dataset.name || null, locked: c.hasAttribute('data-locked'), id: c.id || null });
         walk(c, depth + 1);
       }
     };
@@ -157,6 +169,38 @@ if (!window.__runo) window.__runo = (() => {
     attr: (el, k, v) => { if (v === null || v === '') el.removeAttribute(k); else el.setAttribute(k, v); },
     hide: (el) => { el.hidden = !el.hidden; },
     lock: (el) => { el.toggleAttribute('data-locked'); },
+    // A tap on `el` opens or closes the overlay at `p`, which gets an id to be named by
+    // and starts hidden.
+    showTarget: (el, p) => {
+      const o = at(p);
+      if (!o) return;
+      if (!o.id) {
+        let n = 1;
+        while (document.getElementById('overlay-' + n)) n++;
+        o.id = 'overlay-' + n;
+      }
+      el.dataset.show = '#' + o.id;
+      if (!o.contains(el)) o.hidden = true;
+    },
+    icon: (el, name) => {
+      const i = iconEl(el);
+      if (!i) return;
+      for (const c of Array.from(i.classList)) if (c.startsWith('i-')) i.classList.remove(c);
+      i.classList.add('i-' + name);
+    },
+    // A picture: an <img> shows it, anything else is filled with it. An empty url takes
+    // it away.
+    picture: (el, url) => {
+      if (el.tagName === 'IMG') { if (url) el.setAttribute('src', url); else el.removeAttribute('src'); return; }
+      if (url) {
+        el.style.setProperty('background-image', 'url("' + url + '")');
+        el.style.setProperty('background-size', 'cover');
+        el.style.setProperty('background-position', 'center');
+      } else {
+        for (const k of ['background-image', 'background-size', 'background-position']) el.style.removeProperty(k);
+        if (!el.getAttribute('style')) el.removeAttribute('style');
+      }
+    },
     // A text style is a class: the one given replaces any of `all`, and the type set on the
     // element itself goes, so the style shows.
     textStyle: (el, cls, all) => {
@@ -194,6 +238,21 @@ if (!window.__runo) window.__runo = (() => {
       return info(el);
     },
     info: (p) => { const el = at(p); return el ? info(el) : null; },
+    // Put a part where it belongs on a screen with nothing picked: bars at the top, tab
+    // bars, overlays and floating buttons at the end, anything else at the end of the
+    // screen's content. Gives back its path.
+    place: (s) => {
+      const n = parse(s);
+      if (!n) return null;
+      const frame = n.matches('.tabbar, .overlay, .fab, .toast');
+      const main = document.querySelector('main.screen, .screen, main');
+      if (n.matches('header.bar, .bar')) document.body.prepend(n);
+      else if (frame || !main) {
+        const tab = document.querySelector('.tabbar');
+        if (tab && !n.matches('.tabbar')) tab.before(n); else document.body.appendChild(n);
+      } else main.appendChild(n);
+      return pathOf(n);
+    },
     tree, links, html, boxes,
     size: () => ({ w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight }),
     op: (p, name, ...args) => {
@@ -341,6 +400,15 @@ pub(crate) struct Element {
     pub component: Option<String>,
     #[serde(default)]
     pub variant: Option<String>,
+    /// The one icon it is or holds, by name ("heart" for `i-heart`).
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// An image's `src`.
+    #[serde(default)]
+    pub src: Option<String>,
+    /// What a tap on it shows or hides (`data-show`).
+    #[serde(default)]
+    pub show: Option<String>,
     /// Its name in the layers panel (`data-name`), and whether it's locked.
     #[serde(default)]
     pub name: Option<String>,
@@ -400,6 +468,8 @@ pub(crate) struct Layer {
     /// Locked (`data-locked`): it can't be picked on the canvas.
     #[serde(default)]
     pub locked: bool,
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// An element on the page: where it sits, and whether its children run across.
