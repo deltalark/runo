@@ -193,6 +193,9 @@ impl DesignCanvas {
         let lib = self.library.clone();
         let tokens =
             std::fs::read_to_string(self.root.join(FOLDER).join("tokens.css")).unwrap_or_default();
+        let map = crate::designdraw::codemap::CodeMap::load(&self.root);
+        let swift_app = crate::designdraw::spec::settings(&self.root).mobile
+            == crate::designdraw::spec::Mobile::SwiftUi;
         self.run(
             cx,
             move |r| r.eval(&id, device, &js),
@@ -211,6 +214,8 @@ impl DesignCanvas {
                             &tree,
                             &format!("{name}View"),
                             &tokens,
+                            &lib,
+                            swift_app.then_some(&map),
                         );
                         Written {
                             name,
@@ -219,7 +224,7 @@ impl DesignCanvas {
                         }
                     }
                     _ => Written {
-                        main: crate::designdraw::codegen::react(&tree, &name, &lib),
+                        main: crate::designdraw::codegen::react(&tree, &name, &lib, &map),
                         name,
                         theme: None,
                     },

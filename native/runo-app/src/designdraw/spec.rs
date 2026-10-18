@@ -243,6 +243,7 @@ pub(crate) fn write(
         .filter(|s| s.change != Change::Unchanged)
         .map(|s| s.id.as_str())
         .collect();
+    let map = super::codemap::CodeMap::load(root);
     let components: Vec<serde_json::Value> = super::library::load(root)
         .into_iter()
         .map(|c| {
@@ -251,6 +252,7 @@ pub(crate) fn write(
                 "name": c.name,
                 "library": super::library::library_of(&c.id),
                 "variants": c.variants.iter().map(|v| v.name.clone()).collect::<Vec<_>>(),
+                "code": map.spec(&c.id),
             })
         })
         .collect();
@@ -278,6 +280,7 @@ pub(crate) fn write(
             .iter()
             .map(|f| format!("../tokens/{f}"))
             .collect::<Vec<_>>(),
+        "codeMap": "../../code-map.toml",
         "screens": screens,
         "removed": changes.map(|c| c.removed.clone()).unwrap_or_default(),
         "components": components,
