@@ -564,7 +564,9 @@ impl RunoApp {
                 "Runo can open your app in the Browser tab using a headless copy of {}, with its own profile, so you and your agents can see and click through pages without leaving Runo. You can change this in Settings.",
                 browser_engine::browser_name(path)
             ),
-            None => "Runo can open your app in the Browser tab using a headless Chromium. None was found in Applications; install Chrome, Edge or Brave, or wait for the Chrome for Testing download coming next. You can turn this on later in Settings.".to_string(),
+            None => {
+                browser_engine::offer_without_browser(cfg!(target_os = "macos")).to_string()
+            }
         };
         let answer = |on: bool| {
             cx.listener(move |_: &mut Self, _, _, cx| {

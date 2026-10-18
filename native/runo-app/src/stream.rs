@@ -14,6 +14,11 @@ pub enum Update {
     Text(String),
     /// A finished tool step, such as "Read src/main.rs".
     Step(String),
+    /// A tool step that has started and whose result will follow as `Finished` with
+    /// the same `id`, such as a Bash command that is still running.
+    Started { id: String, label: String },
+    /// The result of a `Started` step arrived: `ok` is false when the tool failed.
+    Finished { id: String, ok: bool },
     /// The run's summary line, such as "12s · 3 turns · $0.04".
     Summary(String),
     /// The run failed; the CLI's own explanation.
@@ -184,11 +189,37 @@ impl ClaudeStream {
                                 out.push(self.text(format!("{sep}{text}")));
                             }
                         }
-                        "tool_use" => out.push(Update::Step(self.step_label(
-                            block["name"].as_str().unwrap_or("tool"),
-                            &block["input"],
-                        ))),
+                        "tool_use" => {
+                            let label = self.step_label(
+                                block["name"].as_str().unwrap_or("tool"),
+                                &block["input"],
+                            );
+                            out.push(match block["id"].as_str().filter(|id| !id.is_empty()) {
+                                Some(id) => Update::Started {
+                                    id: id.to_string(),
+                                    label,
+                                },
+                                None => Update::Step(label),
+                            });
+                        }
                         _ => {}
+                    }
+                }
+            }
+            // Tool results come back as a user message, one block per finished call.
+            "user" => {
+                if !event["parent_tool_use_id"].is_null() {
+                    return out;
+                }
+                for block in event["message"]["content"].as_array().into_iter().flatten() {
+                    if block["type"] != "tool_result" {
+                        continue;
+                    }
+                    if let Some(id) = block["tool_use_id"].as_str().filter(|id| !id.is_empty()) {
+                        out.push(Update::Finished {
+                            id: id.to_string(),
+                            ok: block["is_error"].as_bool() != Some(true),
+                        });
                     }
                 }
             }
@@ -937,6 +968,37 @@ mod tests {
                 Update::Text("All done.".into()),
                 Update::Text("\n\nSecond block.".into()),
                 Update::Summary("12s · 3 turns · $0.04".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_steps_run_until_their_result_arrives() {
+        let out = feed_all(&[
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"sleep 60"}},{"type":"tool_use","id":"toolu_b","name":"Bash","input":{"command":"false"}}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu_x","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_inner","content":"..."}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","is_error":true,"content":"exit 1"}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":""}]}}"#,
+        ]);
+        assert_eq!(
+            out,
+            [
+                Update::Started {
+                    id: "toolu_a".into(),
+                    label: "Ran sleep 60".into()
+                },
+                Update::Started {
+                    id: "toolu_b".into(),
+                    label: "Ran false".into()
+                },
+                Update::Finished {
+                    id: "toolu_b".into(),
+                    ok: false
+                },
+                Update::Finished {
+                    id: "toolu_a".into(),
+                    ok: true
+                },
             ]
         );
     }
