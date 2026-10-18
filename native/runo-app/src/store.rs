@@ -248,6 +248,10 @@ pub struct Project {
     /// uses the one in Settings.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub setup: String,
+    /// How pull requests are merged on GitHub: "merge", "squash" or "rebase"; empty
+    /// picks one the repository allows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub merge_method: String,
 }
 
 fn default_mode() -> String {

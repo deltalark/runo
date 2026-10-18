@@ -524,6 +524,10 @@ struct RunoApp {
     /// Each session's pull request, and the sessions whose PR is being looked up.
     pr_status: HashMap<u64, github::PrStatus>,
     pr_loading: std::collections::HashSet<u64>,
+    /// The merge methods each project's GitHub repository allows, read once a run, and
+    /// the projects being read.
+    merge_methods: HashMap<u64, Vec<github::MergeMethod>>,
+    merge_methods_loading: std::collections::HashSet<u64>,
     pr_form: Option<ship::PrForm>,
     pr_title: Entity<InputState>,
     pr_base: Entity<InputState>,
@@ -1561,6 +1565,8 @@ impl RunoApp {
             diff_against: "HEAD".into(),
             pr_status: HashMap::new(),
             pr_loading: Default::default(),
+            merge_methods: HashMap::new(),
+            merge_methods_loading: Default::default(),
             pr_form: None,
             pr_title: cx.new(|cx| InputState::new(window, cx).placeholder("Pull request title")),
             pr_base: cx.new(|cx| InputState::new(window, cx).placeholder("main")),

@@ -6,6 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
+- Merge PR uses a method the repository allows, picked beside the button (Merge, Squash or Rebase) and remembered per project; it starts on squash when allowed, then a merge commit, then rebase, instead of always making a merge commit. While checks run or the base branch requires them, Merge when checks pass turns on auto-merge, and the pull request shows auto-merge on.
 - Architecture diagrams draw people and things as pictures: an Actor is a standing figure and Users a group of people, each with its name under it, and Browser, Phone, Desktop, Server, Folder and Security (a shield) look like what they are. A Person is a card with an avatar instead of a box with a circle on top, containers carry an accent stripe, components the UML tabs, and databases, queues and clouds their real outlines.
 - More shapes on Architecture diagrams: hexagon, triangle, callout, block arrow, and a Flowchart section with start or end, process, decision, data and document. They export to draw.io and Mermaid.
 - The shapes panel keeps its tinted icon tiles, with icons for the new people and things, and lines up more neatly: tiles fill the panel three across, list rows and section headings share one left edge, and the hint at the bottom wraps instead of being cut off.
