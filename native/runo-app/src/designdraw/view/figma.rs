@@ -2,6 +2,7 @@
 //! the left, and on the right a Design tab of typed fields grouped into sections, a
 //! Prototype tab, the theme and the checks.
 
+use super::shapes::Shape;
 use super::*;
 use crate::designdraw::export::{self, Format};
 use crate::designdraw::fields::{self, FIELDS, SHADOWS};
@@ -299,9 +300,10 @@ impl DesignCanvas {
                     "design-tool-move",
                     IconName::MousePointer2,
                     "Move (V)",
-                    !hand && !self.commenting,
+                    !hand && !self.commenting && self.shape.is_none(),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_shape(None, cx);
                     this.hand = false;
                     this.commenting = false;
                     this.comment_open = None;
@@ -319,6 +321,38 @@ impl DesignCanvas {
                     this.new_open = !this.new_open;
                     cx.notify();
                 })),
+            )
+            .children(
+                [
+                    (
+                        Shape::Rect,
+                        "design-tool-rect",
+                        IconName::Square,
+                        "Rectangle (R)",
+                    ),
+                    (
+                        Shape::Ellipse,
+                        "design-tool-ellipse",
+                        IconName::Circle,
+                        "Ellipse (O)",
+                    ),
+                    (Shape::Line, "design-tool-line", IconName::Minus, "Line (L)"),
+                    (
+                        Shape::Arrow,
+                        "design-tool-arrow",
+                        IconName::MoveUpRight,
+                        "Arrow (Shift+L)",
+                    ),
+                    (Shape::Pen, "design-tool-pen", IconName::PenTool, "Pen (P)"),
+                ]
+                .map(|(shape, id, name, text)| {
+                    tool(id, name, text, self.shape == Some(shape)).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            let on = this.shape == Some(shape);
+                            this.set_shape((!on).then_some(shape), cx);
+                        },
+                    ))
+                }),
             )
             .child(
                 tool("design-tool-text", IconName::Type, "Text (T)", false)
@@ -700,13 +734,13 @@ impl DesignCanvas {
             div()
                 .id(id)
                 .h(px(28.))
-                .px(px(8.))
+                .px(px(5.))
                 .flex()
                 .items_center()
                 .gap(px(4.))
                 .rounded(px(5.))
                 .cursor_pointer()
-                .text_size(px(12.))
+                .text_size(px(11.5))
                 .font_weight(if on {
                     FontWeight::SEMIBOLD
                 } else {
@@ -781,6 +815,7 @@ impl DesignCanvas {
             Panel::Prototype => self.prototype_panel(cx),
             Panel::Theme => div().px_3().child(self.theme_panel(cx)),
             Panel::Checks => div().px_3().child(self.checks_panel(cx)),
+            Panel::Code => div().px_3().child(self.code_panel(cx)),
         };
         let issues: usize = self.findings().iter().map(|f| f.2.len()).sum();
         div()
@@ -795,10 +830,10 @@ impl DesignCanvas {
                 div()
                     .h(px(36.))
                     .flex_none()
-                    .px_2()
+                    .px_1()
                     .flex()
                     .items_center()
-                    .gap(px(2.))
+                    .gap(px(1.))
                     .border_b_1()
                     .border_color(rgb(c_border()))
                     .child(tab("design-tab-design", "Design", 0, Panel::Design, cx))
@@ -816,7 +851,8 @@ impl DesignCanvas {
                         issues,
                         Panel::Checks,
                         cx,
-                    )),
+                    ))
+                    .child(tab("design-tab-code", "Code", 0, Panel::Code, cx)),
             )
             .child(
                 div()
@@ -950,6 +986,7 @@ impl DesignCanvas {
                     .child(pair(readout("W", w), readout("H", h)))
                     .child(caption(format!("{FOLDER}/screens/{}.html", s.id))),
             )
+            .child(self.grid_sections(s, cx))
             .child(sec("Actions", None).child(actions))
             .child(self.export_section(&s.name, cx))
             .child(sec("Insert", None).child(self.blocks(cx)))
@@ -1436,115 +1473,125 @@ impl DesignCanvas {
             out = out.child(text);
         }
 
-        // Fill: a colour, a gradient or a picture.
-        let fill = fields::field("fill")
-            .map(|f| fields::display(f, el))
-            .unwrap_or_default();
-        let kind = Self::fill_kind(el);
-        out = out.child(if fill.is_empty() && kind == "solid" {
-            sec(
-                "Fill",
-                Some(
-                    mini("design-fill-add", IconName::Plus, "Add a fill", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_style("background-color", "var(--surface)", cx)
-                        }))
-                        .into_any_element(),
-                ),
-            )
+        // A drawing is filled and stroked as a vector.
+        if el.tag == "svg" {
+            out = out.child(self.vector_section(el, cx));
         } else {
-            let body = sec(
-                "Fill",
-                Some(
-                    mini("design-fill-off", IconName::Minus, "Remove the fill", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_styles(
-                                &[
-                                    ("background-color", "transparent"),
-                                    ("background-image", ""),
-                                    ("background", ""),
-                                ],
-                                cx,
-                            )
-                        }))
-                        .into_any_element(),
-                ),
-            )
-            .child(self.fill_kinds(el, cx));
-            match kind {
-                "gradient" => body.child(self.gradient_editor(el, cx)),
-                "picture" => body.child(
-                    text_btn(
-                        "design-fill-pic",
-                        "Replace picture",
-                        Some(IconName::Image),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.choose_picture(super::insert::PictureFor::Picked, cx)
-                    })),
-                ),
-                _ => body
-                    .child(self.color_fld("fill", el))
-                    .child(self.token_swatches("background-color", cx)),
-            }
-        });
-
-        // Stroke.
-        let stroked = el.style("border-top-style") != "none"
-            && fields::field("stroke-w")
+            // Fill: a colour, a gradient or a picture.
+            let fill = fields::field("fill")
                 .map(|f| fields::display(f, el))
-                .is_some_and(|w| w != "0" && w != "Auto");
-        out = out.child(if stroked {
-            sec(
-                "Stroke",
-                Some(
-                    mini(
-                        "design-stroke-off",
-                        IconName::Minus,
-                        "Remove the stroke",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_styles(
-                            &[
-                                ("border-style", "none"),
-                                ("border-width", ""),
-                                ("border-color", ""),
-                            ],
-                            cx,
+                .unwrap_or_default();
+            let kind = Self::fill_kind(el);
+            out = out.child(if fill.is_empty() && kind == "solid" {
+                sec(
+                    "Fill",
+                    Some(
+                        mini("design-fill-add", IconName::Plus, "Add a fill", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_style("background-color", "var(--surface)", cx)
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+            } else {
+                let body = sec(
+                    "Fill",
+                    Some(
+                        mini("design-fill-off", IconName::Minus, "Remove the fill", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_styles(
+                                    &[
+                                        ("background-color", "transparent"),
+                                        ("background-image", ""),
+                                        ("background", ""),
+                                    ],
+                                    cx,
+                                )
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+                .child(self.fill_kinds(el, cx));
+                match kind {
+                    "gradient" => body.child(self.gradient_editor(el, cx)),
+                    "picture" => body
+                        .child(
+                            text_btn(
+                                "design-fill-pic",
+                                "Replace picture",
+                                Some(IconName::Image),
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.choose_picture(super::insert::PictureFor::Picked, cx)
+                            })),
                         )
-                    }))
-                    .into_any_element(),
-                ),
-            )
-            .child(pair(
-                self.color_fld("stroke", el),
-                div()
-                    .w(px(84.))
-                    .flex_none()
-                    .flex()
-                    .child(self.fld("stroke-w", mark_icon(IconName::Minus))),
-            ))
-        } else {
-            sec(
-                "Stroke",
-                Some(
-                    mini("design-stroke-add", IconName::Plus, "Add a stroke", false)
+                        .when(!super::insert::takes_picture(el), |body| {
+                            body.child(self.picture_controls(el, cx))
+                                .children(self.picture_library(cx))
+                        }),
+                    _ => body
+                        .child(self.color_fld("fill", el))
+                        .child(self.token_swatches("background-color", cx)),
+                }
+            });
+
+            // Stroke.
+            let stroked = el.style("border-top-style") != "none"
+                && fields::field("stroke-w")
+                    .map(|f| fields::display(f, el))
+                    .is_some_and(|w| w != "0" && w != "Auto");
+            out = out.child(if stroked {
+                sec(
+                    "Stroke",
+                    Some(
+                        mini(
+                            "design-stroke-off",
+                            IconName::Minus,
+                            "Remove the stroke",
+                            false,
+                        )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_styles(
                                 &[
-                                    ("border-style", "solid"),
-                                    ("border-width", "1px"),
-                                    ("border-color", "var(--border)"),
+                                    ("border-style", "none"),
+                                    ("border-width", ""),
+                                    ("border-color", ""),
                                 ],
                                 cx,
                             )
                         }))
                         .into_any_element(),
-                ),
-            )
-        });
+                    ),
+                )
+                .child(pair(
+                    self.color_fld("stroke", el),
+                    div()
+                        .w(px(84.))
+                        .flex_none()
+                        .flex()
+                        .child(self.fld("stroke-w", mark_icon(IconName::Minus))),
+                ))
+            } else {
+                sec(
+                    "Stroke",
+                    Some(
+                        mini("design-stroke-add", IconName::Plus, "Add a stroke", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_styles(
+                                    &[
+                                        ("border-style", "solid"),
+                                        ("border-width", "1px"),
+                                        ("border-color", "var(--border)"),
+                                    ],
+                                    cx,
+                                )
+                            }))
+                            .into_any_element(),
+                    ),
+                )
+            });
+        }
 
         // Effects.
         out = out.child(
@@ -1616,18 +1663,26 @@ impl DesignCanvas {
     }
 
     /// The theme's colours as swatches that set a style to the token.
-    fn token_swatches(&self, key: &'static str, cx: &mut Context<Self>) -> Div {
+    pub(super) fn token_swatches(&self, key: &'static str, cx: &mut Context<Self>) -> Div {
         let now = self
             .element
             .as_ref()
             .map(|e| e.style(key))
             .unwrap_or_default();
         let mut row = div().flex().flex_wrap().gap(px(4.));
-        for (i, t) in COLOR_TOKENS.iter().enumerate() {
-            let t: &'static str = t;
+        let names: Vec<String> = COLOR_TOKENS
+            .iter()
+            .map(|t| t.to_string())
+            .chain(self.own_colours())
+            .collect();
+        for (i, t) in names.into_iter().enumerate() {
             let value = format!("var({t})");
             let on = now.trim() == value;
-            let c = self.token_color(t).unwrap_or(0x888888);
+            let c = self.token_color(&t).unwrap_or(0x888888);
+            let name: SharedString = match token_name(&t) {
+                "Colour" => t.trim_start_matches("--").to_string().into(),
+                n => n.into(),
+            };
             row = row.child(
                 div()
                     .id((key, i))
@@ -1638,7 +1693,9 @@ impl DesignCanvas {
                     .when(on, |el| el.border_2())
                     .bg(rgb(c))
                     .cursor_pointer()
-                    .tooltip(tip(token_name(t)))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(name.clone()).build(window, cx)
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| this.set_style(key, &value, cx))),
             );
         }
@@ -1882,7 +1939,12 @@ impl DesignCanvas {
         }
         let mut out = div().v_flex().child(
             sec("Interaction", None)
-                .child(caption("On click, navigate to"))
+                .child(self.trigger_rows(el, cx))
+                .child(caption(if el.trigger.as_deref() == Some("delay") {
+                    "After the delay, navigate to"
+                } else {
+                    "On click, navigate to"
+                }))
                 .child(opens),
         );
         out = out.children(self.overlay_section(el, cx));
@@ -1921,6 +1983,7 @@ impl DesignCanvas {
             }
             out = out
                 .child(sec("Animation", None).child(moves))
+                .child(sec("Easing", None).child(self.ease_row(el, cx)))
                 .child(sec("Speed", None).child(speeds));
         }
         out

@@ -117,6 +117,105 @@ impl Component {
     }
 }
 
+/// A variant's properties when its name lists them, as design tools write it:
+/// "Type=Primary, State=Hover". Empty when the name is a plain one.
+pub(crate) fn props(name: &str) -> Vec<(String, String)> {
+    let parts: Vec<Option<(String, String)>> = name
+        .split(',')
+        .map(|p| {
+            let (k, v) = p.split_once('=')?;
+            let (k, v) = (k.trim(), v.trim());
+            (!k.is_empty() && !v.is_empty()).then(|| (k.to_string(), v.to_string()))
+        })
+        .collect();
+    if parts.iter().all(Option::is_some) {
+        parts.into_iter().flatten().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// A variant name from its properties.
+pub(crate) fn name_of(props: &[(String, String)]) -> String {
+    props
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl Component {
+    /// Its variant properties and each one's values, in the order they first appear. Empty
+    /// unless every variant's name lists its properties.
+    pub(crate) fn axes(&self) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        for v in &self.variants {
+            let ps = props(&v.name);
+            if ps.is_empty() {
+                return Vec::new();
+            }
+            for (k, val) in ps {
+                match out.iter_mut().find(|(name, _)| *name == k) {
+                    Some((_, vals)) if !vals.contains(&val) => vals.push(val),
+                    Some(_) => {}
+                    None => out.push((k, vec![val])),
+                }
+            }
+        }
+        out
+    }
+
+    /// The variant to show when `prop` changes to `value` on `from`: the one with that value
+    /// that keeps the most of `from`'s other properties.
+    pub(crate) fn pick(&self, from: &str, prop: &str, value: &str) -> Option<String> {
+        let have = props(from);
+        self.variants
+            .iter()
+            .filter_map(|v| {
+                let ps = props(&v.name);
+                ps.iter().any(|(k, x)| k == prop && x == value).then(|| {
+                    let same = ps.iter().filter(|p| have.contains(p)).count();
+                    (same, v.name.clone())
+                })
+            })
+            .max_by_key(|(same, _)| *same)
+            .map(|(_, n)| n)
+    }
+
+    /// The new names of its variants when `f` changes each one's properties, for the variants
+    /// it changes.
+    pub(crate) fn renames(
+        &self,
+        f: impl Fn(Vec<(String, String)>) -> Vec<(String, String)>,
+    ) -> Vec<(String, String)> {
+        self.variants
+            .iter()
+            .filter_map(|v| {
+                let ps = props(&v.name);
+                let to = if ps.is_empty() {
+                    name_of(&f(vec![("State".into(), v.name.clone())]))
+                } else {
+                    name_of(&f(ps))
+                };
+                (to != v.name).then(|| (v.name.clone(), to))
+            })
+            .collect()
+    }
+
+    /// Rename variants, `from` to `to`, keeping each one's HTML in step.
+    pub(crate) fn rename_all(&mut self, renames: &[(String, String)]) {
+        for v in &mut self.variants {
+            if let Some((from, to)) = renames.iter().find(|(f, _)| *f == v.name) {
+                v.html = v.html.replace(
+                    &format!("data-variant=\"{}\"", attr(from)),
+                    &format!("data-variant=\"{}\"", attr(to)),
+                );
+                v.name = to.clone();
+            }
+        }
+    }
+}
+
 fn attr(s: &str) -> String {
     s.replace('&', "&amp;").replace('"', "&quot;")
 }
@@ -229,6 +328,69 @@ mod tests {
         assert_eq!(back, c);
         assert_eq!(back.next_variant(), "Variant 2");
         assert_eq!(back.map()["Default"], "<button>Went</button>");
+    }
+
+    #[test]
+    fn variant_names_can_list_properties() {
+        let v = |name: &str| Variant {
+            name: name.into(),
+            html: format!("<button data-variant=\"{name}\">Go</button>"),
+        };
+        let mut c = Component {
+            id: "button".into(),
+            name: "Button".into(),
+            variants: vec![
+                v("Type=Primary, State=Default"),
+                v("Type=Primary, State=Hover"),
+                v("Type=Ghost, State=Default"),
+            ],
+        };
+        assert_eq!(
+            c.axes(),
+            vec![
+                ("Type".into(), vec!["Primary".into(), "Ghost".into()]),
+                ("State".into(), vec!["Default".into(), "Hover".into()]),
+            ]
+        );
+        assert_eq!(
+            c.pick("Type=Primary, State=Hover", "Type", "Ghost")
+                .as_deref(),
+            Some("Type=Ghost, State=Default")
+        );
+        assert_eq!(
+            c.pick("Type=Ghost, State=Default", "Type", "Primary")
+                .as_deref(),
+            Some("Type=Primary, State=Default")
+        );
+        let r = c.renames(|mut ps| {
+            for (k, v) in &mut ps {
+                if k == "Type" && v == "Ghost" {
+                    *v = "Outline".into();
+                }
+            }
+            ps
+        });
+        assert_eq!(
+            r,
+            vec![(
+                "Type=Ghost, State=Default".to_string(),
+                "Type=Outline, State=Default".to_string()
+            )]
+        );
+        c.rename_all(&r);
+        assert!(c.variants[2]
+            .html
+            .contains("data-variant=\"Type=Outline, State=Default\""));
+        let plain = Component {
+            variants: vec![v("Default"), v("Hover")],
+            ..c.clone()
+        };
+        assert!(plain.axes().is_empty());
+        assert_eq!(
+            plain.renames(|ps| ps)[0],
+            ("Default".to_string(), "State=Default".to_string())
+        );
+        assert!(props("Size=").is_empty() && props("a=b, c").is_empty());
     }
 
     #[test]

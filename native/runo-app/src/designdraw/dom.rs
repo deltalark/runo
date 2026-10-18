@@ -45,7 +45,9 @@ if (!window.__runo) window.__runo = (() => {
     'margin-bottom', 'gap', 'border-radius', 'display', 'flex-direction', 'align-items',
     'justify-content', 'width', 'height', 'opacity', 'line-height', 'letter-spacing',
     'border-top-width', 'border-top-color', 'border-top-style', 'border-top-left-radius',
-    'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'right', 'bottom', 'z-index', 'background-image'];
+    'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'right', 'bottom', 'z-index', 'background-image',
+    'fill', 'stroke', 'stroke-width', 'filter', 'object-fit', 'object-position', 'object-view-box',
+    'background-size', 'background-position', 'background-repeat'];
   // The one icon an element is or holds, as an icon button or a tab does.
   const iconEl = (el) => {
     const all = el.matches('.icon') ? [el] : Array.from(el.querySelectorAll('.icon'));
@@ -55,6 +57,55 @@ if (!window.__runo) window.__runo = (() => {
     const i = iconEl(el);
     const c = i && Array.from(i.classList).find((c) => c.startsWith('i-'));
     return c ? c.slice(2) : null;
+  };
+  // The styles written for an element, from the rules that match it and its own style,
+  // as a developer would copy them; the variables they use, and its markup.
+  // Declarations as written, shorthands kept whole: split the text at semicolons that
+  // aren't inside brackets.
+  const written = (style) => {
+    const out = [];
+    let depth = 0, from = 0;
+    const t = style.cssText;
+    const take = (end) => {
+      const d = t.slice(from, end), i = d.indexOf(':');
+      if (i > 0) out.push([d.slice(0, i).trim(), d.slice(i + 1).trim()]);
+      from = end + 1;
+    };
+    for (let i = 0; i < t.length; i++) {
+      if (t[i] === '(') depth++;
+      else if (t[i] === ')') depth--;
+      else if (t[i] === ';' && depth === 0) take(i);
+    }
+    take(t.length);
+    return out;
+  };
+  // Linked style sheets can't be read from a file page, so their text comes along.
+  const code = (el, text) => {
+    const decls = new Map();
+    const visit = (rules) => {
+      for (const r of rules) {
+        if (!r.selectorText) {
+          if (r.cssRules && (!r.media || matchMedia(r.media.mediaText).matches)) visit(r.cssRules);
+          continue;
+        }
+        if (/^\s*(\*|html\b|body\b|:root\b)/.test(r.selectorText) && !el.matches('body')) continue;
+        let hit = false;
+        try { hit = el.matches(r.selectorText); } catch (e) { hit = false; }
+        if (!hit) continue;
+        for (const [k, v] of written(r.style)) if (!k.startsWith('--')) decls.set(k, v);
+      }
+    };
+    for (const sheet of document.styleSheets) { try { visit(sheet.cssRules); } catch (e) {} }
+    if (text) { try { const s = new CSSStyleSheet(); s.replaceSync(text); visit(s.cssRules); } catch (e) {} }
+    for (const [k, v] of written(el.style)) decls.set(k, v);
+    const css = Array.from(decls, ([k, v]) => ({ k, v }));
+    const root = getComputedStyle(document.documentElement);
+    const names = new Set();
+    for (const d of css) for (const m of d.v.matchAll(/var\((--[\w-]+)/g)) names.add(m[1]);
+    const vars = Array.from(names, (k) => ({ k, v: root.getPropertyValue(k).trim() }));
+    let html = el.outerHTML;
+    if (html.length > 4000) html = html.slice(0, 4000) + '\n…';
+    return { css, vars, html };
   };
   const info = (el) => {
     const cs = getComputedStyle(el);
@@ -70,6 +121,8 @@ if (!window.__runo) window.__runo = (() => {
       text: ownText(el), classes: Array.from(el.classList), rect: rect(el),
       computed, inline, goto: el.dataset.goto || null, hidden: el.hidden,
       transition: el.dataset.transition || null, speed: el.dataset.speed || null,
+      ease: el.dataset.ease || null, trigger: el.dataset.trigger || null,
+      delay: el.dataset.delay || null,
       children: kids(el).length,
       component: el.dataset.component || null, variant: el.dataset.variant || null,
       name: el.dataset.name || null, locked: el.hasAttribute('data-locked'),
@@ -86,7 +139,8 @@ if (!window.__runo) window.__runo = (() => {
         out.push({ path: pathOf(c), label: label(c), depth, hidden: c.hidden,
           text: t ? t.slice(0, 40) : null, component: c.dataset.component || null,
           name: c.dataset.name || null, locked: c.hasAttribute('data-locked'), id: c.id || null });
-        walk(c, depth + 1);
+        // A drawing is one layer: what it's drawn with stays out of the list.
+        if (!(c instanceof SVGElement)) walk(c, depth + 1);
       }
     };
     walk(document.body, 0);
@@ -102,18 +156,24 @@ if (!window.__runo) window.__runo = (() => {
       if (r.width === 0 || r.height === 0) continue;
       const cs = getComputedStyle(el);
       if (cs.display === 'none' || cs.visibility === 'hidden') continue;
-      if (el.closest('[data-locked]')) continue;
+      if (el.closest('[data-locked]') || el.ownerSVGElement) continue;
       const path = pathOf(el);
       if (!path) continue;
       const row = (cs.display.includes('flex') && cs.flexDirection.startsWith('row'))
         || cs.display.includes('grid') || cs.display === 'inline';
-      out.push({ path, rect: rect(el), row, tag: el.tagName.toLowerCase() });
+      // What it's called, so Smart animate can find it on the next screen.
+      const t = ownText(el);
+      const key = el.dataset.name || (el.id ? '#' + el.id : null)
+        || (t ? el.tagName.toLowerCase() + ':' + t.slice(0, 60) : null);
+      out.push({ path, rect: rect(el), row, tag: el.tagName.toLowerCase(), key });
     }
     return out;
   };
   const links = () => Array.from(document.querySelectorAll('[data-goto]'))
     .map((el) => ({ path: pathOf(el), goto: el.dataset.goto.replace(/\.html$/, ''), rect: rect(el),
-      transition: el.dataset.transition || '', speed: el.dataset.speed || '' }))
+      transition: el.dataset.transition || '', speed: el.dataset.speed || '',
+      ease: el.dataset.ease || '', trigger: el.dataset.trigger || '',
+      delay: Number(el.dataset.delay) || 0 }))
     .filter((l) => l.path);
   const html = () => '<!doctype html>\n' + document.documentElement.outerHTML + '\n';
   const parse = (s) => {
@@ -321,12 +381,39 @@ if (!window.__runo) window.__runo = (() => {
       // A point below the fold is scrolled into view first: only what shows can be hit.
       if (y - scrollY < 0 || y - scrollY >= innerHeight) scrollTo(0, Math.max(0, y - innerHeight / 2));
       let el = document.elementFromPoint(x - scrollX, y - scrollY);
+      while (el && el.ownerSVGElement) el = el.ownerSVGElement;
       // A locked element can't be picked on the canvas: what holds it is picked instead.
       while (el && el.closest('[data-locked]')) el = el.closest('[data-locked]').parentElement;
       if (!el || el === document.documentElement || el === document.body) return null;
       return info(el);
     },
     info: (p) => { const el = at(p); return el ? info(el) : null; },
+    code: (p, text) => { const el = at(p); return el ? code(el, text) : null; },
+    // Put a drawn shape at a point on the page, in the box that holds that spot, floating
+    // where it was drawn. Gives back its path.
+    drawShape: (x, y, s) => {
+      const n = parse(s);
+      if (!n) return null;
+      if (y - scrollY < 0 || y - scrollY >= innerHeight) scrollTo(0, Math.max(0, y - innerHeight / 2));
+      const LEAF = new Set(['IMG', 'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'P', 'SPAN', 'A',
+        'LABEL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'I', 'B', 'STRONG', 'EM', 'SMALL', 'VIDEO']);
+      let el = document.elementFromPoint(x - scrollX, y - scrollY) || document.body;
+      // Not inside a component's copy, a locked layer, text, a picture or a drawing.
+      for (;;) {
+        const fixed = el.closest('[data-component], [data-locked]');
+        if (fixed && fixed !== document.body) { el = fixed.parentElement; continue; }
+        if (el instanceof SVGElement || LEAF.has(el.tagName) || el.matches('.icon')) { el = el.parentElement; continue; }
+        break;
+      }
+      if (!el || el === document.documentElement) el = document.body;
+      if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
+      const r = el.getBoundingClientRect();
+      n.style.position = 'absolute';
+      n.style.left = Math.round(x - scrollX - r.left - el.clientLeft + el.scrollLeft) + 'px';
+      n.style.top = Math.round(y - scrollY - r.top - el.clientTop + el.scrollTop) + 'px';
+      el.appendChild(n);
+      return pathOf(n);
+    },
     // Put a part where it belongs on a screen with nothing picked: bars at the top, tab
     // bars, overlays and floating buttons at the end, anything else at the end of the
     // screen's content. Gives back its path.
@@ -424,6 +511,14 @@ if (!window.__runo) window.__runo = (() => {
       }
       return changed || null;
     },
+    renameVariants: (id, map) => {
+      let changed = 0;
+      for (const el of instances(id)) {
+        const to = map[el.dataset.variant];
+        if (to) { el.dataset.variant = to; changed++; }
+      }
+      return changed || null;
+    },
     // Put each element's children where it was.
     ungroup: (ps) => {
       for (const el of inOrder(ps).reverse()) {
@@ -492,6 +587,12 @@ pub(crate) struct Element {
     pub transition: Option<String>,
     #[serde(default)]
     pub speed: Option<String>,
+    #[serde(default)]
+    pub ease: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub delay: Option<String>,
     #[serde(default)]
     pub hidden: bool,
     #[serde(default)]
@@ -581,6 +682,24 @@ pub(crate) struct Layer {
     pub id: Option<String>,
 }
 
+/// An element as code: the declarations written for it, the variables they use with their
+/// values, and its markup.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct Code {
+    #[serde(default)]
+    pub css: Vec<Decl>,
+    #[serde(default)]
+    pub vars: Vec<Decl>,
+    #[serde(default)]
+    pub html: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct Decl {
+    pub k: String,
+    pub v: String,
+}
+
 /// An element on the page: where it sits, and whether its children run across.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct Bx {
@@ -591,6 +710,9 @@ pub(crate) struct Bx {
     pub row: bool,
     #[serde(default)]
     pub tag: String,
+    /// Its name, id or text: the same key on two screens is the same layer.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// The deepest element under a point, leaving out `skip` and what's inside it.
@@ -756,6 +878,15 @@ pub(crate) struct Link {
     pub transition: String,
     #[serde(default)]
     pub speed: String,
+    /// `data-ease`, how the move eases; empty for ease out.
+    #[serde(default)]
+    pub ease: String,
+    /// `data-trigger` and `data-delay`: "delay" follows the link by itself after `delay`
+    /// milliseconds; empty for a click.
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub delay: u64,
 }
 
 /// The parent's path, or None at the top.

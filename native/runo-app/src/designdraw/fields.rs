@@ -95,7 +95,7 @@ pub(crate) fn display(f: &Field, el: &Element) -> String {
         .get(f.reads)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    if let Some(v) = &own {
+    if let Some(v) = own.as_ref().filter(|_| matches!(f.unit, Unit::Color)) {
         if let Some(name) = token_of(v) {
             return name;
         }
@@ -136,10 +136,11 @@ fn number(n: f32) -> String {
     }
 }
 
-/// `var(--primary)` as `primary`.
+/// `var(--primary)` as `primary`: a variable by its name.
 fn token_of(v: &str) -> Option<String> {
     let name = v.strip_prefix("var(--")?.strip_suffix(')')?;
-    TOKENS.contains(&name).then(|| name.to_string())
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .then(|| name.to_string())
 }
 
 /// A CSS colour as `#RRGGBB`, or nothing for a transparent one.
@@ -173,6 +174,10 @@ pub(crate) fn parse(f: &Field, typed: &str) -> Option<String> {
     let lower = t.to_lowercase();
     if t.is_empty() || lower == "auto" {
         return Some(String::new());
+    }
+    // A design variable, by its name.
+    if let Some(name) = t.strip_prefix("--").filter(|n| !n.is_empty()) {
+        return Some(format!("var(--{name})"));
     }
     match f.unit {
         Unit::Px => {

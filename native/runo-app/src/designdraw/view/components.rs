@@ -187,10 +187,14 @@ impl DesignCanvas {
 
     /// One more variant of the component: the selected instance as it looks now.
     fn add_variant(&mut self, cx: &mut Context<Self>) {
-        let Some((c, _)) = self.instance().map(|(c, v)| (c.clone(), v)) else {
+        let Some(c) = self.instance().map(|(c, _)| c.clone()) else {
             return;
         };
         let name = c.next_variant();
+        self.add_variant_named(c, name, cx);
+    }
+
+    fn add_variant_named(&mut self, c: Component, name: String, cx: &mut Context<Self>) {
         self.mark_then(c.id.clone(), name.clone(), cx, move |this, html, cx| {
             let mut c = c;
             c.set(&name, &html);
@@ -274,6 +278,234 @@ impl DesignCanvas {
         self.comp_vals.1 = to.clone();
         let js = dom::call("renameVariant", &[json!(c.id), json!(from), json!(to)]);
         self.on_every_screen(js, format!("Renamed the variant to {to}"), false, cx);
+    }
+
+    pub(super) fn make_prop_field(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        subs: &mut Vec<Subscription>,
+    ) -> Entity<InputState> {
+        let f = cx.new(|cx| InputState::new(window, cx));
+        subs.push(cx.subscribe_in(&f, window, |this, state, ev, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                let v = state.read(cx).value().trim().to_string();
+                this.finish_prop_rename(v, cx);
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    window.focus(&this.focus, cx);
+                }
+            }
+        }));
+        f
+    }
+
+    /// Rename the component's variants, and every instance on every screen with them.
+    fn rename_variants(
+        &mut self,
+        c: Component,
+        renames: Vec<(String, String)>,
+        what: String,
+        cx: &mut Context<Self>,
+    ) {
+        if renames.is_empty() {
+            return;
+        }
+        if renames.iter().any(|(_, to)| {
+            c.variants.iter().any(|v| v.name == *to) && !renames.iter().any(|(f, _)| f == to)
+        }) {
+            self.say(format!("{} already has a variant like that.", c.name));
+            return;
+        }
+        let mut c = c;
+        c.rename_all(&renames);
+        self.save_component(&c);
+        self.comp_vals.1.clear();
+        let map: serde_json::Map<String, serde_json::Value> =
+            renames.into_iter().map(|(f, t)| (f, t.into())).collect();
+        let js = dom::call(
+            "renameVariants",
+            &[json!(c.id), serde_json::Value::Object(map)],
+        );
+        self.on_every_screen(js, what, false, cx);
+    }
+
+    /// Give every variant one more property, "Property N", set to Default. A component whose
+    /// variants have plain names gets them as the values of a State property first.
+    fn add_property(&mut self, cx: &mut Context<Self>) {
+        let Some(c) = self.instance().map(|(c, _)| c.clone()) else {
+            return;
+        };
+        let axes = c.axes();
+        let renames = if axes.is_empty() {
+            c.renames(|ps| ps)
+        } else {
+            let name = (1..)
+                .map(|n| format!("Property {n}"))
+                .find(|n| !axes.iter().any(|(k, _)| k == n))
+                .unwrap_or_default();
+            c.renames(move |mut ps| {
+                ps.push((name.clone(), DEFAULT.to_string()));
+                ps
+            })
+        };
+        self.rename_variants(c, renames, "Added a property".into(), cx);
+    }
+
+    /// One more value of `prop`: the selected instance as it looks now, as a new variant.
+    fn add_value(&mut self, prop: String, cx: &mut Context<Self>) {
+        let Some((c, now)) = self.instance().map(|(c, v)| (c.clone(), v)) else {
+            return;
+        };
+        let values: Vec<String> = c
+            .axes()
+            .into_iter()
+            .find(|(k, _)| *k == prop)
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+        let value = (2..)
+            .map(|n| format!("Value {n}"))
+            .find(|v| !values.contains(v))
+            .unwrap_or_default();
+        let mut ps = library::props(&now);
+        for (k, v) in &mut ps {
+            if *k == prop {
+                *v = value.clone();
+            }
+        }
+        let name = library::name_of(&ps);
+        self.add_variant_named(c, name, cx);
+    }
+
+    fn start_prop_rename(
+        &mut self,
+        prop: String,
+        value: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let now = value.clone().unwrap_or_else(|| prop.clone());
+        self.renaming_prop = Some((prop, value));
+        let input = self.f_prop.clone();
+        input.update(cx, |s, cx| s.set_value(now, window, cx));
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.select_all(window, cx);
+            })
+        });
+        cx.notify();
+    }
+
+    fn finish_prop_rename(&mut self, to: String, cx: &mut Context<Self>) {
+        let Some((prop, value)) = self.renaming_prop.take() else {
+            return;
+        };
+        cx.notify();
+        let to = to.replace([',', '='], " ").trim().to_string();
+        let Some(c) = self.instance().map(|(c, _)| c.clone()) else {
+            return;
+        };
+        if to.is_empty() || Some(&to) == value.as_ref().or(Some(&prop)) {
+            return;
+        }
+        let renames = c.renames(|ps| {
+            ps.into_iter()
+                .map(|(k, v)| match &value {
+                    None if k == prop => (to.clone(), v),
+                    Some(old) if k == prop && v == *old => (k, to.clone()),
+                    _ => (k, v),
+                })
+                .collect()
+        });
+        let what = match &value {
+            None => format!("Renamed {prop} to {to}"),
+            Some(old) => format!("Renamed {old} to {to}"),
+        };
+        self.rename_variants(c, renames, what, cx);
+    }
+
+    /// The component's variant properties, a row of values each: picking a value shows the
+    /// variant with it, picking the shown one again renames it.
+    fn property_rows(&self, c: &Component, variant: &str, cx: &mut Context<Self>) -> Div {
+        let now = library::props(variant);
+        let mut out = div().v_flex().gap(px(6.));
+        for (pi, (prop, values)) in c.axes().into_iter().enumerate() {
+            let editing = |v: Option<&String>| {
+                self.renaming_prop
+                    .as_ref()
+                    .is_some_and(|(p, x)| *p == prop && x.as_ref() == v)
+            };
+            let label: AnyElement = if editing(None) {
+                div()
+                    .w(px(72.))
+                    .child(Input::new(&self.f_prop).small().h(px(24.)))
+                    .into_any_element()
+            } else {
+                let p = prop.clone();
+                div()
+                    .id(("design-prop", pi))
+                    .w(px(72.))
+                    .flex_none()
+                    .truncate()
+                    .cursor_pointer()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_muted()))
+                    .tooltip(tip("Rename this property"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_prop_rename(p.clone(), None, window, cx)
+                    }))
+                    .child(prop.clone())
+                    .into_any_element()
+            };
+            let mut chips = div().flex_1().min_w_0().flex().flex_wrap().gap(px(4.));
+            for (vi, value) in values.iter().enumerate() {
+                let on = now.iter().any(|(k, v)| *k == prop && v == value);
+                if editing(Some(value)) {
+                    chips = chips.child(
+                        div()
+                            .w(px(80.))
+                            .child(Input::new(&self.f_prop).small().h(px(24.))),
+                    );
+                    continue;
+                }
+                let (p, v) = (prop.clone(), value.clone());
+                chips = chips.child(
+                    chip(("design-prop-value", pi * 100 + vi), value.clone(), on)
+                        .tooltip(tip(if on {
+                            "Rename this value"
+                        } else {
+                            "Show this value"
+                        }))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if on {
+                                this.start_prop_rename(p.clone(), Some(v.clone()), window, cx);
+                            } else if let Some(name) =
+                                this.instance().and_then(|(c, now)| c.pick(&now, &p, &v))
+                            {
+                                this.swap_variant(&name, true, cx);
+                            }
+                        })),
+                );
+            }
+            let p = prop.clone();
+            chips = chips.child(
+                figma::mini(
+                    ("design-prop-add", pi),
+                    IconName::Plus,
+                    "Add a value: this instance as it looks now",
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.add_value(p.clone(), cx))),
+            );
+            out = out.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(6.))
+                    .child(label)
+                    .child(chips),
+            );
+        }
+        out
     }
 
     /// Change every screen with `js`, each a step of undo, and say `what` happened.
@@ -427,8 +659,9 @@ impl DesignCanvas {
                         .h(px(26.)),
                 ),
             );
+        let axes = !c.axes().is_empty();
         let mut chips = div().flex().flex_wrap().gap(px(4.));
-        for (i, v) in c.variants.iter().enumerate() {
+        for (i, v) in c.variants.iter().enumerate().filter(|_| !axes) {
             let name = v.name.clone();
             chips = chips.child(
                 chip(("design-variant", i), v.name.clone(), v.name == variant).on_click(
@@ -436,10 +669,13 @@ impl DesignCanvas {
                 ),
             );
         }
-        chips = chips.child(
-            figma::mini("design-variant-add", IconName::Plus, "Add a variant", false)
-                .on_click(cx.listener(|this, _, _, cx| this.add_variant(cx))),
-        );
+        if !axes {
+            chips = chips.child(
+                figma::mini("design-variant-add", IconName::Plus, "Add a variant", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.add_variant(cx))),
+            );
+        }
+        let props = self.property_rows(c, &variant, cx);
         let n_screens = self.canvas.screens.len();
         Some(
             figma::sec(
@@ -477,6 +713,19 @@ impl DesignCanvas {
                     ),
             )
             .child(chips)
+            .child(props)
+            .child(
+                text_btn(
+                    "design-prop-new",
+                    "Add property",
+                    Some(IconName::Plus),
+                    false,
+                )
+                .tooltip(tip(
+                    "Give the variants another property, like Size or State, to pick by",
+                ))
+                .on_click(cx.listener(|this, _, _, cx| this.add_property(cx))),
+            )
             .child(
                 text_btn(
                     "design-component-states",

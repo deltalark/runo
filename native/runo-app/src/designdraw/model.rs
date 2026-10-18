@@ -59,6 +59,60 @@ pub(crate) struct Screen {
     pub x: f32,
     #[serde(default)]
     pub y: f32,
+    /// The layout grid drawn over it, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<Grid>,
+    /// Lines to line things up against, across or down the screen.
+    #[serde(default, rename = "guide", skip_serializing_if = "Vec::is_empty")]
+    pub guides: Vec<Guide>,
+}
+
+/// A layout grid: columns or rows with gutters between and margins at the sides, or a
+/// square grid.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Grid {
+    /// "columns", "rows" or "square".
+    pub kind: String,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub gutter: f32,
+    #[serde(default)]
+    pub margin: f32,
+    /// The square grid's step.
+    #[serde(default)]
+    pub size: f32,
+}
+
+impl Grid {
+    pub(crate) fn columns() -> Self {
+        Self {
+            kind: "columns".into(),
+            count: 4,
+            gutter: 16.,
+            margin: 16.,
+            size: 8.,
+        }
+    }
+
+    /// The bands of a columns or rows grid across `span`, as (start, length).
+    pub(crate) fn bands(&self, span: f32) -> Vec<(f32, f32)> {
+        let n = self.count.max(1) as f32;
+        let each = (span - 2. * self.margin - (n - 1.) * self.gutter) / n;
+        if each <= 0. {
+            return vec![];
+        }
+        (0..self.count.max(1))
+            .map(|i| (self.margin + i as f32 * (each + self.gutter), each))
+            .collect()
+    }
+}
+
+/// A guide: a line at `at` pixels from the left (vertical) or the top.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Guide {
+    pub vertical: bool,
+    pub at: f32,
 }
 
 /// Everything about the canvas that isn't in the screens themselves.
@@ -256,6 +310,7 @@ pub(crate) fn load(root: &Path) -> Result<Canvas, String> {
                 id,
                 x,
                 y,
+                ..Default::default()
             });
         }
     }
@@ -438,6 +493,111 @@ pub(crate) fn set_var(css: &str, name: &str, value: &str) -> String {
     } else {
         format!("{}  {name}: {value};\n{}", &css[..end], &css[end..])
     }
+}
+
+/// A design variable: a custom property of the theme, its value, and its value in dark mode
+/// when that differs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Var {
+    pub name: String,
+    pub light: String,
+    pub dark: Option<String>,
+}
+
+/// The custom properties set in a block of declarations, in order.
+fn decls(block: &str) -> Vec<(String, String)> {
+    block
+        .split(';')
+        .filter_map(|d| {
+            let d = d.trim();
+            let d = d.rsplit_once("*/").map(|(_, r)| r.trim()).unwrap_or(d);
+            let (k, v) = d.split_once(':')?;
+            k.trim()
+                .starts_with("--")
+                .then(|| (k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Every variable of the theme, with its dark value.
+pub(crate) fn vars(css: &str) -> Vec<Var> {
+    let dark = dark_block(css)
+        .map(|(a, b)| decls(&css[a..b]))
+        .unwrap_or_default();
+    root_block(css)
+        .map(|(a, b)| decls(&css[a..b]))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, light)| Var {
+            dark: dark
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone()),
+            name,
+            light,
+        })
+        .collect()
+}
+
+/// The byte range inside the braces of the `:root` that dark mode sets.
+fn dark_block(css: &str) -> Option<(usize, usize)> {
+    let at = css.find("prefers-color-scheme: dark")?;
+    let root = css[at..].find(":root")? + at;
+    let open = css[root..].find('{')? + root + 1;
+    let close = css[open..].find('}')? + open;
+    Some((open, close))
+}
+
+/// `css` with a variable's dark mode value set, or taken out so it's the same as light.
+pub(crate) fn set_dark_var(css: &str, name: &str, value: &str) -> String {
+    let value = value.trim();
+    let Some((start, end)) = dark_block(css) else {
+        if value.is_empty() {
+            return css.to_string();
+        }
+        return format!(
+            "{}\n\n@media (prefers-color-scheme: dark) {{\n  :root {{\n    {name}: {value};\n  }}\n}}\n",
+            css.trim_end()
+        );
+    };
+    let key = format!("{name}:");
+    match css[start..end].find(&key).map(|i| i + start) {
+        Some(i) => {
+            let stop = css[i..end].find(';').map(|e| e + i + 1).unwrap_or(end);
+            if value.is_empty() {
+                let line = css[..i].rfind('\n').map(|n| n + 1).unwrap_or(i);
+                let after = if css[stop..].starts_with('\n') {
+                    stop + 1
+                } else {
+                    stop
+                };
+                format!("{}{}", &css[..line], &css[after..])
+            } else {
+                format!("{}{key} {value};{}", &css[..i], &css[stop..])
+            }
+        }
+        None if value.is_empty() => css.to_string(),
+        None => {
+            let line = css[..end].rfind('\n').map(|n| n + 1).unwrap_or(end);
+            format!("{}    {name}: {value};\n{}", &css[..line], &css[line..])
+        }
+    }
+}
+
+/// `text` with a variable renamed wherever it's set or used.
+pub(crate) fn rename_var(text: &str, from: &str, to: &str) -> String {
+    text.replace(&format!("{from}:"), &format!("{to}:"))
+        .replace(&format!("var({from})"), &format!("var({to})"))
+        .replace(&format!("var({from},"), &format!("var({to},"))
+}
+
+/// `css` without a variable, in light and dark.
+pub(crate) fn remove_var(css: &str, name: &str) -> String {
+    css.lines()
+        .filter(|l| !l.trim_start().starts_with(&format!("{name}:")))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if css.ends_with('\n') { "\n" } else { "" }
 }
 
 /// The byte range inside the braces of the first `:root {`.
@@ -1030,6 +1190,37 @@ mod tests {
         assert!(css.contains("--bg: #0b0d12"));
         assert_eq!(set_var("a{}", "--x", "1"), ":root {\n  --x: 1;\n}\na{}");
         assert!(set_var(":root {\n}", "--y", "2px").contains("--y: 2px;"));
+    }
+
+    #[test]
+    fn variables_have_a_light_and_a_dark_value() {
+        let v = vars(TOKENS_CSS);
+        let bg = v.iter().find(|v| v.name == "--bg").unwrap();
+        assert_eq!(
+            (bg.light.as_str(), bg.dark.as_deref()),
+            ("#ffffff", Some("#0b0d12"))
+        );
+        let p = v.iter().find(|v| v.name == "--primary").unwrap();
+        assert_eq!(p.dark, None);
+        let css = set_dark_var(TOKENS_CSS, "--primary", "#60a5fa");
+        let css = set_dark_var(&css, "--bg", "#000000");
+        let css = set_dark_var(&css, "--border", "");
+        let v = vars(&css);
+        let get = |n: &str| v.iter().find(|v| v.name == n).unwrap().clone();
+        assert_eq!(get("--primary").dark.as_deref(), Some("#60a5fa"));
+        assert_eq!(get("--primary").light, "#2563eb");
+        assert_eq!(get("--bg").dark.as_deref(), Some("#000000"));
+        assert_eq!(get("--border").dark, None);
+        assert_eq!(get("--border").light, "#e2e8f0");
+        let plain = set_dark_var(":root {\n  --x: red;\n}\n", "--x", "blue");
+        assert_eq!(vars(&plain)[0].dark.as_deref(), Some("blue"));
+        let renamed = rename_var(&css, "--primary", "--brand");
+        assert!(renamed.contains("--brand: #2563eb;"));
+        assert!(renamed.contains("var(--brand) 12%"));
+        assert!(renamed.contains("--primary-soft:"));
+        let gone = remove_var(&css, "--primary");
+        assert!(vars(&gone).iter().all(|v| v.name != "--primary"));
+        assert!(gone.contains("--primary-soft"));
     }
 
     #[test]
