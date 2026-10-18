@@ -1,6 +1,7 @@
 //! The design canvas: screens kept as real HTML in `design/`, drawn by WebKit on
 //! macOS (a headless Chromium elsewhere), edited directly on the canvas and with AI.
 
+pub(crate) mod agentops;
 pub(crate) mod brief;
 pub(crate) mod checks;
 pub(crate) mod codegen;

@@ -75,7 +75,7 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
-fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -89,7 +89,7 @@ fn new_id() -> String {
 }
 
 /// Write under a temporary name and rename, so nobody reads half a file.
-fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

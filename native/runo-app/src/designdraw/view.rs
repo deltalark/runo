@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+mod agents;
 mod codelinks;
 mod comments;
 mod components;
@@ -270,8 +271,8 @@ pub(crate) struct DesignCanvas {
     layers_of: Option<String>,
     layers_loading: bool,
     /// Each screen's HTML before a change, for undo and redo.
-    undo: Vec<(String, String)>,
-    redo: Vec<(String, String)>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     panel: Panel,
     tokens: String,
     dark: bool,
@@ -407,6 +408,14 @@ pub(crate) struct DesignCanvas {
     _subs: Vec<Subscription>,
 }
 
+/// A screen as it was before one change, for undo and redo.
+struct Step {
+    id: String,
+    html: String,
+    /// What AI did, when it made the change through Design's actions.
+    by_ai: Option<String>,
+}
+
 /// An agent's change to the design: the files as they were, to undo it.
 struct AiChange {
     task: String,
@@ -427,6 +436,9 @@ struct AiChange {
     review_due: bool,
     /// The comments it was asked to fix, resolved when it's kept.
     comments: Vec<u32>,
+    /// Screens it rewrote as files rather than through Design's actions, whose steps on
+    /// the undo history no longer hold.
+    direct: HashSet<String>,
 }
 
 impl AiChange {
@@ -443,6 +455,7 @@ impl AiChange {
             reviewed: true,
             review_due: false,
             comments: Vec::new(),
+            direct: HashSet::new(),
         }
     }
 
@@ -672,6 +685,7 @@ impl DesignCanvas {
             this.draw(&id, cx);
         }
         this.watch(cx);
+        this.serve_agents(cx);
         this
     }
 
@@ -983,6 +997,11 @@ impl DesignCanvas {
         self.files_changed += 1;
         if let Some(ai) = &mut self.ai {
             ai.changed = true;
+            if ai.by_ai {
+                ai.direct.extend(changed.iter().filter_map(|p| {
+                    (p.extension()? == "html").then(|| p.file_stem()?.to_str().map(String::from))?
+                }));
+            }
         }
         self.asked.forget();
         let shared = changed
@@ -1186,6 +1205,7 @@ impl DesignCanvas {
             reviewed: false,
             review_due: false,
             comments: Vec::new(),
+            direct: HashSet::new(),
         });
         // Leave the keys to the New session dialog that opens next.
         window.blur(cx);
@@ -1419,9 +1439,11 @@ impl DesignCanvas {
     fn keep_ai(&mut self, cx: &mut Context<Self>) {
         if let Some(ai) = self.ai.take() {
             self.resolve_fixed(&ai.comments, &ai.task);
+            // What AI did through Design's actions stays on the history, step by step, beside
+            // your own edits; a screen it rewrote as a file starts its history again.
+            self.undo.retain(|s| !ai.direct.contains(&s.id));
+            self.redo.retain(|s| !ai.direct.contains(&s.id));
         }
-        self.undo.clear();
-        self.redo.clear();
         cx.notify();
     }
 
@@ -2231,7 +2253,11 @@ impl DesignCanvas {
         after: After,
         cx: &mut Context<Self>,
     ) {
-        self.undo.push((id.clone(), before));
+        self.undo.push(Step {
+            id: id.clone(),
+            html: before,
+            by_ai: None,
+        });
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
         }
@@ -2715,14 +2741,25 @@ impl DesignCanvas {
         } else {
             self.redo.pop()
         };
-        let Some((id, html)) = entry else {
+        let Some(Step { id, html, by_ai }) = entry else {
             return;
         };
         let now = std::fs::read_to_string(screen_path(&self.root, &id)).unwrap_or_default();
+        if let Some(what) = &by_ai {
+            self.say(format!(
+                "{} AI's change: {what}.",
+                if back { "Undid" } else { "Redid" }
+            ));
+        }
+        let step = Step {
+            id: id.clone(),
+            html: now,
+            by_ai,
+        };
         if back {
-            self.redo.push((id.clone(), now));
+            self.redo.push(step);
         } else {
-            self.undo.push((id.clone(), now));
+            self.undo.push(step);
         }
         let file = screen_path(&self.root, &id);
         if let Err(e) = std::fs::write(&file, &html) {
