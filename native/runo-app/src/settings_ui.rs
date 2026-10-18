@@ -1,8 +1,10 @@
 //! The Settings screen: grouped navigation, searchable pages, titled sections of rows.
 
 use super::*;
+use crate::cleanup;
 use crate::connections::{self, Connection};
 use gpui_kit::component::switch::Switch;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -177,6 +179,8 @@ enum Ctl {
     },
     /// This text as a QR code, for a phone's camera.
     Qr(String),
+    /// A note (such as a size) and a checkbox; clicking runs the action.
+    Check(bool, String, Action),
 }
 
 /// The form for adding or editing one of Runo's MCP servers.
@@ -295,7 +299,7 @@ fn switch_row(title: &str, desc: &str, on: bool, set: fn(&mut AppSettings, bool)
 }
 
 /// A path with the home folder shown as ~.
-fn tilde(path: &std::path::Path) -> String {
+pub(crate) fn tilde(path: &std::path::Path) -> String {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     match home.and_then(|h| path.strip_prefix(h).ok().map(|p| p.display().to_string())) {
         Some(rest) => format!("~/{rest}"),
@@ -2000,6 +2004,41 @@ impl RunoApp {
                 }
                 group.into_any_element()
             }
+            Ctl::Check(on, note, action) => div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .when(!note.is_empty(), |el| {
+                    el.child(div().text_xs().text_color(rgb(c_secondary())).child(note))
+                })
+                .child(
+                    div()
+                        .id(("setting-check", ix))
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(5.))
+                        .border_1()
+                        .cursor_pointer()
+                        .when(on, |el| {
+                            el.bg(rgb(c_blue())).border_color(rgb(c_blue())).child(icon(
+                                IconName::Check,
+                                12.,
+                                0xffffff,
+                            ))
+                        })
+                        .when(!on, |el| {
+                            el.border_color(rgb(c_border()))
+                                .bg(rgb(c_canvas()))
+                                .hover(|el| el.border_color(rgb(c_secondary())))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            action(this, cx);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
             Ctl::Chip(text, kind) => {
                 let color = match kind {
                     0 => c_green(),
@@ -2665,6 +2704,9 @@ impl RunoApp {
                 .unwrap_or(sections.len());
             sections.insert(at, mcp_form_section(form));
         }
+        if query.is_empty() && self.settings_page == SettingsPage::Worktrees {
+            sections.extend(self.cleanup_sections());
+        }
         for sec in sections {
             body = body.child(self.settings_card(sec, &mut counter, window, cx));
         }
@@ -2759,5 +2801,319 @@ impl RunoApp {
                     .child(main),
             )
             .into_any_element()
+    }
+}
+
+/// Settings > Worktrees > Clean up: what the last scan found and what is picked.
+#[derive(Default)]
+pub(crate) struct CleanupView {
+    scanning: bool,
+    removing: bool,
+    /// None until the first scan.
+    items: Option<Vec<cleanup::Item>>,
+    /// Keys of the picked items.
+    picked: HashSet<String>,
+    /// "Remove selected" was pressed and waits for a yes.
+    confirming: bool,
+    /// How the last removal went, and whether all of it worked.
+    result: Option<(String, bool)>,
+}
+
+fn plural(n: usize, one: &str) -> String {
+    format!("{n} {one}{}", if n == 1 { "" } else { "s" })
+}
+
+impl RunoApp {
+    /// The projects to scan and what every session, archived ones included, holds on to.
+    fn cleanup_inputs(&self) -> (Vec<cleanup::Project>, Vec<cleanup::Use>) {
+        let projects: Vec<cleanup::Project> = self
+            .state
+            .projects
+            .iter()
+            .map(|p| cleanup::Project {
+                name: p.name.clone(),
+                path: p.path.clone(),
+            })
+            .collect();
+        let uses = self
+            .state
+            .sessions
+            .iter()
+            .map(|s| cleanup::Use {
+                project: self
+                    .state
+                    .projects
+                    .iter()
+                    .find(|p| p.id == s.project_id)
+                    .map(|p| p.path.clone())
+                    .unwrap_or_default(),
+                dir: s.dir.clone(),
+                branch: s.branch.clone(),
+            })
+            .collect();
+        (projects, uses)
+    }
+
+    /// Look for leftover worktrees, folders and branches in every project, off the UI
+    /// thread. Everything that can't lose work starts picked.
+    pub(crate) fn scan_cleanup(&mut self) {
+        if self.cleanup.scanning || self.cleanup.removing {
+            return;
+        }
+        if self.demo {
+            self.cleanup.items = Some(Vec::new());
+            return;
+        }
+        self.cleanup.scanning = true;
+        self.cleanup.confirming = false;
+        let (projects, uses) = self.cleanup_inputs();
+        self.bg(
+            move || cleanup::scan(&projects, &uses, true),
+            |this, items: Vec<cleanup::Item>, cx| {
+                this.cleanup.picked = items
+                    .iter()
+                    .filter(|i| !i.careful())
+                    .map(cleanup::Item::key)
+                    .collect();
+                applog::info(
+                    "worktree",
+                    format!(
+                        "Clean up scan found {} ({})",
+                        plural(items.len(), "item"),
+                        cleanup::human(items.iter().map(|i| i.size).sum())
+                    ),
+                );
+                this.cleanup.items = Some(items);
+                this.cleanup.scanning = false;
+                cx.notify();
+            },
+        );
+    }
+
+    fn picked_cleanup(&self) -> Vec<cleanup::Item> {
+        self.cleanup
+            .items
+            .iter()
+            .flatten()
+            .filter(|i| self.cleanup.picked.contains(&i.key()))
+            .cloned()
+            .collect()
+    }
+
+    /// Remove the picked items, checking again first that no session uses them.
+    fn remove_cleanup(&mut self) {
+        self.cleanup.confirming = false;
+        let picked = self.picked_cleanup();
+        if picked.is_empty() || self.cleanup.removing || self.demo {
+            return;
+        }
+        self.cleanup.removing = true;
+        let (projects, uses) = self.cleanup_inputs();
+        self.bg(
+            move || cleanup::remove(picked, &projects, &uses),
+            |this, results: Vec<(cleanup::Item, Result<(), String>)>, cx| {
+                let (mut removed, mut freed, mut failed) = (0, 0u64, Vec::new());
+                for (item, result) in &results {
+                    let what = match item.found.what {
+                        cleanup::What::Branch => format!("branch {}", item.found.branch),
+                        cleanup::What::Missing => {
+                            format!("missing worktree {}", item.found.path.display())
+                        }
+                        cleanup::What::Folder => format!("folder {}", item.found.path.display()),
+                        cleanup::What::Worktree => {
+                            format!("worktree {}", item.found.path.display())
+                        }
+                    };
+                    match result {
+                        Ok(()) => {
+                            removed += 1;
+                            freed += item.size;
+                            applog::info(
+                                "worktree",
+                                format!("Clean up removed {what} in project {:?}", item.project),
+                            );
+                        }
+                        Err(error) => {
+                            applog::warn(
+                                "worktree",
+                                format!(
+                                    "Clean up could not remove {what} in project {:?}: {error}",
+                                    item.project
+                                ),
+                            );
+                            failed.push(format!("{}: {error}", item.title()));
+                        }
+                    }
+                }
+                let mut text = format!(
+                    "Removed {}, freeing {}.",
+                    plural(removed, "item"),
+                    cleanup::human(freed)
+                );
+                if !failed.is_empty() {
+                    text.push_str(&format!(
+                        " {} could not be removed: {}",
+                        failed.len(),
+                        failed.join("; ")
+                    ));
+                    this.fail("worktree", text.clone());
+                }
+                this.cleanup.result = Some((text, failed.is_empty()));
+                this.cleanup.removing = false;
+                this.scan_cleanup();
+                cx.notify();
+            },
+        );
+    }
+
+    fn cleanup_row(&self, item: &cleanup::Item) -> Row {
+        let key = item.key();
+        let on = self.cleanup.picked.contains(&key);
+        let note = match item.found.what {
+            cleanup::What::Worktree | cleanup::What::Folder => cleanup::human(item.size),
+            cleanup::What::Missing => "folder gone".into(),
+            cleanup::What::Branch => "branch".into(),
+        };
+        row(
+            &item.title(),
+            &item.detail(),
+            Ctl::Check(
+                on,
+                note,
+                Rc::new(move |this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                    if !this.cleanup.picked.remove(&key) {
+                        this.cleanup.picked.insert(key.clone());
+                    }
+                    this.cleanup.confirming = false;
+                }),
+            ),
+        )
+    }
+
+    /// The Clean up sections of the Worktrees page.
+    fn cleanup_sections(&self) -> Vec<Section> {
+        let view = &self.cleanup;
+        let scan: Action = Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
+            this.cleanup.result = None;
+            this.scan_cleanup();
+        });
+        let mut rows = Vec::new();
+        let Some(items) = view.items.as_ref() else {
+            rows.push(row(
+                "Find what's left behind",
+                "Looks in every project for worktrees and folders under .runo-worktrees and runo/ branches that no session uses, archived ones included, and how much space they take.",
+                if view.scanning {
+                    Ctl::Chip("Scanning…".into(), 3)
+                } else {
+                    Ctl::Button("Scan".into(), scan)
+                },
+            ));
+            return vec![section("Clean up", "Sessions remove their worktree when they are deleted or cleaned up after a merge. Anything left behind another way shows up here.", rows)];
+        };
+        let picked = self.picked_cleanup();
+        let picked_size: u64 = picked.iter().map(|i| i.size).sum();
+        let total: u64 = items.iter().map(|i| i.size).sum();
+        let summary = if items.is_empty() {
+            "Nothing to clean up: every worktree and runo/ branch belongs to a session.".to_string()
+        } else {
+            format!(
+                "{} found, {} in all. {} picked, {}.",
+                plural(items.len(), "item"),
+                cleanup::human(total),
+                picked.len(),
+                cleanup::human(picked_size)
+            )
+        };
+        let busy = if view.scanning {
+            Some("Scanning…")
+        } else if view.removing {
+            Some("Removing…")
+        } else {
+            None
+        };
+        rows.push(row(
+            "Left behind",
+            &summary,
+            match busy {
+                Some(text) => Ctl::Chip(text.into(), 3),
+                None if picked.is_empty() => Ctl::Button("Scan again".into(), scan),
+                None => Ctl::Buttons(vec![
+                    ("Scan again".into(), scan),
+                    (
+                        "Remove selected".into(),
+                        Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                            this.cleanup.confirming = true;
+                        }),
+                    ),
+                ]),
+            },
+        ));
+        if view.confirming && busy.is_none() && !picked.is_empty() {
+            let careful = picked.iter().filter(|i| i.careful()).count();
+            let mut desc = "Worktrees are removed with git worktree remove --force, so changes in them are lost, and branches are deleted with git branch -D. This can't be undone.".to_string();
+            if careful > 0 {
+                desc.push_str(&format!(
+                    " {} of them hold work not on the default branch or never committed.",
+                    careful
+                ));
+            }
+            rows.push(row(
+                &format!(
+                    "Remove {} ({})?",
+                    plural(picked.len(), "item"),
+                    cleanup::human(picked_size)
+                ),
+                &desc,
+                Ctl::Buttons(vec![
+                    (
+                        "Cancel".into(),
+                        Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                            this.cleanup.confirming = false;
+                        }),
+                    ),
+                    (
+                        "Remove".into(),
+                        Rc::new(|this: &mut RunoApp, _: &mut Context<RunoApp>| {
+                            this.remove_cleanup();
+                        }),
+                    ),
+                ]),
+            ));
+        }
+        if let Some((result, ok)) = &view.result {
+            rows.push(row(
+                "Last clean up",
+                result,
+                if *ok {
+                    Ctl::Chip("Done".into(), 0)
+                } else {
+                    Ctl::Chip("Some failed".into(), 2)
+                },
+            ));
+        }
+        rows.extend(
+            items
+                .iter()
+                .filter(|i| !i.careful())
+                .map(|i| self.cleanup_row(i)),
+        );
+        let mut out = vec![section(
+            "Clean up",
+            "Worktrees, folders and runo/ branches that no session uses, archived ones included. Merged branches and worktrees without changes start picked.",
+            rows,
+        )];
+        let careful: Vec<Row> = items
+            .iter()
+            .filter(|i| i.careful())
+            .map(|i| self.cleanup_row(i))
+            .collect();
+        if !careful.is_empty() {
+            out.push(section(
+                "Unmerged work",
+                "⚠ These hold commits the default branch doesn't have, or changes never committed. Removing them loses that work, so they are never picked for you.",
+                careful,
+            ));
+        }
+        out
     }
 }

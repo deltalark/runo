@@ -73,6 +73,32 @@ pub fn running(playbook: u64) -> bool {
     age(&running_file(playbook)).is_some_and(|a| a < RUN_LIMIT.as_secs() + 600)
 }
 
+/// What the runner has made that Runo has no session for yet: the folders and branches
+/// of finished runs not picked up, and branch prefixes of runs still going.
+pub fn in_flight() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (mut dirs, mut branches, mut prefixes) = (Vec::new(), Vec::new(), Vec::new());
+    let Ok(entries) = std::fs::read_dir(runs_dir()) else {
+        return (dirs, branches, prefixes);
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(id) = name.strip_prefix("running-") {
+            if id.parse::<u64>().is_ok_and(running) {
+                prefixes.push(format!("runo/playbook-{id}-"));
+            }
+        } else if name.starts_with("done-") {
+            let run = std::fs::read(entry.path())
+                .ok()
+                .and_then(|b| serde_json::from_slice::<HeadlessRun>(&b).ok());
+            if let Some(run) = run {
+                dirs.push(run.dir);
+                branches.push(run.branch);
+            }
+        }
+    }
+    (dirs, branches, prefixes)
+}
+
 /// Runs the runner finished, oldest first. Their files are removed as they are read.
 fn take_results() -> Vec<HeadlessRun> {
     let Ok(entries) = std::fs::read_dir(runs_dir()) else {

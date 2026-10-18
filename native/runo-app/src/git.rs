@@ -506,6 +506,41 @@ pub fn remove_worktree(repo: &str, dir: &str) -> Result<(), String> {
     git(repo, &["worktree", "remove", "--force", dir]).map(|_| ())
 }
 
+/// `git worktree list --porcelain`: one block per worktree, the repository's own first.
+pub fn worktree_list(repo: &str) -> Result<String, String> {
+    git(repo, &["worktree", "list", "--porcelain"])
+}
+
+/// Forget worktrees whose folder is gone.
+pub fn prune_worktrees(repo: &str) -> Result<(), String> {
+    git(repo, &["worktree", "prune"]).map(|_| ())
+}
+
+/// Local branches under `prefix`, such as `runo/`.
+pub fn local_branches(repo: &str, prefix: &str) -> Vec<String> {
+    let pattern = format!("refs/heads/{}", prefix.trim_end_matches('/'));
+    git(
+        repo,
+        &["for-each-ref", "--format=%(refname:short)", &pattern],
+    )
+    .map(|out| {
+        out.lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with(prefix))
+            .map(String::from)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Whether the worktree has uncommitted changes, untracked files included. None when
+/// git can't tell, such as for a folder that is not a worktree.
+pub fn has_uncommitted(dir: &str) -> Option<bool> {
+    git(dir, &["status", "--porcelain"])
+        .ok()
+        .map(|s| !s.trim().is_empty())
+}
+
 /// Delete a branch. Without `force` git refuses when it holds unmerged work.
 pub fn delete_branch(repo: &str, branch: &str, force: bool) -> Result<(), String> {
     git(repo, &["branch", if force { "-D" } else { "-d" }, branch]).map(|_| ())
