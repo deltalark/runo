@@ -73,7 +73,11 @@ impl DesignCanvas {
         } else {
             self.app_code_panel(cx)
         };
-        div().v_flex().child(langs).child(body)
+        div()
+            .v_flex()
+            .child(self.handoff_section(cx))
+            .child(langs)
+            .child(body)
     }
 
     /// The picked layer, or the screen, as React or SwiftUI.

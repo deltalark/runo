@@ -36,7 +36,7 @@ impl DesignCanvas {
         f
     }
 
-    fn who(&mut self) -> String {
+    pub(super) fn who(&mut self) -> String {
         if self.author.is_empty() {
             self.author = notes::author(&self.root);
         }
