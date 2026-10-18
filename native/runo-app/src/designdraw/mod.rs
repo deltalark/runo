@@ -4,9 +4,11 @@
 pub(crate) mod brief;
 pub(crate) mod checks;
 pub(crate) mod codegen;
+pub(crate) mod codemap;
 pub(crate) mod dom;
 pub(crate) mod export;
 pub(crate) mod fields;
+pub(crate) mod guard;
 pub(crate) mod library;
 pub(crate) mod model;
 pub(crate) mod notes;

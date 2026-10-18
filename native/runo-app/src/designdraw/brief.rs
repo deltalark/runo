@@ -65,6 +65,22 @@ pub(crate) fn context(c: &Canvas) -> String {
          and leave locked layers as they are unless asked. Text styles are classes: the kit's \
          (display, big, small, tiny, eyebrow) and any listed after \"Text styles made in \
          Design\" in components.css; use them for type rather than setting sizes. \
+         Keep what Design keeps on its own as you change files. data-rid is a layer's \
+         lasting id that ties it to the code built from it: keep it on the element when you \
+         edit or move it, never copy it onto another element (drop it from a copy), and \
+         leave new elements without one; Runo gives them theirs. A layer that's on several \
+         screens should keep the same data-name on each, so Smart animate moves it between \
+         them. Shapes drawn in Design are inline <svg> with preserveAspectRatio=\"none\" and \
+         vector-effect=\"non-scaling-stroke\" on their paths: keep those, and make new \
+         shapes the same way. Components in {FOLDER}/components/<library>/ come from a \
+         library another project published, and their instances carry data-library: use \
+         them, but don't change their files; a screen using one links \
+         ../components/<library>/library.css. {FOLDER}/code-map.toml says which component \
+         in the app's code each design component is: keep a mapped component's id, variant \
+         names and property names, since code is written from them, and add a variant \
+         rather than rename one. Leave {FOLDER}/.versions/ (the version history) and \
+         {FOLDER}/handoff/ (what was handed off to be built) as they are. Runo checks \
+         this after your turn and puts back lost ids, library files and mapped variants. \
          New screen files show up on the canvas by themselves. Make the \
          change by editing these files directly: Runo shows it live and the user keeps or \
          undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for this \
@@ -109,8 +125,12 @@ pub(crate) fn context(c: &Canvas) -> String {
              variant's element from its file as it is, marks and all, then change its text:",
         );
         for (id, name, variants) in &c.library {
+            let from = match id.split_once('/') {
+                Some((lib, _)) => format!(", from the {lib} library: use it, don't change it"),
+                None => String::new(),
+            };
             p.push_str(&format!(
-                "\n- {name} ({FOLDER}/components/{id}.html): {}",
+                "\n- {name} ({FOLDER}/components/{id}.html{from}): {}",
                 variants.join(", ")
             ));
         }
@@ -484,6 +504,24 @@ mod tests {
         let lean = crate::shell::lean_context(&text, &rest);
         assert!(lean.contains("Nothing is selected"));
         assert!(!lean.contains("How to design well"));
+    }
+
+    #[test]
+    fn ai_keeps_what_design_keeps() {
+        let text = context(&Canvas {
+            library: vec![(
+                "brand/button".into(),
+                "Button".into(),
+                vec!["Default".into()],
+            )],
+            ..Default::default()
+        });
+        assert!(text.contains("never copy it onto another element"));
+        assert!(text.contains("code-map.toml"));
+        assert!(text.contains("same data-name on each"));
+        assert!(text.contains(
+            "- Button (design/components/brand/button.html, from the brand library: use it, don't change it): Default"
+        ));
     }
 
     #[test]

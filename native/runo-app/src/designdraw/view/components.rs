@@ -61,7 +61,7 @@ impl DesignCanvas {
     }
 
     /// The component the one selected element is an instance of, and its variant.
-    fn instance(&self) -> Option<(&Component, String)> {
+    pub(super) fn instance(&self) -> Option<(&Component, String)> {
         let el = self.element.as_ref().filter(|_| self.also.is_empty())?;
         let c = self
             .library

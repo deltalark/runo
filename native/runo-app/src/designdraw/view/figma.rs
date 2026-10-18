@@ -190,6 +190,7 @@ impl DesignCanvas {
             }
         }
         self.load_component_fields(window, cx);
+        self.load_code_link_fields(window, cx);
     }
 
     /// Set what was typed in a field on the selection.
@@ -1133,6 +1134,7 @@ impl DesignCanvas {
         );
         out = out.children(self.vector_tools(el, cx));
         out = out.children(self.component_section(cx));
+        out = out.children(self.code_link_section());
         if !multi {
             out = out.child(self.style_section(el, cx));
         }

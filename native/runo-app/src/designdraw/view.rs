@@ -19,6 +19,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+mod codelinks;
 mod comments;
 mod components;
 mod figma;
@@ -349,6 +350,12 @@ pub(crate) struct DesignCanvas {
     handoff_pending: std::cell::RefCell<Option<((u64, u32), super::versions::Changes)>>,
     /// Counts the times the design's files changed, ours or from outside.
     files_changed: u64,
+    /// Which components in the app's code the design's components are, the boxes naming
+    /// the selected instance's, and which instance and stack those boxes are for.
+    code_map: super::codemap::CodeMap,
+    f_link_name: Entity<InputState>,
+    f_link_import: Entity<InputState>,
+    code_link_for: String,
     f_variant: Entity<InputState>,
     comp_vals: (String, String),
     /// The comment tool, the design's comments, the one open, and its text box.
@@ -521,6 +528,8 @@ impl DesignCanvas {
         let (f_comp, f_variant) = Self::make_component_fields(window, cx, &mut subs);
         let f_lib = Self::make_library_field(&root, window, cx);
         let f_version = Self::make_version_field(window, cx, &mut subs);
+        let (f_link_name, f_link_import) = Self::make_code_link_fields(window, cx, &mut subs);
+        let code_map = super::codemap::CodeMap::load(&root);
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
         let f_icon = Self::make_icon_field(window, cx, &mut subs);
@@ -611,6 +620,10 @@ impl DesignCanvas {
             handing_off: false,
             handoff_pending: Default::default(),
             files_changed: 0,
+            code_map,
+            f_link_name,
+            f_link_import,
+            code_link_for: String::new(),
             f_variant,
             comp_vals: Default::default(),
             commenting: false,
@@ -1135,6 +1148,11 @@ impl DesignCanvas {
             return false;
         }
         self.save_canvas();
+        // How the design was before AI changed it, to find again in History.
+        let who = self.who();
+        if let Ok(Some(_)) = super::versions::save(&self.root, "", &who) {
+            self.versions = super::versions::list(&self.root);
+        }
         let picture = self.screen.clone().and_then(|id| self.save_picture(&id));
         let mut context = self.ask_context(picture.as_deref());
         let picked = self.picked_refs();
@@ -1453,14 +1471,17 @@ impl DesignCanvas {
         } else {
             ai.review_due = true;
         }
+        // Hold its change to what an edit by hand keeps, before it's read and drawn.
+        let before = ai.before.clone();
+        let kept = super::guard::keep(&self.root, &before, &self.code_map);
         // Read what it wrote now rather than at the next look, and draw it.
         self.check_files(cx);
-        if let Some(before) = self.ai.as_ref().map(|ai| ai.before.clone()) {
-            self.sync_changed_components(&before, cx);
-        }
+        self.sync_changed_components(&before, cx);
         if self.ai.as_ref().is_some_and(|ai| !ai.changed) {
             self.ai = None;
             self.say("AI finished without changing the design.");
+        } else if let Some(line) = kept.line() {
+            self.say(line);
         }
         // The chat that just ended takes the next ask a moment later.
         cx.spawn(async move |this, cx| {

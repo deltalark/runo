@@ -4,9 +4,10 @@
 //! page computed, its colours named after the design's tokens). No AI: the same design
 //! always gives the same code.
 
+use super::codemap::{CodeMap, Link, Target};
 use super::library::{self, Component};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 /// A piece of the page as `tree` gives it: an element or a run of text.
@@ -161,6 +162,9 @@ struct React<'a> {
     lib: &'a [Component],
     /// The components used, by id.
     used: BTreeMap<String, String>,
+    map: &'a CodeMap,
+    /// The app's own components used, by where they're imported from.
+    imports: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl React<'_> {
@@ -196,6 +200,10 @@ impl React<'_> {
             return;
         };
         if let Some(id) = n.attr("data-component") {
+            if let Some(link) = self.map.get(id, Target::Web) {
+                self.mapped(n, id, link, &pad, out);
+                return;
+            }
             let name = type_name(id.rsplit('/').next().unwrap_or(id));
             self.used.insert(id.to_string(), name.clone());
             let props = self.props(id, n.attr("data-variant").unwrap_or_default());
@@ -233,6 +241,30 @@ impl React<'_> {
             }
             let _ = writeln!(out, "{pad}</{tag}>");
         }
+    }
+
+    /// An instance of a component the app has: that component, with the variant's
+    /// properties as its props.
+    fn mapped(&mut self, n: &Node, id: &str, link: &Link, pad: &str, out: &mut String) {
+        let c = self.lib.iter().find(|c| c.id == id);
+        let props: String = link
+            .args(c, n.attr("data-variant").unwrap_or_default(), false)
+            .into_iter()
+            .map(|(k, v)| format!(" {k}={v:?}"))
+            .collect();
+        let name = &link.name;
+        if !link.import.is_empty() {
+            // `Card.Header` is imported as `Card`.
+            let root = name.split('.').next().unwrap_or(name).to_string();
+            self.imports
+                .entry(link.import.clone())
+                .or_default()
+                .insert(root);
+        }
+        let _ = match n.only_text() {
+            Some(t) => writeln!(out, "{pad}<{name}{props}>{}</{name}>", jsx_text(&t)),
+            None => writeln!(out, "{pad}<{name}{props} />"),
+        };
     }
 
     /// A component as a React component: its variant picked by its props, its text by
@@ -327,10 +359,13 @@ fn strip_component(n: &Node) -> Node {
 }
 
 /// The layer as a React component called `name`, with the components it uses after it.
-pub(crate) fn react(tree: &Tree, name: &str, lib: &[Component]) -> String {
+/// Components the app has, by `map`, are used as they are.
+pub(crate) fn react(tree: &Tree, name: &str, lib: &[Component], map: &CodeMap) -> String {
     let mut r = React {
         lib,
         used: BTreeMap::new(),
+        map,
+        imports: BTreeMap::new(),
     };
     let mut body = String::new();
     // A whole screen is its body's children, in a fragment.
@@ -344,7 +379,15 @@ pub(crate) fn react(tree: &Tree, name: &str, lib: &[Component]) -> String {
         }
         n => r.jsx(n, 2, &mut body),
     }
-    let mut out = String::from(
+    let mut out = String::new();
+    for (from, names) in &r.imports {
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let _ = writeln!(out, "import {{ {} }} from {from:?};", names.join(", "));
+    }
+    if !r.imports.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(
         "// The design's styles: copy design/tokens.css and design/components.css next to this file.\n\
          import \"./tokens.css\";\nimport \"./components.css\";\n\n",
     );
@@ -433,6 +476,9 @@ pub(crate) fn token_colors(tokens_css: &str) -> Vec<(String, [u8; 3])> {
 struct Swift<'a> {
     tokens: &'a [(String, [u8; 3])],
     used: BTreeMap<String, [u8; 3]>,
+    /// The app's own components, when the app is built with SwiftUI.
+    map: Option<&'a CodeMap>,
+    lib: &'a [Component],
 }
 
 /// What a colour is for, to pick the token that names it best when several match.
@@ -665,6 +711,31 @@ impl Swift<'_> {
             return;
         }
         let pad = "    ".repeat(depth);
+        let link = n
+            .attr("data-component")
+            .and_then(|id| Some((id, self.map?.get(id, Target::Mobile)?)));
+        if let Some((id, link)) = link {
+            let c = self.lib.iter().find(|c| c.id == id);
+            let args: Vec<String> = link
+                .args(c, n.attr("data-variant").unwrap_or_default(), true)
+                .into_iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect();
+            let name = &link.name;
+            let _ = match n.only_text() {
+                Some(t) if args.is_empty() => {
+                    writeln!(out, "{pad}{name} {{ Text({:?}) }}", t.trim())
+                }
+                Some(t) => writeln!(
+                    out,
+                    "{pad}{name}({}) {{ Text({:?}) }}",
+                    args.join(", "),
+                    t.trim()
+                ),
+                None => writeln!(out, "{pad}{name}({})", args.join(", ")),
+            };
+            return;
+        }
         let action = tag == "button" || tag == "a" || n.attr("data-goto").is_some();
         let classes = n.attr("class").unwrap_or_default();
         let mut mods = Vec::new();
@@ -823,12 +894,21 @@ fn is_floating(n: &Node) -> bool {
     matches!(n, Node::El { s, .. } if s.get("position").is_some_and(|p| p == "absolute" || p == "fixed"))
 }
 
-/// The layer as a SwiftUI view called `name`, and the theme its colours come from.
-pub(crate) fn swiftui(tree: &Tree, name: &str, tokens_css: &str) -> (String, String) {
+/// The layer as a SwiftUI view called `name`, and the theme its colours come from. With
+/// `map`, components the app has are used as they are.
+pub(crate) fn swiftui(
+    tree: &Tree,
+    name: &str,
+    tokens_css: &str,
+    lib: &[Component],
+    map: Option<&CodeMap>,
+) -> (String, String) {
     let tokens = token_colors(tokens_css);
     let mut sw = Swift {
         tokens: &tokens,
         used: BTreeMap::new(),
+        map,
+        lib,
     };
     let mut body = String::new();
     let screen = matches!(&tree.node, Node::El { tag, .. } if tag == "body");
@@ -854,7 +934,7 @@ pub(crate) fn swiftui(tree: &Tree, name: &str, tokens_css: &str) -> (String, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{react, swiftui, token_colors, type_name, Node, Tree};
+    use super::{react, swiftui, token_colors, type_name, CodeMap, Node, Tree};
     use crate::designdraw::library::{Component, Variant};
     use std::collections::HashMap;
 
@@ -896,7 +976,7 @@ mod tests {
                 },
             ],
         }];
-        let code = react(&t, "Home", &lib);
+        let code = react(&t, "Home", &lib, &CodeMap::default());
         assert!(code.contains("export default function Home()"), "{code}");
         assert!(
             code.contains(r#"<main className="screen stack" style={{ gap: "8px", "--x": "1" }}>"#),
@@ -919,6 +999,45 @@ mod tests {
         assert!(
             code.contains(r#"<button className="button">{children ?? "Go"}</button>"#),
             "{code}"
+        );
+
+        // With the app's own Button mapped, that's used, imported, and not written out.
+        let mut map = CodeMap::default();
+        map.set(
+            "button",
+            crate::designdraw::codemap::Target::Web,
+            "@/components/ui/button",
+            "Button",
+        );
+        let code = react(&t, "Home", &lib, &map);
+        assert!(
+            code.starts_with("import { Button } from \"@/components/ui/button\";\n"),
+            "{code}"
+        );
+        assert!(
+            code.contains(r#"<Button state="pressed">Buy</Button>"#),
+            "{code}"
+        );
+        assert!(!code.contains("export function Button"), "{code}");
+        let (view, _) = swiftui(
+            &t,
+            "HomeView",
+            "",
+            &lib,
+            Some(&{
+                let mut m = CodeMap::default();
+                m.set(
+                    "button",
+                    crate::designdraw::codemap::Target::Mobile,
+                    "",
+                    "PrimaryButton",
+                );
+                m
+            }),
+        );
+        assert!(
+            view.contains(r#"PrimaryButton(state: .pressed) { Text("Buy") }"#),
+            "{view}"
         );
     }
 
@@ -990,6 +1109,8 @@ mod tests {
             &t,
             "Card",
             ":root {\n  --primary: #2563eb;\n  --on-primary: #fff;\n}\n",
+            &[],
+            None,
         );
         assert!(view.contains("struct Card: View"), "{view}");
         assert!(

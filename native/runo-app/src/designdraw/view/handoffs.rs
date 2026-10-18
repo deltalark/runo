@@ -12,6 +12,7 @@ impl DesignCanvas {
     pub(super) fn refresh_handoffs(&mut self) {
         self.handoffs = spec::list(&self.root);
         self.handoff_settings = spec::settings(&self.root);
+        self.code_map = crate::designdraw::codemap::CodeMap::load(&self.root);
     }
 
     /// What changed since the last handoff, worked out again only when files changed.
