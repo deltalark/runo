@@ -79,7 +79,8 @@ pub(crate) fn context(c: &Canvas) -> String {
          in the app's code each design component is: keep a mapped component's id, variant \
          names and property names, since code is written from them, and add a variant \
          rather than rename one. Leave {FOLDER}/.versions/ (the version history) and \
-         {FOLDER}/handoff/ (what was handed off to be built) as they are. \
+         {FOLDER}/handoff/ (what was handed off to be built) as they are. Runo checks \
+         this after your turn and puts back lost ids, library files and mapped variants. \
          New screen files show up on the canvas by themselves. Make the \
          change by editing these files directly: Runo shows it live and the user keeps or \
          undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for this \

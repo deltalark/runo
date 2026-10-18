@@ -1471,14 +1471,17 @@ impl DesignCanvas {
         } else {
             ai.review_due = true;
         }
+        // Hold its change to what an edit by hand keeps, before it's read and drawn.
+        let before = ai.before.clone();
+        let kept = super::guard::keep(&self.root, &before, &self.code_map);
         // Read what it wrote now rather than at the next look, and draw it.
         self.check_files(cx);
-        if let Some(before) = self.ai.as_ref().map(|ai| ai.before.clone()) {
-            self.sync_changed_components(&before, cx);
-        }
+        self.sync_changed_components(&before, cx);
         if self.ai.as_ref().is_some_and(|ai| !ai.changed) {
             self.ai = None;
             self.say("AI finished without changing the design.");
+        } else if let Some(line) = kept.line() {
+            self.say(line);
         }
         // The chat that just ended takes the next ask a moment later.
         cx.spawn(async move |this, cx| {

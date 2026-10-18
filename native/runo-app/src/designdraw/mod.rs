@@ -8,6 +8,7 @@ pub(crate) mod codemap;
 pub(crate) mod dom;
 pub(crate) mod export;
 pub(crate) mod fields;
+pub(crate) mod guard;
 pub(crate) mod library;
 pub(crate) mod model;
 pub(crate) mod notes;
