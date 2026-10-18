@@ -43,7 +43,9 @@ if (!window.__runo) window.__runo = (() => {
   const STYLES = ['color', 'background-color', 'font-size', 'font-weight', 'text-align',
     'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'margin-top',
     'margin-bottom', 'gap', 'border-radius', 'display', 'flex-direction', 'align-items',
-    'justify-content', 'width', 'height', 'opacity'];
+    'justify-content', 'width', 'height', 'opacity', 'line-height', 'letter-spacing',
+    'border-top-width', 'border-top-color', 'border-top-style', 'border-top-left-radius',
+    'box-shadow', 'flex-wrap'];
   const info = (el) => {
     const cs = getComputedStyle(el);
     const computed = {};

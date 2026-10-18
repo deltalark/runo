@@ -19,6 +19,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+mod figma;
+
 actions!(
     design_canvas,
     [DesignEscape, DesignUndo, DesignRedo, DesignCopy]
@@ -74,8 +76,8 @@ const TITLE_H: f32 = 26.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Panel {
-    Inspect,
-    Layers,
+    Design,
+    Prototype,
     Theme,
     Checks,
 }
@@ -252,6 +254,11 @@ pub(crate) struct DesignCanvas {
     play_tapping: bool,
     f_text: Entity<InputState>,
     f_name: Entity<InputState>,
+    /// The inspector's typed fields, and what each was last filled with.
+    fields: Vec<(&'static str, Entity<InputState>)>,
+    field_vals: HashMap<&'static str, String>,
+    /// The hand tool: dragging anywhere pans.
+    hand: bool,
     f_inline: Entity<InputState>,
     inline_open: bool,
     /// What the text fields were filled for.
@@ -382,6 +389,7 @@ impl DesignCanvas {
                 this.save_rules(cx);
             }
         }));
+        let fields = Self::make_fields(window, cx, &mut subs);
         let renderer = Renderer::new(root.clone());
         let mut this = Self {
             refs: crate::design::load(&root),
@@ -416,7 +424,7 @@ impl DesignCanvas {
             layers_loading: false,
             undo: Vec::new(),
             redo: Vec::new(),
-            panel: Panel::Inspect,
+            panel: Panel::Design,
             tokens,
             dark: false,
             hotspots: true,
@@ -431,6 +439,9 @@ impl DesignCanvas {
             play_tapping: false,
             f_text,
             f_name,
+            fields,
+            field_vals: HashMap::new(),
+            hand: false,
             f_inline,
             inline_open: false,
             loaded: None,
@@ -1768,6 +1779,34 @@ impl DesignCanvas {
         );
     }
 
+    fn zoom_step(&mut self, factor: f32) {
+        let (w, h) = self.view_size();
+        self.zoom_at((w / 2., h / 2.), factor);
+    }
+
+    /// Zoom to the selected element, or the selected screen.
+    fn zoom_to_selection(&mut self) {
+        let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
+            self.fit();
+            return;
+        };
+        let (l, t, w, h) = match self.picked_rect() {
+            Some((_, r)) => (r.x, r.y, r.w, r.h),
+            None => {
+                let size = self.size_of(s);
+                (s.x, s.y, size.0, size.1)
+            }
+        };
+        let (vw, vh) = self.view_size();
+        self.zoom = ((vw - 120.) / w.max(1.))
+            .min((vh - 160.) / h.max(1.))
+            .clamp(MIN_ZOOM, MAX_ZOOM);
+        self.pan = (
+            vw / 2. - (l + w / 2.) * self.zoom,
+            vh / 2. - (t + h / 2.) * self.zoom,
+        );
+    }
+
     fn zoom_at(&mut self, local: Pt, factor: f32) {
         let w = self.world(local);
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
@@ -1805,7 +1844,7 @@ impl DesignCanvas {
                 if edit_text && this.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     this.inline_open = true;
                 }
-                this.panel = Panel::Inspect;
+                this.panel = Panel::Design;
                 this.load_layers(cx);
             },
         );
@@ -1959,7 +1998,7 @@ impl DesignCanvas {
                 this.element = (!els.is_empty()).then(|| els.remove(0));
                 this.also = els;
                 this.inline_open = false;
-                this.panel = Panel::Inspect;
+                this.panel = Panel::Design;
                 this.load_layers(cx);
             },
         );
@@ -2731,7 +2770,7 @@ impl DesignCanvas {
         self.new_open = false;
         let local = self.local(e.position);
         let w = self.world(local);
-        if e.button == MouseButton::Middle {
+        if e.button == MouseButton::Middle || (self.hand && e.button == MouseButton::Left) {
             self.drag = Drag::Pan {
                 from: local,
                 start: self.pan,
@@ -3183,8 +3222,41 @@ impl DesignCanvas {
                 }
                 true
             }
-            (false, true, false, "1") => {
+            (false, true, false, "1" | "!") => {
                 self.fit();
+                true
+            }
+            (false, true, false, "2" | "@") => {
+                self.zoom_to_selection();
+                true
+            }
+            (false, true, false, "0" | ")") => {
+                let z = self.zoom;
+                self.zoom_step(1. / z);
+                true
+            }
+            (true, false, false, "=" | "+") => {
+                self.zoom_step(1.25);
+                true
+            }
+            (true, false, false, "-") => {
+                self.zoom_step(1. / 1.25);
+                true
+            }
+            (false, false, false, "v") => {
+                self.hand = false;
+                true
+            }
+            (false, false, false, "h") => {
+                self.hand = !self.hand;
+                true
+            }
+            (false, false, false, "f") => {
+                self.new_open = !self.new_open;
+                true
+            }
+            (false, false, false, "t") if self.screen.is_some() => {
+                self.insert("<p>Text</p>", cx);
                 true
             }
             _ => false,
@@ -3354,126 +3426,6 @@ impl DesignCanvas {
                 .update(cx, |s, cx| s.set_value(name, window, cx));
             self.loaded_screen = self.screen.clone();
         }
-    }
-
-    fn toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let sep = || div().w(px(1.)).h(px(18.)).mx_1().bg(rgb(c_border()));
-        div()
-            .h(px(44.))
-            .flex_none()
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_1()
-            .border_b_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_canvas()))
-            .child(
-                text_btn("design-new", "New screen", Some(IconName::Plus), true).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.new_open = !this.new_open;
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(div().flex_1())
-            .child(
-                icon_btn("design-undo", IconName::Undo2, "Undo (⌘Z)", false)
-                    .when(
-                        self.undo.is_empty() && !self.ai.as_ref().is_some_and(|ai| ai.changed),
-                        |el| el.opacity(0.4),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
-            )
-            .child(
-                icon_btn("design-redo", IconName::Redo2, "Redo (⇧⌘Z)", false)
-                    .when(self.redo.is_empty(), |el| el.opacity(0.4))
-                    .on_click(cx.listener(|this, _, _, cx| this.redo(cx))),
-            )
-            .child(sep())
-            .child(
-                icon_btn(
-                    "design-arrange",
-                    IconName::Workflow,
-                    "Arrange along the flow",
-                    false,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.arrange(cx))),
-            )
-            .child(
-                icon_btn(
-                    "design-dark",
-                    if self.dark {
-                        IconName::Moon
-                    } else {
-                        IconName::Sun
-                    },
-                    "Light or dark",
-                    self.dark,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let d = !this.dark;
-                    this.set_dark(d, cx)
-                })),
-            )
-            .child(
-                icon_btn(
-                    "design-hotspots",
-                    IconName::MousePointerClick,
-                    "Show links between screens",
-                    self.hotspots,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.hotspots = !this.hotspots;
-                    cx.notify();
-                })),
-            )
-            .child(sep())
-            .child(
-                icon_btn("design-zoom-out", IconName::Minus, "Zoom out", false).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        let (w, h) = this.view_size();
-                        this.zoom_at((w / 2., h / 2.), 1. / 1.25);
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(
-                div()
-                    .id("design-zoom")
-                    .w(px(46.))
-                    .text_center()
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .child(format!("{}%", (self.zoom * 100.).round()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.fit();
-                        cx.notify();
-                    })),
-            )
-            .child(
-                icon_btn("design-zoom-in", IconName::Plus, "Zoom in", false).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        let (w, h) = this.view_size();
-                        this.zoom_at((w / 2., h / 2.), 1.25);
-                        cx.notify();
-                    },
-                )),
-            )
-            .child(sep())
-            .child(if self.playing.is_some() {
-                text_btn("design-play", "Stop", Some(IconName::Square), true).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.playing = None;
-                        cx.notify();
-                    },
-                ))
-            } else {
-                text_btn("design-play", "Play", Some(IconName::Play), false)
-                    .on_click(cx.listener(|this, _, _, cx| this.play(cx)))
-            })
-            .into_any_element()
     }
 
     /// The menu of screens to start from.
@@ -3803,26 +3755,55 @@ impl DesignCanvas {
                     .top(px(y - 1.))
                     .w(px(w + 2.))
                     .h(px(h + 2.))
-                    .border_2()
+                    .border_1()
                     .border_color(rgb(c_blue()))
+                    .into_any_element(),
+            );
+            // Handles at the corners, as in other design tools.
+            for (hx, hy) in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)] {
+                out.push(
+                    div()
+                        .absolute()
+                        .left(px(hx - 4.))
+                        .top(px(hy - 4.))
+                        .size(px(8.))
+                        .border_1()
+                        .border_color(rgb(c_blue()))
+                        .bg(rgb(0xffffff))
+                        .into_any_element(),
+                );
+            }
+            // The name above, and the size below.
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y - 18.))
+                    .max_w(px(w.max(80.)))
+                    .truncate()
+                    .text_size(px(10.5))
+                    .text_color(rgb(c_blue()))
+                    .child(el.label.clone())
                     .into_any_element(),
             );
             out.push(
                 div()
                     .absolute()
                     .left(px(x))
-                    .top(px(y - 20.))
-                    .px_1()
-                    .rounded_sm()
-                    .bg(rgb(c_blue()))
-                    .text_size(px(10.5))
-                    .text_color(rgb(0xffffff))
-                    .child(format!(
-                        "{}  {}×{}",
-                        el.label,
-                        el.rect.w.round(),
-                        el.rect.h.round()
-                    ))
+                    .w(px(w))
+                    .top(px(y + h + 6.))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px(px(5.))
+                            .py(px(1.))
+                            .rounded(px(3.))
+                            .bg(rgb(c_blue()))
+                            .text_size(px(10.5))
+                            .text_color(rgb(0xffffff))
+                            .child(format!("{} × {}", el.rect.w.round(), el.rect.h.round())),
+                    )
                     .into_any_element(),
             );
             // The link handle: drag it onto another screen.
@@ -3844,8 +3825,8 @@ impl DesignCanvas {
                     div()
                         .id("design-ask-here")
                         .absolute()
-                        .left(px(x))
-                        .top(px(y + h + 6.))
+                        .left(px(x + w + 10.))
+                        .top(px(y))
                         .h(px(22.))
                         .px_2()
                         .flex()
@@ -4094,8 +4075,8 @@ impl DesignCanvas {
                 div()
                     .id("design-layout-bar")
                     .absolute()
-                    .left(px(x + 86.))
-                    .top(px(y + h + 6.))
+                    .left(px(x))
+                    .top(px(y + h + 28.))
                     .h(px(26.))
                     .px_1()
                     .flex()
@@ -4634,149 +4615,6 @@ impl DesignCanvas {
 
     // ---- The side panel
 
-    fn side_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        // The tabs share the width evenly, as one segmented control.
-        let tab = |id: &'static str,
-                   label: &'static str,
-                   count: usize,
-                   p: Panel,
-                   cx: &mut Context<Self>| {
-            let on = self.panel == p;
-            div()
-                .id(id)
-                .flex_1()
-                .min_w_0()
-                .h(px(26.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(5.))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .when(on, |el| {
-                    el.bg(tint(c_raised()))
-                        .shadow_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                })
-                .text_color(rgb(if on { c_text() } else { c_secondary() }))
-                .hover(|el| el.text_color(rgb(c_text())))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.panel = p;
-                    cx.notify();
-                }))
-                .child(label)
-                .when(count > 0, |el| {
-                    el.child(
-                        div()
-                            .h(px(15.))
-                            .min_w(px(15.))
-                            .px(px(4.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(col(c_amber(), 0.2))
-                            .text_size(px(10.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_amber()))
-                            .child(if count > 99 {
-                                "99+".to_string()
-                            } else {
-                                count.to_string()
-                            }),
-                    )
-                })
-        };
-        let body = match self.panel {
-            Panel::Inspect => self.inspector(cx),
-            Panel::Layers => self.layers_panel(cx),
-            Panel::Theme => self.theme_panel(cx),
-            Panel::Checks => self.checks_panel(cx),
-        };
-        let issues: usize = self.findings().iter().map(|f| f.2.len()).sum();
-        div()
-            .w(px(290.))
-            .flex_none()
-            .h_full()
-            .v_flex()
-            .border_l_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_canvas()))
-            .child(
-                div()
-                    .h(px(44.))
-                    .flex_none()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
-                    .child(
-                        div()
-                            .flex_1()
-                            .p(px(2.))
-                            .flex()
-                            .gap(px(2.))
-                            .rounded(px(8.))
-                            .bg(tint(c_subtle()))
-                            .child(tab("design-tab-inspect", "Inspect", 0, Panel::Inspect, cx))
-                            .child(tab("design-tab-layers", "Layers", 0, Panel::Layers, cx))
-                            .child(tab("design-tab-theme", "Theme", 0, Panel::Theme, cx))
-                            .child(tab(
-                                "design-tab-checks",
-                                "Checks",
-                                issues,
-                                Panel::Checks,
-                                cx,
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .id("design-side")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_3()
-                    .pb_4()
-                    .child(body),
-            )
-            .into_any_element()
-    }
-
-    /// Swatches for a colour property: the theme's tokens, then none.
-    fn color_row(&self, key: &'static str, el: &Element, cx: &mut Context<Self>) -> Div {
-        let now = el.style(key);
-        let mut row = div().flex().flex_wrap().gap(px(4.));
-        for (i, t) in COLOR_TOKENS.iter().enumerate() {
-            let t: &'static str = t;
-            let value = format!("var({t})");
-            let on = now.trim() == value;
-            let c = self.token_color(t).unwrap_or(0x888888);
-            row = row.child(
-                div()
-                    .id((key, i))
-                    .size(px(22.))
-                    .rounded_md()
-                    .border_2()
-                    .border_color(rgb(if on { c_blue() } else { c_border() }))
-                    .bg(rgb(c))
-                    .cursor_pointer()
-                    .tooltip(crate::archdraw::view::tip(token_name(t)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_style(key, &value, cx))),
-            );
-        }
-        row.child(
-            chip_btn(
-                SharedString::from(format!("{key}-none")),
-                "None",
-                !el.inline.contains_key(key),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.set_style(key, "", cx))),
-        )
-    }
-
     /// Chips that set a style to one of a few values.
     fn choice_row(
         &self,
@@ -4867,561 +4705,6 @@ impl DesignCanvas {
             .child(how)
     }
 
-    fn inspector(&self, cx: &mut Context<Self>) -> Div {
-        let out = div().v_flex().gap_1();
-        let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
-            return out.child(self.add_screen_panel(cx));
-        };
-        let mut out = out;
-        match &self.element {
-            None => {
-                let mut devices = div().flex().gap_1();
-                for (i, d) in Device::ALL.iter().enumerate() {
-                    let d = *d;
-                    devices = devices.child(
-                        chip_btn(("design-dev", i), d.label(), s.device == d)
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_device(d, cx))),
-                    );
-                }
-                out = out
-                    .child(section("Screen"))
-                    .child(label_row("Name", Input::new(&self.f_name)))
-                    .child(label_row("Device", devices))
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(rgb(c_muted()))
-                            .child(format!("{FOLDER}/screens/{}.html", s.id)),
-                    )
-                    .child(
-                        div()
-                            .pt_2()
-                            .flex()
-                            .flex_wrap()
-                            .gap_1()
-                            .child(
-                                text_btn(
-                                    "design-dup-screen",
-                                    "Duplicate",
-                                    Some(IconName::Copy),
-                                    false,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.duplicate_screen(cx))),
-                            )
-                            .child(
-                                text_btn(
-                                    "design-variants",
-                                    "Variants with AI",
-                                    Some(IconName::Sparkles),
-                                    false,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| this.variants_with_ai(window, cx),
-                                )),
-                            )
-                            .when(
-                                variant_of(&s.id).is_none() && brief::state_of(&s.id).is_none(),
-                                |el| {
-                                    el.child(
-                                        text_btn(
-                                            "design-states",
-                                            "States with AI",
-                                            Some(IconName::Layers),
-                                            false,
-                                        )
-                                        .tooltip(tip(
-                                            "AI designs this screen empty, loading and with an error, beside it",
-                                        ))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.states_with_ai(window, cx)
-                                        })),
-                                    )
-                                },
-                            )
-                            .when(
-                                variant_of(&s.id).is_some_and(|b| self.canvas.screen(&b).is_some()),
-                                |el| {
-                                    let id = s.id.clone();
-                                    el.child(
-                                        text_btn(
-                                            "design-use-variant",
-                                            "Use this variant",
-                                            Some(IconName::Check),
-                                            true,
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.use_variant(&id, cx)
-                                            }),
-                                        ),
-                                    )
-                                },
-                            )
-                            .child(
-                                text_btn(
-                                    "design-play-here",
-                                    "Play from here",
-                                    Some(IconName::Play),
-                                    false,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.play(cx))),
-                            )
-                            .child(
-                                text_btn(
-                                    "design-del-screen",
-                                    "Delete",
-                                    Some(IconName::Trash),
-                                    false,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.delete_screen(cx))),
-                            ),
-                    )
-                    .child(section("Insert"))
-                    .child(self.blocks(cx));
-            }
-            Some(el) if !self.also.is_empty() => {
-                out = out.child(self.selection_panel(el, cx));
-            }
-            Some(el) => {
-                out = out.child(section("Element")).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            div()
-                                .flex_1()
-                                .truncate()
-                                .text_size(px(12.5))
-                                .text_color(rgb(c_text()))
-                                .child(el.label.clone()),
-                        )
-                        .child(
-                            icon_btn(
-                                "design-parent",
-                                IconName::ArrowUpLeft,
-                                "Select its parent (Esc)",
-                                false,
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| this.escape(window, cx))),
-                        ),
-                );
-                if el.text.is_some() {
-                    out = out.child(label_row("Text", Input::new(&self.f_text)));
-                }
-                out = out
-                    .child(label_row("Text colour", self.color_row("color", el, cx)))
-                    .child(label_row(
-                        "Fill",
-                        self.color_row("background-color", el, cx),
-                    ))
-                    .child(label_row(
-                        "Size",
-                        self.choice_row(
-                            "font-size",
-                            el,
-                            &[
-                                ("12", "12px"),
-                                ("14", "14px"),
-                                ("16", "16px"),
-                                ("20", "20px"),
-                                ("24", "24px"),
-                                ("30", "30px"),
-                                ("Auto", ""),
-                            ],
-                            cx,
-                        ),
-                    ))
-                    .child(label_row(
-                        "Weight",
-                        self.choice_row(
-                            "font-weight",
-                            el,
-                            &[
-                                ("Regular", "400"),
-                                ("Medium", "500"),
-                                ("Semibold", "600"),
-                                ("Bold", "700"),
-                                ("Auto", ""),
-                            ],
-                            cx,
-                        ),
-                    ))
-                    .child(label_row(
-                        "Padding",
-                        self.choice_row(
-                            "padding",
-                            el,
-                            &[
-                                ("0", "0"),
-                                ("1×", "var(--space)"),
-                                ("2×", "calc(var(--space) * 2)"),
-                                ("3×", "calc(var(--space) * 3)"),
-                                ("Auto", ""),
-                            ],
-                            cx,
-                        ),
-                    ))
-                    .child(label_row(
-                        "Corners",
-                        self.choice_row(
-                            "border-radius",
-                            el,
-                            &[
-                                ("Square", "0"),
-                                ("Theme", "var(--radius)"),
-                                ("Round", "999px"),
-                                ("Auto", ""),
-                            ],
-                            cx,
-                        ),
-                    ))
-                    .child(label_row(
-                        "Width",
-                        self.choice_row(
-                            "width",
-                            el,
-                            &[("Hug", "fit-content"), ("Fill", "100%"), ("Auto", "")],
-                            cx,
-                        ),
-                    ))
-                    .child(label_row(
-                        "Align text",
-                        self.choice_row(
-                            "text-align",
-                            el,
-                            &[
-                                ("Left", "left"),
-                                ("Center", "center"),
-                                ("Right", "right"),
-                                ("Auto", ""),
-                            ],
-                            cx,
-                        ),
-                    ));
-                if el.is_flex() {
-                    out = out
-                        .child(section("Layout"))
-                        .child(label_row(
-                            "Direction",
-                            self.choice_row(
-                                "flex-direction",
-                                el,
-                                &[("Down", "column"), ("Across", "row"), ("Auto", "")],
-                                cx,
-                            ),
-                        ))
-                        .child(label_row(
-                            "Gap",
-                            self.choice_row(
-                                "gap",
-                                el,
-                                &[
-                                    ("0", "0"),
-                                    ("1×", "var(--space)"),
-                                    ("2×", "calc(var(--space) * 2)"),
-                                    ("3×", "calc(var(--space) * 3)"),
-                                    ("Auto", ""),
-                                ],
-                                cx,
-                            ),
-                        ))
-                        .child(label_row(
-                            "Align",
-                            self.choice_row(
-                                "align-items",
-                                el,
-                                &[
-                                    ("Start", "flex-start"),
-                                    ("Center", "center"),
-                                    ("End", "flex-end"),
-                                    ("Stretch", "stretch"),
-                                    ("Auto", ""),
-                                ],
-                                cx,
-                            ),
-                        ))
-                        .child(label_row(
-                            "Spread",
-                            self.choice_row(
-                                "justify-content",
-                                el,
-                                &[
-                                    ("Start", "flex-start"),
-                                    ("Center", "center"),
-                                    ("End", "flex-end"),
-                                    ("Between", "space-between"),
-                                    ("Auto", ""),
-                                ],
-                                cx,
-                            ),
-                        ));
-                }
-                // Where clicking it goes.
-                let mut opens = div().flex().flex_wrap().gap(px(4.));
-                opens = opens.child(
-                    chip_btn(("design-goto", 0usize), "Nowhere", el.goto.is_none()).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.op("attr", &[json!("data-goto"), json!("")], After::Same, cx)
-                        }),
-                    ),
-                );
-                for (i, t) in self.canvas.screens.iter().enumerate() {
-                    if Some(&t.id) == self.screen.as_ref() {
-                        continue;
-                    }
-                    let id = t.id.clone();
-                    opens = opens.child(
-                        chip_btn(
-                            ("design-goto", i + 1),
-                            t.name.clone(),
-                            el.goto.as_deref() == Some(t.id.as_str()),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.op("attr", &[json!("data-goto"), json!(id)], After::Same, cx)
-                        })),
-                    );
-                }
-                let mut moves = div().flex().flex_wrap().gap(px(4.));
-                let mut speeds = div().flex().flex_wrap().gap(px(4.));
-                if el.goto.is_some() {
-                    let now = el.transition.clone().unwrap_or_default();
-                    for (i, (label, value)) in MOVES.iter().enumerate() {
-                        let value: &'static str = value;
-                        moves = moves.child(
-                            chip_btn(("design-move", i), *label, now == value).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.op(
-                                        "attr",
-                                        &[json!("data-transition"), json!(value)],
-                                        After::Same,
-                                        cx,
-                                    )
-                                }),
-                            ),
-                        );
-                    }
-                    let now = el.speed.clone().unwrap_or_default();
-                    for (i, (label, value)) in SPEEDS.iter().enumerate() {
-                        let value: &'static str = value;
-                        speeds = speeds.child(
-                            chip_btn(("design-speed", i), *label, now == value).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.op(
-                                        "attr",
-                                        &[json!("data-speed"), json!(value)],
-                                        After::Same,
-                                        cx,
-                                    )
-                                }),
-                            ),
-                        );
-                    }
-                }
-                let linked = el.goto.is_some();
-                out = out
-                    .child(section("Prototype"))
-                    .child(label_row("Opens", opens))
-                    .when(linked, |el| {
-                        el.child(label_row("Moves", moves))
-                            .child(label_row("Speed", speeds))
-                    })
-                    .child(section("Arrange"))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_1()
-                            .child(
-                                icon_btn("design-up", IconName::ArrowUp, "Move up (⌥↑)", false)
-                                    .on_click(cx.listener(|this, _, _, cx| this.nudge(-1, cx))),
-                            )
-                            .child(
-                                icon_btn(
-                                    "design-down",
-                                    IconName::ArrowDown,
-                                    "Move down (⌥↓)",
-                                    false,
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.nudge(1, cx))),
-                            )
-                            .child(
-                                icon_btn("design-dup", IconName::Copy, "Duplicate (⌘D)", false)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.duplicate_element(cx)),
-                                    ),
-                            )
-                            .child(
-                                icon_btn(
-                                    "design-hide",
-                                    IconName::EyeOff,
-                                    "Hide or show",
-                                    el.hidden,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| this.op("hide", &[], After::Same, cx),
-                                )),
-                            )
-                            .child(
-                                icon_btn("design-del", IconName::Trash, "Delete (⌫)", false)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.delete_element(cx)),
-                                    ),
-                            ),
-                    )
-                    .child(section(if el.is_container() {
-                        "Insert inside"
-                    } else {
-                        "Insert after"
-                    }))
-                    .child(self.blocks(cx));
-                if !el.inline.is_empty() {
-                    let mut css: Vec<String> = el
-                        .inline
-                        .iter()
-                        .map(|(k, v)| format!("{k}: {v};"))
-                        .collect();
-                    css.sort();
-                    out = out.child(section("Its own CSS")).child(
-                        div()
-                            .p_2()
-                            .rounded_md()
-                            .bg(tint(c_subtle()))
-                            .font_family("monospace")
-                            .text_size(px(11.5))
-                            .text_color(rgb(c_secondary()))
-                            .child(css.join("\n")),
-                    );
-                }
-            }
-        }
-        out
-    }
-
-    /// The inspector for several elements: what can be done to them together, and the
-    /// styles that change them all at once.
-    fn selection_panel(&self, el: &Element, cx: &mut Context<Self>) -> Div {
-        let n = self.also.len() + 1;
-        let groups = std::iter::once(el)
-            .chain(&self.also)
-            .any(|e| e.children > 0);
-        let mut actions = div()
-            .flex()
-            .flex_wrap()
-            .gap_1()
-            .child(
-                text_btn("design-group", "Group", Some(IconName::Group), false)
-                    .tooltip(tip("Wrap them in a new container (⌘G)"))
-                    .on_click(cx.listener(|this, _, _, cx| this.group(false, cx))),
-            )
-            .child(
-                text_btn("design-autolayout", "Auto layout", Some(IconName::Columns3), false)
-                    .tooltip(tip(
-                        "Wrap them in a container that lays them out across or down, the way they sit now (⇧A)",
-                    ))
-                    .on_click(cx.listener(|this, _, _, cx| this.auto_layout(cx))),
-            );
-        if groups {
-            actions = actions.child(
-                text_btn("design-ungroup", "Ungroup", Some(IconName::Ungroup), false)
-                    .tooltip(tip("Put what's inside each one where it is (⇧⌘G)"))
-                    .on_click(cx.listener(|this, _, _, cx| this.ungroup(cx))),
-            );
-        }
-        actions = actions
-            .child(
-                icon_btn("design-copy", IconName::Copy, "Copy (⌘C)", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.copy(false, cx))),
-            )
-            .child(
-                icon_btn(
-                    "design-dup-all",
-                    IconName::CopyPlus,
-                    "Duplicate (⌘D)",
-                    false,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.duplicate_element(cx))),
-            )
-            .child(
-                icon_btn("design-hide-all", IconName::EyeOff, "Hide or show", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.op("hide", &[], After::Same, cx))),
-            )
-            .child(
-                icon_btn("design-del-all", IconName::Trash, "Delete (⌫)", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.delete_element(cx))),
-            );
-        div()
-            .v_flex()
-            .gap_1()
-            .child(section("Selection"))
-            .child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_muted()))
-                    .child(format!(
-                        "{n} elements. Shift-click to add or take one out. Changes here apply to all of them."
-                    )),
-            )
-            .child(actions)
-            .child(section("Style all"))
-            .child(label_row("Text colour", self.color_row("color", el, cx)))
-            .child(label_row("Fill", self.color_row("background-color", el, cx)))
-            .child(label_row(
-                "Size",
-                self.choice_row(
-                    "font-size",
-                    el,
-                    &[
-                        ("12", "12px"),
-                        ("14", "14px"),
-                        ("16", "16px"),
-                        ("20", "20px"),
-                        ("24", "24px"),
-                        ("Auto", ""),
-                    ],
-                    cx,
-                ),
-            ))
-            .child(label_row(
-                "Weight",
-                self.choice_row(
-                    "font-weight",
-                    el,
-                    &[
-                        ("Regular", "400"),
-                        ("Medium", "500"),
-                        ("Semibold", "600"),
-                        ("Bold", "700"),
-                        ("Auto", ""),
-                    ],
-                    cx,
-                ),
-            ))
-            .child(label_row(
-                "Corners",
-                self.choice_row(
-                    "border-radius",
-                    el,
-                    &[
-                        ("Square", "0"),
-                        ("Theme", "var(--radius)"),
-                        ("Round", "999px"),
-                        ("Auto", ""),
-                    ],
-                    cx,
-                ),
-            ))
-            .child(label_row(
-                "Width",
-                self.choice_row(
-                    "width",
-                    el,
-                    &[("Hug", "fit-content"), ("Fill", "100%"), ("Auto", "")],
-                    cx,
-                ),
-            ))
-    }
-
     fn blocks(&self, cx: &mut Context<Self>) -> Div {
         let mut row = div().flex().flex_wrap().gap(px(4.));
         for (i, (label, html)) in BLOCKS.iter().enumerate() {
@@ -5432,150 +4715,6 @@ impl DesignCanvas {
             );
         }
         row
-    }
-
-    fn layers_panel(&self, cx: &mut Context<Self>) -> Div {
-        let mut out = div().v_flex().pt_2();
-        if self.screen.is_none() {
-            return out.child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(rgb(c_secondary()))
-                    .child("Pick a screen to see what it's made of."),
-            );
-        }
-        if self.layers.is_empty() {
-            return out.child(div().text_size(px(12.5)).text_color(rgb(c_muted())).child(
-                if self.layers_loading {
-                    "Reading the screen…"
-                } else {
-                    "Nothing on this screen yet."
-                },
-            ));
-        }
-        let picked: Vec<dom::Path> = self
-            .element
-            .iter()
-            .chain(&self.also)
-            .map(|e| e.path.clone())
-            .collect();
-        let name = self
-            .screen
-            .as_ref()
-            .and_then(|id| self.canvas.screen(id))
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
-        out = out.child(
-            div()
-                .pb_1()
-                .flex()
-                .items_center()
-                .justify_between()
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(c_muted()))
-                .child(name.to_uppercase())
-                .child(
-                    div()
-                        .font_weight(FontWeight::NORMAL)
-                        .child(format!("{} layers", self.layers.len())),
-                ),
-        );
-        for (i, l) in self.layers.iter().enumerate() {
-            let on = picked.contains(&l.path);
-            let (tag, classes) = l.label.split_once('.').unwrap_or((l.label.as_str(), ""));
-            // What a person would call it: its text, else its class, else its tag.
-            let title: SharedString = match &l.text {
-                Some(t) if !t.is_empty() => t.clone().into(),
-                _ if !classes.is_empty() => classes.replace('.', " ").into(),
-                _ => tag.to_string().into(),
-            };
-            let glyph = layer_icon(tag);
-            let (p1, p2, p3) = (l.path.clone(), l.path.clone(), l.path.clone());
-            let dragged = DraggedLayer {
-                path: l.path.clone(),
-                label: l.label.clone().into(),
-            };
-            out = out.child(
-                div()
-                    .id(("design-layer", i))
-                    .group("design-layer")
-                    .h(px(26.))
-                    .pl(px(6. + l.depth.min(8) as f32 * 14.))
-                    .pr_1()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .when(on, |el| el.bg(tint(c_selected())))
-                    .hover(|el| el.bg(tint(c_subtle())))
-                    .when(l.hidden, |el| el.opacity(0.5))
-                    .text_color(rgb(c_text()))
-                    .on_drag(dragged, |d, _, _, cx| cx.new(|_| d.clone()))
-                    .drag_over::<DraggedLayer>(|el, _, _, _| {
-                        el.border_t_2().border_color(rgb(c_blue()))
-                    })
-                    .on_drop(cx.listener(move |this, d: &DraggedLayer, _, cx| {
-                        let target = p3.clone();
-                        if d.path != target {
-                            let js = dom::op(&d.path, "moveTo", &[json!(target), json!(false)]);
-                            this.edit(js, After::Clear, cx);
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
-                        let id = this.screen.clone().unwrap_or_default();
-                        if e.modifiers().shift {
-                            this.toggle_pick(&id, p1.clone(), cx);
-                        } else {
-                            this.select_path(&id, p1.clone(), cx);
-                        }
-                    }))
-                    .child(icon(glyph, 12., if on { c_blue() } else { c_muted() }))
-                    .child(div().flex_1().min_w_0().truncate().child(title))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(10.5))
-                            .text_color(rgb(c_muted()))
-                            .child(tag.to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .when(!l.hidden && !on, |el| {
-                                el.invisible()
-                                    .group_hover("design-layer", |el| el.visible())
-                            })
-                            .child(
-                                icon_btn(
-                                    ("design-layer-eye", i),
-                                    if l.hidden {
-                                        IconName::EyeOff
-                                    } else {
-                                        IconName::Eye
-                                    },
-                                    "Hide or show",
-                                    false,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.edit(dom::op(&p2, "hide", &[]), After::Same, cx);
-                                    },
-                                )),
-                            ),
-                    ),
-            );
-        }
-        out.child(
-            div()
-                .pt_2()
-                .text_size(px(11.5))
-                .text_color(rgb(c_muted()))
-                .child("Drag a layer onto another to move it there."),
-        )
     }
 
     /// What the design checks found on each screen.
@@ -5784,8 +4923,9 @@ impl DesignCanvas {
 
     fn render_inner(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.load_fields(window, cx);
-        // The Layers tab reads the selected screen when it shows, however it was selected.
-        if self.panel == Panel::Layers && self.screen.is_some() && self.layers_of != self.screen {
+        self.load_typed_fields(window, cx);
+        // The layers panel reads the selected screen, however it was selected.
+        if self.screen.is_some() && self.layers_of != self.screen {
             self.load_layers(cx);
         }
         if !self.fitted && self.view_size().0 > 10. {
@@ -5804,7 +4944,6 @@ impl DesignCanvas {
         }
         div()
             .size_full()
-            .flex()
             .key_context("DesignCanvas")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
@@ -5815,16 +4954,24 @@ impl DesignCanvas {
             .on_mouse_move(cx.listener(Self::on_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_up))
+            .v_flex()
+            .child(self.fig_toolbar(cx))
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .v_flex()
-                    .child(self.toolbar(cx))
-                    .child(self.canvas_area(cx)),
+                    .min_h_0()
+                    .flex()
+                    .child(self.layers_side(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .v_flex()
+                            .child(self.canvas_area(cx)),
+                    )
+                    .child(self.right_panel(cx)),
             )
-            .child(self.side_panel(cx))
             .into_any_element()
     }
 }
