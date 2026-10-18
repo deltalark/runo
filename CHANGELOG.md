@@ -73,6 +73,7 @@ All notable changes to Runo are documented here.
 - A Review page lists every session whose agent stopped with changed files, with commit, push, pull request and merge in one place. A session's Changes panel shows where its work stands and a Review and ship button. The mode rail is regrouped to Home, Sessions, Review, GitHub, Playbooks and History, then Design and Architecture, with Notes and Settings at the bottom.
 - The browser opens as its own tab, glass mode looks the same on every page, the GitHub page has clearer empty states and filters, and the GitHub and Review pages come back after a restart.
 - Design and Architecture belong to the current project: they sit under its badge on the rail, their title switches project, and All projects shows a chooser instead of opening the first project. New project can start from Design an app or Architecture, making an empty git project in `~/Runo/<name>/`.
+- Clean up in Settings > Worktrees finds what sessions left behind in every project: folders under `.runo-worktrees` that no session points at (archived ones included), worktrees git still lists whose folder is gone, and `runo/` branches no session uses, each with its size and a total. Merged branches and worktrees without changes start picked; branches with commits the default branch lacks are listed apart with a warning and never picked for you. Remove selected asks first, checks again that nothing uses them, and logs each removal.
 
 ### Changed
 

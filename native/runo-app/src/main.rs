@@ -12,6 +12,7 @@ mod browser;
 mod browser_engine;
 mod caps;
 mod chatctl;
+mod cleanup;
 mod cliview;
 mod connections;
 mod connections_ui;
@@ -254,6 +255,8 @@ struct RunoApp {
     settings_areas: HashMap<String, Entity<TextareaState>>,
     /// The open form for adding or editing one of Runo's MCP servers.
     mcp_form: Option<McpForm>,
+    /// Settings > Worktrees > Clean up.
+    cleanup: settings_ui::CleanupView,
     settings_menu: Option<String>,
     discovered: Option<Discovered>,
     applied_dark: Option<bool>,
@@ -1405,6 +1408,7 @@ impl RunoApp {
             settings_inputs: HashMap::new(),
             settings_areas: HashMap::new(),
             mcp_form: None,
+            cleanup: Default::default(),
             settings_menu: None,
             discovered: None,
             applied_dark: None,
