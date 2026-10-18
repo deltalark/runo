@@ -1,6 +1,7 @@
 //! Comments on the canvas: the comment tool (C) pins a note to a point on a screen, pins
-//! open a thread with replies, and the right panel lists them all. A comment can be handed
-//! to AI to fix.
+//! open a thread with replies, and the right panel lists them all. Comments work in
+//! Present too, pinned to the screen playing. Typing @ mentions someone; mentioning AI
+//! hands the comment to AI to fix.
 
 use super::*;
 use crate::designdraw::notes::{self, Comment, Reply};
@@ -40,8 +41,22 @@ fn avatar(name: &str, size: f32) -> Div {
         .child(notes::initials(name))
 }
 
+/// What someone said, with the people it mentions picked out.
+fn said(text: &str, people: &[String]) -> StyledText {
+    let style = HighlightStyle {
+        color: Some(rgb(c_blue()).into()),
+        font_weight: Some(FontWeight::SEMIBOLD),
+        ..Default::default()
+    };
+    StyledText::new(text.to_string()).with_highlights(
+        notes::mentions(text, people)
+            .into_iter()
+            .map(|r| (r, style)),
+    )
+}
+
 /// One message of a thread: who, when, and what they said.
-fn message(author: &str, at: &str, text: &str) -> Div {
+fn message(author: &str, at: &str, text: &str, people: &[String]) -> Div {
     div().flex().gap(px(8.)).child(avatar(author, 22.)).child(
         div()
             .flex_1()
@@ -71,7 +86,7 @@ fn message(author: &str, at: &str, text: &str) -> Div {
                 div()
                     .text_size(px(12.5))
                     .text_color(rgb(c_text()))
-                    .child(text.to_string()),
+                    .child(said(text, people)),
             ),
     )
 }
@@ -84,8 +99,11 @@ impl DesignCanvas {
     ) -> Entity<InputState> {
         let f = cx.new(|cx| InputState::new(window, cx).placeholder("Add a comment"));
         subs.push(cx.subscribe_in(&f, window, |this, _, ev, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. }) {
-                this.post_comment(window, cx);
+            match ev {
+                InputEvent::PressEnter { .. } => this.post_comment(window, cx),
+                // Mentions being typed are suggested as they go.
+                InputEvent::Change => cx.notify(),
+                _ => {}
             }
         }));
         f
@@ -98,6 +116,10 @@ impl DesignCanvas {
         self.comment_open = None;
         if self.commenting {
             self.comments = notes::load(&self.root);
+            self.people = notes::people(&self.root, &self.comments);
+            if self.author.is_empty() {
+                self.author = notes::author(&self.root);
+            }
         }
         cx.notify();
     }
@@ -136,9 +158,10 @@ impl DesignCanvas {
             self.author = notes::author(&self.root);
         }
         let (author, at) = (self.author.clone(), notes::now());
+        let for_ai = notes::mentions_name(&text, &self.people, notes::AI);
         // Read the file again first, so comments added elsewhere aren't lost.
         self.comments = notes::load(&self.root);
-        match open {
+        let id = match open {
             CommentOpen::New { screen, x, y } => {
                 let id = notes::next_id(&self.comments);
                 self.comments.push(Comment {
@@ -153,16 +176,21 @@ impl DesignCanvas {
                     replies: Vec::new(),
                 });
                 self.comment_open = Some(CommentOpen::Thread(id));
+                id
             }
             CommentOpen::Thread(id) => {
                 if let Some(c) = self.comments.iter_mut().find(|c| c.id == id) {
                     c.replies.push(Reply { author, text, at });
                 }
+                id
             }
-        }
+        };
         self.save_comments();
         self.f_comment
             .update(cx, |s, cx| s.set_value("", window, cx));
+        if for_ai {
+            self.fix_comments(vec![id], window, cx);
+        }
         cx.notify();
     }
 
@@ -190,6 +218,65 @@ impl DesignCanvas {
         self.comments.retain(|c| c.id != id);
         self.comment_open = None;
         self.save_comments();
+        cx.notify();
+    }
+
+    /// Finish the mention being typed as `name`.
+    fn mention(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = notes::complete(self.f_comment.read(cx).value().as_ref(), name);
+        let input = self.f_comment.clone();
+        input.update(cx, |s, cx| {
+            s.set_value(text, window, cx);
+            s.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Where a point on a screen is in the view: on the canvas, or in Present on the
+    /// screen playing (and nowhere for the others).
+    fn pin_point(&self, screen: &str, x: f32, y: f32) -> Option<Pt> {
+        match &self.playing {
+            Some(playing) if playing == screen => {
+                let (left, top, scale) = self.play_frame()?;
+                Some((left + x * scale, top + y * scale))
+            }
+            Some(_) => None,
+            None => self
+                .canvas
+                .screen(screen)
+                .map(|s| self.screen_pt((s.x + x, s.y + y))),
+        }
+    }
+
+    /// In Present, where the screen playing sits in the view and how it's scaled.
+    pub(super) fn play_frame(&self) -> Option<(f32, f32, f32)> {
+        let s = self.canvas.screen(self.playing.as_ref()?)?;
+        let (vw, vh) = self.view_size();
+        let (w, h) = s.device.size();
+        let scale = ((vh - 80.) / h).min((vw - 80.) / w).min(1.);
+        Some((
+            (vw - w * scale) / 2.,
+            40. + (vh - 40. - h * scale) / 2.,
+            scale,
+        ))
+    }
+
+    /// A click on the screen playing with comments on: start a comment there.
+    pub(super) fn play_comment_down(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let (Some(id), Some((left, top, scale))) = (self.playing.clone(), self.play_frame()) else {
+            return;
+        };
+        let (x, y) = self.local(pos);
+        let at = (((x - left) / scale).round(), ((y - top) / scale).round());
+        if self.comment_open.is_some() {
+            self.comment_open = None;
+        } else {
+            self.open_comment(CommentOpen::New {
+                screen: id,
+                x: at.0,
+                y: at.1,
+            });
+        }
         cx.notify();
     }
 
@@ -277,7 +364,17 @@ impl DesignCanvas {
     /// Show a comment's thread, from the list.
     fn show_comment(&mut self, id: u32, cx: &mut Context<Self>) {
         if let Some(c) = self.comments.iter().find(|c| c.id == id) {
-            self.select_screen(Some(c.screen.clone()));
+            let screen = c.screen.clone();
+            // In Present, go to the screen it's on.
+            if self.playing.as_ref().is_some_and(|p| *p != screen)
+                && self.canvas.screen(&screen).is_some()
+            {
+                self.playing = Some(screen.clone());
+                self.play_taps.clear();
+                self.play_move = None;
+                self.arm_delay(cx);
+            }
+            self.select_screen(Some(screen));
         }
         self.open_comment(CommentOpen::Thread(id));
         cx.notify();
@@ -288,18 +385,14 @@ impl DesignCanvas {
     /// The pins on the screens and the open comment, over the canvas.
     pub(super) fn comment_layer(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
-        if !self.commenting || self.playing.is_some() {
+        if !self.commenting {
             return out;
         }
         let open_id = match &self.comment_open {
             Some(CommentOpen::Thread(id)) => Some(*id),
             _ => None,
         };
-        let pin_at = |screen: &str, x: f32, y: f32| {
-            self.canvas
-                .screen(screen)
-                .map(|s| self.screen_pt((s.x + x, s.y + y)))
-        };
+        let pin_at = |screen: &str, x: f32, y: f32| self.pin_point(screen, x, y);
         for (i, c) in self.comments.iter().enumerate() {
             if c.resolved && open_id != Some(c.id) {
                 continue;
@@ -456,9 +549,9 @@ impl DesignCanvas {
         );
         let mut body = div().v_flex().gap(px(10.)).px_3().py(px(10.));
         if let Some(c) = thread {
-            body = body.child(message(&c.author, &c.at, &c.text));
+            body = body.child(message(&c.author, &c.at, &c.text, &self.people));
             for r in &c.replies {
-                body = body.child(message(&r.author, &r.at, &r.text));
+                body = body.child(message(&r.author, &r.at, &r.text, &self.people));
             }
         }
         let field = div()
@@ -478,16 +571,52 @@ impl DesignCanvas {
                         .h(px(28.)),
                 ),
             );
+        let typed = self.f_comment.read(cx).value().to_string();
+        let suggested: Vec<String> = notes::mention_query(&typed)
+            .map(|q| {
+                notes::suggest(&self.people, q)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut picks = div().flex().flex_wrap().gap(px(4.));
+        for (i, name) in suggested.iter().enumerate() {
+            let name = name.clone();
+            picks = picks.child(
+                div()
+                    .id(("design-mention", i))
+                    .h(px(24.))
+                    .pl(px(3.))
+                    .pr(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .rounded_full()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(rgb(c_border()))
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_text()))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .child(avatar(&name, 18.))
+                    .child(name.clone())
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.mention(&name, window, cx)),
+                    ),
+            );
+        }
         let mut foot = div()
             .px_3()
             .pb(px(10.))
             .v_flex()
             .gap(px(6.))
             .child(field)
+            .when(!suggested.is_empty(), |f| f.child(picks))
             .child(figma::caption(if thread.is_some() {
-                "Enter to reply"
+                "Enter to reply. @ mentions someone; @AI hands it to AI."
             } else {
-                "Enter to post"
+                "Enter to post. @ mentions someone; @AI hands it to AI."
             }));
         if let Some(c) = thread.filter(|c| !c.resolved) {
             let id = c.id;
@@ -516,7 +645,10 @@ impl DesignCanvas {
         }
         // Kept inside the canvas: a thread near the bottom opens upward.
         let lines = thread.map_or(0, |c| 1 + c.replies.len()) as f32;
-        let tall = 110. + lines * 56. + if thread.is_some() { 36. } else { 0. };
+        let tall = 126.
+            + lines * 56.
+            + if thread.is_some() { 36. } else { 0. }
+            + if suggested.is_empty() { 0. } else { 30. };
         let (vw, vh) = self.view_size();
         let top = (p.1 - PIN).min(vh - tall - 12.).max(8.);
         let left = if p.0 + PIN + 8. + POPOVER_W > vw - 8. {
@@ -561,6 +693,12 @@ impl DesignCanvas {
                 .iter()
                 .filter(|c| c.resolved && self.show_resolved),
         );
+        let me = self.author.clone();
+        let mentions_me = |c: &Comment| {
+            std::iter::once(&c.text)
+                .chain(c.replies.iter().map(|r| &r.text))
+                .any(|t| notes::mentions_name(t, &self.people, &me))
+        };
         for (i, c) in shown.enumerate() {
             let id = c.id;
             let on = self.comment_open == Some(CommentOpen::Thread(id));
@@ -584,7 +722,7 @@ impl DesignCanvas {
                     .when(c.resolved, |el| el.opacity(0.6))
                     .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| this.show_comment(id, cx)))
-                    .child(message(&c.author, &c.at, &c.text))
+                    .child(message(&c.author, &c.at, &c.text, &self.people))
                     .child(
                         div()
                             .pl(px(30.))
@@ -600,7 +738,15 @@ impl DesignCanvas {
                                     format!("{replies} replies")
                                 })
                             })
-                            .when(c.resolved, |el| el.child("Resolved")),
+                            .when(c.resolved, |el| el.child("Resolved"))
+                            .when(mentions_me(c), |el| {
+                                el.child(
+                                    div()
+                                        .text_color(rgb(c_blue()))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Mentions you"),
+                                )
+                            }),
                     ),
             );
         }

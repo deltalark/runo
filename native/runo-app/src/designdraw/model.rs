@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// The folder in the project that holds the design.
 pub(crate) const FOLDER: &str = "design";
-const SCREENS: &str = "screens";
+pub(crate) const SCREENS: &str = "screens";
 const CANVAS: &str = "canvas.toml";
 pub(crate) const TOKENS: &str = "tokens.css";
 pub(crate) const COMPONENTS: &str = "components.css";

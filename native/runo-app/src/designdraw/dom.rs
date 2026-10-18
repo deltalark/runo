@@ -307,6 +307,18 @@ if (!window.__runo) window.__runo = (() => {
       const y = r.top - box.top - (p ? p.clientTop : 0);
       set({ left: x, right: w - x - r.width, top: y, bottom: h - y - r.height }[side]);
     },
+    // A drawing's new outline: its path data and size, moved by (dx, dy).
+    reshape: (el, dx, dy, w, h, d) => {
+      const q = el.querySelector('path');
+      if (q) q.setAttribute('d', d);
+      el.setAttribute('width', w); el.setAttribute('height', h);
+      if (el.style.width) el.style.width = w + 'px';
+      if (el.style.height) el.style.height = h + 'px';
+      el.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+      const move = (k, by) => { const v = parseFloat(el.style[k]); el.style[k] = Math.round((isNaN(v) ? 0 : v) + by) + 'px'; };
+      if (el.style.right && !el.style.left) move('right', -dx); else move('left', dx);
+      if (el.style.bottom && !el.style.top) move('bottom', -dy); else move('top', dy);
+    },
     styles: (el, map) => {
       for (const [k, v] of Object.entries(map)) {
         if (v) el.style.setProperty(k, v); else el.style.removeProperty(k);
@@ -391,6 +403,120 @@ if (!window.__runo) window.__runo = (() => {
     code: (p, text) => { const el = at(p); return el ? code(el, text) : null; },
     // Put a drawn shape at a point on the page, in the box that holds that spot, floating
     // where it was drawn. Gives back its path.
+    // Each shape's outline as Design draws it: an svg's path data and where its units sit
+    // on the page, or a box with its corner radius; and the first one's fill and stroke.
+    // The layer at `p` (or the whole screen) as a tree for writing it as code: each
+    // element's tag, attributes and what's inside, and how it's laid out and styled; and
+    // the variants of `comps` ({id: {variant: html}}) as trees, for their code.
+    codeTree: (p, comps) => {
+      const STY = ['display', 'flex-direction', 'flex-wrap', 'row-gap', 'column-gap',
+        'align-items', 'justify-content', 'align-self', 'flex-grow', 'padding-top',
+        'padding-right', 'padding-bottom', 'padding-left', 'background-color',
+        'background-image', 'color', 'font-size', 'font-weight', 'font-style', 'line-height',
+        'text-align', 'text-transform', 'letter-spacing', 'border-top-left-radius',
+        'border-top-width', 'border-top-style', 'border-top-color', 'box-shadow', 'opacity',
+        'position', 'left', 'top', 'grid-template-columns', 'object-fit', 'overflow',
+        'text-decoration-line', 'visibility'];
+      const nodeOf = (el, styled) => {
+        const kids = [];
+        for (const c of el.childNodes) {
+          if (c.nodeType === 3) {
+            const t = c.textContent.replace(/\s+/g, ' ');
+            if (t.trim()) kids.push({ t: 'text', text: t });
+          } else if (c.nodeType === 1 && !SKIP.has(c.tagName)) {
+            kids.push(nodeOf(c, styled));
+          }
+        }
+        const out = { t: 'el', tag: el.tagName.toLowerCase(), kids,
+          attrs: Array.from(el.attributes, (a) => [a.name, a.value]) };
+        if (styled && el.getBoundingClientRect) {
+          const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+          out.s = {};
+          for (const k of STY) out.s[k] = cs.getPropertyValue(k);
+          out.w = r.width; out.h = r.height;
+          out.shown = cs.display !== 'none' && !el.hidden;
+          const par = el.parentElement;
+          if (par) {
+            const ps = getComputedStyle(par), pr = par.getBoundingClientRect();
+            const inner = pr.width - parseFloat(ps.paddingLeft) - parseFloat(ps.paddingRight);
+            out.fill = Math.abs(r.width - inner) < 1.5;
+          }
+          out.sized = !!(el.style.width || el.style.height);
+        }
+        return out;
+      };
+      const el = p && p.length ? at(p) : document.body;
+      if (!el) return null;
+      const parsed = {};
+      for (const [id, vs] of Object.entries(comps || {})) {
+        parsed[id] = {};
+        for (const [v, html] of Object.entries(vs)) {
+          const t = document.createElement('template');
+          t.innerHTML = html;
+          const first = t.content.firstElementChild;
+          if (first) parsed[id][v] = nodeOf(first, false);
+        }
+      }
+      return { node: nodeOf(el, true), comps: parsed };
+    },
+    // Link a stylesheet into the page unless it's linked already.
+    useSheet: (href) => {
+      const have = Array.from(document.querySelectorAll('link[rel="stylesheet"]'));
+      if (have.some((l) => l.getAttribute('href') === href)) return false;
+      const l = document.createElement('link');
+      l.rel = 'stylesheet';
+      l.href = href;
+      document.head.appendChild(l);
+      return true;
+    },
+    // Show only the elements at `ps`, on a page of colour `bg`; with no `bg`, everything again.
+    solo: (ps, bg) => {
+      const html = document.documentElement, body = document.body;
+      if (bg) html.style.setProperty('background', bg, 'important');
+      else html.style.removeProperty('background');
+      body.style.visibility = bg ? 'hidden' : '';
+      for (const p of ps) { const el = at(p); if (el) el.style.visibility = bg ? 'visible' : ''; }
+      if (!html.getAttribute('style')) html.removeAttribute('style');
+      if (!body.getAttribute('style')) body.removeAttribute('style');
+      return true;
+    },
+    // Hide the elements at `ps`, or show them again, to draw a screen without them.
+    hide: (ps, on) => {
+      for (const p of ps) { const el = at(p); if (el) el.style.visibility = on ? 'hidden' : ''; }
+      return true;
+    },
+    outlines: (ps) => ps.map((p) => {
+      const el = at(p);
+      if (!el) return null;
+      const r = rect(el), cs = getComputedStyle(el);
+      if (el.tagName.toLowerCase() === 'svg') {
+        const vb = el.viewBox && el.viewBox.baseVal;
+        const sx = vb && vb.width ? r.w / vb.width : 1, sy = vb && vb.height ? r.h / vb.height : 1;
+        const d = Array.from(el.querySelectorAll('path')).map((q) => q.getAttribute('d') || '').join(' ');
+        return { kind: 'path', d, x: r.x - (vb ? vb.x * sx : 0), y: r.y - (vb ? vb.y * sy : 0), sx, sy, rect: r,
+          fill: el.style.fill || cs.fill, stroke: el.style.stroke || 'none' };
+      }
+      const radius = parseFloat(cs.borderTopLeftRadius) || 0;
+      const round = cs.borderTopLeftRadius.endsWith('%') && parseFloat(cs.borderTopLeftRadius) >= 50;
+      return { kind: round ? 'ellipse' : 'rect', radius: Math.min(radius, r.w / 2, r.h / 2), rect: r,
+        fill: el.style.background || el.style.backgroundColor || cs.backgroundColor, stroke: 'none' };
+    }),
+    // Put `s` where the shapes at `ps` were, in the first one's box, floating at page point
+    // (x, y), and take the shapes away. Gives back its path.
+    replaceShapes: (ps, x, y, s) => {
+      const n = parse(s);
+      const els = ps.map(at).filter(Boolean);
+      if (!n || !els.length) return null;
+      const parent = els[0].parentElement;
+      if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative';
+      const r = parent.getBoundingClientRect();
+      n.style.position = 'absolute';
+      n.style.left = Math.round(x - scrollX - r.left - parent.clientLeft + parent.scrollLeft) + 'px';
+      n.style.top = Math.round(y - scrollY - r.top - parent.clientTop + parent.scrollTop) + 'px';
+      els[0].before(n);
+      for (const e of els) e.remove();
+      return pathOf(n);
+    },
     drawShape: (x, y, s) => {
       const n = parse(s);
       if (!n) return null;

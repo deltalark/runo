@@ -1,5 +1,6 @@
 //! The Code tab: what a developer needs to build the picked layer. Its size and place, the
-//! variables it uses, the CSS written for it and its markup, each ready to copy.
+//! variables it uses, the CSS written for it and its markup, each ready to copy; or the
+//! layer (or the whole screen) written as React or SwiftUI.
 
 use super::figma::{caption, sec};
 use super::*;
@@ -28,8 +29,239 @@ pub(crate) fn vars_text(code: &dom::Code) -> String {
     out
 }
 
+/// What the Code tab writes the picked layer as.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Lang {
+    #[default]
+    Css,
+    React,
+    Swift,
+}
+
+impl Lang {
+    const ALL: [(Lang, &'static str); 3] = [
+        (Lang::Css, "CSS"),
+        (Lang::React, "React"),
+        (Lang::Swift, "SwiftUI"),
+    ];
+}
+
+/// Code written for a layer: the code itself, and for SwiftUI the theme it uses.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Written {
+    /// What it's called: the component, or the view without "View".
+    pub name: String,
+    pub main: String,
+    pub theme: Option<String>,
+}
+
 impl DesignCanvas {
     pub(super) fn code_panel(&self, cx: &mut Context<Self>) -> Div {
+        let mut langs = div().flex().gap(px(4.)).pt_3().pb_1();
+        for (i, (lang, label)) in Lang::ALL.into_iter().enumerate() {
+            langs = langs.child(
+                chip_btn(("design-code-lang", i), label, self.code_lang == lang).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.code_lang = lang;
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+        let body = if self.code_lang == Lang::Css {
+            self.css_panel(cx)
+        } else {
+            self.app_code_panel(cx)
+        };
+        div().v_flex().child(langs).child(body)
+    }
+
+    /// The picked layer, or the screen, as React or SwiftUI.
+    fn app_code_panel(&self, cx: &mut Context<Self>) -> Div {
+        let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
+            return div().v_flex().child(sec("Code", None).child(caption(
+                "Pick a screen or a layer to write it as React or SwiftUI.",
+            )));
+        };
+        let path = self
+            .element
+            .as_ref()
+            .map(|e| e.path.clone())
+            .unwrap_or_default();
+        let key = (s.id.clone(), path.clone(), self.undo.len());
+        let lang = self.code_lang;
+        let written = match &self.code_gen {
+            Some((k, l, w)) if *k == key && *l == lang => Some(w.clone()),
+            _ => {
+                if self.gen_asked.borrow().as_ref() != Some(&(key.clone(), lang)) {
+                    *self.gen_asked.borrow_mut() = Some((key.clone(), lang));
+                    let me = cx.entity().downgrade();
+                    let id = s.id.clone();
+                    cx.defer(move |cx| {
+                        let _ = me.update(cx, |this, cx| {
+                            this.write_code(
+                                id,
+                                path,
+                                lang,
+                                move |this, w, cx| {
+                                    this.code_gen = Some((key, lang, w));
+                                    cx.notify();
+                                },
+                                cx,
+                            )
+                        });
+                    });
+                }
+                None
+            }
+        };
+        let what = match &self.element {
+            Some(e) => e.name.clone().unwrap_or_else(|| e.label.clone()),
+            None => s.name.clone(),
+        };
+        let (title, note) = if lang == Lang::React {
+            (
+                "React",
+                "Keeps the design's classes: it needs design/tokens.css and components.css, which \
+                 Export writes next to it. Components become React components, their variant \
+                 properties props.",
+            )
+        } else {
+            (
+                "SwiftUI",
+                "Stacks, text and shapes as the screen lays them out. Colours come from the \
+                 design's tokens in Theme.swift, which Export writes next to it.",
+            )
+        };
+        let Some(w) = written else {
+            return div()
+                .v_flex()
+                .child(sec(what, None).child(caption(format!("Writing {title}…"))));
+        };
+        let mut out = div().v_flex().child(
+            sec(
+                format!("{what} in {title}"),
+                Some(copy_btn("design-code-app", w.main.clone(), cx)),
+            )
+            .child(caption(note))
+            .child(app_block("design-code-app-block", w.main.clone())),
+        );
+        if let Some(theme) = w.theme.clone() {
+            out = out.child(
+                sec(
+                    "Theme.swift",
+                    Some(copy_btn("design-code-theme", theme.clone(), cx)),
+                )
+                .child(app_block("design-code-theme-block", theme)),
+            );
+        }
+        out
+    }
+
+    /// Write the layer at `path` on screen `id` (or the whole screen, with no path) as
+    /// `lang`, then `done` with the code.
+    pub(super) fn write_code(
+        &mut self,
+        id: String,
+        path: dom::Path,
+        lang: Lang,
+        done: impl FnOnce(&mut Self, Written, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(s) = self.canvas.screen(&id) else {
+            return;
+        };
+        let device = s.device;
+        let what = match self
+            .element
+            .as_ref()
+            .filter(|e| e.path == path && !path.is_empty())
+        {
+            Some(e) => e.name.clone().unwrap_or_else(|| e.label.clone()),
+            None => s.name.clone(),
+        };
+        let comps: serde_json::Map<String, serde_json::Value> = self
+            .library
+            .iter()
+            .map(|c| (c.id.clone(), serde_json::Value::Object(c.map())))
+            .collect();
+        let js = dom::call("codeTree", &[json!(path), serde_json::Value::Object(comps)]);
+        let lib = self.library.clone();
+        let tokens =
+            std::fs::read_to_string(self.root.join(FOLDER).join("tokens.css")).unwrap_or_default();
+        self.run(
+            cx,
+            move |r| r.eval(&id, device, &js),
+            move |this, out, cx| {
+                let tree: Option<crate::designdraw::codegen::Tree> =
+                    out.ok().and_then(|v| serde_json::from_value(v).ok());
+                let Some(tree) = tree else {
+                    this.say("Couldn't read the screen to write its code.");
+                    cx.notify();
+                    return;
+                };
+                let name = crate::designdraw::codegen::type_name(&what);
+                let written = match lang {
+                    Lang::Swift => {
+                        let (main, theme) = crate::designdraw::codegen::swiftui(
+                            &tree,
+                            &format!("{name}View"),
+                            &tokens,
+                        );
+                        Written {
+                            name,
+                            main,
+                            theme: Some(theme),
+                        }
+                    }
+                    _ => Written {
+                        main: crate::designdraw::codegen::react(&tree, &name, &lib),
+                        name,
+                        theme: None,
+                    },
+                };
+                done(this, written, cx);
+            },
+        );
+    }
+
+    /// Save code written for Export, with the styles or theme it needs beside it.
+    pub(super) fn save_code_export(&mut self, lang: Lang, code: Written, cx: &mut Context<Self>) {
+        let name = &match lang {
+            Lang::Swift => format!("{}View.swift", code.name),
+            _ => format!("{}.tsx", code.name),
+        };
+        let dir = crate::designdraw::export::folder(&self.root);
+        let design = self.root.join(FOLDER);
+        let mut extra: Vec<(String, String)> = Vec::new();
+        if lang == Lang::React {
+            for sheet in ["tokens.css", "components.css"] {
+                if let Ok(css) = std::fs::read_to_string(design.join(sheet)) {
+                    extra.push((sheet.to_string(), css));
+                }
+            }
+        }
+        if let Some(theme) = code.theme {
+            extra.push(("Theme.swift".into(), theme));
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        for (file, text) in &extra {
+            if let Err(e) = std::fs::write(dir.join(file), text) {
+                self.say(format!("Couldn't save {file}: {e}"));
+                return;
+            }
+        }
+        self.save_export(name, code.main.into_bytes(), cx);
+        if !extra.is_empty() {
+            let names: Vec<&str> = extra.iter().map(|(f, _)| f.as_str()).collect();
+            self.say(format!(
+                "Exported {FOLDER}/exports/{name}, with {}",
+                names.join(" and ")
+            ));
+        }
+    }
+
+    fn css_panel(&self, cx: &mut Context<Self>) -> Div {
         let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
             return div().v_flex().child(sec("Code", None).child(caption(
                 "Pick a layer to see its size, the variables it uses, its CSS and its HTML.",
@@ -202,6 +434,23 @@ fn code_block(text: String) -> Div {
         .text_size(px(11.))
         .text_color(rgb(c_text()))
         .child(text)
+}
+
+/// Code for an app, its lines kept whole and scrolled across.
+fn app_block(id: &'static str, text: String) -> Stateful<Div> {
+    div()
+        .id(id)
+        .max_h(px(520.))
+        .overflow_scroll()
+        .p_2()
+        .rounded(px(6.))
+        .bg(rgb(c_subtle()))
+        .border_1()
+        .border_color(rgb(c_border()))
+        .font_family("monospace")
+        .text_size(px(10.5))
+        .text_color(rgb(c_text()))
+        .child(div().whitespace_nowrap().child(text))
 }
 
 fn copy_btn(id: &'static str, text: String, cx: &mut Context<DesignCanvas>) -> AnyElement {
