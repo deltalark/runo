@@ -121,8 +121,13 @@ impl DesignCanvas {
                     let broke = this.new_findings(&call.screen, &shot);
                     this.landed(call.screen.clone(), before, shot, After::Same, cx);
                     this.show_ai_touch(call.screen.clone(), boxes, call.what.clone(), cx);
+                    let name = this
+                        .canvas
+                        .screen(&call.screen)
+                        .map_or_else(|| call.screen.clone(), |s| s.name.clone());
                     if let Some(step) = this.undo.last_mut() {
                         step.by_ai = Some(call.what.clone());
+                        step.lesson = Some(format!("{} on the screen {name}", call.detail));
                     }
                     if let Some(ai) = &mut this.ai {
                         ai.changed = true;
@@ -354,5 +359,64 @@ impl DesignCanvas {
             .into_iter()
             .filter(|f| !was.iter().any(|w| w.kind == f.kind && w.text == f.text))
             .collect()
+    }
+
+    /// Keep the AI change just undone as a design rule, which every later ask follows.
+    pub(super) fn learn(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(lesson) = self.lesson.take() else {
+            return;
+        };
+        let file = crate::design::notes_path(&self.root);
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let text = learned(&text, &lesson);
+        match crate::architecture::save_notes(&file, &text) {
+            Ok(()) => {
+                self.load_rules(window, cx);
+                self.say("Added to the design rules. AI follows them from the next ask.");
+            }
+            Err(e) => self.say(format!("Couldn't save the design rules: {e}")),
+        }
+        cx.notify();
+    }
+}
+
+const LEARNED: &str = "## Learned from undoing AI";
+
+/// The rules with one more AI change not to repeat, under its own heading at the end.
+fn learned(rules: &str, lesson: &str) -> String {
+    let line = format!("- Don't repeat this change, which was undone: {lesson}.");
+    let mut out = rules.trim_end().to_string();
+    if !out.contains(LEARNED) {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(LEARNED);
+        out.push_str(
+            "\nChanges AI made that the person undid. Treat each as a rule unless asked for it.",
+        );
+    }
+    out.push('\n');
+    out.push_str(&line);
+    out.push('\n');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn undone_changes_become_rules_under_one_heading() {
+        let once = learned(
+            "# Rules\nWarm and calm.\n",
+            "set color: red on .price on the screen Home",
+        );
+        assert!(once.starts_with("# Rules\nWarm and calm.\n\n## Learned from undoing AI\n"));
+        assert!(once.ends_with("set color: red on .price on the screen Home.\n"));
+        let twice = learned(&once, "delete .hero on the screen Home");
+        assert_eq!(twice.matches(LEARNED).count(), 1);
+        assert!(twice.ends_with("delete .hero on the screen Home.\n"));
+        assert!(learned("", "x").starts_with(LEARNED));
     }
 }
