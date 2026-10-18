@@ -45,7 +45,7 @@ if (!window.__runo) window.__runo = (() => {
     'margin-bottom', 'gap', 'border-radius', 'display', 'flex-direction', 'align-items',
     'justify-content', 'width', 'height', 'opacity', 'line-height', 'letter-spacing',
     'border-top-width', 'border-top-color', 'border-top-style', 'border-top-left-radius',
-    'box-shadow', 'flex-wrap'];
+    'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'right', 'bottom', 'z-index', 'background-image'];
   // The one icon an element is or holds, as an icon button or a tab does.
   const iconEl = (el) => {
     const all = el.matches('.icon') ? [el] : Array.from(el.querySelectorAll('.icon'));
@@ -156,8 +156,97 @@ if (!window.__runo) window.__runo = (() => {
   };
   const instances = (id) => Array.from(document.querySelectorAll('[data-component]'))
     .filter((el) => el.dataset.component === id);
+  // An element's own style as written, declaration by declaration, keeping shorthands set
+  // to a variable whole.
+  const ownStyle = (el) => {
+    const out = [];
+    let depth = 0, quote = null, cur = '';
+    for (const c of el.getAttribute('style') || '') {
+      if (quote) { if (c === quote) quote = null; }
+      else if (c === '"' || c === "'") quote = c;
+      else if (c === '(') depth++;
+      else if (c === ')') depth--;
+      else if (c === ';' && depth === 0) { out.push(cur); cur = ''; continue; }
+      cur += c;
+    }
+    out.push(cur);
+    return out.map((d) => {
+      const i = d.indexOf(':');
+      return i < 0 ? null : [d.slice(0, i).trim().toLowerCase(), d.slice(i + 1).trim()];
+    }).filter((d) => d && d[0] && d[1]);
+  };
+  // What stays on an element when its look becomes a style: where it is and how big.
+  const PLACE = /^(width|height|min-|max-|margin|top|left|right|bottom|inset|position|z-index|flex$|flex-grow|flex-shrink|flex-basis|align-self|order|grid-column|grid-row)/;
   const ops = {
     text: (el, v) => { el.textContent = v; },
+    // Give an element the style `cls` in place of any of `drop`, and let go of its own
+    // values for what the style sets, so the style shows.
+    look: (el, cls, props, drop) => {
+      for (const c of drop) if (c !== cls) el.classList.remove(c);
+      if (cls) el.classList.add(cls);
+      for (const k of props) el.style.removeProperty(k);
+      if (!el.getAttribute('style')) el.removeAttribute('style');
+      if (!el.getAttribute('class')) el.removeAttribute('class');
+    },
+    // Take an element out of the style `cls`, keeping how it looks: what the style set
+    // becomes its own, under anything it set itself.
+    detach: (el, cls, decls) => {
+      el.classList.remove(cls);
+      const own = new Set(ownStyle(el).map((d) => d[0]));
+      for (const [k, v] of decls) if (!own.has(k)) el.style.setProperty(k, v);
+      if (!el.getAttribute('class')) el.removeAttribute('class');
+    },
+    // Where an element sits: in the flow, floating over what holds it where it is now,
+    // stuck to the top as the screen scrolls, or pinned to the screen.
+    position: (el, mode) => {
+      for (const k of ['position', 'top', 'left', 'right', 'bottom', 'z-index']) el.style.removeProperty(k);
+      const parent = el.parentElement;
+      const wide = el.getBoundingClientRect().width;
+      if (mode === 'absolute' && parent) {
+        if (getComputedStyle(parent).position === 'static') parent.style.setProperty('position', 'relative');
+        const r = el.getBoundingClientRect();
+        const pr = parent.getBoundingClientRect();
+        el.style.setProperty('position', 'absolute');
+        el.style.setProperty('left', Math.round(r.left - pr.left - parent.clientLeft) + 'px');
+        el.style.setProperty('top', Math.round(r.top - pr.top - parent.clientTop) + 'px');
+        el.style.setProperty('z-index', '1');
+      } else if (mode === 'sticky') {
+        el.style.setProperty('position', 'sticky');
+        el.style.setProperty('top', '0px');
+        el.style.setProperty('z-index', '2');
+      } else if (mode === 'fixed') {
+        const r = el.getBoundingClientRect();
+        el.style.setProperty('position', 'fixed');
+        el.style.setProperty('left', Math.round(r.left) + 'px');
+        el.style.setProperty('top', Math.round(r.top) + 'px');
+        el.style.setProperty('z-index', '3');
+      }
+      // Out of the flow it would shrink to its content, so it keeps the width it had.
+      if ((mode === 'absolute' || mode === 'fixed') && !el.style.width) {
+        el.style.setProperty('width', Math.round(wide) + 'px');
+      }
+      if (!el.getAttribute('style')) el.removeAttribute('style');
+    },
+    // Which edges of what holds it a floating or pinned element keeps its distance to, so
+    // it stays in its corner when that changes size. Sticky ones stick at the top or bottom.
+    anchor: (el, side) => {
+      const other = { left: 'right', right: 'left', top: 'bottom', bottom: 'top' }[side];
+      if (!other) return;
+      const set = (v) => {
+        el.style.setProperty(side, Math.round(v) + 'px');
+        el.style.removeProperty(other);
+      };
+      const how = getComputedStyle(el).position;
+      if (how === 'sticky') return set(0);
+      const r = el.getBoundingClientRect();
+      const p = how === 'fixed' ? null : el.offsetParent || el.parentElement;
+      const box = p ? p.getBoundingClientRect() : { left: 0, top: 0 };
+      const w = p ? p.clientWidth : innerWidth;
+      const h = p ? p.clientHeight : innerHeight;
+      const x = r.left - box.left - (p ? p.clientLeft : 0);
+      const y = r.top - box.top - (p ? p.clientTop : 0);
+      set({ left: x, right: w - x - r.width, top: y, bottom: h - y - r.height }[side]);
+    },
     styles: (el, map) => {
       for (const [k, v] of Object.entries(map)) {
         if (v) el.style.setProperty(k, v); else el.style.removeProperty(k);
@@ -262,6 +351,18 @@ if (!window.__runo) window.__runo = (() => {
       return true;
     },
     infos: (ps) => ps.map(at).filter(Boolean).map(info),
+    // Move how an element looks into the style `cls`, giving it that class: its own style
+    // goes, but for where it is and how big. Gives back what moved, as [property, value].
+    takeLook: (p, cls) => {
+      const el = at(p);
+      if (!el) return null;
+      const all = ownStyle(el);
+      const moved = all.filter(([k]) => !PLACE.test(k));
+      el.removeAttribute('style');
+      for (const [k, v] of all) if (PLACE.test(k)) el.style.setProperty(k, v);
+      el.classList.add(cls);
+      return moved;
+    },
     // The same change to several elements, last on the page first, so changing one
     // doesn't move the ones still to come.
     opAll: (ps, name, ...args) => {
@@ -414,6 +515,9 @@ pub(crate) struct Element {
     pub name: Option<String>,
     #[serde(default)]
     pub locked: bool,
+    /// Every class it has.
+    #[serde(default)]
+    pub classes: Vec<String>,
 }
 
 impl Element {
@@ -432,8 +536,13 @@ impl Element {
             .is_some_and(|d| d.contains("flex"))
     }
 
-    /// Whether new pieces go inside it rather than after it.
+    /// Whether new pieces go inside it rather than after it, unless the person says.
     pub(crate) fn is_container(&self) -> bool {
+        self.can_hold() && (self.children > 0 || self.is_flex())
+    }
+
+    /// Whether pieces can go inside it at all, even while it's empty.
+    pub(crate) fn can_hold(&self) -> bool {
         matches!(
             self.tag.as_str(),
             "main"
@@ -446,7 +555,7 @@ impl Element {
                 | "footer"
                 | "aside"
                 | "form"
-        ) && (self.children > 0 || self.is_flex())
+        )
     }
 }
 

@@ -31,7 +31,7 @@ fn takes_picture(el: &Element) -> bool {
 
 /// What a picture chosen from a file goes into.
 #[derive(Clone, Copy)]
-enum PictureFor {
+pub(super) enum PictureFor {
     /// A new picture on the screen.
     New,
     /// The picked element: its source, or its fill.
@@ -225,7 +225,7 @@ impl DesignCanvas {
         self.choose_picture(PictureFor::New, cx);
     }
 
-    fn choose_picture(&mut self, to: PictureFor, cx: &mut Context<Self>) {
+    pub(super) fn choose_picture(&mut self, to: PictureFor, cx: &mut Context<Self>) {
         if self.screen.is_none() {
             self.say("Pick a screen first, then add a picture to it.");
             cx.notify();
