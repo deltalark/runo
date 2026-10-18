@@ -270,6 +270,8 @@ pub(crate) struct DesignCanvas {
     /// The screen the layers were read from, or are being read from.
     layers_of: Option<String>,
     layers_loading: bool,
+    /// The next ask is about the selected layers.
+    scoping: bool,
     /// Each screen's HTML before a change, for undo and redo.
     undo: Vec<Step>,
     redo: Vec<Step>,
@@ -439,6 +441,9 @@ struct AiChange {
     /// Screens it rewrote as files rather than through Design's actions, whose steps on
     /// the undo history no longer hold.
     direct: HashSet<String>,
+    /// The screen and layers it was asked about, when the ask was about a selection: it
+    /// may change only those.
+    scope: Option<(String, Vec<dom::Path>)>,
 }
 
 impl AiChange {
@@ -456,6 +461,7 @@ impl AiChange {
             review_due: false,
             comments: Vec::new(),
             direct: HashSet::new(),
+            scope: None,
         }
     }
 
@@ -581,6 +587,7 @@ impl DesignCanvas {
             layers: Vec::new(),
             layers_of: None,
             layers_loading: false,
+            scoping: false,
             undo: Vec::new(),
             redo: Vec::new(),
             panel: Panel::Design,
@@ -1140,6 +1147,8 @@ impl DesignCanvas {
             Some(device) => brief::describe_task(&typed, device),
             None => typed,
         };
+        // Asked with layers selected, the ask is about them, and AI changes only them.
+        self.scoping = self.ask_new.is_none() && self.element.is_some();
         if self.ask(task, window, cx) {
             self.ask_new = None;
             self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
@@ -1174,6 +1183,19 @@ impl DesignCanvas {
         }
         let picture = self.screen.clone().and_then(|id| self.save_picture(&id));
         let mut context = self.ask_context(picture.as_deref());
+        let scope = std::mem::take(&mut self.scoping)
+            .then(|| Some((self.screen.clone()?, self.selected_paths())))
+            .flatten()
+            .filter(|(_, paths)| !paths.is_empty());
+        if scope.is_some() {
+            context.push_str(
+                "\nThis ask is about the selection. Change it with Runo's design tools: they \
+                 change only the selected layers and what's inside them, and refuse the rest. \
+                 Runo also puts back any other screen changed during this ask. If the ask needs \
+                 more than the selection, make what you can there and say in one line what \
+                 else it needs.\n",
+            );
+        }
         let picked = self.picked_refs();
         if !picked.is_empty() {
             context.push_str(
@@ -1206,6 +1228,7 @@ impl DesignCanvas {
             review_due: false,
             comments: Vec::new(),
             direct: HashSet::new(),
+            scope,
         });
         // Leave the keys to the New session dialog that opens next.
         window.blur(cx);
@@ -1496,6 +1519,7 @@ impl DesignCanvas {
         // Hold its change to what an edit by hand keeps, before it's read and drawn.
         let before = ai.before.clone();
         let kept = super::guard::keep(&self.root, &before, &self.code_map);
+        let outside = self.keep_scope(&before);
         // Read what it wrote now rather than at the next look, and draw it.
         self.check_files(cx);
         self.sync_changed_components(&before, cx);
@@ -1504,6 +1528,12 @@ impl DesignCanvas {
             self.say("AI finished without changing the design.");
         } else if let Some(line) = kept.line() {
             self.say(line);
+        }
+        if !outside.is_empty() {
+            self.say(format!(
+                "AI was asked about the selection, so Design put back {} it changed besides.",
+                outside.join(", ")
+            ));
         }
         // The chat that just ended takes the next ask a moment later.
         cx.spawn(async move |this, cx| {
