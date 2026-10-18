@@ -1619,7 +1619,7 @@ impl RunoApp {
         let working = self.handles.contains_key(&Target::Session(id));
         // A turn that failed or was stopped can be sent again as it was.
         let retry = !working
-            && session.status == Status::Failed
+            && matches!(session.status, Status::Failed | Status::Stopped)
             && session
                 .messages
                 .last()

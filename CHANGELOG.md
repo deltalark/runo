@@ -93,6 +93,7 @@ All notable changes to Runo are documented here.
 
 ### Fixed
 
+- Small fixes from a walk-through of the app. A Bash step in the chat shows a pulsing dot while it runs and a check or a red cross when it ends, instead of a check from the start. A quick command's tab keeps its newest lines in view when the pass or fail bar appears, and the Output box follows new output unless you scroll up. The browser offer says "on this computer" instead of "in Applications" off macOS. The New project dialog takes a typed or pasted folder path (with `~`), checks it, and points to the field when no folder picker opens, as on Linux without a desktop portal. A session you stop reads Stopped in grey, with a plain "Stopped." note, instead of Failed in red.
 - The terminal answers when a program asks where the cursor is or what terminal it is, the way other terminals do. Prompts such as gh's Y/n waited for that answer and took every key as part of it, Ctrl-C included, so the terminal looked frozen. Typing never blocks the window either, even when the program stops reading.
 - The Design canvas no longer freezes the window for seconds while screens are being drawn. Undo, renaming a screen, changing its device, the theme or dark mode, and files changed by an agent used to wait for the drawing in progress, and on macOS that wait stalled until it timed out. Redraws also free the old screen images, so memory stops growing as you edit, and a canvas you're not looking at stops checking its folder.
 

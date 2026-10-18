@@ -18,6 +18,29 @@ pub enum Status {
     Working,
     Done,
     Failed,
+    /// The person stopped the turn on purpose: not an error.
+    Stopped,
+}
+
+impl Status {
+    /// The word shown for a session's status, everywhere it is shown.
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::Idle => "Idle",
+            Status::Working => "Working",
+            Status::Done => "Completed",
+            Status::Failed => "Failed",
+            Status::Stopped => "Stopped",
+        }
+    }
+}
+
+/// How a tool step in an agent turn stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepState {
+    Running,
+    Done,
+    Failed,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -64,6 +87,13 @@ pub struct Message {
     /// User turns run from a playbook: what the person typed with it, if anything.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// Agent turns: steps (by index into `steps`) whose tool reported an error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_steps: Vec<usize>,
+    /// Agent turns: steps still waiting for their result, as (index into `steps`, the
+    /// tool call's id). Only meaningful while the turn runs, so it isn't saved.
+    #[serde(skip)]
+    pub running_steps: Vec<(usize, String)>,
 }
 
 /// Token use of one agent turn.
@@ -218,7 +248,34 @@ impl Message {
             questions: Vec::new(),
             playbook: String::new(),
             note: String::new(),
+            failed_steps: Vec::new(),
+            running_steps: Vec::new(),
         }
+    }
+
+    /// Where step `i` stands, for its icon: still running (only while the turn is live),
+    /// failed, or done.
+    pub fn step_state(&self, i: usize, live: bool) -> StepState {
+        if live && self.running_steps.iter().any(|(j, _)| *j == i) {
+            StepState::Running
+        } else if self.failed_steps.contains(&i) {
+            StepState::Failed
+        } else {
+            StepState::Done
+        }
+    }
+
+    /// A started step's result arrived: it is no longer running, and is marked failed
+    /// when its tool reported an error. Returns false when no step has that id.
+    pub fn finish_step(&mut self, id: &str, ok: bool) -> bool {
+        let Some(at) = self.running_steps.iter().position(|(_, s)| s == id) else {
+            return false;
+        };
+        let (i, _) = self.running_steps.remove(at);
+        if !ok && !self.failed_steps.contains(&i) {
+            self.failed_steps.push(i);
+        }
+        true
     }
 
     /// A message stamped with the current local time, for the conversation header.
@@ -1326,6 +1383,36 @@ mod tests {
         stopped.steps.push("Read src/main.rs".into());
         session.messages.push(stopped);
         assert!(session.has_conversation());
+    }
+
+    #[test]
+    fn a_stopped_session_reads_stopped_not_failed() {
+        assert_eq!(Status::Stopped.label(), "Stopped");
+        assert_eq!(Status::Failed.label(), "Failed");
+        let saved: Status =
+            serde_json::from_str(&serde_json::to_string(&Status::Stopped).unwrap()).unwrap();
+        assert!(saved == Status::Stopped);
+    }
+
+    #[test]
+    fn steps_run_until_finished_and_keep_failures() {
+        let mut m = Message::new(Role::Agent, "");
+        m.steps = vec!["Ran sleep 60".into(), "Ran false".into()];
+        m.running_steps = vec![(0, "a".into()), (1, "b".into())];
+        assert_eq!(m.step_state(0, true), StepState::Running);
+        assert_eq!(
+            m.step_state(0, false),
+            StepState::Done,
+            "nothing runs once the turn is over"
+        );
+        assert!(m.finish_step("b", false));
+        assert!(!m.finish_step("b", false), "already finished");
+        assert_eq!(m.step_state(1, true), StepState::Failed);
+        assert!(m.finish_step("a", true));
+        assert_eq!(m.step_state(0, true), StepState::Done);
+        let saved: Message = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(saved.failed_steps, [1]);
+        assert!(saved.running_steps.is_empty());
     }
 
     #[test]

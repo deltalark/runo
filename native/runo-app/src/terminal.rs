@@ -24,6 +24,13 @@ pub(crate) fn term_line() -> f32 {
     (term_font() * 4. / 3.).round()
 }
 
+/// Whether an output box scrolled to `offset_y` (zero at the top, negative further
+/// down) of at most `max_y` is at, or within a line of, its end, so new output should
+/// keep it there. One scrolled further up is left where the person put it.
+pub(crate) fn follows_tail(offset_y: f32, max_y: f32) -> bool {
+    max_y + offset_y <= 24.
+}
+
 /// The terminal panel's height when nothing has been chosen, and the range it is dragged
 /// within.
 pub(crate) const TERM_HEIGHT: f32 = 230.;
@@ -1274,6 +1281,15 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn output_follows_the_end_until_scrolled_up() {
+        assert!(follows_tail(0., 0.), "everything fits");
+        assert!(follows_tail(-400., 400.), "at the end");
+        assert!(follows_tail(-390., 400.), "within a line of it");
+        assert!(!follows_tail(-200., 400.), "scrolled up to read");
+        assert!(!follows_tail(0., 400.), "at the top");
+    }
 
     #[test]
     fn run_lengths_read_short() {

@@ -1,7 +1,7 @@
 //! The New project / Edit project popup: folder, name, color and icon.
 
 use super::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Accent colors a project can carry in the sidebar. The first entry is "no color".
 pub(crate) const COLORS: &[(&str, u32)] = &[
@@ -72,9 +72,20 @@ pub(crate) struct ProjectForm {
     pub auto_name: bool,
     /// A name to put in the field on the next render (picking a folder happens off the window).
     pub sync_name: Option<String>,
+    /// Whether putting `sync_name` in also moves the focus to the name field. Not while
+    /// the person is typing a path, or the rest of it would land in the name.
+    pub focus_name: bool,
+    /// The name Runo last filled in from a folder, so it keeps following the folder
+    /// while the path is typed, until the person types a name of their own.
+    pub filled_name: String,
     /// The setup command to put in its field on the next render.
     pub sync_setup: Option<String>,
     pub error: Option<String>,
+    /// A folder path to put in the path field on the next render (after Browse).
+    pub sync_path: Option<String>,
+    /// What is wrong with the folder path typed in, or a pointer to the field when the
+    /// folder picker didn't give a folder.
+    pub path_error: Option<String>,
     /// Clone a repository from a URL instead of picking a folder.
     pub clone: bool,
     /// The folder the clone goes into, as a new folder named after the repository.
@@ -103,6 +114,48 @@ pub(crate) fn folder_name(name: &str) -> String {
         }
     }
     out.trim_end_matches('-').to_string()
+}
+
+/// The folder a typed or pasted path names: `~` is the home folder, surrounding quotes
+/// are dropped, and the path must be a full path to a folder that exists.
+pub(crate) fn resolve_folder(typed: &str, home: Option<&Path>) -> Result<PathBuf, String> {
+    let text = typed.trim();
+    let text = text
+        .strip_prefix(['"', '\''])
+        .and_then(|t| t.strip_suffix(['"', '\'']))
+        .unwrap_or(text)
+        .trim();
+    if text.is_empty() {
+        return Err("Type or paste the folder's path, or choose it with Browse….".into());
+    }
+    let path = match text.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') => {
+            let Some(home) = home else {
+                return Err("Could not find your home folder; type the full path.".into());
+            };
+            home.join(rest.trim_start_matches(['/', '\\']))
+        }
+        _ => PathBuf::from(text),
+    };
+    if !path.is_absolute() {
+        return Err("Type the full path, such as ~/code/app.".into());
+    }
+    // Drop a trailing slash and "." parts so the project's path reads cleanly.
+    let path: PathBuf = path.components().collect();
+    if !path.exists() {
+        return Err(format!("{} doesn't exist.", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(format!("{} is a file, not a folder.", path.display()));
+    }
+    Ok(path)
+}
+
+/// The home folder, for `~` in typed paths.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// Where clones go unless another folder is picked: beside the newest project, else home.
@@ -530,8 +583,12 @@ impl RunoApp {
             start_session: true,
             auto_name: true,
             sync_name: Some(String::new()),
+            focus_name: true,
+            filled_name: String::new(),
             sync_setup: Some(String::new()),
             error: None,
+            sync_path: Some(String::new()),
+            path_error: None,
             clone: false,
             parent: clone_parent(&self.state.projects),
             cloning: None,
@@ -569,8 +626,12 @@ impl RunoApp {
             start_session: false,
             auto_name: false,
             sync_name: Some(p.name.clone()),
+            focus_name: true,
+            filled_name: String::new(),
             sync_setup: Some(p.setup.clone()),
             error: None,
+            sync_path: None,
+            path_error: None,
             clone: false,
             parent: None,
             cloning: None,
@@ -746,45 +807,120 @@ impl RunoApp {
             prompt: Some("Choose folder".into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(path) = paths.first().cloned() {
-                    let _ = this.update(cx, |this, cx| {
-                        // The name follows the folder until the user types their own.
-                        let typed = this.project_name.read(cx).value().trim().to_string();
+            let picked = match rx.await {
+                Ok(Ok(Some(paths))) => Ok(paths.first().cloned()),
+                Ok(Ok(None)) => Ok(None),
+                // No picker could be shown, such as on Linux without a desktop portal.
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(_) => Err("the picker closed".to_string()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                match picked {
+                    Ok(Some(path)) => {
                         if let Some(form) = this.project_form.as_mut() {
-                            let previous = form
-                                .path
-                                .as_ref()
-                                .and_then(|p| p.file_name())
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            if form.auto_name && (typed.is_empty() || typed == previous) {
-                                form.sync_name =
-                                    path.file_name().map(|n| n.to_string_lossy().into_owned());
-                            }
-                            form.path = Some(path);
-                            form.error = None;
+                            form.sync_path = Some(path.to_string_lossy().into_owned());
                         }
-                        cx.notify();
-                    });
+                        this.use_project_folder(path, true, cx);
+                    }
+                    Ok(None) => {
+                        if let Some(form) = this.project_form.as_mut().filter(|f| f.path.is_none())
+                        {
+                            form.path_error = Some(
+                                "No folder was chosen. You can also type or paste its path above."
+                                    .into(),
+                            );
+                        }
+                    }
+                    Err(why) => {
+                        crate::applog::info(
+                            "project",
+                            format!("the folder picker didn't open: {why}"),
+                        );
+                        if let Some(form) = this.project_form.as_mut() {
+                            form.path_error = Some(
+                                "Couldn't open a folder picker here. Type or paste the folder's path above instead."
+                                    .into(),
+                            );
+                        }
+                    }
                 }
-            }
+                cx.notify();
+            });
         })
         .detach();
     }
 
+    /// Take `path` as the new project's folder; the name follows the folder until the
+    /// user types their own.
+    fn use_project_folder(&mut self, path: PathBuf, focus: bool, cx: &mut Context<Self>) {
+        let typed = self.project_name.read(cx).value().trim().to_string();
+        let Some(form) = self.project_form.as_mut() else {
+            return;
+        };
+        if form.auto_name && (typed.is_empty() || typed == form.filled_name) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            form.filled_name = name.clone();
+            form.sync_name = Some(name);
+            form.focus_name = focus;
+        }
+        form.path = Some(path);
+        form.error = None;
+        form.path_error = None;
+    }
+
+    /// The path field changed: a folder that exists is used right away. What's wrong
+    /// with any other path is said when the person tries to add it.
+    pub(crate) fn project_path_typed(&mut self, cx: &mut Context<Self>) {
+        let typed = self.project_path.read(cx).value().to_string();
+        let name = self.project_name.read(cx).value().trim().to_string();
+        let Some(form) = self.project_form.as_mut().filter(|f| f.editing.is_none()) else {
+            return;
+        };
+        form.path_error = None;
+        match resolve_folder(&typed, home_dir().as_deref()) {
+            Ok(path) => {
+                if form.path.as_ref() != Some(&path) {
+                    self.use_project_folder(path, false, cx);
+                }
+            }
+            Err(_) => {
+                form.path = None;
+                // A name filled in from a folder along the way goes with it.
+                if form.auto_name && !name.is_empty() && name == form.filled_name {
+                    form.filled_name.clear();
+                    form.sync_name = Some(String::new());
+                    form.focus_name = false;
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// Put a pending name into the name field; called from render, which has the window.
     pub(crate) fn sync_project_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = self.project_form.as_mut().and_then(|f| f.sync_path.take()) {
+            self.project_path
+                .update(cx, |input, cx| input.set_value(path, window, cx));
+        }
         if let Some(setup) = self.project_form.as_mut().and_then(|f| f.sync_setup.take()) {
             self.project_setup
                 .update(cx, |input, cx| input.set_value(setup, window, cx));
         }
-        let Some(name) = self.project_form.as_mut().and_then(|f| f.sync_name.take()) else {
+        let Some((name, focus)) = self
+            .project_form
+            .as_mut()
+            .and_then(|f| Some((f.sync_name.take()?, f.focus_name)))
+        else {
             return;
         };
         self.project_name.update(cx, |input, cx| {
             input.set_value(name, window, cx);
-            input.focus(window, cx);
+            if focus {
+                input.focus(window, cx);
+            }
         });
     }
 
@@ -822,8 +958,13 @@ impl RunoApp {
             return;
         }
         let Some(path) = form.path.clone() else {
+            let typed = self.project_path.read(cx).value().to_string();
+            let why = match resolve_folder(&typed, home_dir().as_deref()) {
+                Ok(_) => "Choose a folder first.".to_string(),
+                Err(why) => why,
+            };
             if let Some(form) = self.project_form.as_mut() {
-                form.error = Some("Choose a folder first.".into());
+                form.path_error = Some(why);
             }
             cx.notify();
             return;
@@ -1008,6 +1149,28 @@ impl RunoApp {
                         }),
                 )
             });
+
+        // A new project's folder can be typed or pasted, as well as picked with Browse.
+        let path_error = form.path_error.clone();
+        let folder_entry = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div().flex_1().min_w_0().child(
+                    Input::new(&self.project_path)
+                        .bordered(true)
+                        .h(px(34.))
+                        .font_family(self.mono_font.clone())
+                        .text_size(px(12.5)),
+                ),
+            )
+            .child(
+                self.button("project-browse", "Browse…", false)
+                    .h(px(34.))
+                    .on_click(cx.listener(|this, _, _, cx| this.browse_project_folder(cx))),
+            );
+        let typed_path = !self.project_path.read(cx).value().trim().is_empty();
 
         let clone_mode = form.clone && !editing;
         let blank = form.blank.filter(|_| !editing);
@@ -1391,7 +1554,26 @@ impl RunoApp {
             .when(clone_mode, |el| el.child(clone_box))
             .when(blank.is_some(), |el| el.child(blank_box))
             .when(!clone_mode && blank.is_none(), |el| {
-                el.child(div().v_flex().gap_1p5().child(label("Folder")).child(folder))
+                el.child(
+                    div()
+                        .v_flex()
+                        .gap_1p5()
+                        .child(label("Folder"))
+                        .map(|el| {
+                            if editing {
+                                el.child(folder)
+                            } else {
+                                el.child(folder_entry)
+                            }
+                        })
+                        .children(path_error.map(|why| {
+                            div()
+                                .id("project-path-error")
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_red()))
+                                .child(why)
+                        })),
+                )
             })
             .child(
                 div()
@@ -1481,7 +1663,7 @@ impl RunoApp {
                                     } else if blank.is_some() {
                                         folder_name(&typed).is_empty()
                                     } else {
-                                        path_text.is_none()
+                                        path_text.is_none() && !typed_path
                                     }),
                             |el| el.opacity(0.5),
                         )
@@ -1516,6 +1698,39 @@ impl RunoApp {
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn typed_folder_paths_are_checked() {
+        let tmp = std::env::temp_dir().join(format!("runo-path-test-{}", std::process::id()));
+        let dir = tmp.join("app");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = tmp.join("notes.txt");
+        std::fs::write(&file, "x").unwrap();
+        let home = Some(tmp.as_path());
+        assert_eq!(resolve_folder("~/app", home), Ok(dir.clone()));
+        assert_eq!(resolve_folder("  ~/app/  ", home), Ok(dir.clone()));
+        assert_eq!(resolve_folder("~", home), Ok(tmp.clone()));
+        let quoted = format!("'{}'", dir.display());
+        assert_eq!(resolve_folder(&quoted, home), Ok(dir.clone()));
+        assert!(resolve_folder("~/missing", home)
+            .unwrap_err()
+            .ends_with("doesn't exist."));
+        assert!(resolve_folder("~/notes.txt", home)
+            .unwrap_err()
+            .contains("is a file, not a folder"));
+        assert!(resolve_folder("app", home)
+            .unwrap_err()
+            .contains("full path"));
+        assert!(
+            resolve_folder("~other/app", home).is_err(),
+            "no other users' homes"
+        );
+        assert!(resolve_folder("   ", home).is_err());
+        assert!(resolve_folder("~/app", None)
+            .unwrap_err()
+            .contains("home folder"));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 
     #[test]
     fn clones_go_beside_the_newest_project() {

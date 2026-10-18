@@ -83,7 +83,7 @@ use shell::Mode;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
-use store::{Message, Note, Project, Role, Session, State, Status};
+use store::{Message, Note, Project, Role, Session, State, Status, StepState};
 
 const DEMO_DIFF: &str = "@@ -42,13 +42,20 @@ impl NavItem {
      impl NavItem {
@@ -222,6 +222,8 @@ struct RunoApp {
     project_name: Entity<InputState>,
     /// The project form's worktree setup command.
     project_setup: Entity<InputState>,
+    /// The New project popup's folder path, typed or filled in by Browse.
+    project_path: Entity<InputState>,
     /// The project form's repository URL, when cloning.
     clone_url: Entity<InputState>,
     /// A freshly installed CLI found off PATH, to save as the agent's binary.
@@ -364,6 +366,10 @@ struct RunoApp {
     /// Sessions open as tabs in the work area, in tab order.
     tabs: Vec<u64>,
     tab_scroll: ScrollHandle,
+    /// The terminal panel's Output box, so it can follow new output.
+    term_scroll: ScrollHandle,
+    /// The session and number of lines the Output box last showed, to notice new ones.
+    term_seen: std::cell::Cell<(u64, usize)>,
     /// The project in the top bar; the open session's project unless the person switched.
     project: Option<u64>,
     /// The row picked with the arrow keys in the sidebar, Home or the Inbox.
@@ -1347,6 +1353,8 @@ impl RunoApp {
             expanded: state.projects.iter().map(|p| p.id).collect(),
             tabs: Vec::new(),
             tab_scroll: ScrollHandle::new(),
+            term_scroll: ScrollHandle::new(),
+            term_seen: Default::default(),
             project: None,
             cursor: None,
             ctx_index: None,
@@ -1385,6 +1393,10 @@ impl RunoApp {
             project_name,
             project_setup: cx
                 .new(|cx| InputState::new(window, cx).placeholder("npm install (optional)")),
+            project_path: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Type or paste a folder path, such as ~/code/app")
+            }),
             clone_url: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("https://github.com/owner/repo.git")
             }),
@@ -1679,6 +1691,15 @@ impl RunoApp {
         );
         let remove_name_sub = cx.subscribe_in(&app.remove_name, window, repaint);
         let clone_url_sub = cx.subscribe_in(&app.clone_url, window, repaint);
+        let project_path_sub = cx.subscribe_in(
+            &app.project_path,
+            window,
+            |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.project_path_typed(cx);
+                }
+            },
+        );
         let auto_name_sub = cx.subscribe_in(&app.auto_name, window, repaint);
         let auto_prompt_sub = cx.subscribe_in(
             &app.auto_prompt,
@@ -1703,6 +1724,7 @@ impl RunoApp {
             finder_sub,
             remove_name_sub,
             clone_url_sub,
+            project_path_sub,
             auto_name_sub,
             auto_prompt_sub,
         ]);
@@ -2123,6 +2145,19 @@ impl RunoApp {
                                 m.text.push_str(&text);
                             }
                             stream::Update::Step(step) => m.steps.push(step),
+                            stream::Update::Started { id, label } => {
+                                m.running_steps.push((m.steps.len(), id));
+                                m.steps.push(label);
+                            }
+                            stream::Update::Finished { id, ok } => {
+                                // The step may sit in an earlier reply when an error
+                                // message came between.
+                                for m in session.messages.iter_mut().rev() {
+                                    if m.finish_step(&id, ok) {
+                                        break;
+                                    }
+                                }
+                            }
                             stream::Update::Summary(summary) => {
                                 m.meta = match &model {
                                     Some(model) => format!("{model} · {summary}"),
@@ -2268,7 +2303,13 @@ impl RunoApp {
                             session.messages.remove(at);
                         }
                     }
-                    session.status = if ok { Status::Done } else { Status::Failed };
+                    session.status = if ok {
+                        Status::Done
+                    } else if stopped {
+                        Status::Stopped
+                    } else {
+                        Status::Failed
+                    };
                     session.remote_turn = false;
                     session.unread = !on_screen;
                     if silent {
@@ -2362,7 +2403,12 @@ impl RunoApp {
                         }
                         let text = text.trim_start().to_string();
                         if !text.is_empty() {
-                            session.messages.push(Message::new(Role::System, text));
+                            let mut m = Message::new(Role::System, text);
+                            // A stop the person asked for reads as a note, not an error.
+                            if stopped {
+                                m.meta = "stopped".into();
+                            }
+                            session.messages.push(m);
                         }
                     }
                 }
@@ -3667,16 +3713,13 @@ impl RunoApp {
             Status::Working => c_blue(),
             Status::Done => c_green(),
             Status::Failed => c_red(),
+            // Stopped on purpose: neutral, not an error.
+            Status::Stopped => c_muted(),
         }
     }
 
     fn status_label(status: Status) -> &'static str {
-        match status {
-            Status::Idle => "Idle",
-            Status::Working => "Working",
-            Status::Done => "Completed",
-            Status::Failed => "Failed",
-        }
+        status.label()
     }
 
     fn button(
@@ -4479,14 +4522,39 @@ impl RunoApp {
             )
     }
 
-    fn step_row(&self, text: &str) -> impl IntoElement {
+    /// One tool step: a pulsing dot while it runs, then a check, or a red cross when
+    /// its tool failed.
+    fn step_row(&self, text: &str, state: StepState, key: (u64, usize, usize)) -> impl IntoElement {
+        let mark = match state {
+            StepState::Running => div()
+                .size(px(12.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(c_blue()))
+                        .animated(
+                            SharedString::from(format!("step-run-{}-{}-{}", key.0, key.1, key.2)),
+                            Animation::new(Duration::from_millis(1200))
+                                .repeat()
+                                .with_easing(pulsating_between(0.3, 1.)),
+                            |el, t| el.opacity(t),
+                        ),
+                )
+                .into_any_element(),
+            StepState::Failed => icon(IconName::X, 12., c_red()).into_any_element(),
+            StepState::Done => icon(IconName::Check, 12., c_muted()).into_any_element(),
+        };
         div()
             .flex()
             .items_center()
             .gap_2()
             .h(px(24.))
             .text_size(px(12.5))
-            .child(icon(IconName::Check, 12., c_muted()))
+            .child(mark)
             .child(
                 div()
                     .truncate()
@@ -4759,7 +4827,10 @@ impl RunoApp {
             return self.sync_card(index, message, cx);
         }
         if message.role == Role::System
-            && matches!(message.meta.as_str(), "moved" | "note" | "warning")
+            && matches!(
+                message.meta.as_str(),
+                "moved" | "note" | "warning" | "stopped"
+            )
         {
             return fade(
                 div()
@@ -4775,6 +4846,7 @@ impl RunoApp {
                     .text_color(rgb(c_secondary()))
                     .child(match message.meta.as_str() {
                         "note" => icon(IconName::Info, 13., c_blue()),
+                        "stopped" => icon(IconName::CircleStop, 13., c_muted()),
                         "warning" => icon(IconName::TriangleAlert, 13., c_amber()),
                         _ => icon(IconName::Server, 13., c_blue()),
                     })
@@ -4826,7 +4898,7 @@ impl RunoApp {
         let shown = if open { message.steps.len() } else { 0 };
         for (i, step) in message.steps.iter().take(shown).enumerate() {
             steps = steps.child(stagger(
-                div().child(self.step_row(step)),
+                div().child(self.step_row(step, message.step_state(i, live), (key.0, index, i))),
                 SharedString::from(format!("step-{}-{}-{}", key.0, index, i)),
                 i,
             ));
@@ -8029,6 +8101,19 @@ impl RunoApp {
         let body = match shell {
             Some(sh) => self.shell_view(sh, window, cx),
             None if has_output => {
+                // New output keeps the newest line in view, unless the person scrolled
+                // up to read; a session's output opens at its end.
+                let lines = self.terminal[&id].len();
+                let (seen_id, seen) = self.term_seen.replace((id, lines));
+                if seen_id != id
+                    || (lines != seen
+                        && terminal::follows_tail(
+                            f32::from(self.term_scroll.offset().y),
+                            f32::from(self.term_scroll.max_offset().y),
+                        ))
+                {
+                    self.term_scroll.scroll_to_bottom();
+                }
                 let text: Vec<&str> = self.terminal[&id]
                     .iter()
                     .rev()
@@ -8037,23 +8122,35 @@ impl RunoApp {
                     .map(String::as_str)
                     .collect();
                 fade(
-                    div().flex_1().min_h_0().overflow_y_scrollbar().child(
-                        div()
-                            .v_flex()
-                            .font_family(self.mono_font.clone())
-                            .text_xs()
-                            .p_3()
-                            .child(
-                                TextView::markdown(
-                                    SharedString::from(format!("term-{id}")),
-                                    format!(
-                                        "```text\n{}\n```",
-                                        text.join("\n").replace("```", "'''")
-                                    ),
-                                )
-                                .selectable(true),
-                            ),
-                    ),
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(
+                            div()
+                                .id("term-out")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.term_scroll)
+                                .child(
+                                    div()
+                                        .v_flex()
+                                        .font_family(self.mono_font.clone())
+                                        .text_xs()
+                                        .p_3()
+                                        .child(
+                                            TextView::markdown(
+                                                SharedString::from(format!("term-{id}")),
+                                                format!(
+                                                    "```text\n{}\n```",
+                                                    text.join("\n").replace("```", "'''")
+                                                ),
+                                            )
+                                            .selectable(true),
+                                        ),
+                                ),
+                        )
+                        .vertical_scrollbar(&self.term_scroll),
                     SharedString::from(format!("termbody-{id}")),
                     220,
                 )
