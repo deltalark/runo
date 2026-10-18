@@ -116,6 +116,9 @@ impl DesignCanvas {
             },
             move |this, out, cx| match out {
                 Ok(Some((before, shot, (n, boxes)))) => {
+                    // The same checks as for a change made by hand: what this one broke
+                    // goes back to the agent at once, to fix before it finishes.
+                    let broke = this.new_findings(&call.screen, &shot);
                     this.landed(call.screen.clone(), before, shot, After::Same, cx);
                     this.show_ai_touch(call.screen.clone(), boxes, call.what.clone(), cx);
                     if let Some(step) = this.undo.last_mut() {
@@ -125,15 +128,23 @@ impl DesignCanvas {
                         ai.changed = true;
                     }
                     cx.notify();
-                    reply(
-                        true,
-                        format!(
-                            "Done: {} on {n} layer{} of {}. It's on the person's undo history.",
-                            call.what,
-                            if n == 1 { "" } else { "s" },
-                            call.screen
-                        ),
+                    let mut text = format!(
+                        "Done: {} on {n} layer{} of {}. It's on the person's undo history.",
+                        call.what,
+                        if n == 1 { "" } else { "s" },
+                        call.screen
                     );
+                    if !broke.is_empty() {
+                        let name = this
+                            .canvas
+                            .screen(&call.screen)
+                            .map_or_else(|| call.screen.clone(), |s| s.name.clone());
+                        text.push_str(
+                            "\nDesign's checks find new problems after this change; fix them before you finish:",
+                        );
+                        text.push_str(&checks::listed(&[(call.screen.clone(), name, broke)]));
+                    }
+                    reply(true, text);
                 }
                 Ok(None) => reply(true, "Nothing changed: the layers already were that way.".into()),
                 Err(e) => reply(false, e),
@@ -321,5 +332,27 @@ impl DesignCanvas {
             );
         }
         Some(row)
+    }
+
+    /// The serious problems Design's checks find on `screen` as `shot` shows it that they
+    /// didn't find before.
+    fn new_findings(&self, screen: &str, shot: &Shot) -> Vec<checks::Finding> {
+        let Some(device) = self.canvas.screen(screen).map(|s| s.device) else {
+            return Vec::new();
+        };
+        let ids: HashSet<String> = self.canvas.screens.iter().map(|s| s.id.clone()).collect();
+        let found = |shot: Option<&Shot>| -> Vec<checks::Finding> {
+            shot.and_then(|s| s.facts.as_ref())
+                .map(|f| checks::review(f, device, &ids))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|f| f.kind.serious())
+                .collect()
+        };
+        let was = found(self.shots.get(screen));
+        found(Some(shot))
+            .into_iter()
+            .filter(|f| !was.iter().any(|w| w.kind == f.kind && w.text == f.text))
+            .collect()
     }
 }
