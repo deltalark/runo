@@ -116,6 +116,20 @@ impl Program {
     }
 }
 
+/// Interactive shell for a new Windows terminal tab. Prefer PowerShell over cmd.exe,
+/// and skip the profile so a slow or blocking profile cannot leave a blank ConPTY.
+fn windows_shell() -> Option<Program> {
+    if !cfg!(windows) {
+        return None;
+    }
+    Some(Program {
+        bin: "powershell.exe".into(),
+        args: vec!["-NoLogo".into(), "-NoProfile".into()],
+        env: Vec::new(),
+        unset: Vec::new(),
+    })
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -157,7 +171,9 @@ impl Shell {
                 pixel_height: 0,
             })
             .map_err(|e| e.to_string())?;
-        let custom = program.is_some();
+        // On Windows, prefer PowerShell over cmd.exe: ConPTY often leaves cmd with a
+        // blank screen and no prompt until something else wakes it.
+        let program = program.or_else(windows_shell);
         let mut cmd = match &program {
             Some(p) => {
                 let mut c = CommandBuilder::new(&p.bin);
@@ -175,8 +191,11 @@ impl Shell {
         if !dir.is_empty() {
             cmd.cwd(dir);
         }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        // xterm TERM confuses some Windows hosts in ConPTY; keep it for Unix only.
+        if !cfg!(windows) {
+            cmd.env("TERM", "xterm-256color");
+            cmd.env("COLORTERM", "truecolor");
+        }
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -246,13 +265,23 @@ impl Shell {
             });
         }
         let name = program
-            .filter(|_| custom)
-            .map(|p| p.bin)
-            .or_else(|| std::env::var("SHELL").ok())
-            .and_then(|s| s.rsplit(['/', '\\']).next().map(str::to_string))
+            .as_ref()
+            .map(|p| p.bin.as_str())
+            .map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s).to_string())
+            .or_else(|| {
+                std::env::var("SHELL")
+                    .ok()
+                    .and_then(|s| s.rsplit(['/', '\\']).next().map(str::to_string))
+            })
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| if cfg!(windows) { "pwsh" } else { "shell" }.into());
-        Ok(Self {
+            .unwrap_or_else(|| {
+                if cfg!(windows) {
+                    "powershell".into()
+                } else {
+                    "shell".into()
+                }
+            });
+        let shell = Self {
             id,
             session,
             title: name,
@@ -266,7 +295,15 @@ impl Shell {
             last_output,
             last_input: AtomicU64::new(0),
             view: Arc::new(Mutex::new(ViewState::default())),
-        })
+        };
+        // ConPTY sometimes holds the first paint until the size changes: nudge it.
+        let _ = shell.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        Ok(shell)
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -461,17 +498,14 @@ impl Shell {
         }
     }
 
-    /// Whether the program exited successfully, once it has exited. A program that
-    /// closed its terminal but hasn't quit yet is given half a second.
+    /// Whether the program exited successfully, once it has exited.
+    /// Non-blocking: callers on the UI thread must not wait here.
     pub fn success(&self) -> Option<bool> {
         let mut c = self.child.lock().ok()?;
-        for _ in 0..50 {
-            if let Ok(Some(status)) = c.try_wait() {
-                return Some(status.success());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        None
+        c.try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.success())
     }
 
     /// Ask the program to finish up: Runo's connection runner ends the program on the
@@ -492,6 +526,12 @@ impl Shell {
 impl Drop for Shell {
     fn drop(&mut self) {
         self.kill();
+        // Closing the input channel ends the writer thread before ConPTY tears down.
+        // Field drop would close `master` first; take the sender here instead.
+        drop(std::mem::replace(
+            &mut self.input,
+            std::sync::mpsc::channel().0,
+        ));
     }
 }
 
@@ -629,9 +669,20 @@ pub fn key_bytes(
             }
         }
         _ => {
+            // GPUI on Windows sometimes omits key_char; fall back to the key name
+            // when it is a single printable character.
             let text = key_char
                 .map(str::to_string)
-                .or_else(|| (key == "space").then(|| " ".to_string()))?;
+                .or_else(|| (key == "space").then(|| " ".to_string()))
+                .or_else(|| {
+                    let mut chars = key.chars();
+                    let c = chars.next()?;
+                    if chars.next().is_none() && !c.is_control() {
+                        Some(c.to_string())
+                    } else {
+                        None
+                    }
+                })?;
             let mut v = if alt { vec![0x1b] } else { vec![] };
             v.extend(text.into_bytes());
             v
@@ -811,6 +862,7 @@ mod tests {
         let k = |key, ch: Option<&str>, ctrl, alt| key_bytes(key, ch, ctrl, alt, false, false);
         assert_eq!(k("c", Some("c"), true, false), Some(vec![3]));
         assert_eq!(k("a", Some("a"), false, false), Some(b"a".to_vec()));
+        assert_eq!(k("a", None, false, false), Some(b"a".to_vec()));
         assert_eq!(k("b", Some("b"), false, true), Some(b"\x1bb".to_vec()));
         assert_eq!(k("enter", None, false, false), Some(b"\r".to_vec()));
         assert_eq!(k("up", None, false, false), Some(b"\x1b[A".to_vec()));

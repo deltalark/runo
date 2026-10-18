@@ -12,7 +12,7 @@ pub(crate) struct Shortcut {
     pub default: &'static [&'static str],
 }
 
-pub(crate) const SHORTCUTS: [Shortcut; 25] = [
+pub(crate) const SHORTCUTS: [Shortcut; 32] = [
     Shortcut {
         id: "quick-open",
         title: "Quick open",
@@ -35,7 +35,50 @@ pub(crate) const SHORTCUTS: [Shortcut; 25] = [
         id: "panel",
         title: "Changes panel",
         desc: "Show or hide the Changes, Files and Terminal panel.",
-        default: &["secondary-b"],
+        default: &["secondary-b", "secondary-shift-b"],
+    },
+    Shortcut {
+        id: "toggle-terminal",
+        title: "Terminal",
+        desc: "Show the terminal and focus it, or hide the panel when it already has focus.",
+        // Ctrl on every platform, matching Cursor / VS Code (not Cmd on Mac).
+        default: &["ctrl-`"],
+    },
+    Shortcut {
+        id: "new-terminal",
+        title: "New terminal",
+        desc: "Open a new shell tab in the terminal panel.",
+        default: &["ctrl-shift-`"],
+    },
+    Shortcut {
+        id: "toggle-term-size",
+        title: "Expand terminal",
+        desc: "Make the terminal tall, or bring it back to the usual height.",
+        default: &["alt-`"],
+    },
+    Shortcut {
+        id: "focus-changes",
+        title: "Changes",
+        desc: "Show the Changes tab in the right panel.",
+        default: &["secondary-shift-g"],
+    },
+    Shortcut {
+        id: "focus-files",
+        title: "Files",
+        desc: "Show the Files tab in the right panel.",
+        default: &["secondary-shift-e"],
+    },
+    Shortcut {
+        id: "search-files",
+        title: "Search in files",
+        desc: "Show the Files tab and focus the search box.",
+        default: &["secondary-shift-f"],
+    },
+    Shortcut {
+        id: "open-browser",
+        title: "Browser",
+        desc: "Open the Browser tab for the session's app.",
+        default: &["secondary-shift-u"],
     },
     Shortcut {
         id: "sidebar",
@@ -113,7 +156,7 @@ pub(crate) const SHORTCUTS: [Shortcut; 25] = [
         id: "go-notes",
         title: "Notes",
         desc: "Open the project's notes.",
-        default: &[],
+        default: &["secondary-shift-n"],
     },
     Shortcut {
         id: "go-inbox",
@@ -190,6 +233,13 @@ fn binding_in(id: &str, keys: &str, context: &str) -> Option<KeyBinding> {
         "new-session" => KeyBinding::new(keys, NewSession, context),
         "settings" => KeyBinding::new(keys, OpenSettings, context),
         "panel" => KeyBinding::new(keys, TogglePanel, context),
+        "toggle-terminal" => KeyBinding::new(keys, ToggleTerminal, context),
+        "new-terminal" => KeyBinding::new(keys, NewTerminal, context),
+        "toggle-term-size" => KeyBinding::new(keys, ToggleTermSize, context),
+        "focus-changes" => KeyBinding::new(keys, FocusChanges, context),
+        "focus-files" => KeyBinding::new(keys, FocusFiles, context),
+        "search-files" => KeyBinding::new(keys, SearchFiles, context),
+        "open-browser" => KeyBinding::new(keys, OpenBrowser, context),
         "sidebar" => KeyBinding::new(keys, ToggleSidebar, context),
         "stop" => KeyBinding::new(keys, StopAgent, context),
         "toggle-view" => KeyBinding::new(keys, ToggleView, context),
@@ -406,6 +456,13 @@ pub(crate) fn install(cx: &mut App) {
     for (id, keys) in &used {
         let n = normalize(keys);
         if n.split('-').any(|p| p == "ctrl") {
+            // Terminal shortcuts stay live inside the shell (toggle, new tab).
+            if matches!(*id, "toggle-terminal" | "new-terminal") {
+                if let Some(b) = binding_in(id, keys, "RunoTerminal") {
+                    bindings.push(b);
+                }
+                continue;
+            }
             bindings.push(KeyBinding::new(keys, NoAction {}, Some("RunoTerminal")));
             // The same shortcut with Shift still reaches Runo from inside the shell.
             if let Some(shifted) = terminal_variant(keys).filter(|v| !taken.contains(v)) {

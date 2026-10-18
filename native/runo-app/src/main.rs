@@ -113,6 +113,13 @@ actions!(
         OpenSettings,
         StopAgent,
         TogglePanel,
+        ToggleTerminal,
+        NewTerminal,
+        ToggleTermSize,
+        FocusChanges,
+        FocusFiles,
+        SearchFiles,
+        OpenBrowser,
         ToggleSidebar,
         SaveFile,
         Dismiss,
@@ -1619,6 +1626,8 @@ impl RunoApp {
                 },
             );
         // Recording a shortcut in Settings takes the next keys before any binding runs.
+        // When the terminal (or CLI) has focus, send keys straight to the PTY here so
+        // bindings like Escape/NoAction cannot swallow them before on_key_down runs.
         let me = cx.entity().downgrade();
         let keys_sub = cx.intercept_keystrokes(move |event, window, cx| {
             let keystroke = event.keystroke.clone();
@@ -1626,15 +1635,48 @@ impl RunoApp {
                 if this.key_capture.is_some() && this.view == View::Settings {
                     this.capture_key(&keystroke, cx);
                     cx.stop_propagation();
-                } else {
-                    this.key_capture = None;
-                    if keystroke.key == "escape"
-                        && !keystroke.modifiers.modified()
-                        && this.leave_terminal(window, cx)
-                    {
-                        cx.stop_propagation();
-                    }
+                    return;
                 }
+                this.key_capture = None;
+                if keystroke.key == "escape"
+                    && !keystroke.modifiers.modified()
+                    && this.leave_terminal(window, cx)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
+                let term = this.term_focus.is_focused(window);
+                let cli = this.cli_focus.is_focused(window);
+                if !(term || cli) {
+                    return;
+                }
+                // Ctrl/Cmd chords stay with the keymap: NoAction + Shift variants, and
+                // Ctrl+` / Ctrl+Shift+` for toggle / new terminal. Alt+` expands the
+                // panel. Other Alt chords still go to the PTY (meta-key sequences).
+                if keystroke.modifiers.control || keystroke.modifiers.platform {
+                    return;
+                }
+                if keystroke.modifiers.alt
+                    && matches!(
+                        keystroke.key.as_str(),
+                        "`" | "oem_3" | "backtick"
+                    )
+                {
+                    return;
+                }
+                let ev = KeyDownEvent {
+                    keystroke: keystroke.clone(),
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                if cli {
+                    if let Some(id) = this.selected {
+                        this.cli_key(id, &ev, cx);
+                    }
+                } else {
+                    this.shell_key(&ev, window, cx);
+                }
+                cx.stop_propagation();
             });
         });
         // Search boxes on the Playbooks and Project notes pages filter as you type.
@@ -2606,7 +2648,7 @@ impl RunoApp {
         let mut groups: Vec<(CommandGroup, Vec<Jump>)> = Vec::new();
         let mut commands = CommandGroup::new().label("Commands");
         let mut command_jumps = Vec::new();
-        let actions: [(&str, IconName, Box<dyn Action>); 9] = [
+        let actions: [(&str, IconName, Box<dyn Action>); 16] = [
             ("New session", IconName::Plus, Box::new(NewSession)),
             ("Open settings", IconName::Settings, Box::new(OpenSettings)),
             (
@@ -2619,6 +2661,33 @@ impl RunoApp {
                 IconName::PanelRightOpen,
                 Box::new(TogglePanel),
             ),
+            (
+                "Toggle the Terminal",
+                IconName::SquareTerminal,
+                Box::new(ToggleTerminal),
+            ),
+            (
+                "New terminal",
+                IconName::SquareTerminal,
+                Box::new(NewTerminal),
+            ),
+            (
+                "Expand or shrink the Terminal",
+                IconName::ChevronsUpDown,
+                Box::new(ToggleTermSize),
+            ),
+            (
+                "Show Changes",
+                IconName::GitCompare,
+                Box::new(FocusChanges),
+            ),
+            ("Show Files", IconName::FileText, Box::new(FocusFiles)),
+            (
+                "Search in files",
+                IconName::Search,
+                Box::new(SearchFiles),
+            ),
+            ("Open Browser", IconName::Globe, Box::new(OpenBrowser)),
             (
                 "Toggle the sidebar",
                 IconName::PanelLeft,
@@ -8674,6 +8743,42 @@ impl Render for RunoApp {
                 this.toggle_panel();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.toggle_terminal(window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &NewTerminal, _, cx| {
+                this.open_new_terminal(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTermSize, _, cx| {
+                if this.current().is_none() {
+                    return;
+                }
+                if this.view != View::Session {
+                    this.view = View::Session;
+                }
+                this.show_panel = true;
+                this.panel_auto_hidden = false;
+                this.toggle_term_size();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusChanges, _, cx| {
+                this.focus_right_tab(RightTab::Changes);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &FocusFiles, _, cx| {
+                this.focus_right_tab(RightTab::Files);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SearchFiles, window, cx| {
+                this.focus_file_search(window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenBrowser, _, cx| {
+                this.open_browser_tab(cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 // The sidebar belongs to Sessions; elsewhere the shortcut opens Sessions with it.
                 if this.mode() != Mode::Sessions {
@@ -9299,6 +9404,13 @@ fn app_menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Toggle sidebar", ToggleSidebar),
             MenuItem::action("Toggle Changes panel", TogglePanel),
+            MenuItem::action("Show Changes", FocusChanges),
+            MenuItem::action("Show Files", FocusFiles),
+            MenuItem::action("Search in files", SearchFiles),
+            MenuItem::action("Toggle Terminal", ToggleTerminal),
+            MenuItem::action("New terminal", NewTerminal),
+            MenuItem::action("Expand or shrink Terminal", ToggleTermSize),
+            MenuItem::action("Open Browser", OpenBrowser),
             MenuItem::action("Chat or CLI", ToggleView),
         ]),
         Menu::new("Session").items([

@@ -346,7 +346,12 @@ impl RunoApp {
     }
 
     pub(crate) fn close_shell(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.shells.retain(|s| s.id != id);
+        if let Some(pos) = self.shells.iter().position(|s| s.id == id) {
+            let shell = self.shells.remove(pos);
+            shell.kill();
+            // ClosePseudoConsole can block; never do that on the UI thread.
+            std::thread::spawn(move || drop(shell));
+        }
         self.tasks.remove(&id);
         if self.shell_tab == Some(id) {
             let session = self.selected.unwrap_or(0);
@@ -886,7 +891,25 @@ impl RunoApp {
         .top_0()
         .left_0()
         .size_full();
-        let lines = div().relative().child(measure).child(lines);
+        // Keep focus handling on this inner layer: the measure canvas sits on top of the
+        // text and can be the hit target, so the outer on_mouse_down alone is not enough.
+        let lines = div()
+            .relative()
+            .size_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    let focus = if cli.is_some() {
+                        &this.cli_focus
+                    } else {
+                        &this.term_focus
+                    };
+                    window.focus(focus, cx);
+                    cx.notify();
+                }),
+            )
+            .child(measure)
+            .child(lines);
         let find_bar = view.find.as_ref().map(|q| {
             let count = match (view.find_count, q.is_empty()) {
                 (_, true) => "Type to find".to_string(),
