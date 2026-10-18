@@ -531,7 +531,8 @@ impl DesignCanvas {
             if !open || self.layers_of.as_ref() != Some(&s.id) {
                 continue;
             }
-            for (i, l) in self.layers.iter().enumerate() {
+            for i in self.shown_layers() {
+                let l = &self.layers[i];
                 list = list.child(self.layer_row(i, l, picked.contains(&l.path), cx));
             }
         }
@@ -566,6 +567,9 @@ impl DesignCanvas {
                             })),
                     ),
             )
+            .when(!self.assets && !self.canvas.screens.is_empty(), |el| {
+                el.child(self.find_box())
+            })
             .child(
                 div()
                     .id("design-layers-list")
@@ -582,13 +586,9 @@ impl DesignCanvas {
     }
 
     fn layer_row(&self, i: usize, l: &Layer, on: bool, cx: &mut Context<Self>) -> AnyElement {
-        let (tag, classes) = l.label.split_once('.').unwrap_or((l.label.as_str(), ""));
-        // What a person would call it: its text, else its class, else its tag.
-        let title: SharedString = match &l.text {
-            Some(t) if !t.is_empty() => t.clone().into(),
-            _ if !classes.is_empty() => classes.replace('.', " ").into(),
-            _ => tag.to_string().into(),
-        };
+        let tag = l.label.split('.').next().unwrap_or_default();
+        let title: SharedString = Self::layer_title(l).into();
+        let renaming = self.renaming.as_ref() == Some(&l.path);
         let glyph = if l.component.is_some() {
             components::component_icon()
         } else {
@@ -596,6 +596,7 @@ impl DesignCanvas {
         };
         let tone = l.component.is_some().then_some(components::PURPLE);
         let (p1, p2, p3) = (l.path.clone(), l.path.clone(), l.path.clone());
+        let named = l.name.is_some();
         let dragged = DraggedLayer {
             path: l.path.clone(),
             label: l.label.clone().into(),
@@ -604,7 +605,12 @@ impl DesignCanvas {
             .id(("design-layer", i))
             .group("design-layer")
             .h(px(26.))
-            .pl(px(22. + l.depth.min(8) as f32 * 12.))
+            .pl(px(22.
+                + if self.layer_query.is_empty() {
+                    l.depth.min(8) as f32 * 12.
+                } else {
+                    0.
+                }))
             .pr_1()
             .flex()
             .items_center()
@@ -625,9 +631,11 @@ impl DesignCanvas {
                     this.edit(js, After::Clear, cx);
                 }
             }))
-            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                 let id = this.screen.clone().unwrap_or_default();
-                if e.modifiers().shift {
+                if e.click_count() >= 2 {
+                    this.start_rename(p1.clone(), window, cx);
+                } else if e.modifiers().shift {
                     this.toggle_pick(&id, p1.clone(), cx);
                 } else {
                     this.select_path(&id, p1.clone(), cx);
@@ -638,14 +646,22 @@ impl DesignCanvas {
                 12.,
                 tone.unwrap_or(if on { c_blue() } else { c_muted() }),
             ))
-            .child(
+            .child(if renaming {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(Input::new(&self.f_layer).xsmall())
+            } else {
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
+                    .when(named, |el| el.font_weight(FontWeight::MEDIUM))
                     .when_some(tone, |el, c| el.text_color(rgb(c)))
-                    .child(title),
-            )
+                    .child(title)
+            })
+            .child(self.lock_button(i, l, cx))
             .child(
                 div()
                     .flex_none()
@@ -948,7 +964,7 @@ impl DesignCanvas {
         let title: SharedString = if multi {
             format!("{} elements", self.also.len() + 1).into()
         } else {
-            el.label.clone().into()
+            el.name.clone().unwrap_or_else(|| el.label.clone()).into()
         };
         let mut tools = div().flex().items_center().gap(px(2.));
         if multi {
@@ -994,6 +1010,23 @@ impl DesignCanvas {
         }
         tools = tools
             .child(
+                mini(
+                    "design-lock",
+                    if el.locked {
+                        IconName::Lock
+                    } else {
+                        IconName::LockOpen
+                    },
+                    if el.locked {
+                        "Unlock (⇧⌘L)"
+                    } else {
+                        "Lock (⇧⌘L)"
+                    },
+                    el.locked,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.lock_selected(cx))),
+            )
+            .child(
                 mini("design-dup", IconName::Copy, "Duplicate (⌘D)", false)
                     .on_click(cx.listener(|this, _, _, cx| this.duplicate_element(cx))),
             )
@@ -1004,38 +1037,45 @@ impl DesignCanvas {
         out = out.child(
             div()
                 .px_3()
-                .h(px(40.))
-                .flex()
-                .items_center()
-                .gap_1()
+                .pt_2()
+                .pb_1()
+                .v_flex()
+                .gap(px(2.))
                 .border_b_1()
                 .border_color(rgb(c_border()))
-                .child(icon(
-                    if multi {
-                        IconName::Group
-                    } else if el.component.is_some() {
-                        components::component_icon()
-                    } else {
-                        layer_icon(&el.tag)
-                    },
-                    13.,
-                    if !multi && el.component.is_some() {
-                        components::PURPLE
-                    } else {
-                        c_secondary()
-                    },
-                ))
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(c_text()))
-                        .child(title),
+                        .h(px(24.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(icon(
+                            if multi {
+                                IconName::Group
+                            } else if el.component.is_some() {
+                                components::component_icon()
+                            } else {
+                                layer_icon(&el.tag)
+                            },
+                            13.,
+                            if !multi && el.component.is_some() {
+                                components::PURPLE
+                            } else {
+                                c_secondary()
+                            },
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(c_text()))
+                                .child(title),
+                        ),
                 )
-                .child(tools),
+                .child(tools.ml(px(-4.))),
         );
         out = out.children(self.component_section(cx));
 
@@ -1279,11 +1319,24 @@ impl DesignCanvas {
                     cx.listener(move |this, _, _, cx| this.set_style("text-align", v, cx)),
                 ));
             }
-            let mut text = sec("Typography", None);
+            let mut text = sec(
+                "Typography",
+                (!multi).then(|| {
+                    mini(
+                        "design-text-style-add",
+                        IconName::Plus,
+                        "Make a text style from this",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.create_text_style(cx)))
+                    .into_any_element()
+                }),
+            );
             if el.text.is_some() && !multi {
                 text = text.child(Input::new(&self.f_text).small());
             }
             text = text
+                .child(self.text_styles(el, cx))
                 .child(pair(
                     self.fld("font-size", mark_icon(IconName::CaseSensitive)),
                     self.color_fld("color", el),
