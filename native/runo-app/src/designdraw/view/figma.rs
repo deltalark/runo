@@ -891,6 +891,25 @@ impl DesignCanvas {
                 .on_click(cx.listener(|this, _, window, cx| this.states_with_ai(window, cx))),
             );
         }
+        // A version for each other device, made by AI beside this one.
+        for (i, to) in Device::ALL
+            .into_iter()
+            .filter(|d| *d != s.device)
+            .enumerate()
+        {
+            actions = actions.child(
+                text_btn(
+                    ("design-adapt", i),
+                    format!("{} version", to.label()),
+                    Some(IconName::Sparkles),
+                    false,
+                )
+                .tooltip(tip("AI lays this screen out for that device, beside it"))
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.adapt_with_ai(to, window, cx)),
+                ),
+            );
+        }
         if variant_of(&s.id).is_some_and(|b| self.canvas.screen(&b).is_some()) {
             let id = s.id.clone();
             actions = actions.child(

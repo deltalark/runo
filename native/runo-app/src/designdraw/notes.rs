@@ -97,11 +97,11 @@ pub(crate) fn initials(name: &str) -> String {
     }
 }
 
-/// What an agent is asked when a comment is handed to it to fix.
-pub(crate) fn task(c: &Comment, screen_name: &str, under: Option<&str>) -> String {
+/// A comment where it's pinned, for an agent: "On Inbox (inbox.html) at 20, 141, on the
+/// button there: Ada: Make it bigger", with its replies after.
+pub(crate) fn line(c: &Comment, screen_name: &str, under: Option<&str>) -> String {
     let mut out = format!(
-        "Address this comment on the {screen_name} screen ({}.html), pinned at {}, {} \
-         (CSS px from its top left){}:\n\n{}: {}\n",
+        "On {screen_name} ({}.html) at {}, {}{}: {}: {}",
         c.screen,
         c.x.round(),
         c.y.round(),
@@ -112,9 +112,25 @@ pub(crate) fn task(c: &Comment, screen_name: &str, under: Option<&str>) -> Strin
         c.text
     );
     for r in &c.replies {
-        out.push_str(&format!("{}: {}\n", r.author, r.text));
+        out.push_str(&format!(" / {}: {}", r.author, r.text));
     }
-    out.push_str("\nChange the design so the comment is resolved.");
+    out
+}
+
+/// What an agent is asked when comments are handed to it to fix, each said by `line`.
+pub(crate) fn task(lines: &[String]) -> String {
+    let mut out = String::from(match lines.len() {
+        1 => "Address this comment on the design (pinned in CSS px from the screen's top left):\n",
+        _ => "Address these comments on the design (each pinned in CSS px from its screen's top left):\n",
+    });
+    for l in lines {
+        out.push_str(&format!("- {l}\n"));
+    }
+    out.push_str(if lines.len() == 1 {
+        "\nChange the design so the comment is resolved."
+    } else {
+        "\nChange the design so each comment is resolved, keeping the screens consistent."
+    });
     out
 }
 
@@ -146,10 +162,12 @@ mod tests {
         assert_eq!(next_id(std::slice::from_ref(&c)), 2);
         assert_eq!(initials(&c.author), "AL");
         assert_eq!(initials(""), "?");
-        let t = task(&c, "Home", Some("button"));
-        assert!(t.contains("pinned at 20, 141"));
-        assert!(t.contains("on the button there"));
-        assert!(t.contains("Bo: On it"));
+        let l = line(&c, "Home", Some("button"));
+        assert!(l.starts_with("On Home (home.html) at 20, 141, on the button there: Ada"));
+        assert!(l.ends_with(" / Bo: On it"));
+        let t = task(std::slice::from_ref(&l));
+        assert!(t.contains("this comment") && t.contains(&l));
+        assert!(task(&[l.clone(), l]).contains("each comment"));
         let _ = std::fs::remove_dir_all(root);
     }
 }
