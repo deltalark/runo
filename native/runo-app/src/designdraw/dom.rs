@@ -633,15 +633,21 @@ if (!window.__runo) window.__runo = (() => {
     agent: (sel, name, args) => {
       const els = matching(sel).filter((el) => !el.closest('[data-locked]'));
       if (!els.length || !ops[name]) return null;
-      for (const el of els.reverse()) ops[name](el, ...args);
-      return els.length;
+      for (const el of els.slice().reverse()) ops[name](el, ...args);
+      return { n: els.length, boxes: els.filter((el) => el.isConnected).map(rect) };
     },
     // Swap each matching instance for the HTML given for it, in page order.
     agentSwap: (sel, htmls) => {
       const els = matching(sel).filter((el) => !el.closest('[data-locked]'));
-      let n = 0;
-      els.forEach((el, i) => { if (htmls[i]) { ops.swapTo(el, htmls[i]); n++; } });
-      return n || null;
+      const now = [];
+      els.forEach((el, i) => {
+        if (!htmls[i]) return;
+        const next = el.nextSibling, parent = el.parentNode;
+        ops.swapTo(el, htmls[i]);
+        const n = next ? next.previousElementSibling : parent.lastElementChild;
+        if (n) now.push(n);
+      });
+      return now.length ? { n: now.length, boxes: now.map(rect) } : null;
     },
     // Move how an element looks into the style `cls`, giving it that class: its own style
     // goes, but for where it is and how big. Gives back what moved, as [property, value].

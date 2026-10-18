@@ -217,6 +217,10 @@ impl Render for DraggedLayer {
 /// Edits kept to undo. Each holds a whole screen's HTML, so a long session can't keep
 /// every one.
 const UNDO_LIMIT: usize = 200;
+/// What AI changes is outlined in this colour on the canvas.
+const AI_COLOR: u32 = 0x8b5cf6;
+/// How long the layers AI just changed stay outlined.
+const AI_TOUCH: Duration = Duration::from_millis(2500);
 
 /// Work for the renderer, started when the one before it is done.
 type Job = Box<dyn FnOnce(&mut DesignCanvas, &mut Context<DesignCanvas>)>;
@@ -256,6 +260,8 @@ pub(crate) struct DesignCanvas {
     drag: Drag,
     /// The element under the pointer, on which screen, and where.
     hover: Option<(String, dom::Path, dom::Box)>,
+    /// The layers AI changed last, on which screen, and when: outlined for a moment.
+    ai_touch: Option<(String, Vec<dom::Box>, Instant)>,
     /// Alt is held: show the spacing between the selection and what's under the pointer.
     measure: bool,
     drop: Option<Drop>,
@@ -578,6 +584,7 @@ impl DesignCanvas {
             fitted: false,
             drag: Drag::None,
             hover: None,
+            ai_touch: None,
             measure: false,
             drop: None,
             screen: None,
@@ -1663,35 +1670,37 @@ impl DesignCanvas {
             return None;
         }
         let body = match &self.ai {
-            Some(ai) if !ai.busy() => askbar::composer("design-ask-bar", true).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .min_h(px(32.))
-                    .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
-                    .child(
-                        div()
-                            .flex_1()
-                            .px_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(rgb(c_text()))
-                            .child(if ai.by_ai {
-                                format!("AI changed the design: {}", ai.task)
-                            } else {
-                                ai.task.clone()
-                            }),
-                    )
-                    .child(
-                        text_btn("design-ai-undo", "Undo", Some(IconName::Undo2), false)
-                            .on_click(cx.listener(|this, _, _, cx| this.undo_ai(cx))),
-                    )
-                    .child(
-                        text_btn("design-ai-keep", "Keep", Some(IconName::Check), true)
-                            .on_click(cx.listener(|this, _, _, cx| this.keep_ai(cx))),
-                    ),
-            ),
+            Some(ai) if !ai.busy() => askbar::composer("design-ask-bar", true)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .min_h(px(32.))
+                        .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
+                        .child(
+                            div()
+                                .flex_1()
+                                .px_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(rgb(c_text()))
+                                .child(if ai.by_ai {
+                                    format!("AI changed the design: {}", ai.task)
+                                } else {
+                                    ai.task.clone()
+                                }),
+                        )
+                        .child(
+                            text_btn("design-ai-undo", "Undo", Some(IconName::Undo2), false)
+                                .on_click(cx.listener(|this, _, _, cx| this.undo_ai(cx))),
+                        )
+                        .child(
+                            text_btn("design-ai-keep", "Keep", Some(IconName::Check), true)
+                                .on_click(cx.listener(|this, _, _, cx| this.keep_ai(cx))),
+                        ),
+                )
+                .when(ai.by_ai, |bar| bar.children(self.ai_screens_row(cx))),
             Some(ai) => askbar::composer("design-ask-bar", true).child(
                 askbar::working_row(
                     "design-wait-spin",
@@ -4273,6 +4282,39 @@ impl DesignCanvas {
                         .border_color(col(c_blue(), 0.8))
                         .into_any_element(),
                 );
+            }
+        }
+        // What AI just changed, outlined in its colour while it works.
+        if let Some((id, boxes, _)) = &self.ai_touch {
+            if let Some(s) = self.canvas.screen(id) {
+                for r in boxes {
+                    let (x, y) = self.screen_pt((s.x + r.x, s.y + r.y));
+                    out.push(
+                        div()
+                            .absolute()
+                            .left(px(x))
+                            .top(px(y))
+                            .w(px(r.w * z))
+                            .h(px(r.h * z))
+                            .border_2()
+                            .rounded_sm()
+                            .border_color(col(AI_COLOR, 0.9))
+                            .bg(col(AI_COLOR, 0.06))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top(px(-18.))
+                                    .left(px(-2.))
+                                    .px_1()
+                                    .rounded_sm()
+                                    .bg(rgb(AI_COLOR))
+                                    .text_size(px(10.))
+                                    .text_color(rgb(0xffffff))
+                                    .child("AI"),
+                            )
+                            .into_any_element(),
+                    );
+                }
             }
         }
         // A box being dragged across a screen to select what's in it.
