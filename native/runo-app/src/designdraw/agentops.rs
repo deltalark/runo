@@ -230,6 +230,8 @@ pub(crate) struct Call {
     pub action: Action,
     /// What it does, for undo: "set the text".
     pub what: String,
+    /// The same with its values, to remember when the person undoes it.
+    pub detail: String,
 }
 
 /// Read a call's input, or say what's wrong with it.
@@ -241,6 +243,7 @@ pub(crate) fn parse(tool: &str, input: &Value, text_styles: &[String]) -> Result
             selector: String::new(),
             action: Action::Selection,
             what: String::new(),
+            detail: String::new(),
         });
     }
     let screen = s("screen")
@@ -250,25 +253,42 @@ pub(crate) fn parse(tool: &str, input: &Value, text_styles: &[String]) -> Result
         .filter(|v| !v.trim().is_empty())
         .ok_or("Give a CSS selector for the layers.")?;
     let need = |k: &str| s(k).ok_or(format!("{tool} needs \"{k}\"."));
-    let (action, what) = match tool {
-        "design_set_text" => (
-            Action::Op("text", vec![json!(need("text")?)]),
-            "set the text",
-        ),
+    let sel = &selector;
+    let (action, what, detail) = match tool {
+        "design_set_text" => {
+            let text = need("text")?;
+            let detail = format!("set the text of {sel} to \"{text}\"");
+            (
+                Action::Op("text", vec![json!(text)]),
+                "set the text",
+                detail,
+            )
+        }
         "design_set_style" => {
             let map = input["styles"]
                 .as_object()
                 .filter(|m| !m.is_empty())
                 .ok_or("design_set_style needs \"styles\": property to value.")?;
+            let decls: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or_default()))
+                .collect();
+            let detail = format!("set {} on {sel}", decls.join("; "));
             (
                 Action::Op("styles", vec![Value::Object(map.clone())]),
                 "set the style",
+                detail,
             )
         }
-        "design_set_text_style" => (
-            Action::Op("textStyle", vec![json!(need("style")?), json!(text_styles)]),
-            "set the text style",
-        ),
+        "design_set_text_style" => {
+            let style = need("style")?;
+            let detail = format!("give {sel} the text style \"{style}\"");
+            (
+                Action::Op("textStyle", vec![json!(style), json!(text_styles)]),
+                "set the text style",
+                detail,
+            )
+        }
         "design_set_attribute" => {
             let name = need("name")?;
             if kept_attribute(&name) {
@@ -276,21 +296,35 @@ pub(crate) fn parse(tool: &str, input: &Value, text_styles: &[String]) -> Result
                     "{name} is kept by Design: ids, component marks and locks follow the layer, so they can't be set."
                 ));
             }
+            let value = need("value")?;
+            let detail = format!("set {name}=\"{value}\" on {sel}");
             (
-                Action::Op("attr", vec![json!(name), json!(need("value")?)]),
+                Action::Op("attr", vec![json!(name), json!(value)]),
                 "set an attribute",
+                detail,
             )
         }
-        "design_swap_variant" => (Action::Swap(need("variant")?), "swapped the variant"),
+        "design_swap_variant" => {
+            let variant = need("variant")?;
+            let detail = format!("show {sel} as the variant \"{variant}\"");
+            (Action::Swap(variant), "swapped the variant", detail)
+        }
         "design_insert" => {
             let inside = match need("position")?.as_str() {
                 "inside" => true,
                 "after" => false,
                 p => return Err(format!("position is \"inside\" or \"after\", not \"{p}\".")),
             };
+            let html = need("html")?;
+            let detail = format!(
+                "add {} {} {sel}",
+                html.chars().take(120).collect::<String>(),
+                if inside { "inside" } else { "after" }
+            );
             (
-                Action::Op("insertNew", vec![json!(need("html")?), json!(inside)]),
+                Action::Op("insertNew", vec![json!(html), json!(inside)]),
                 "added layers",
+                detail,
             )
         }
         "design_move" => {
@@ -299,12 +333,22 @@ pub(crate) fn parse(tool: &str, input: &Value, text_styles: &[String]) -> Result
                 "before" => false,
                 p => return Err(format!("position is \"before\" or \"after\", not \"{p}\".")),
             };
+            let target = need("target")?;
+            let detail = format!(
+                "move {sel} {} {target}",
+                if after { "after" } else { "before" }
+            );
             (
-                Action::Op("moveBy", vec![json!(need("target")?), json!(after)]),
+                Action::Op("moveBy", vec![json!(target), json!(after)]),
                 "moved layers",
+                detail,
             )
         }
-        "design_remove" => (Action::Op("remove", Vec::new()), "deleted layers"),
+        "design_remove" => (
+            Action::Op("remove", Vec::new()),
+            "deleted layers",
+            format!("delete {sel}"),
+        ),
         other => return Err(format!("Design has no action {other}.")),
     };
     Ok(Call {
@@ -312,6 +356,7 @@ pub(crate) fn parse(tool: &str, input: &Value, text_styles: &[String]) -> Result
         selector,
         action,
         what: what.to_string(),
+        detail,
     })
 }
 
@@ -328,6 +373,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.screen, "home");
+        assert_eq!(c.detail, "set padding: var(--space-4) on .card");
         assert_eq!(
             c.action,
             Action::Op("styles", vec![json!({ "padding": "var(--space-4)" })])

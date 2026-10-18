@@ -252,6 +252,8 @@ pub(crate) struct DesignCanvas {
     stale: HashSet<String>,
     error: Option<String>,
     notice: Option<(String, std::time::Instant)>,
+    /// An AI change the person just undid, offered to keep as a design rule.
+    lesson: Option<String>,
     focus: FocusHandle,
     pan: Pt,
     zoom: f32,
@@ -422,6 +424,8 @@ struct Step {
     html: String,
     /// What AI did, when it made the change through Design's actions.
     by_ai: Option<String>,
+    /// The same with its values and screen, to keep as a rule when the person undoes it.
+    lesson: Option<String>,
 }
 
 /// An agent's change to the design: the files as they were, to undo it.
@@ -577,6 +581,7 @@ impl DesignCanvas {
             stale: HashSet::new(),
             error,
             notice: None,
+            lesson: None,
             focus: cx.focus_handle(),
             pan: (40., 60.),
             zoom: 0.5,
@@ -2070,6 +2075,7 @@ impl DesignCanvas {
 
     fn say(&mut self, text: impl Into<String>) {
         self.notice = Some((text.into(), std::time::Instant::now()));
+        self.lesson = None;
     }
 
     // ---- Geometry
@@ -2296,6 +2302,7 @@ impl DesignCanvas {
             id: id.clone(),
             html: before,
             by_ai: None,
+            lesson: None,
         });
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
@@ -2780,7 +2787,13 @@ impl DesignCanvas {
         } else {
             self.redo.pop()
         };
-        let Some(Step { id, html, by_ai }) = entry else {
+        let Some(Step {
+            id,
+            html,
+            by_ai,
+            lesson,
+        }) = entry
+        else {
             return;
         };
         let now = std::fs::read_to_string(screen_path(&self.root, &id)).unwrap_or_default();
@@ -2789,11 +2802,16 @@ impl DesignCanvas {
                 "{} AI's change: {what}.",
                 if back { "Undid" } else { "Redid" }
             ));
+            // Undoing what AI did can teach it: offered beside the notice.
+            if back {
+                self.lesson = lesson.clone();
+            }
         }
         let step = Step {
             id: id.clone(),
             html: now,
             by_ai,
+            lesson,
         };
         if back {
             self.redo.push(step);
@@ -5293,7 +5311,22 @@ impl DesignCanvas {
                             .shadow_md()
                             .text_size(px(12.5))
                             .text_color(rgb(c_text()))
-                            .child(text),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .occlude()
+                            .child(text)
+                            .when(self.lesson.is_some(), |t| {
+                                t.child(
+                                    text_btn("design-learn", "Make it a rule", None, false)
+                                        .tooltip(tip(
+                                            "Add this to the design rules, so AI doesn't do it again",
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.learn(window, cx)
+                                        })),
+                                )
+                            }),
                     ),
             );
         }
