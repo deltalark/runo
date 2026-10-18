@@ -384,6 +384,8 @@ pub(crate) struct Bx {
     /// Its children run left to right (a flex row or a grid).
     #[serde(default)]
     pub row: bool,
+    #[serde(default)]
+    pub tag: String,
 }
 
 /// The deepest element under a point, leaving out `skip` and what's inside it.
