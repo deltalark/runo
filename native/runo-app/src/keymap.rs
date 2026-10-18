@@ -41,7 +41,7 @@ pub(crate) const SHORTCUTS: [Shortcut; 32] = [
         id: "toggle-terminal",
         title: "Terminal",
         desc: "Show the terminal and focus it, or hide the panel when it already has focus.",
-        // Ctrl on every platform, matching Cursor / VS Code (not Cmd on Mac).
+        // Ctrl on every platform, matching VS Code (not Cmd on Mac).
         default: &["ctrl-`"],
     },
     Shortcut {
