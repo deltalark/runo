@@ -3,6 +3,7 @@
 //! Prototype tab, the theme and the checks.
 
 use super::*;
+use crate::designdraw::export::{self, Format};
 use crate::designdraw::fields::{self, FIELDS, SHADOWS};
 use gpui_kit::component::Sizable;
 
@@ -808,6 +809,7 @@ impl DesignCanvas {
                     .child(caption(format!("{FOLDER}/screens/{}.html", s.id))),
             )
             .child(sec("Actions", None).child(actions))
+            .child(self.export_section(&s.name, cx))
             .child(sec("Insert", None).child(self.blocks(cx)))
     }
 
@@ -1252,17 +1254,18 @@ impl DesignCanvas {
             self.choice_row("box-shadow", el, &SHADOWS, cx),
         )));
 
-        out.child(
-            sec(
-                if el.is_container() && !multi {
-                    "Insert inside"
-                } else {
-                    "Insert after"
-                },
-                None,
+        out.child(self.export_section(if multi { "selection" } else { &el.label }, cx))
+            .child(
+                sec(
+                    if el.is_container() && !multi {
+                        "Insert inside"
+                    } else {
+                        "Insert after"
+                    },
+                    None,
+                )
+                .child(self.blocks(cx)),
             )
-            .child(self.blocks(cx)),
-        )
     }
 
     /// The theme's colours as swatches that set a style to the token.
@@ -1293,6 +1296,166 @@ impl DesignCanvas {
             );
         }
         row
+    }
+
+    // ---- Export
+
+    /// The Export section: a scale and a format, then export to a file or copy.
+    fn export_section(&self, what: &str, cx: &mut Context<Self>) -> Div {
+        let picture = self.export_format != Format::Html;
+        let mut scales = div().flex().gap(px(4.));
+        for n in [1u32, 2, 3] {
+            scales = scales.child(
+                chip_btn(
+                    ("design-export-scale", n as usize),
+                    format!("{n}x"),
+                    self.export_scale == n,
+                )
+                .when(!picture, |el| el.opacity(0.4))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.export_scale = n;
+                    cx.notify();
+                })),
+            );
+        }
+        let mut formats = div().flex().gap(px(4.));
+        for (i, f) in Format::ALL.into_iter().enumerate() {
+            formats = formats.child(
+                chip_btn(
+                    ("design-export-format", i),
+                    f.label(),
+                    self.export_format == f,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.export_format = f;
+                    cx.notify();
+                })),
+            );
+        }
+        let label = format!("Export {what}");
+        sec("Export", None)
+            .child(div().flex().gap(px(8.)).child(scales).child(formats))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(4.))
+                    .child(
+                        text_btn("design-export", label, Some(IconName::Download), false)
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .on_click(cx.listener(|this, _, _, cx| this.export(false, cx))),
+                    )
+                    .when(picture, |el| {
+                        el.child(
+                            mini("design-export-copy", IconName::Copy, "Copy as PNG", false)
+                                .on_click(cx.listener(|this, _, _, cx| this.export(true, cx))),
+                        )
+                    }),
+            )
+    }
+
+    /// Export the selection, or the selected screen: to a file in `design/exports/`, or
+    /// as a picture on the clipboard.
+    fn export(&mut self, copy: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.screen.clone() else {
+            return;
+        };
+        let picked: Vec<Element> = self.element.iter().chain(&self.also).cloned().collect();
+        let part = match picked.as_slice() {
+            [] => None,
+            [one] => Some(one.label.clone()),
+            _ => Some("selection".to_string()),
+        };
+        let format = if copy {
+            Format::Png
+        } else {
+            self.export_format
+        };
+        let name = export::file_name(&id, part.as_deref(), self.export_scale, format);
+        if format == Format::Html {
+            let design = folder(&self.root);
+            let html = std::fs::read_to_string(screen_path(&self.root, &id)).unwrap_or_default();
+            if picked.is_empty() {
+                let page = export::standalone(&html, &design, None);
+                self.save_export(&name, page.into_bytes(), cx);
+                return;
+            }
+            let Some(device) = self.canvas.screen(&id).map(|s| s.device) else {
+                return;
+            };
+            let paths = self.selected_paths();
+            self.run(
+                cx,
+                move |r| r.eval(&id, device, &dom::call("copy", &[json!(paths)])),
+                move |this, out, cx| {
+                    let parts: Vec<String> = out
+                        .ok()
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default();
+                    let page = export::standalone(&html, &design, Some(&parts.join("\n")));
+                    this.save_export(&name, page.into_bytes(), cx);
+                },
+            );
+            return;
+        }
+        let Some(shot) = self.shots.get(&id) else {
+            self.say("This screen isn't drawn yet. Try again in a moment.");
+            return;
+        };
+        let size = shot.image.size(0);
+        let (w, h) = (size.width.0 as u32, size.height.0 as u32);
+        let density = w as f32 / shot.size.0.max(1.);
+        // The box around everything picked.
+        let area = (!picked.is_empty()).then(|| {
+            let l = picked.iter().map(|e| e.rect.x).fold(f32::MAX, f32::min);
+            let t = picked.iter().map(|e| e.rect.y).fold(f32::MAX, f32::min);
+            let r = picked
+                .iter()
+                .map(|e| e.rect.x + e.rect.w)
+                .fold(f32::MIN, f32::max);
+            let b = picked
+                .iter()
+                .map(|e| e.rect.y + e.rect.h)
+                .fold(f32::MIN, f32::max);
+            dom::Box {
+                x: l,
+                y: t,
+                w: r - l,
+                h: b - t,
+            }
+        });
+        let Some(bytes) = shot.image.as_bytes(0) else {
+            return;
+        };
+        let pic = export::picture(bytes, w, h, density, area.as_ref(), self.export_scale);
+        let encoded = pic
+            .ok_or_else(|| "the drawing couldn't be read".to_string())
+            .and_then(|p| export::encode(&p, format));
+        match encoded {
+            Ok(bytes) if copy => {
+                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                    ImageFormat::Png,
+                    bytes,
+                )));
+                self.say(format!("Copied as a PNG at {}x.", self.export_scale));
+            }
+            Ok(bytes) => self.save_export(&name, bytes, cx),
+            Err(e) => self.say(format!("Couldn't export: {e}")),
+        }
+    }
+
+    fn save_export(&mut self, name: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        let dir = export::folder(&self.root);
+        let file = dir.join(name);
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, bytes)) {
+            Ok(()) => {
+                self.note_writes();
+                self.say(format!("Exported {FOLDER}/exports/{name}"));
+            }
+            Err(e) => self.say(format!("Couldn't save {}: {e}", file.display())),
+        }
+        cx.notify();
     }
 
     // ---- Prototype
