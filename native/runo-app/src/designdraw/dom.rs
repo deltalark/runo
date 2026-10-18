@@ -390,7 +390,24 @@ if (!window.__runo) window.__runo = (() => {
       if (!n) return;
       if (inside) el.appendChild(n); else el.after(n);
     },
+    // An agent's new layers: never with an id copied from another layer.
+    insertNew: (el, s, inside) => ops.insert(el, noRid(s), inside),
+    moveBy: (el, sel, after) => {
+      const t = document.querySelector(sel);
+      if (!t || t === el || el.contains(t)) return;
+      if (after) t.after(el); else t.before(el);
+    },
+    swapTo: (el, html) => {
+      const n = parse(html);
+      if (!n) return;
+      keep(el, n);
+      el.replaceWith(n);
+    },
   };
+  // The layers an agent names by a CSS selector, as Design's own layers: not Design's
+  // helpers, and not inside a locked layer.
+  const matching = (sel) => Array.from(document.querySelectorAll(sel))
+    .filter((el) => !SKIP.has(el.tagName) && el !== document.documentElement);
   return {
     pick: (x, y) => {
       // A point below the fold is scrolled into view first: only what shows can be hit.
@@ -588,6 +605,39 @@ if (!window.__runo) window.__runo = (() => {
       return true;
     },
     infos: (ps) => ps.map(at).filter(Boolean).map(info),
+    // What an agent's selector matches, before changing it: how many, and each one's
+    // component and variant; or why it can't be changed.
+    find: (sel) => {
+      let els;
+      try { els = matching(sel); } catch (e) { return { error: `"${sel}" isn't a CSS selector.` }; }
+      if (!els.length) return { error: `Nothing on this screen matches "${sel}".` };
+      const locked = els.filter((el) => el.closest('[data-locked]')).length;
+      if (locked) return { error: `${locked} of the ${els.length} layers matching "${sel}" are locked by the person, so they stay as they are.` };
+      return { n: els.length, components: els.map((el) => [el.dataset.component || null, el.dataset.variant || null]) };
+    },
+    // A CSS selector an agent can name each layer at `ps` by: its id, or its place.
+    selectors: (ps) => ps.map(at).filter(Boolean).map((el) => {
+      if (el.dataset.rid) return `[data-rid="${el.dataset.rid}"]`;
+      const steps = [];
+      for (let e = el; e && e !== document.body; e = e.parentElement) {
+        steps.unshift(`${e.tagName.toLowerCase()}:nth-child(${Array.from(e.parentElement.children).indexOf(e) + 1})`);
+      }
+      return ['body', ...steps].join(' > ');
+    }),
+    // Run the operation `name` on every layer `sel` matches, last on the page first.
+    agent: (sel, name, args) => {
+      const els = matching(sel).filter((el) => !el.closest('[data-locked]'));
+      if (!els.length || !ops[name]) return null;
+      for (const el of els.reverse()) ops[name](el, ...args);
+      return els.length;
+    },
+    // Swap each matching instance for the HTML given for it, in page order.
+    agentSwap: (sel, htmls) => {
+      const els = matching(sel).filter((el) => !el.closest('[data-locked]'));
+      let n = 0;
+      els.forEach((el, i) => { if (htmls[i]) { ops.swapTo(el, htmls[i]); n++; } });
+      return n || null;
+    },
     // Move how an element looks into the style `cls`, giving it that class: its own style
     // goes, but for where it is and how big. Gives back what moved, as [property, value].
     takeLook: (p, cls) => {

@@ -49,7 +49,15 @@ pub fn handle(dir: &str, request: &Value) -> Option<Value> {
         "prompts/list" => Ok(json!({ "prompts": prompt_list(&load_state(), dir) })),
         "prompts/get" => prompt_get(&load_state(), dir, params["name"].as_str().unwrap_or("")),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools() })),
+        "tools/list" => {
+            let mut all = tools();
+            if crate::designdraw::agentops::offered(dir) {
+                if let Some(list) = all.as_array_mut() {
+                    list.extend(crate::designdraw::agentops::tools());
+                }
+            }
+            Ok(json!({ "tools": all }))
+        }
         "tools/call" => Ok(call(
             dir,
             params["name"].as_str().unwrap_or(""),
@@ -211,6 +219,12 @@ fn call(dir: &str, name: &str, args: &Value) -> Value {
             dir,
             args,
             crate::approvals::wait(),
+        ),
+        design if design.starts_with("design_") => crate::designdraw::agentops::call(
+            &crate::designdraw::agentops::folder(),
+            dir,
+            design,
+            args,
         ),
         other => failure(format!("Unknown tool {other}")),
     }

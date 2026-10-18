@@ -81,6 +81,12 @@ pub(crate) fn context(c: &Canvas) -> String {
          rather than rename one. Leave {FOLDER}/.versions/ (the version history) and \
          {FOLDER}/handoff/ (what was handed off to be built) as they are. Runo checks \
          this after your turn and puts back lost ids, library files and mapped variants. \
+         To change layers already on a screen, use Runo's design tools when you have them \
+         (design_set_text, design_set_style, design_set_text_style, design_set_attribute, \
+         design_swap_variant, design_insert, design_move, design_remove; \
+         design_selection says what the person has selected): they make the change the way \
+         Design's own controls do, each one on the person's undo history. Write the files \
+         for new screens and for changes too big for them. \
          New screen files show up on the canvas by themselves. Make the \
          change by editing these files directly: Runo shows it live and the user keeps or \
          undoes it, so don't ask before editing. Don't change files outside {FOLDER}/ for this \
@@ -519,6 +525,7 @@ mod tests {
         assert!(text.contains("never copy it onto another element"));
         assert!(text.contains("code-map.toml"));
         assert!(text.contains("same data-name on each"));
+        assert!(text.contains("design_set_style"));
         assert!(text.contains(
             "- Button (design/components/brand/button.html, from the brand library: use it, don't change it): Default"
         ));
