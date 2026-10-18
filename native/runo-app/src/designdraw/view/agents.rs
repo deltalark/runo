@@ -7,6 +7,10 @@ use super::*;
 use crate::designdraw::agentops::{self, Action, Request};
 use crate::designdraw::styles;
 
+/// An action that changed its screen: the screen before, how it looks now, and how many
+/// layers it changed, where they are now.
+type Landed = (String, Shot, (u64, Vec<dom::Box>));
+
 impl DesignCanvas {
     /// Take agents' calls every moment, whether or not the canvas is on screen: the agent
     /// waits for each answer.
@@ -76,7 +80,7 @@ impl DesignCanvas {
         let find = dom::call("find", &[json!(sel), json!(scope.map(|(_, p)| p))]);
         self.run(
             cx,
-            move |r| -> Result<Option<(String, Shot, u64)>, String> {
+            move |r| -> Result<Option<Landed>, String> {
                 let found = r.eval(&id, device, &find)?;
                 if let Some(e) = found["error"].as_str() {
                     return Err(e.to_string());
@@ -104,12 +108,16 @@ impl DesignCanvas {
                     }
                     Action::Selection => unreachable!(),
                 };
-                Ok(r.edit_giving(&id, device, &js)?
-                    .map(|(before, shot, n)| (before, shot, n.as_u64().unwrap_or(0))))
+                Ok(r.edit_giving(&id, device, &js)?.map(|(before, shot, done)| {
+                    let boxes: Vec<dom::Box> =
+                        serde_json::from_value(done["boxes"].clone()).unwrap_or_default();
+                    (before, shot, (done["n"].as_u64().unwrap_or(0), boxes))
+                }))
             },
             move |this, out, cx| match out {
-                Ok(Some((before, shot, n))) => {
+                Ok(Some((before, shot, (n, boxes)))) => {
                     this.landed(call.screen.clone(), before, shot, After::Same, cx);
+                    this.show_ai_touch(call.screen.clone(), boxes, call.what.clone(), cx);
                     if let Some(step) = this.undo.last_mut() {
                         step.by_ai = Some(call.what.clone());
                     }
@@ -216,5 +224,102 @@ impl DesignCanvas {
             }
         }
         out
+    }
+
+    /// Outline for a moment the layers AI just changed, so its work shows as it happens.
+    fn show_ai_touch(
+        &mut self,
+        screen: String,
+        boxes: Vec<dom::Box>,
+        what: String,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self
+            .canvas
+            .screen(&screen)
+            .map_or_else(|| screen.clone(), |s| s.name.clone());
+        self.say(format!("AI {what} on {name}."));
+        self.ai_touch = Some((screen, boxes, Instant::now()));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AI_TOUCH).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .ai_touch
+                    .as_ref()
+                    .is_some_and(|(_, _, at)| at.elapsed() >= AI_TOUCH)
+                {
+                    this.ai_touch = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Put one screen back as it was before AI's change, keeping the rest of the change.
+    pub(super) fn reject_screen(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(ai) = &self.ai else {
+            return;
+        };
+        let path = screen_path(&self.root, id);
+        let name = self
+            .canvas
+            .screen(id)
+            .map_or_else(|| id.to_string(), |s| s.name.clone());
+        let put = match ai.before.get(&path) {
+            Some(was) => std::fs::write(&path, was),
+            None => std::fs::remove_file(&path),
+        };
+        if let Err(e) = put {
+            self.say(format!("Couldn't put {name} back: {e}"));
+            cx.notify();
+            return;
+        }
+        // Its steps were made on the HTML that's gone.
+        self.undo.retain(|s| s.id != id);
+        self.redo.retain(|s| s.id != id);
+        self.check_files(cx);
+        self.say(format!(
+            "Put {name} back as it was. Keep or Undo the rest of AI's change."
+        ));
+        cx.notify();
+    }
+
+    /// The screens AI's change touched, each to put back on its own, under Keep and Undo.
+    pub(super) fn ai_screens_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let changed = self.ai_screens();
+        if changed.is_empty() {
+            return None;
+        }
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .pt_1()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_muted()))
+                    .child("Changed:"),
+            );
+        for (i, (id, new)) in changed.into_iter().enumerate() {
+            let name = self
+                .canvas
+                .screen(&id)
+                .map_or_else(|| id.clone(), |s| s.name.clone());
+            let label = if new { format!("{name} (new)") } else { name };
+            row = row.child(
+                crate::askbar::target_chip(("design-ai-screen", i), IconName::Smartphone, label)
+                    .tooltip(tip(if new {
+                        "Take this new screen away, keeping the rest of AI's change"
+                    } else {
+                        "Put this screen back, keeping the rest of AI's change"
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| this.reject_screen(&id, cx))),
+            );
+        }
+        Some(row)
     }
 }
