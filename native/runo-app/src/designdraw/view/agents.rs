@@ -57,9 +57,23 @@ impl DesignCanvas {
                 ),
             );
         };
+        // An ask about the selection changes only the selected layers.
+        let scope = self
+            .ai
+            .as_ref()
+            .filter(|ai| ai.busy())
+            .and_then(|ai| ai.scope.clone());
+        if let Some((screen, _)) = scope.as_ref().filter(|(s, _)| *s != call.screen) {
+            return reply(
+                false,
+                format!(
+                    "This ask is about the layers selected on the screen \"{screen}\", so other screens stay as they are."
+                ),
+            );
+        }
         let library = self.library.clone();
         let (id, sel, action) = (call.screen.clone(), call.selector.clone(), call.action);
-        let find = dom::call("find", &[json!(sel)]);
+        let find = dom::call("find", &[json!(sel), json!(scope.map(|(_, p)| p))]);
         self.run(
             cx,
             move |r| -> Result<Option<(String, Shot, u64)>, String> {
@@ -164,5 +178,43 @@ impl DesignCanvas {
                 reply(true, text);
             },
         );
+    }
+
+    /// After an ask about the selection, put back the other screens AI changed, and take
+    /// away screens it added. Gives their names.
+    pub(super) fn keep_scope(&mut self, before: &HashMap<PathBuf, Vec<u8>>) -> Vec<String> {
+        let Some((scoped, _)) = self.ai.as_ref().and_then(|ai| ai.scope.clone()) else {
+            return Vec::new();
+        };
+        let dir = folder(&self.root).join("screens");
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            let Some(id) = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|_| p.extension().is_some_and(|x| x == "html"))
+            else {
+                continue;
+            };
+            if id == scoped {
+                continue;
+            }
+            let name = self
+                .canvas
+                .screen(id)
+                .map_or_else(|| id.to_string(), |s| s.name.clone());
+            let put = match before.get(&p) {
+                Some(was) if std::fs::read(&p).ok().as_ref() != Some(was) => {
+                    std::fs::write(&p, was)
+                }
+                Some(_) => continue,
+                None => std::fs::remove_file(&p),
+            };
+            if put.is_ok() {
+                out.push(name);
+            }
+        }
+        out
     }
 }

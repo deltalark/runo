@@ -607,12 +607,17 @@ if (!window.__runo) window.__runo = (() => {
     infos: (ps) => ps.map(at).filter(Boolean).map(info),
     // What an agent's selector matches, before changing it: how many, and each one's
     // component and variant; or why it can't be changed.
-    find: (sel) => {
+    find: (sel, scope) => {
       let els;
       try { els = matching(sel); } catch (e) { return { error: `"${sel}" isn't a CSS selector.` }; }
       if (!els.length) return { error: `Nothing on this screen matches "${sel}".` };
       const locked = els.filter((el) => el.closest('[data-locked]')).length;
       if (locked) return { error: `${locked} of the ${els.length} layers matching "${sel}" are locked by the person, so they stay as they are.` };
+      if (scope) {
+        const within = scope.map(at).filter(Boolean);
+        const out = els.filter((el) => !within.some((w) => w.contains(el))).length;
+        if (out) return { error: `${out} of the ${els.length} layers matching "${sel}" are outside what the person selected, and this ask is about the selection only. Narrow the selector to the selected layers or what's inside them.` };
+      }
       return { n: els.length, components: els.map((el) => [el.dataset.component || null, el.dataset.variant || null]) };
     },
     // A CSS selector an agent can name each layer at `ps` by: its id, or its place.
