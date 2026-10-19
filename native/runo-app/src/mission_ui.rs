@@ -3,7 +3,7 @@
 //! branch, and landing the mission. The page is in `mission_view.rs`.
 
 use super::*;
-use crate::mission::{self, Mission, PartState, Stage};
+use crate::mission::{self, Mark, Mission, PartState, Stage};
 use crate::proof;
 
 /// The New mission form's choices; the goal is in its own text box.
@@ -25,6 +25,13 @@ fn last_ask(session: &Session) -> Option<usize> {
 }
 
 impl RunoApp {
+    /// Add a line to a mission's activity log.
+    pub(crate) fn mission_log(&mut self, mid: u64, mark: Mark, text: impl Into<String>) {
+        if let Some(m) = self.mission_mut(mid) {
+            m.record(crate::workspace::unix_now(), mark, text);
+        }
+    }
+
     pub(crate) fn mission(&self, mid: u64) -> Option<&Mission> {
         self.state.missions.iter().find(|m| m.id == mid)
     }
@@ -198,8 +205,25 @@ impl RunoApp {
         );
         if let Some(m) = self.mission_mut(mid) {
             m.stage = Stage::Planning;
+            m.planned = crate::workspace::unix_now();
             m.note.clear();
         }
+        cx.notify();
+    }
+
+    /// Plan again with what the person typed under the plan.
+    pub(crate) fn replan(&mut self, mid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self
+            .mission(mid)
+            .is_some_and(|m| matches!(m.stage, Stage::Plan | Stage::Failed))
+        {
+            return;
+        }
+        let feedback = self.mission_feedback.read(cx).value().trim().to_string();
+        self.mission_feedback
+            .update(cx, |i, cx| i.set_value("", window, cx));
+        self.run_planner(mid, feedback, cx);
+        self.save();
         cx.notify();
     }
 
@@ -315,6 +339,15 @@ impl RunoApp {
                     m.stage = Stage::Running;
                     m.started = crate::workspace::unix_now();
                     m.note.clear();
+                    let n = m.parts.len();
+                    m.record(
+                        m.started,
+                        Mark::Start,
+                        format!(
+                            "Mission started with {n} part{}",
+                            if n == 1 { "" } else { "s" }
+                        ),
+                    );
                 }
                 if !self.expanded.contains(&project.id) {
                     self.expanded.push(project.id);
@@ -466,6 +499,15 @@ impl RunoApp {
                     p.started = crate::workspace::unix_now();
                     p.note.clear();
                 }
+                self.mission_log(
+                    mid,
+                    Mark::Part,
+                    format!(
+                        "{} started {}",
+                        agent::provider(&part.agent).name,
+                        part.title
+                    ),
+                );
                 self.state.log(id, format!("Mission part: {}", part.title));
                 crate::applog::info(
                     "mission",
@@ -493,6 +535,7 @@ impl RunoApp {
         p.note = note.clone();
         let title = p.title.clone();
         let session = p.session;
+        self.mission_log(mid, Mark::Stuck, format!("{title} needs you"));
         crate::applog::warn("mission", format!("mission #{mid}: {title}: {note}"));
         if session != 0 {
             self.state
@@ -509,9 +552,43 @@ impl RunoApp {
     }
 
     fn set_part(&mut self, mid: u64, index: usize, state: PartState, note: &str) {
-        if let Some(p) = self.mission_mut(mid).and_then(|m| m.parts.get_mut(index)) {
-            p.state = state;
-            p.note = note.to_string();
+        let Some(m) = self.mission_mut(mid) else {
+            return;
+        };
+        let Some(p) = m.parts.get_mut(index) else {
+            return;
+        };
+        let was = p.state;
+        p.state = state;
+        p.note = note.to_string();
+        let (title, name) = (p.title.clone(), agent::provider(&p.agent).name);
+        let line = match (was, state) {
+            (PartState::Checking, PartState::Working) => Some((
+                Mark::Fix,
+                format!("Checks failed on {title}. {name} is fixing them"),
+            )),
+            (PartState::Checking, PartState::Reviewing) => Some((
+                Mark::Passed,
+                format!("Checks passed on {title}. A second agent is reviewing it"),
+            )),
+            (PartState::Checking, PartState::Proved) => {
+                Some((Mark::Passed, format!("Checks passed on {title}")))
+            }
+            (PartState::Reviewing, PartState::Proved) => Some((
+                Mark::Review,
+                format!("The second opinion found nothing to change in {title}"),
+            )),
+            (PartState::Reviewing, PartState::Working) => Some((
+                Mark::Review,
+                format!("The second opinion left notes on {title}. {name} is on them"),
+            )),
+            (PartState::Working, PartState::Reviewing) => {
+                Some((Mark::Review, format!("A second agent is reviewing {title}")))
+            }
+            _ => None,
+        };
+        if let Some((mark, text)) = line {
+            m.record(crate::workspace::unix_now(), mark, text);
         }
     }
 
@@ -719,6 +796,11 @@ impl RunoApp {
                 if let Some(p) = self.mission_mut(mid).and_then(|m| m.parts.get_mut(index)) {
                     p.finished = crate::workspace::unix_now();
                 }
+                self.mission_log(
+                    mid,
+                    Mark::Merge,
+                    format!("{} merged into the mission branch", part.title),
+                );
                 self.state.log(
                     part.session,
                     format!("Merged into {target}: {}", part.title),
@@ -744,6 +826,15 @@ impl RunoApp {
                     p.state = PartState::Working;
                     p.note = format!("Bringing in {target} to resolve conflicts");
                 }
+                self.mission_log(
+                    mid,
+                    Mark::Conflict,
+                    format!(
+                        "{} conflicts with {target}. {} is resolving it",
+                        part.title,
+                        agent::provider(&part.agent).name
+                    ),
+                );
                 self.save();
                 let id = part.session;
                 let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
@@ -796,6 +887,11 @@ impl RunoApp {
         };
         m.stage = Stage::Landing;
         m.note = "Every part is merged. Running the checks on the mission branch.".into();
+        m.record(
+            crate::workspace::unix_now(),
+            Mark::Land,
+            "Every part is in. Running the checks on the mission branch",
+        );
         let lead = m.lead;
         let project = m.project_id;
         let checks = self
@@ -847,6 +943,8 @@ impl RunoApp {
                         "The parts work alone but not together. {} is fixing the mission branch.",
                         agent::provider(&provider).name
                     );
+                    let note = m.note.trim_end_matches('.').to_string();
+                    m.record(crate::workspace::unix_now(), Mark::Fix, note);
                 }
                 let opts = cx.global::<AppSettings>().agent(&provider);
                 this.start_turn(lead, prompt, Vec::new(), &opts);
@@ -901,6 +999,7 @@ impl RunoApp {
         };
         m.stage = Stage::Ready;
         m.finished = crate::workspace::unix_now();
+        m.record(m.finished, Mark::Ready, "Ready to ship");
         m.note = format!("{note} Review the mission branch, then open a pull request or merge it.");
         let (lead, goal) = (m.lead, m.goal.clone());
         if let Some(s) = self.state.session_mut(lead) {
@@ -939,6 +1038,7 @@ impl RunoApp {
         if let Some(p) = self.mission_mut(mid).and_then(|m| m.parts.get_mut(index)) {
             p.conflicts = 0;
         }
+        self.mission_log(mid, Mark::Part, format!("Trying {} again", part.title));
         if errored || failed_checks {
             if let Some(s) = self.state.session_mut(id) {
                 if let Some(p) = s.proof.as_mut() {
@@ -968,6 +1068,13 @@ impl RunoApp {
 
     pub(crate) fn skip_part(&mut self, mid: u64, index: usize, cx: &mut Context<Self>) {
         self.set_part(mid, index, PartState::Skipped, "Skipped");
+        if let Some(title) = self
+            .mission(mid)
+            .and_then(|m| m.parts.get(index))
+            .map(|p| p.title.clone())
+        {
+            self.mission_log(mid, Mark::Skip, format!("{title} skipped"));
+        }
         self.save();
         self.mission_tick(mid, cx);
         cx.notify();

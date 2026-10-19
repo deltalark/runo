@@ -12,6 +12,8 @@ pub const MAX_PARTS: usize = 8;
 pub const PART_FIX_ROUNDS: u32 = 2;
 /// Times a part goes back to its agent to resolve conflicts with the mission branch.
 pub const CONFLICT_ROUNDS: u32 = 2;
+/// Entries a mission's log keeps; the oldest go first.
+pub const LOG_LIMIT: usize = 200;
 /// How long the planner may take.
 pub const PLAN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -177,9 +179,54 @@ pub struct Mission {
     pub started: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub finished: u64,
+    /// Unix seconds the planner last started.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub planned: u64,
+    /// What happened, oldest first, for the activity feed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub log: Vec<Entry>,
+}
+
+/// What kind of thing happened on a mission, for the feed's icon and colour.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Mark {
+    #[default]
+    Info,
+    Start,
+    Part,
+    Passed,
+    Fix,
+    Review,
+    Conflict,
+    Merge,
+    Stuck,
+    Skip,
+    Pause,
+    Land,
+    Ready,
+}
+
+/// One line of a mission's log.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct Entry {
+    pub at: u64,
+    pub mark: Mark,
+    pub text: String,
 }
 
 impl Mission {
+    /// Add a line to the log, dropping the oldest past `LOG_LIMIT`.
+    pub fn record(&mut self, at: u64, mark: Mark, text: impl Into<String>) {
+        self.log.push(Entry {
+            at,
+            mark,
+            text: text.into(),
+        });
+        let over = self.log.len().saturating_sub(LOG_LIMIT);
+        self.log.drain(..over);
+    }
+
     /// Parts settled, of all.
     pub fn progress(&self) -> (usize, usize) {
         (
@@ -608,6 +655,17 @@ mod tests {
         assert_eq!(m.startable(), vec![2]);
         m.stage = Stage::Paused;
         assert!(m.startable().is_empty());
+    }
+
+    #[test]
+    fn the_log_keeps_the_newest_lines() {
+        let mut m = Mission::default();
+        for i in 0..LOG_LIMIT + 5 {
+            m.record(i as u64, Mark::Info, format!("line {i}"));
+        }
+        assert_eq!(m.log.len(), LOG_LIMIT);
+        assert_eq!(m.log[0].text, "line 5");
+        assert_eq!(m.log.last().map(|e| e.at), Some((LOG_LIMIT + 4) as u64));
     }
 
     #[test]

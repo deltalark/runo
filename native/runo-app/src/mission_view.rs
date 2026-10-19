@@ -2,7 +2,7 @@
 //! plan laid out in waves, the live board and the ready-to-ship result.
 
 use super::*;
-use crate::mission::{Mission, Part, PartState, Stage};
+use crate::mission::{Mark, Mission, Part, PartState, Stage};
 
 /// Width of the list of missions.
 const LIST_WIDTH: f32 = 280.;
@@ -863,6 +863,7 @@ impl RunoApp {
                             if let Some(m) = this.mission_mut(mid) {
                                 m.stage = Stage::Paused;
                             }
+                            this.mission_log(mid, Mark::Pause, "Paused");
                             this.save();
                             cx.notify();
                         })),
@@ -876,6 +877,7 @@ impl RunoApp {
                             if let Some(m) = this.mission_mut(mid) {
                                 m.stage = Stage::Running;
                             }
+                            this.mission_log(mid, Mark::Start, "Resumed");
                             this.mission_tick(mid, cx);
                             this.save();
                             cx.notify();
@@ -893,18 +895,66 @@ impl RunoApp {
                         })),
                 )
             })
-            .child(
-                self.ghost_button_sized(
-                    ("mission-delete", mid as usize),
-                    IconName::Trash,
-                    "Delete the mission (its sessions stay)",
-                    30.,
+            .when(on_board, |el| {
+                let shown = !self.mission_feed_hidden;
+                el.child(
+                    self.ghost_button_sized(
+                        "mission-feed-toggle",
+                        IconName::Activity,
+                        if shown {
+                            "Hide the activity"
+                        } else {
+                            "Show the activity"
+                        },
+                        30.,
+                    )
+                    .when(shown, |el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.mission_feed_hidden = !this.mission_feed_hidden;
+                        cx.notify();
+                    })),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.delete_mission(mid);
-                    cx.notify();
-                })),
-            );
+            })
+            .map(|el| {
+                if self.mission_deleting == Some(mid) {
+                    el.child(
+                        self.button("mission-delete-yes", "Delete mission", false)
+                            .h(px(30.))
+                            .px_3()
+                            .text_size(px(12.))
+                            .border_color(rgb(shade(c_red(), 0.6)))
+                            .bg(rgb(shade(c_red(), 0.14)))
+                            .text_color(rgb(c_red()))
+                            .child(icon(IconName::Trash, 12., c_red()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.mission_deleting = None;
+                                this.delete_mission(mid);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        small(self, "mission-delete-no", "Keep", false).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.mission_deleting = None;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                } else {
+                    el.child(
+                        self.ghost_button_sized(
+                            ("mission-delete", mid as usize),
+                            IconName::Trash,
+                            "Delete the mission (its sessions and branches stay)",
+                            30.,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mission_deleting = Some(mid);
+                            cx.notify();
+                        })),
+                    )
+                }
+            });
 
         let header = div()
             .flex_none()
@@ -1117,7 +1167,7 @@ impl RunoApp {
     /// While the planner reads: what it's doing, for how long, and the plan taking shape.
     fn planning_view(&self, m: &Mission) -> AnyElement {
         let planner = agent::provider(m.agents.first().map(String::as_str).unwrap_or("claude"));
-        let secs = since(m.created, 0);
+        let secs = since(if m.planned > 0 { m.planned } else { m.created }, 0);
         let ghost = |i: usize, w: f32| {
             div()
                 .flex_1()
@@ -1349,13 +1399,7 @@ impl RunoApp {
                                 if has_parts { c_secondary() } else { c_canvas() },
                             ))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                let feedback =
-                                    this.mission_feedback.read(cx).value().trim().to_string();
-                                this.mission_feedback
-                                    .update(cx, |i, cx| i.set_value("", window, cx));
-                                this.run_planner(mid, feedback, cx);
-                                this.save();
-                                cx.notify();
+                                this.replan(mid, window, cx);
                             })),
                     )
                     .when(has_parts, |el| {
@@ -1605,7 +1649,9 @@ impl RunoApp {
             .min_h_0()
             .flex()
             .child(flow)
-            .child(self.mission_feed(m))
+            .when(!self.mission_feed_hidden, |el| {
+                el.child(self.mission_feed(m))
+            })
             .into_any_element()
     }
 
@@ -1969,7 +2015,7 @@ impl RunoApp {
                 .rounded_lg()
                 .border_1()
                 .border_color(rgb(c_border()))
-                .bg(rgb(settings::mix(c_canvas(), 0x000000, 0.12)))
+                .bg(rgb(settings::mix(0x000000, c_canvas(), 0.2)))
                 .font_family("monospace")
                 .text_size(px(10.5))
                 .children(console.into_iter().enumerate().map(|(i, line)| {
@@ -2100,7 +2146,11 @@ impl RunoApp {
                                 .text_size(px(11.5))
                                 .text_color(rgb(c_muted()))
                                 .child(icon(IconName::Hourglass, 11., c_muted()))
-                                .child("Starts when an agent is free"),
+                                .child(if m.stage == Stage::Paused {
+                                    "Starts when you resume"
+                                } else {
+                                    "Starts when an agent is free"
+                                }),
                         )
                     })
                     .when(stuck && !part.note.is_empty(), |el| {
@@ -2146,8 +2196,16 @@ impl RunoApp {
         let now = crate::workspace::unix_now();
         let live = matches!(m.stage, Stage::Running | Stage::Landing);
         // (when, icon, tone, text)
-        let mut events: Vec<(u64, IconName, u32, String)> = Vec::new();
-        if m.started > 0 {
+        let mut events: Vec<(u64, IconName, u32, String)> = m
+            .log
+            .iter()
+            .map(|e| {
+                let (glyph, tone) = mark_look(e.mark);
+                (e.at, glyph, tone, e.text.clone())
+            })
+            .collect();
+        // Missions from before the log: what their parts' times tell.
+        if m.log.is_empty() && m.started > 0 {
             events.push((
                 m.started,
                 IconName::Rocket,
@@ -2159,7 +2217,7 @@ impl RunoApp {
                 ),
             ));
         }
-        for p in &m.parts {
+        for p in m.parts.iter().filter(|_| m.log.is_empty()) {
             let name = agent::provider(&p.agent).name;
             if p.started > 0 {
                 events.push((
@@ -2186,7 +2244,7 @@ impl RunoApp {
                 ));
             }
         }
-        if m.finished > 0 && m.stage == Stage::Ready {
+        if m.log.is_empty() && m.finished > 0 && m.stage == Stage::Ready {
             events.push((
                 m.finished,
                 IconName::PartyPopper,
@@ -2194,6 +2252,8 @@ impl RunoApp {
                 "Ready to ship".into(),
             ));
         }
+        // Newest first; lines logged in the same second keep their order.
+        events.reverse();
         events.sort_by_key(|e| std::cmp::Reverse(e.0));
 
         let mut now_rows: Vec<AnyElement> = Vec::new();
@@ -2355,6 +2415,25 @@ impl RunoApp {
                     .child(div().v_flex().children(timeline)),
             )
             .into_any_element()
+    }
+}
+
+/// The icon and colour of a line in the mission's log.
+fn mark_look(mark: Mark) -> (IconName, u32) {
+    match mark {
+        Mark::Info => (IconName::Activity, c_muted()),
+        Mark::Start => (IconName::Rocket, c_blue()),
+        Mark::Part => (IconName::Play, c_blue()),
+        Mark::Passed => (IconName::ShieldCheck, c_green()),
+        Mark::Fix => (IconName::RotateCw, c_amber()),
+        Mark::Review => (IconName::MessageSquare, c_blue()),
+        Mark::Conflict => (IconName::GitCompare, c_amber()),
+        Mark::Merge => (IconName::GitMerge, c_green()),
+        Mark::Stuck => (IconName::TriangleAlert, c_amber()),
+        Mark::Skip => (IconName::SkipForward, c_muted()),
+        Mark::Pause => (IconName::Pause, c_muted()),
+        Mark::Land => (IconName::GitBranch, c_blue()),
+        Mark::Ready => (IconName::PartyPopper, c_green()),
     }
 }
 

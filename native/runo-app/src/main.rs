@@ -464,6 +464,10 @@ struct RunoApp {
     mission_wake: Vec<u64>,
     /// Missions left running at the last quit were picked up again.
     missions_resumed: bool,
+    /// The mission whose Delete is waiting to be confirmed.
+    mission_deleting: Option<u64>,
+    /// The activity beside a mission's board is hidden.
+    mission_feed_hidden: bool,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
     /// Images that go with a new session's first prompt.
@@ -1551,9 +1555,11 @@ impl RunoApp {
             reviewing: HashMap::new(),
             mission_open: None,
             mission_goal: cx.new(|cx| {
-                TextareaState::new(window, cx).placeholder(
-                    "Describe the goal, such as: Add a dark theme with a switch in Settings, and keep it after a restart",
-                )
+                TextareaState::new(window, cx)
+                    .placeholder(
+                        "Describe the goal, such as: Add a dark theme with a switch in Settings, and keep it after a restart",
+                    )
+                    .submit_on_enter(true)
             }),
             mission_feedback: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -1562,6 +1568,8 @@ impl RunoApp {
             mission_form: Default::default(),
             mission_wake: Vec::new(),
             missions_resumed: false,
+            mission_deleting: None,
+            mission_feed_hidden: false,
             attachments: HashMap::new(),
             launch_images: HashMap::new(),
             new_context: None,
@@ -1750,6 +1758,28 @@ impl RunoApp {
                 }
             },
         );
+        // Enter on the plan's feedback plans again; the goal box plans like a prompt sends.
+        let replan_sub = cx.subscribe_in(
+            &app.mission_feedback,
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    if let Some(mid) = this.mission_open {
+                        this.replan(mid, window, cx);
+                    }
+                }
+            },
+        );
+        let goal_sub = cx.subscribe_in(&app.mission_goal, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { shift, secondary } = event {
+                let on_enter = cx.global::<AppSettings>().send_on_enter;
+                if *secondary || (on_enter && !*shift) {
+                    this.plan_mission(window, cx);
+                    cx.notify();
+                }
+            }
+        });
+        app._subscriptions.extend([replan_sub, goal_sub]);
         app._subscriptions.extend([
             branch_sub,
             task_sub,
@@ -5426,6 +5456,40 @@ impl RunoApp {
                     }),
             )
             .child(div().flex_1())
+            // A mission's part or its own session: back to the mission's board.
+            .children(self.mission(session.mission).map(|m| {
+                let mid = m.id;
+                let lead = m.lead == session.id;
+                div()
+                    .id("hdr-mission")
+                    .h(px(26.))
+                    .px_2()
+                    .mr_2()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(if lead {
+                            "This session lands the mission. Back to its board."
+                        } else {
+                            "This session is one part of a mission. Back to its board."
+                        })
+                        .build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.mission_open = Some(mid);
+                        this.open_missions(cx);
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::Rocket, 12., c_secondary()))
+                    .child("Mission board")
+            }))
             // Asked from a canvas: back to it, where its changes show.
             .children(shell::canvas_of(session).map(|view| {
                 let id = session.id;
