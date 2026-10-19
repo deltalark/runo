@@ -139,7 +139,8 @@ pub struct AppSettings {
     pub playbook_keep_runs: u32,
     /// Run a scheduled playbook once on launch when it came due while Runo was closed.
     pub playbook_catch_up: bool,
-    /// Run scheduled playbooks while Runo is closed, from a launchd agent (macOS).
+    /// Run scheduled playbooks while Runo is closed, from a background job: launchd on
+    /// macOS, a systemd user timer on Linux, Task Scheduler on Windows.
     pub playbooks_while_closed: bool,
     /// Ask before a playbook an agent asked for starts.
     pub confirm_agent_playbooks: bool,
@@ -326,7 +327,7 @@ impl AppSettings {
         DAILY_LIMIT.store(self.daily_limit_usd, Ordering::Relaxed);
         MAX_RUNNING.store(self.max_running, Ordering::Relaxed);
         CATCH_UP.store(self.playbook_catch_up, Ordering::Relaxed);
-        crate::pbrunner::sync_launch_agent(self.playbooks_while_closed);
+        crate::pbrunner::sync_job(self.playbooks_while_closed);
         crate::phone::sync(self.phone_bridge, self.phone_everywhere);
         crate::terminal::configure(
             self.term_font_size,

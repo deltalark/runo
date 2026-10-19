@@ -9293,7 +9293,8 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--phone") {
         std::process::exit(phone::serve(args.get(2).map(String::as_str)));
     }
-    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed (launchd).
+    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed, started by
+    // the background job (launchd, a systemd user timer or Task Scheduler).
     if args.get(1).map(String::as_str) == Some("--run-due-playbooks") {
         shellenv::init();
         std::process::exit(pbrunner::run_due());
