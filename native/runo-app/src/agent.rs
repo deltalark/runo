@@ -1215,8 +1215,28 @@ pub fn reports_cost(provider: &str) -> bool {
     matches!(provider, "claude" | "opencode")
 }
 
+/// Whether Runo reads the tokens a turn used from the CLI's output, which the token limit
+/// counts. Agents whose output is plain text report none.
+pub fn reports_tokens(provider: &str) -> bool {
+    output(provider) != Output::Text
+}
+
+/// For an agent that reports no cost, which limits still count its turns, as the context
+/// meter says it. None for agents that report a cost, which every limit counts.
+pub fn cost_limit_note(provider: &str) -> Option<String> {
+    if reports_cost(provider) {
+        return None;
+    }
+    let name = self::provider(provider).name;
+    Some(if reports_tokens(provider) {
+        format!("{name} reports no cost, so spending limits don't count it; the turn and token limits do")
+    } else {
+        format!("{name} reports no cost or tokens, so only the turn limits count it")
+    })
+}
+
 /// Which agents report a cost, for spending limits and the spend shown: "Only Claude
-/// Code and OpenCode report a cost; …".
+/// Code and OpenCode report a cost; …", pointing the others to the turn and token limits.
 pub fn cost_note() -> String {
     let (some, none): (Vec<&Provider>, Vec<&Provider>) =
         PROVIDERS.iter().partition(|p| reports_cost(p.id));
@@ -1228,7 +1248,7 @@ pub fn cost_note() -> String {
         }
     };
     format!(
-        "Only {} report a cost; {} report none, so their turns count as $0 and limits don't hold them.",
+        "Only {} report a cost; {} report none, so their turns count as $0 and spending limits don't hold them. Use the turn limits for those, which hold every agent, or the token limit for agents that report tokens.",
         names(&some),
         names(&none)
     )
@@ -2332,6 +2352,20 @@ mod arg_tests {
         let note = cost_note();
         assert!(note.starts_with("Only Claude Code and OpenCode report a cost; Codex, "));
         assert!(note.contains(" and Grok report none"));
+        assert!(note.contains("spending limits don't hold them"));
+        assert!(note.contains("turn limits") && note.contains("token limit"));
+        assert!(reports_tokens("claude") && reports_tokens("codex") && reports_tokens("cursor"));
+        assert!(!reports_tokens("grok"));
+        assert_eq!(cost_limit_note("claude"), None);
+        assert_eq!(cost_limit_note("opencode"), None);
+        assert!(cost_limit_note("codex")
+            .unwrap()
+            .ends_with("the turn and token limits do"));
+        assert!(cost_limit_note("cursor").unwrap().contains("token limits"));
+        assert_eq!(
+            cost_limit_note("grok").as_deref(),
+            Some("Grok reports no cost or tokens, so only the turn limits count it")
+        );
         assert!(sign_in_hint("opencode", "Error: Token refresh failed: 401")
             .unwrap()
             .contains("opencode auth login"));

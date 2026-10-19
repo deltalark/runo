@@ -541,6 +541,28 @@ pub struct State {
     /// Cost reported by the agents per day ("%Y-%m-%d"), in US cents; the last 31 days.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub spend: std::collections::BTreeMap<String, f64>,
+    /// Turns started and tokens reported per day ("%Y-%m-%d"), for the turn and token
+    /// limits; the last 31 days, like `spend`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub day_use: std::collections::BTreeMap<String, DayUse>,
+}
+
+/// What agents did on one day, across every session.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct DayUse {
+    /// Turns started.
+    #[serde(default)]
+    pub turns: u32,
+    /// Input and output tokens the agents reported, cached ones not counted.
+    #[serde(default)]
+    pub tokens: u64,
+}
+
+/// Drop the oldest days past a month.
+fn keep_month<V>(days: &mut std::collections::BTreeMap<String, V>) {
+    while days.len() > 31 {
+        days.pop_first();
+    }
 }
 
 /// How a project's notes are kept and used.
@@ -868,10 +890,28 @@ impl State {
             return;
         }
         *self.spend.entry(day.to_string()).or_default() += cents;
-        while self.spend.len() > 31 {
-            let first = self.spend.keys().next().cloned().unwrap_or_default();
-            self.spend.remove(&first);
+        keep_month(&mut self.spend);
+    }
+
+    /// Count a turn started on `day`, keeping a month of days.
+    pub fn add_turn(&mut self, day: &str) {
+        self.day_use.entry(day.to_string()).or_default().turns += 1;
+        keep_month(&mut self.day_use);
+    }
+
+    /// Add a turn's reported tokens to `day`, keeping a month of days.
+    pub fn add_tokens(&mut self, day: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
         }
+        let used = self.day_use.entry(day.to_string()).or_default();
+        used.tokens = used.tokens.saturating_add(tokens);
+        keep_month(&mut self.day_use);
+    }
+
+    /// Turns and tokens on `day`; a day with nothing yet, such as a new one, is zero.
+    pub fn used_on(&self, day: &str) -> DayUse {
+        self.day_use.get(day).copied().unwrap_or_default()
     }
 
     /// Record an event for the Activity feed, keeping the latest 500.
@@ -1494,5 +1534,63 @@ mod tests {
         }
         assert_eq!(state.spend.len(), 31);
         assert!(!state.spend.contains_key("2026-10-13"));
+    }
+
+    #[test]
+    fn turns_and_tokens_add_up_per_day_and_keep_a_month() {
+        let mut state = State::default();
+        state.add_turn("2026-10-13");
+        state.add_turn("2026-10-13");
+        state.add_tokens("2026-10-13", 1_500);
+        state.add_tokens("2026-10-13", 0);
+        state.add_tokens("2026-10-13", 500);
+        assert_eq!(
+            state.used_on("2026-10-13"),
+            DayUse {
+                turns: 2,
+                tokens: 2_000
+            }
+        );
+        // A new day starts from nothing, and yesterday's count stays as it was.
+        assert_eq!(state.used_on("2026-10-14"), DayUse::default());
+        state.add_turn("2026-10-14");
+        assert_eq!(state.used_on("2026-10-14").turns, 1);
+        assert_eq!(state.used_on("2026-10-13").turns, 2);
+        // Tokens alone start a day too, with no turns.
+        state.add_tokens("2026-10-15", 7);
+        assert_eq!(
+            state.used_on("2026-10-15"),
+            DayUse {
+                turns: 0,
+                tokens: 7
+            }
+        );
+        for day in 1..=40 {
+            state.add_turn(&format!("2026-11-{day:02}"));
+        }
+        assert_eq!(state.day_use.len(), 31);
+        assert!(!state.day_use.contains_key("2026-10-13"));
+        assert_eq!(state.used_on("2026-10-13"), DayUse::default());
+    }
+
+    #[test]
+    fn turns_and_tokens_per_day_survive_a_restart() {
+        let mut state = State::default();
+        state.add_turn("2026-10-13");
+        state.add_tokens("2026-10-13", 42);
+        let text = serde_json::to_string(&state).unwrap();
+        let back: State = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            back.used_on("2026-10-13"),
+            DayUse {
+                turns: 1,
+                tokens: 42
+            }
+        );
+        // A state saved before these counts reads as none.
+        let mut saved = serde_json::to_value(&back).unwrap();
+        saved.as_object_mut().unwrap().remove("day_use");
+        let old: State = serde_json::from_value(saved).unwrap();
+        assert!(old.day_use.is_empty());
     }
 }

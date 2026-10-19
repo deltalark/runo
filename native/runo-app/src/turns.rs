@@ -244,6 +244,10 @@ impl RunoApp {
                 self.handles.insert(Target::Session(id), handle);
                 self.started.insert(id, std::time::Instant::now());
                 self.turn_files.remove(&id);
+                // Counted as it starts, so turns running side by side can't pass the limit.
+                if !demo {
+                    self.state.add_turn(&store::today());
+                }
                 crate::applog::info(
                     "turn",
                     format!(
