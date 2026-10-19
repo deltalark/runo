@@ -147,6 +147,7 @@ Every session has two views of the same conversation. **Chat** is Runo's own int
 
 - **Review page.** Every session whose agent stopped with changed files, in one list. Pick one to see its changes and commit, push, open a pull request or merge.
 - **Changes.** Real `git` status and diffs for each session, with stage, discard, commit, push and **Create PR** buttons.
+- **Proof of done.** Each project's tests, lint and build run after every turn that changes files. A red result goes back to the agent with Fix it, or on its own for a few rounds, and Second opinion has another vendor's agent review the diff, leaving its comments as diff notes.
 - **Diff notes.** Click any diff line, leave a note, and send all notes back to the agent as one follow-up.
 - **Files.** Browse and edit the worktree, with syntax highlighting, rendered Markdown, images and CSV tables.
 - **Terminal.** A real interactive shell (PTY) in the session's folder, with several tabs per session, your saved commands as one-click buttons, and the agent's own command output.

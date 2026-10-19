@@ -1216,6 +1216,26 @@ pub fn changed_since(dir: &str, checkpoint: &str) -> Vec<String> {
     diff_names(dir, checkpoint, &tree).unwrap_or_default()
 }
 
+/// The patch of everything that changed since a checkpoint, files made since included,
+/// cut to about `limit` bytes.
+pub fn patch_since(dir: &str, checkpoint: &str, limit: usize) -> String {
+    let Ok(tree) = snapshot_tree(dir) else {
+        return String::new();
+    };
+    let mut text = git(dir, &["diff", "--stat", checkpoint, &tree]).unwrap_or_default();
+    text.push('\n');
+    text.push_str(&git(dir, &["diff", checkpoint, &tree]).unwrap_or_default());
+    if text.len() > limit {
+        let mut cut = limit;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n[diff truncated]");
+    }
+    text
+}
+
 /// What a restore did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Restored {
