@@ -6,6 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
+- Merge PR uses a method the repository allows, picked beside the button (Merge, Squash or Rebase) and remembered per project; it starts on squash when allowed, then a merge commit, then rebase, instead of always making a merge commit. While checks run or the base branch requires them, Merge when checks pass turns on auto-merge, and the pull request shows auto-merge on.
 - Architecture diagrams draw people and things as pictures: an Actor is a standing figure and Users a group of people, each with its name under it, and Browser, Phone, Desktop, Server, Folder and Security (a shield) look like what they are. A Person is a card with an avatar instead of a box with a circle on top, containers carry an accent stripe, components the UML tabs, and databases, queues and clouds their real outlines.
 - More shapes on Architecture diagrams: hexagon, triangle, callout, block arrow, and a Flowchart section with start or end, process, decision, data and document. They export to draw.io and Mermaid.
 - The shapes panel keeps its tinted icon tiles, with icons for the new people and things, and lines up more neatly: tiles fill the panel three across, list rows and section headings share one left edge, and the hint at the bottom wraps instead of being cut off.
@@ -72,6 +73,7 @@ All notable changes to Runo are documented here.
 - A Review page lists every session whose agent stopped with changed files, with commit, push, pull request and merge in one place. A session's Changes panel shows where its work stands and a Review and ship button. The mode rail is regrouped to Home, Sessions, Review, GitHub, Playbooks and History, then Design and Architecture, with Notes and Settings at the bottom.
 - The browser opens as its own tab, glass mode looks the same on every page, the GitHub page has clearer empty states and filters, and the GitHub and Review pages come back after a restart.
 - Design and Architecture belong to the current project: they sit under its badge on the rail, their title switches project, and All projects shows a chooser instead of opening the first project. New project can start from Design an app or Architecture, making an empty git project in `~/Runo/<name>/`.
+- Clean up in Settings > Worktrees finds what sessions left behind in every project: folders under `.runo-worktrees` that no session points at (archived ones included), worktrees git still lists whose folder is gone, and `runo/` branches no session uses, each with its size and a total. Merged branches and worktrees without changes start picked; branches with commits the default branch lacks are listed apart with a warning and never picked for you. Remove selected asks first, checks again that nothing uses them, and logs each removal.
 
 ### Changed
 
@@ -91,6 +93,7 @@ All notable changes to Runo are documented here.
 
 ### Fixed
 
+- Small fixes from a walk-through of the app. A Bash step in the chat shows a pulsing dot while it runs and a check or a red cross when it ends, instead of a check from the start. A quick command's tab keeps its newest lines in view when the pass or fail bar appears, and the Output box follows new output unless you scroll up. The browser offer says "on this computer" instead of "in Applications" off macOS. The New project dialog takes a typed or pasted folder path (with `~`), checks it, and points to the field when no folder picker opens, as on Linux without a desktop portal. A session you stop reads Stopped in grey, with a plain "Stopped." note, instead of Failed in red.
 - The terminal answers when a program asks where the cursor is or what terminal it is, the way other terminals do. Prompts such as gh's Y/n waited for that answer and took every key as part of it, Ctrl-C included, so the terminal looked frozen. Typing never blocks the window either, even when the program stops reading.
 - The Design canvas no longer freezes the window for seconds while screens are being drawn. Undo, renaming a screen, changing its device, the theme or dark mode, and files changed by an agent used to wait for the drawing in progress, and on macOS that wait stalled until it timed out. Redraws also free the old screen images, so memory stops growing as you edit, and a canvas you're not looking at stops checking its folder.
 

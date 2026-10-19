@@ -69,10 +69,11 @@ impl ListFilter {
     }
 }
 
-const STATUSES: [(Status, &str); 4] = [
+const STATUSES: [(Status, &str); 5] = [
     (Status::Working, "Working"),
     (Status::Done, "Done"),
     (Status::Failed, "Failed"),
+    (Status::Stopped, "Stopped"),
     (Status::Idle, "Idle"),
 ];
 
