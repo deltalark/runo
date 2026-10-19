@@ -110,7 +110,7 @@ Approve permissions, plans and questions from any session, undo any turn, and ca
 - **Undo, Keep or Review each turn.** Runo checkpoints the worktree before every turn, so you can roll back a turn that went wrong with one click.
 - **Usage at a glance.** Tokens, cost and context use per turn and per session.
 - **Context control.** `/compact` shrinks a long conversation and `/clear` starts fresh, also from the session's right-click menu. Fork a session from any turn, or edit and resend a sent message.
-- **Limits.** Stop an agent that goes quiet, cap spending per session and per day, and cap how many agents run at once (Settings → General).
+- **Limits.** Stop an agent that goes quiet, cap spending per session and per day (for agents that report a cost), cap turns per session and per day and tokens per day for any agent, and cap how many agents run at once (Settings → General).
 
 <table>
 <tr>
