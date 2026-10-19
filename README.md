@@ -110,7 +110,7 @@ Approve permissions, plans and questions from any session, undo any turn, and ca
 - **Undo, Keep or Review each turn.** Runo checkpoints the worktree before every turn, so you can roll back a turn that went wrong with one click.
 - **Usage at a glance.** Tokens, cost and context use per turn and per session.
 - **Context control.** `/compact` shrinks a long conversation and `/clear` starts fresh, also from the session's right-click menu. Fork a session from any turn, or edit and resend a sent message.
-- **Limits.** Stop an agent that goes quiet, cap spending per session and per day, and cap how many agents run at once (Settings → General).
+- **Limits.** Stop an agent that goes quiet, cap spending per session and per day (for agents that report a cost), cap turns per session and per day and tokens per day for any agent, and cap how many agents run at once (Settings → General).
 
 <table>
 <tr>
@@ -183,7 +183,7 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 - **Install from anywhere.** Paste a GitHub repo, a link to one file, a local folder or the clipboard into **Install**. Runo lists what it found, marks new and updated playbooks, and shows what each one asks permission to do before you install it. **Update** checks the source again later.
 - **Inputs.** Write `{{area}}` in the instructions and Runo asks for it before the run, with a default for scheduled runs.
 - **Permissions.** A playbook says whether it may edit files, run commands or use the network, and Runo holds every turn of its session to that in the way each agent allows: plan mode for read-only, turning off shell or web tools, Codex's sandbox without network. Where an agent can't be held to a limit, the card and the run form say so. Approving a read-only playbook's plan asks before allowing edits.
-- **Schedules.** Scheduled runs use the project's default connection and its setup command, skip a run while the last one is still going, note runs missed while Runo was closed, and keep the last few sessions (set in Settings → Chat). Each card shows its recent runs and any failure.
+- **Schedules.** Scheduled runs use the project's default connection and its setup command, skip a run while the last one is still going, note runs missed while Runo was closed, and keep the last few sessions (set in Settings → Chat). Each card shows its recent runs and any failure. Turn on **Run while Runo is closed** to have a background job (launchd on macOS, a systemd user timer on Linux, Task Scheduler on Windows) run due playbooks every 5 minutes while Runo isn't open.
 - **Agents can start playbooks**, and Runo asks you first (on by default). An agent in plan mode can't start one that edits or runs commands.
 
 </details>

@@ -1,5 +1,5 @@
 //! Keeping an eye on what the person isn't watching: local turns picked up after a
-//! restart, agents gone quiet, spending limits, the cap on agents running at once, crash
+//! restart, agents gone quiet, spending, turn and token limits, the cap on agents running at once, crash
 //! reports and newer Runo releases. Also saves the state a moment after it changes.
 
 use super::*;
@@ -28,8 +28,8 @@ pub(crate) struct Health {
     last_output: HashMap<u64, Instant>,
     /// Sessions whose quiet-agent card was hidden, until they print again.
     quiet_hidden: HashSet<u64>,
-    /// Sessions whose turns wait on a spending limit, with why.
-    held: HashMap<u64, String>,
+    /// Sessions whose turns wait on a limit, with which and why.
+    held: HashMap<u64, Hold>,
     /// Sessions the person let past their limit for one turn.
     allow_once: HashSet<u64>,
     /// Sessions waiting for a free slot, first come first served.
@@ -63,22 +63,108 @@ pub(crate) fn session_cost(session: &Session) -> f64 {
     session.messages.iter().map(|m| m.usage.cost_cents).sum()
 }
 
-/// Why a new turn must wait for a spending limit, if it must. Limits are in cents; 0
-/// means none.
-pub(crate) fn over_limit(session: f64, today: f64, limits: (f64, f64)) -> Option<String> {
+/// What counts toward the limits for a session's next turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Used {
+    /// What the session's agents cost, in US cents.
+    pub(crate) session_cents: f64,
+    /// What agents cost today, in US cents.
+    pub(crate) day_cents: f64,
+    /// Turns the session has had.
+    pub(crate) session_turns: u32,
+    /// Turns started today, across every session.
+    pub(crate) day_turns: u32,
+    /// Tokens agents reported today.
+    pub(crate) day_tokens: u64,
+}
+
+/// A limit holding new turns: which kind, for the card's title, and why.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Hold {
+    pub(crate) title: &'static str,
+    pub(crate) why: String,
+}
+
+/// Turns a session has had: one for each prompt sent to its agent.
+pub(crate) fn session_turns(session: &Session) -> u32 {
+    let turns = session
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .count();
+    u32::try_from(turns).unwrap_or(u32::MAX)
+}
+
+/// The tokens a finished turn counts toward the daily token limit: input and output,
+/// without the cached prompt, which would count the same context again on every turn.
+pub(crate) fn turn_tokens(usage: &store::Usage) -> u64 {
+    usage.input.saturating_add(usage.output)
+}
+
+/// A token count the way people read it: 950, 12k, 1.5M.
+pub(crate) fn token_count(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{}k", n / 1_000),
+        _ => {
+            let m = format!("{:.1}", n as f64 / 1e6);
+            format!("{}M", m.strip_suffix(".0").unwrap_or(&m))
+        }
+    }
+}
+
+/// Why a new turn must wait for a limit, if it must. 0 means no limit.
+pub(crate) fn over_limit(used: &Used, limits: &settings::Limits) -> Option<Hold> {
     let dollars = |cents: f64| format!("${:.2}", cents / 100.);
-    if limits.0 > 0. && session >= limits.0 {
-        Some(format!(
-            "This session has cost {} of its {} limit.",
-            dollars(session),
-            dollars(limits.0)
-        ))
-    } else if limits.1 > 0. && today >= limits.1 {
-        Some(format!(
-            "Agents have cost {} today, reaching the daily limit of {}.",
-            dollars(today),
-            dollars(limits.1)
-        ))
+    let plural = |n: u32| if n == 1 { "" } else { "s" };
+    let hold = |title, why| Some(Hold { title, why });
+    if limits.session_cents > 0. && used.session_cents >= limits.session_cents {
+        hold(
+            "Spending limit reached",
+            format!(
+                "This session has cost {} of its {} limit.",
+                dollars(used.session_cents),
+                dollars(limits.session_cents)
+            ),
+        )
+    } else if limits.day_cents > 0. && used.day_cents >= limits.day_cents {
+        hold(
+            "Spending limit reached",
+            format!(
+                "Agents have cost {} today, reaching the daily limit of {}.",
+                dollars(used.day_cents),
+                dollars(limits.day_cents)
+            ),
+        )
+    } else if limits.session_turns > 0 && used.session_turns >= limits.session_turns {
+        hold(
+            "Turn limit reached",
+            format!(
+                "Held: {} turn{} in this session (limit {}).",
+                used.session_turns,
+                plural(used.session_turns),
+                limits.session_turns
+            ),
+        )
+    } else if limits.day_turns > 0 && used.day_turns >= limits.day_turns {
+        hold(
+            "Turn limit reached",
+            format!(
+                "Held: {} turn{} today (limit {}).",
+                used.day_turns,
+                plural(used.day_turns),
+                limits.day_turns
+            ),
+        )
+    } else if limits.day_tokens > 0 && used.day_tokens >= limits.day_tokens {
+        hold(
+            "Token limit reached",
+            format!(
+                "Held: {} tokens today (limit {}).",
+                token_count(used.day_tokens),
+                token_count(limits.day_tokens)
+            ),
+        )
     } else {
         None
     }
@@ -102,23 +188,31 @@ impl RunoApp {
             .count()
     }
 
-    /// Why a new turn of `id` has to wait (a spending limit, or no free slot), noting
-    /// it so the turn starts once it can. None lets it start.
+    /// What counts toward the limits for the next turn of `session`.
+    fn used(&self, session: &Session) -> Used {
+        let today = store::today();
+        let day = self.state.used_on(&today);
+        Used {
+            session_cents: session_cost(session),
+            day_cents: self.state.spend.get(&today).copied().unwrap_or_default(),
+            session_turns: session_turns(session),
+            day_turns: day.turns,
+            day_tokens: day.tokens,
+        }
+    }
+
+    /// Why a new turn of `id` has to wait (a spending, turn or token limit, or no free
+    /// slot), noting it so the turn starts once it can. None lets it start.
     pub(crate) fn hold_turn(&mut self, id: u64) -> Option<String> {
         if self.demo {
             return None;
         }
         let session = self.state.session(id)?;
-        let today = self
-            .state
-            .spend
-            .get(&store::today())
-            .copied()
-            .unwrap_or_default();
         if !self.health.allow_once.contains(&id) {
-            if let Some(why) = over_limit(session_cost(session), today, settings::spend_limits()) {
-                self.health.held.insert(id, why.clone());
-                return Some(format!("Not sent: {why}"));
+            if let Some(hold) = over_limit(&self.used(session), &settings::limits()) {
+                let text = format!("Not sent. {}", hold.why);
+                self.health.held.insert(id, hold);
+                return Some(text);
             }
         }
         let cap = settings::max_running();
@@ -139,8 +233,8 @@ impl RunoApp {
 
     /// What holds a session's queued prompts, for the composer.
     pub(crate) fn held_reason(&self, id: u64) -> Option<(bool, String)> {
-        if let Some(why) = self.health.held.get(&id) {
-            return Some((true, why.clone()));
+        if let Some(hold) = self.health.held.get(&id) {
+            return Some((true, hold.why.clone()));
         }
         let place = self.health.waiting_slot.iter().position(|w| *w == id)?;
         Some((
@@ -152,7 +246,7 @@ impl RunoApp {
         ))
     }
 
-    /// Send one held turn past its spending limit.
+    /// Send one held turn past its limit.
     pub(crate) fn send_anyway(&mut self, id: u64, cx: &mut Context<Self>) {
         self.health.allow_once.insert(id);
         self.health.held.remove(&id);
@@ -267,14 +361,7 @@ impl RunoApp {
         let held: Vec<u64> = self.health.held.keys().copied().collect();
         for id in held {
             let free = self.state.session(id).is_none_or(|s| {
-                let today = self
-                    .state
-                    .spend
-                    .get(&store::today())
-                    .copied()
-                    .unwrap_or_default();
-                s.queue.is_empty()
-                    || over_limit(session_cost(s), today, settings::spend_limits()).is_none()
+                s.queue.is_empty() || over_limit(&self.used(s), &settings::limits()).is_none()
             });
             if free {
                 self.health.held.remove(&id);
@@ -327,7 +414,7 @@ impl RunoApp {
         quiet
     }
 
-    /// Cards for the corner of the window: quiet agents, spending limits, a crash last
+    /// Cards for the corner of the window: quiet agents, limits reached, a crash last
     /// time, and a newer Runo.
     pub(crate) fn health_cards(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut cards = Vec::new();
@@ -373,9 +460,10 @@ impl RunoApp {
                 cx,
             ));
         }
-        let mut held: Vec<(&u64, &String)> = self.health.held.iter().collect();
-        held.sort();
-        for (n, (&id, why)) in held.into_iter().enumerate() {
+        let mut held: Vec<(&u64, &Hold)> = self.health.held.iter().collect();
+        held.sort_by_key(|(id, _)| **id);
+        for (n, (&id, hold)) in held.into_iter().enumerate() {
+            let why = &hold.why;
             let Some(session) = self.state.session(id) else {
                 continue;
             };
@@ -408,7 +496,7 @@ impl RunoApp {
                 SharedString::from(format!("alert-limit-{id}")),
                 c_amber(),
                 IconName::TriangleAlert,
-                "Spending limit reached",
+                hold.title,
                 Some(session.title.clone()),
                 Some(self.provider_badge(provider, 18.)),
                 format!("{why} Its next prompt is queued."),
@@ -606,7 +694,7 @@ impl RunoApp {
     }
 
     /// The composer line saying why queued prompts are waiting, with Send anyway for a
-    /// spending limit.
+    /// limit.
     pub(crate) fn held_line(&self, id: u64, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (limit, text) = self.held_reason(id)?;
         Some(
@@ -658,14 +746,138 @@ mod tests {
     use super::*;
     use std::prelude::v1::test;
 
+    fn why(used: Used, limits: settings::Limits) -> Option<String> {
+        over_limit(&used, &limits).map(|h| h.why)
+    }
+
     #[test]
     fn limits_hold_turns_once_reached() {
-        assert_eq!(over_limit(500., 900., (0., 0.)), None);
-        let why = over_limit(500., 900., (500., 0.)).unwrap();
-        assert!(why.contains("$5.00 of its $5.00"));
-        assert!(over_limit(499., 900., (500., 0.)).is_none());
-        let why = over_limit(10., 1000., (500., 1000.)).unwrap();
+        let spent = |session_cents, day_cents| Used {
+            session_cents,
+            day_cents,
+            ..Used::default()
+        };
+        let cost = |session_cents, day_cents| settings::Limits {
+            session_cents,
+            day_cents,
+            ..settings::Limits::default()
+        };
+        assert_eq!(over_limit(&spent(500., 900.), &cost(0., 0.)), None);
+        let hold = over_limit(&spent(500., 900.), &cost(500., 0.)).unwrap();
+        assert_eq!(hold.title, "Spending limit reached");
+        assert!(hold.why.contains("$5.00 of its $5.00"));
+        assert!(why(spent(499., 900.), cost(500., 0.)).is_none());
+        let why = why(spent(10., 1000.), cost(500., 1000.)).unwrap();
         assert!(why.contains("daily limit of $10.00"));
+    }
+
+    #[test]
+    fn turn_and_token_limits_hold_every_agent() {
+        let none = settings::Limits::default();
+        let busy = Used {
+            session_turns: 50,
+            day_turns: 500,
+            day_tokens: 90_000_000,
+            ..Used::default()
+        };
+        assert_eq!(over_limit(&busy, &none), None, "all off by default");
+
+        let per_session = settings::Limits {
+            session_turns: 20,
+            ..none
+        };
+        let mut used = Used {
+            session_turns: 19,
+            ..Used::default()
+        };
+        assert_eq!(over_limit(&used, &per_session), None);
+        used.session_turns = 20;
+        let hold = over_limit(&used, &per_session).unwrap();
+        assert_eq!(hold.title, "Turn limit reached");
+        assert_eq!(hold.why, "Held: 20 turns in this session (limit 20).");
+
+        let per_day = settings::Limits {
+            day_turns: 20,
+            ..none
+        };
+        let mut used = Used {
+            day_turns: 19,
+            session_turns: 3,
+            ..Used::default()
+        };
+        assert_eq!(over_limit(&used, &per_day), None);
+        used.day_turns = 20;
+        assert_eq!(
+            why(used, per_day).as_deref(),
+            Some("Held: 20 turns today (limit 20).")
+        );
+        // A limit of one reads as one turn.
+        let one = settings::Limits {
+            day_turns: 1,
+            ..none
+        };
+        let used = Used {
+            day_turns: 1,
+            ..Used::default()
+        };
+        assert_eq!(
+            why(used, one).as_deref(),
+            Some("Held: 1 turn today (limit 1).")
+        );
+
+        let tokens = settings::Limits {
+            day_tokens: 1_000_000,
+            ..none
+        };
+        let mut used = Used {
+            day_tokens: 999_999,
+            ..Used::default()
+        };
+        assert_eq!(over_limit(&used, &tokens), None);
+        used.day_tokens = 1_240_000;
+        let hold = over_limit(&used, &tokens).unwrap();
+        assert_eq!(hold.title, "Token limit reached");
+        assert_eq!(hold.why, "Held: 1.2M tokens today (limit 1M).");
+
+        // Spending is named first when several limits are reached.
+        let all = settings::Limits {
+            session_cents: 100.,
+            session_turns: 1,
+            day_turns: 1,
+            day_tokens: 1,
+            ..none
+        };
+        let used = Used {
+            session_cents: 100.,
+            ..busy
+        };
+        assert_eq!(
+            over_limit(&used, &all).unwrap().title,
+            "Spending limit reached"
+        );
+    }
+
+    #[test]
+    fn a_session_counts_its_turns_and_a_turn_its_tokens() {
+        let mut session = State::demo().sessions[0].clone();
+        session.messages.clear();
+        assert_eq!(session_turns(&session), 0);
+        session.messages.push(Message::new(Role::User, "one"));
+        session.messages.push(Message::new(Role::Agent, "a"));
+        session.messages.push(Message::new(Role::System, "note"));
+        session.messages.push(Message::new(Role::User, "two"));
+        assert_eq!(session_turns(&session), 2);
+        let usage = store::Usage {
+            input: 1_000,
+            output: 250,
+            cached: 90_000,
+            ..store::Usage::default()
+        };
+        assert_eq!(turn_tokens(&usage), 1_250);
+        assert_eq!(token_count(950), "950");
+        assert_eq!(token_count(12_400), "12k");
+        assert_eq!(token_count(5_000_000), "5M");
+        assert_eq!(token_count(1_500_000), "1.5M");
     }
 
     #[test]

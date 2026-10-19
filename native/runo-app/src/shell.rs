@@ -371,15 +371,19 @@ impl RunoApp {
         counts
     }
 
-    /// Note a finished turn's cost under today, for the top bar's spend.
+    /// Note a finished turn's cost and tokens under today, for the top bar's spend and
+    /// the daily limits.
     pub(crate) fn record_spend(&mut self, id: u64) {
-        let cents = self
+        let usage = self
             .state
             .session(id)
             .and_then(|s| s.messages.iter().rev().find(|m| m.role == Role::Agent))
-            .map(|m| m.usage.cost_cents)
+            .map(|m| m.usage)
             .unwrap_or_default();
-        self.state.add_spend(&store::today(), cents);
+        let today = store::today();
+        self.state.add_spend(&today, usage.cost_cents);
+        self.state
+            .add_tokens(&today, crate::health::turn_tokens(&usage));
     }
 
     // ---------- keyboard ----------

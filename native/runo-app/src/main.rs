@@ -2222,6 +2222,12 @@ impl RunoApp {
                 if agent::waits_for_sign_in(&line) {
                     self.sign_in_wait(id, &line);
                 }
+                // Grok names its conversation on stderr; the next turn continues it.
+                if let Some(session) = self.state.session_mut(id) {
+                    if let Some(found) = agent::stderr_conversation(&session.provider, &line) {
+                        session.agent_session = found;
+                    }
+                }
                 let log = self.stderr.entry(id).or_default();
                 log.push(line);
                 if log.len() > 200 {
@@ -8901,7 +8907,11 @@ impl Render for RunoApp {
                         let total = f32::from(window.viewport_size().width);
                         let x = total - f32::from(e.position.x);
                         // Leave the chat room for its header and composer.
-                        let sidebar = if this.show_sidebar { this.sidebar_width } else { 0. };
+                        let sidebar = if this.show_sidebar {
+                            this.sidebar_width
+                        } else {
+                            0.
+                        };
                         let max = (total - shell::RAIL_WIDTH - sidebar - CHAT_MIN)
                             .clamp(PANEL_MIN, PANEL_MAX);
                         this.panel_width = x.clamp(PANEL_MIN, max);
@@ -8959,20 +8969,22 @@ impl Render for RunoApp {
                             .when(show_tabs, |el| el.child(self.tab_strip(cx)))
                             .child(div().flex_1().min_h_0().flex().child(center))
                             .animated(
-                        SharedString::from(format!(
-                            "center-{}-{}",
-                            shown as u8,
-                            self.selected.unwrap_or(0)
-                        )),
-                        Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
-                        move |el, delta| {
-                            if still {
-                                el
-                            } else {
-                                el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta)))
-                            }
-                        },
-                    ))
+                                SharedString::from(format!(
+                                    "center-{}-{}",
+                                    shown as u8,
+                                    self.selected.unwrap_or(0)
+                                )),
+                                Animation::new(Duration::from_millis(200))
+                                    .with_easing(ease_out_quint()),
+                                move |el, delta| {
+                                    if still {
+                                        el
+                                    } else {
+                                        el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta)))
+                                    }
+                                },
+                            ),
+                    )
                     .children(right),
             )
             .child(
@@ -9068,19 +9080,19 @@ impl Render for RunoApp {
                                                     .map(|m| m.usage.cost_cents)
                                                     .sum();
                                                 let reports = agent::reports_cost(&s.provider);
-                                                let about = if reports {
-                                                    format!("session cost ${:.2}", cost / 100.0)
-                                                } else {
-                                                    format!(
-                                                        "{} reports no cost, so spending limits don't count it",
-                                                        agent::provider(&s.provider).name
-                                                    )
-                                                };
+                                                let about = agent::cost_limit_note(&s.provider)
+                                                    .unwrap_or_else(|| {
+                                                        format!("session cost ${:.2}", cost / 100.0)
+                                                    });
                                                 (u, cost, reports, about)
                                             })
                                     }),
                                 |el, (usage, cost, reports, about)| {
-                                    let window = if usage.window > 0 { usage.window } else { 200_000 };
+                                    let window = if usage.window > 0 {
+                                        usage.window
+                                    } else {
+                                        200_000
+                                    };
                                     let pct = (usage.context() as f32 / window as f32).min(1.0);
                                     el.child(
                                         div()
@@ -9132,10 +9144,7 @@ impl Render for RunoApp {
                     ),
             )
             .when(self.view == View::NewSession, |el| {
-                el.child(self.new_session_modal(
-                    f32::from(window.viewport_size().height) - 96.,
-                    cx,
-                ))
+                el.child(self.new_session_modal(f32::from(window.viewport_size().height) - 96., cx))
             })
             .children(self.alerts_view(cx))
             .children(self.assistant_view(cx))
@@ -9293,7 +9302,8 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--phone") {
         std::process::exit(phone::serve(args.get(2).map(String::as_str)));
     }
-    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed (launchd).
+    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed, started by
+    // the background job (launchd, a systemd user timer or Task Scheduler).
     if args.get(1).map(String::as_str) == Some("--run-due-playbooks") {
         shellenv::init();
         std::process::exit(pbrunner::run_due());
