@@ -351,7 +351,9 @@ impl RunoApp {
         let parallel = form.parallel;
         let review = form.review;
 
-        // Agents that may work on it: badges that light up when picked.
+        // Agents that may work on it: badges that light up when picked, with how often
+        // each got its parts through first time on earlier missions.
+        let records = crate::mission::records(&self.state.missions);
         let agent_pills: Vec<AnyElement> = installed
             .iter()
             .enumerate()
@@ -395,6 +397,21 @@ impl RunoApp {
                                 .text_color(rgb(c_secondary()))
                                 .child("plans"),
                         )
+                    })
+                    .when_some(records.get(id).and_then(|r| r.first_try()), |el, rate| {
+                        el.child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(rgb(c_muted()))
+                                .child(format!("{rate}%")),
+                        )
+                    })
+                    .when_some(records.get(id).and_then(|r| r.line()), |el, line| {
+                        let tip: SharedString = format!("On earlier missions: {line}").into();
+                        el.tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                .build(window, cx)
+                        })
                     })
                     .when(on, |el| el.child(icon(IconName::Check, 12., p.color)))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1004,6 +1021,7 @@ impl RunoApp {
                                     .line_height(px(24.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .line_clamp(2)
+                                    .text_ellipsis()
                                     .child(short(m.goal.trim(), 170)),
                             ),
                     )
@@ -1432,6 +1450,9 @@ impl RunoApp {
             preview.push('…');
         }
         let deps = m.dep_titles(part);
+        let record = crate::mission::records(&self.state.missions)
+            .get(&part.agent)
+            .and_then(|r| r.first_try());
         div()
             .w_full()
             .flex()
@@ -1567,6 +1588,18 @@ impl RunoApp {
                                         cx.notify();
                                     })),
                             )
+                            .when_some(record, |el, rate| {
+                                el.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(c_muted()))
+                                        .child(icon(IconName::ShieldCheck, 11., c_muted()))
+                                        .child(format!("{rate}% first time")),
+                                )
+                            })
                             .child(div().flex_1())
                             .when(!deps.is_empty(), |el| {
                                 el.child(
@@ -2399,6 +2432,7 @@ impl RunoApp {
                         .children(now_rows),
                 )
             })
+            .children(self.mission_team(m))
             .child(
                 div()
                     .v_flex()
@@ -2415,6 +2449,78 @@ impl RunoApp {
                     .child(div().v_flex().children(timeline)),
             )
             .into_any_element()
+    }
+}
+
+impl RunoApp {
+    /// Each agent on the mission: its parts, how many went back for fixes, and its cost.
+    fn mission_team(&self, m: &Mission) -> Option<AnyElement> {
+        let mut agents: Vec<&str> = Vec::new();
+        for p in &m.parts {
+            if !agents.contains(&p.agent.as_str()) {
+                agents.push(&p.agent);
+            }
+        }
+        if agents.is_empty() || m.started == 0 {
+            return None;
+        }
+        let rows = agents.into_iter().map(|a| {
+            let provider = agent::provider(a);
+            let parts: Vec<&Part> = m.parts.iter().filter(|p| p.agent == a).collect();
+            let done = parts.iter().filter(|p| p.state == PartState::Done).count();
+            let fixes: u32 = parts.iter().map(|p| p.fixes).sum();
+            let secs: u64 = parts.iter().map(|p| since(p.started, p.finished)).sum();
+            let cents: f64 = parts
+                .iter()
+                .filter_map(|p| self.state.session(p.session))
+                .map(crate::health::session_cost)
+                .sum();
+            let mut facts = vec![format!("{done} of {} merged", parts.len())];
+            if fixes > 0 {
+                facts.push(format!(
+                    "{fixes} fix round{}",
+                    if fixes == 1 { "" } else { "s" }
+                ));
+            }
+            if secs > 0 {
+                facts.push(took(secs));
+            }
+            if cents > 0. {
+                facts.push(format!("${:.2}", cents / 100.));
+            }
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(self.provider_badge(provider, 22.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .v_flex()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(provider.name),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(10.5))
+                                .text_color(rgb(c_muted()))
+                                .child(facts.join(" · ")),
+                        ),
+                )
+        });
+        Some(
+            div()
+                .v_flex()
+                .gap_2()
+                .child(small_caps("TEAM"))
+                .children(rows)
+                .into_any_element(),
+        )
     }
 }
 

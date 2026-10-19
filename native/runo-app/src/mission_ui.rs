@@ -193,7 +193,9 @@ impl RunoApp {
                 (p.id, p.name)
             })
             .collect();
-        let prompt = mission::plan_prompt(&m.goal, &roster, m.parallel, &feedback, &m.parts);
+        let records = mission::records(&self.state.missions);
+        let prompt =
+            mission::plan_prompt(&m.goal, &roster, &records, m.parallel, &feedback, &m.parts);
         let binary = cx.global::<AppSettings>().agent(planner.id).binary;
         let command = agent::ask_command(planner.id, &binary, &prompt);
         agent::oneshot_within(
@@ -532,6 +534,7 @@ impl RunoApp {
             return;
         };
         p.state = PartState::Stuck;
+        p.needed_you = true;
         p.note = note.clone();
         let title = p.title.clone();
         let session = p.session;
@@ -560,6 +563,9 @@ impl RunoApp {
         };
         let was = p.state;
         p.state = state;
+        if was == PartState::Checking && state == PartState::Working {
+            p.fixes += 1;
+        }
         p.note = note.to_string();
         let (title, name) = (p.title.clone(), agent::provider(&p.agent).name);
         let line = match (was, state) {

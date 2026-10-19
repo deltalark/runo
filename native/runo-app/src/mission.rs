@@ -138,6 +138,68 @@ pub struct Part {
     pub started: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub finished: u64,
+    /// Times its checks failed and went back to its agent.
+    #[serde(default, skip_serializing_if = "is_none")]
+    pub fixes: u32,
+    /// It stopped and needed the person at least once.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub needed_you: bool,
+}
+
+/// How an agent has done on mission parts so far, for picking agents.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Record {
+    /// Parts it finished and that were merged.
+    pub done: u32,
+    /// Of those, the ones that passed their checks the first time without needing you.
+    pub clean: u32,
+    /// Parts that stopped and needed the person.
+    pub stuck: u32,
+    /// Seconds the finished parts took, together.
+    pub secs: u64,
+}
+
+impl Record {
+    /// Share of finished parts that went through first time, in percent.
+    pub fn first_try(&self) -> Option<u32> {
+        (self.done > 0).then(|| self.clean * 100 / self.done)
+    }
+
+    /// "8 parts, 88% through first time, about 1m 20s each".
+    pub fn line(&self) -> Option<String> {
+        let rate = self.first_try()?;
+        let each = self.secs / self.done as u64;
+        let time = match each {
+            0..=59 => format!("{each}s"),
+            _ => format!("{}m {:02}s", each / 60, each % 60),
+        };
+        Some(format!(
+            "{} part{}, {rate}% through first time, about {time} each",
+            self.done,
+            if self.done == 1 { "" } else { "s" }
+        ))
+    }
+}
+
+/// Every agent's record over the missions' parts, by agent id.
+pub fn records(missions: &[Mission]) -> std::collections::HashMap<String, Record> {
+    let mut out: std::collections::HashMap<String, Record> = Default::default();
+    for p in missions.iter().flat_map(|m| &m.parts) {
+        let r = out.entry(p.agent.clone()).or_default();
+        if p.needed_you {
+            r.stuck += 1;
+        }
+        if p.state == PartState::Done {
+            r.done += 1;
+            if p.fixes == 0 && !p.needed_you {
+                r.clean += 1;
+            }
+            if p.started > 0 && p.finished >= p.started {
+                r.secs += p.finished - p.started;
+            }
+        }
+    }
+    out
 }
 
 /// A goal and its plan.
@@ -337,6 +399,14 @@ impl Mission {
     }
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_none(n: &u32) -> bool {
+    *n == 0
+}
+
 fn is_zero(n: &u64) -> bool {
     *n == 0
 }
@@ -364,15 +434,25 @@ pub fn branch_for(goal: &str) -> String {
 pub fn plan_prompt(
     goal: &str,
     agents: &[(&str, &str)],
+    records: &std::collections::HashMap<String, Record>,
     parallel: u32,
     feedback: &str,
     previous: &[Part],
 ) -> String {
-    let roster = agents
+    let mut roster = agents
         .iter()
-        .map(|(id, name)| format!("- `{id}`: {name}"))
+        .map(|(id, name)| match records.get(*id).and_then(Record::line) {
+            Some(line) => format!("- `{id}`: {name} (on earlier missions: {line})"),
+            None => format!("- `{id}`: {name}"),
+        })
         .collect::<Vec<_>>()
         .join("\n");
+    if agents
+        .iter()
+        .any(|(id, _)| records.get(*id).is_some_and(|r| r.done > 0))
+    {
+        roster.push_str("\n  Give the hardest parts to the agents that more often get through first time, but still spread the parts so they run at once.");
+    }
     let mut prompt = format!(
         "You are planning a mission in this repository. Several coding agents will carry it out at the same time, each on one part in its own git worktree; each part is merged into one branch once its tests pass.\n\n\
 ## The goal\n{goal}\n\n\
@@ -771,16 +851,68 @@ mod tests {
 
     #[test]
     fn plan_again_carries_the_feedback() {
+        let mut records = std::collections::HashMap::new();
+        records.insert(
+            "codex".to_string(),
+            Record {
+                done: 4,
+                clean: 3,
+                stuck: 1,
+                secs: 400,
+            },
+        );
         let prompt = plan_prompt(
             "Add dark mode",
             &[("claude", "Claude Code"), ("codex", "Codex")],
+            &records,
             3,
             "Merge the two UI parts",
             &[part("a", &[])],
         );
-        assert!(prompt.contains("- `codex`: Codex"));
+        assert!(prompt.contains(
+            "- `codex`: Codex (on earlier missions: 4 parts, 75% through first time, about 1m 40s each)"
+        ));
+        assert!(prompt.contains("- `claude`: Claude Code\n"));
+        assert!(prompt.contains("Give the hardest parts"));
         assert!(prompt.contains("(3 at a time)"));
         assert!(prompt.contains("Merge the two UI parts"));
         assert!(prompt.contains("- A (claude): Do a"));
+    }
+
+    #[test]
+    fn records_count_first_time_parts_per_agent() {
+        let done = |agent: &str, fixes: u32, needed_you: bool| Part {
+            agent: agent.into(),
+            state: PartState::Done,
+            started: 100,
+            finished: 160,
+            fixes,
+            needed_you,
+            ..Default::default()
+        };
+        let m = Mission {
+            parts: vec![
+                done("claude", 0, false),
+                done("claude", 1, false),
+                done("codex", 0, true),
+                Part {
+                    agent: "codex".into(),
+                    state: PartState::Stuck,
+                    needed_you: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let r = records(&[m]);
+        assert_eq!(r["claude"].first_try(), Some(50));
+        assert_eq!(
+            r["claude"].line().as_deref(),
+            Some("2 parts, 50% through first time, about 1m 00s each")
+        );
+        assert_eq!(r["codex"].done, 1);
+        assert_eq!(r["codex"].clean, 0);
+        assert_eq!(r["codex"].stuck, 2);
+        assert_eq!(Record::default().line(), None);
     }
 }
