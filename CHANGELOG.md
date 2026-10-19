@@ -79,6 +79,7 @@ All notable changes to Runo are documented here.
 
 ### Changed
 
+- Grok continues its own conversation from turn to turn (`grok -s <session>`) instead of starting fresh with the recent turns pasted into each prompt, and its session can be opened in the CLI view. Older Grok releases without `--session` still get the recent turns.
 - The working row at the end of a chat has a new animation: a small comet circles a softly breathing dot while a glint of the accent colour sweeps across "Working", with the elapsed time beside it. It replaces the spinner and three dots, reads well in light and dark, and holds still when animations are off in Settings.
 - Projects in the sidebar are easier to tell apart when several are open. Each project gets a bolder name with its icon on a tinted tile and a count badge, its sessions hang off a rail in the project's color, and a little space sets projects apart. Session rows take two lines instead of three: the title and time, then the agent and branch ("local folder" is no longer repeated on every row). The open session is tinted in its project's color, a folded project shows a dot when a session inside needs you or is running, and the pin and archive buttons on hover are lighter and easier to hit.
 - The sample workspace shown before you add a project now gives each project its own color, so it previews the colored project rails in the sidebar. The README screenshots show the current app, with new ones for the Design and Architecture canvases.
