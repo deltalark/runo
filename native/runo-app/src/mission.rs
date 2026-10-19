@@ -86,6 +86,19 @@ impl PartState {
         )
     }
 
+    /// How far along the part's pipeline it is: 0 working, 1 checks, 2 second opinion,
+    /// 3 merging, 4 merged. Waiting, stuck and skipped parts have no step.
+    pub fn step(self) -> Option<usize> {
+        match self {
+            PartState::Working => Some(0),
+            PartState::Checking => Some(1),
+            PartState::Reviewing => Some(2),
+            PartState::Proved | PartState::Merging => Some(3),
+            PartState::Done => Some(4),
+            PartState::Waiting | PartState::Stuck | PartState::Skipped => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             PartState::Waiting => "Waiting",
@@ -130,6 +143,11 @@ pub struct Part {
     /// The second opinion's notes already went back once.
     #[serde(default)]
     pub reviewed: bool,
+    /// Unix seconds it started and was merged, for how long it took.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub started: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub finished: u64,
 }
 
 /// A goal and its plan.
@@ -166,6 +184,11 @@ pub struct Mission {
     /// Unix seconds it was created.
     #[serde(default)]
     pub created: u64,
+    /// Unix seconds the parts started running, and the mission was ready.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub started: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub finished: u64,
 }
 
 impl Mission {
@@ -233,6 +256,31 @@ impl Mission {
             .position(|p| p.session == session && session != 0)
     }
 
+    /// The parts grouped into waves: the first wave waits on nothing, and each later one
+    /// waits only on parts in the waves before it.
+    pub fn waves(&self) -> Vec<Vec<usize>> {
+        let mut depth: Vec<usize> = Vec::with_capacity(self.parts.len());
+        for part in &self.parts {
+            let d = part
+                .deps
+                .iter()
+                .filter_map(|k| self.parts.iter().position(|p| &p.key == k))
+                .filter(|i| *i < depth.len())
+                .map(|i| depth[i] + 1)
+                .max()
+                .unwrap_or(0);
+            depth.push(d);
+        }
+        let mut waves: Vec<Vec<usize>> = Vec::new();
+        for (i, d) in depth.into_iter().enumerate() {
+            if waves.len() <= d {
+                waves.resize(d + 1, Vec::new());
+            }
+            waves[d].push(i);
+        }
+        waves
+    }
+
     /// Titles of the parts a part waits on.
     pub fn dep_titles(&self, part: &Part) -> Vec<String> {
         part.deps
@@ -252,6 +300,10 @@ impl Mission {
             p.deps.retain(|d| *d != key);
         }
     }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// A branch name from the goal, such as `mission/add-dark-mode`.
@@ -568,6 +620,22 @@ mod tests {
         assert_eq!(m.startable(), vec![2]);
         m.stage = Stage::Paused;
         assert!(m.startable().is_empty());
+    }
+
+    #[test]
+    fn parts_fall_into_waves_by_what_they_wait_on() {
+        let m = mission(
+            vec![
+                part("a", &[]),
+                part("b", &[]),
+                part("c", &["a"]),
+                part("d", &["c", "b"]),
+            ],
+            2,
+        );
+        assert_eq!(m.waves(), vec![vec![0, 1], vec![2], vec![3]]);
+        assert_eq!(PartState::Reviewing.step(), Some(2));
+        assert_eq!(PartState::Stuck.step(), None);
     }
 
     #[test]

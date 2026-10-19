@@ -39,6 +39,7 @@ mod mcp;
 mod memory_mcp;
 mod mission;
 mod mission_ui;
+mod mission_view;
 mod modelcheck;
 mod models;
 mod notes;

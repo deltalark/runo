@@ -1,15 +1,10 @@
 //! Missions in the app: planning with an agent, starting each part as its own session
 //! when the parts before it are in, proving and merging each one into the mission
-//! branch, landing the mission, and the Missions page with its board.
+//! branch, and landing the mission. The page is in `mission_view.rs`.
 
 use super::*;
-use crate::mission::{self, Mission, Part, PartState, Stage};
+use crate::mission::{self, Mission, PartState, Stage};
 use crate::proof;
-
-/// Width of the list of missions.
-const LIST_WIDTH: f32 = 280.;
-/// Parallel parts offered on the form.
-const PARALLEL: [u32; 4] = [1, 2, 3, 4];
 
 /// The New mission form's choices; the goal is in its own text box.
 #[derive(Default)]
@@ -29,28 +24,16 @@ fn last_ask(session: &Session) -> Option<usize> {
     session.messages.iter().rposition(|m| m.role == Role::User)
 }
 
-fn stage_label(stage: Stage) -> &'static str {
-    match stage {
-        Stage::Planning => "Planning",
-        Stage::Plan => "Check the plan",
-        Stage::Running => "Running",
-        Stage::Paused => "Paused",
-        Stage::Landing => "Landing",
-        Stage::Ready => "Ready to ship",
-        Stage::Failed => "Planning failed",
-    }
-}
-
 impl RunoApp {
-    fn mission(&self, mid: u64) -> Option<&Mission> {
+    pub(crate) fn mission(&self, mid: u64) -> Option<&Mission> {
         self.state.missions.iter().find(|m| m.id == mid)
     }
 
-    fn mission_mut(&mut self, mid: u64) -> Option<&mut Mission> {
+    pub(crate) fn mission_mut(&mut self, mid: u64) -> Option<&mut Mission> {
         self.state.missions.iter_mut().find(|m| m.id == mid)
     }
 
-    fn installed_agents(&self, cx: &App) -> Vec<&'static str> {
+    pub(crate) fn installed_agents(&self, cx: &App) -> Vec<&'static str> {
         let settings = cx.global::<AppSettings>();
         agent::PROVIDERS
             .iter()
@@ -99,7 +82,7 @@ impl RunoApp {
 
     /// Fill the form's choices the first time it shows: the agents that are installed,
     /// two at a time, and a second opinion when there is a second vendor.
-    fn mission_form_defaults(&mut self, cx: &App) {
+    pub(crate) fn mission_form_defaults(&mut self, cx: &App) {
         if self.mission_form.ready {
             return;
         }
@@ -113,7 +96,7 @@ impl RunoApp {
     // ---------- planning ----------
 
     /// Create a mission from the form and ask the planner for a plan.
-    fn plan_mission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn plan_mission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.demo_guard(cx) {
             return;
         }
@@ -181,7 +164,7 @@ impl RunoApp {
     }
 
     /// Ask the mission's first agent for a plan, read-only, in the project folder.
-    fn run_planner(&mut self, mid: u64, feedback: String, cx: &mut Context<Self>) {
+    pub(crate) fn run_planner(&mut self, mid: u64, feedback: String, cx: &mut Context<Self>) {
         let Some(m) = self.mission(mid) else {
             return;
         };
@@ -266,7 +249,7 @@ impl RunoApp {
 
     /// Start the planned mission: its own session on the mission branch takes the
     /// merges, and the first parts start once its worktree is ready.
-    fn start_mission(&mut self, mid: u64, cx: &mut Context<Self>) {
+    pub(crate) fn start_mission(&mut self, mid: u64, cx: &mut Context<Self>) {
         if self.demo_guard(cx) {
             return;
         }
@@ -330,6 +313,7 @@ impl RunoApp {
                 if let Some(m) = self.mission_mut(mid) {
                     m.lead = lead;
                     m.stage = Stage::Running;
+                    m.started = crate::workspace::unix_now();
                     m.note.clear();
                 }
                 if !self.expanded.contains(&project.id) {
@@ -479,6 +463,7 @@ impl RunoApp {
                 if let Some(p) = self.mission_mut(mid).and_then(|m| m.parts.get_mut(index)) {
                     p.session = id;
                     p.state = PartState::Working;
+                    p.started = crate::workspace::unix_now();
                     p.note.clear();
                 }
                 self.state.log(id, format!("Mission part: {}", part.title));
@@ -731,6 +716,9 @@ impl RunoApp {
         match result {
             Ok(commit) => {
                 self.set_part(mid, index, PartState::Done, &format!("Merged as {commit}"));
+                if let Some(p) = self.mission_mut(mid).and_then(|m| m.parts.get_mut(index)) {
+                    p.finished = crate::workspace::unix_now();
+                }
                 self.state.log(
                     part.session,
                     format!("Merged into {target}: {}", part.title),
@@ -912,6 +900,7 @@ impl RunoApp {
             return;
         };
         m.stage = Stage::Ready;
+        m.finished = crate::workspace::unix_now();
         m.note = format!("{note} Review the mission branch, then open a pull request or merge it.");
         let (lead, goal) = (m.lead, m.goal.clone());
         if let Some(s) = self.state.session_mut(lead) {
@@ -928,7 +917,7 @@ impl RunoApp {
 
     /// Try a stuck part again: more fix rounds, the agent picks up after an error, or the
     /// merge runs again.
-    fn retry_part(&mut self, mid: u64, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn retry_part(&mut self, mid: u64, index: usize, cx: &mut Context<Self>) {
         let Some(part) = self.mission(mid).and_then(|m| m.parts.get(index)).cloned() else {
             return;
         };
@@ -977,14 +966,14 @@ impl RunoApp {
         cx.notify();
     }
 
-    fn skip_part(&mut self, mid: u64, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn skip_part(&mut self, mid: u64, index: usize, cx: &mut Context<Self>) {
         self.set_part(mid, index, PartState::Skipped, "Skipped");
         self.save();
         self.mission_tick(mid, cx);
         cx.notify();
     }
 
-    fn delete_mission(&mut self, mid: u64) {
+    pub(crate) fn delete_mission(&mut self, mid: u64) {
         self.state.missions.retain(|m| m.id != mid);
         for s in &mut self.state.sessions {
             if s.mission == mid {
@@ -995,956 +984,5 @@ impl RunoApp {
             self.mission_open = None;
         }
         self.save();
-    }
-
-    // ---------- the page ----------
-
-    pub(crate) fn missions_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut missions: Vec<&Mission> = self.state.missions.iter().collect();
-        missions.sort_by_key(|m| std::cmp::Reverse(m.id));
-        let rows: Vec<AnyElement> = missions.iter().map(|m| self.mission_row(m, cx)).collect();
-        let none = missions.is_empty();
-        let side = div()
-            .w(px(LIST_WIDTH))
-            .flex_none()
-            .h_full()
-            .v_flex()
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
-            .child(
-                div()
-                    .h(px(46.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Missions")
-                    .child(div().flex_1())
-                    .child(
-                        self.button("mission-new", "New", self.mission_open.is_some())
-                            .h(px(26.))
-                            .px_2()
-                            .text_size(px(12.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.mission_open = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .id("mission-list")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .v_flex()
-                    .gap(px(2.))
-                    .children(rows)
-                    .when(none, |el| {
-                        el.child(
-                            div()
-                                .px_3()
-                                .py_2()
-                                .text_size(px(12.5))
-                                .text_color(rgb(c_muted()))
-                                .child("No missions yet. Give Runo a goal, and it plans the work, runs the parts on several agents at once, checks each one and merges them into one branch."),
-                        )
-                    }),
-            );
-        let main = match self.mission_open.and_then(|id| self.mission(id)) {
-            Some(m) => self.mission_page(m, cx),
-            None => self.mission_form_view(cx),
-        };
-        div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .child(side)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .bg(glass_fill(c_canvas()))
-                    .child(main),
-            )
-            .into_any_element()
-    }
-
-    fn mission_row(&self, m: &Mission, cx: &mut Context<Self>) -> AnyElement {
-        let id = m.id;
-        let on = self.mission_open == Some(id);
-        let (done, total) = m.progress();
-        let stuck = m.parts.iter().any(|p| p.state == PartState::Stuck);
-        let tone = match m.stage {
-            Stage::Ready => c_green(),
-            Stage::Failed => c_red(),
-            Stage::Plan => c_amber(),
-            _ if stuck => c_amber(),
-            Stage::Paused => c_muted(),
-            _ => c_blue(),
-        };
-        let line = match m.stage {
-            Stage::Running | Stage::Paused | Stage::Landing if total > 0 => {
-                format!(
-                    "{done} of {total} parts  ·  {}",
-                    if stuck {
-                        "Needs you"
-                    } else {
-                        stage_label(m.stage)
-                    }
-                )
-            }
-            stage => stage_label(stage).to_string(),
-        };
-        let fraction = if total == 0 {
-            0.
-        } else {
-            done as f32 / total as f32
-        };
-        div()
-            .id(("mission-row", id as usize))
-            .mx_1()
-            .px_2()
-            .py(px(7.))
-            .v_flex()
-            .gap_1()
-            .rounded_md()
-            .cursor_pointer()
-            .when(on, |el| el.bg(tint(c_active())))
-            .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.mission_open = Some(id);
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .truncate()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(m.goal.lines().next().unwrap_or("").to_string()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_muted()))
-                    .child(div().size(px(6.)).rounded_full().bg(rgb(tone)))
-                    .child(line),
-            )
-            .when(total > 0 && m.stage != Stage::Plan, |el| {
-                el.child(
-                    div()
-                        .h(px(3.))
-                        .w_full()
-                        .rounded_full()
-                        .bg(tint(c_subtle()))
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(fraction))
-                                .rounded_full()
-                                .bg(rgb(tone)),
-                        ),
-                )
-            })
-            .into_any_element()
-    }
-
-    fn section_label(&self, text: &'static str) -> Div {
-        div()
-            .text_size(px(11.5))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(c_secondary()))
-            .child(text)
-    }
-
-    fn mission_form_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let form = &self.mission_form;
-        let installed = self.installed_agents(cx);
-        let project = Some(form.project)
-            .filter(|p| *p != 0)
-            .or_else(|| self.current_project())
-            .or_else(|| self.state.projects.first().map(|p| p.id));
-        let agent_chips: Vec<AnyElement> = installed
-            .iter()
-            .enumerate()
-            .map(|(i, id)| {
-                let id = *id;
-                let p = agent::provider(id);
-                let order = form.agents.iter().position(|a| a == id);
-                let label = match order {
-                    Some(0) => format!("{}  ·  plans", p.name),
-                    _ => p.name.to_string(),
-                };
-                self.chip(("mission-agent", i), label, order.is_some())
-                    .gap_1p5()
-                    .child(self.provider_mark(p, 12.))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let agents = &mut this.mission_form.agents;
-                        match agents.iter().position(|a| a == id) {
-                            Some(at) => {
-                                agents.remove(at);
-                            }
-                            None => agents.push(id.to_string()),
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        let project_chips: Vec<AnyElement> = self
-            .state
-            .projects
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let pid = p.id;
-                self.chip(("mission-project", i), p.name.clone(), project == Some(pid))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.mission_form.project = pid;
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-        let parallel = form.parallel;
-        let review = form.review;
-        div()
-            .id("mission-form")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .max_w(px(680.))
-                    .mx_auto()
-                    .px_6()
-                    .py_8()
-                    .v_flex()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(icon(IconName::Rocket, 20., c_text()))
-                            .child(
-                                div()
-                                    .text_size(px(20.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("New mission"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(rgb(c_secondary()))
-                            .child("Give Runo one goal. A planner splits it into parts, agents from different vendors work on them at once in their own worktrees, and each part is merged into one branch only when its checks pass."),
-                    )
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_1p5()
-                            .child(self.section_label("Goal"))
-                            .child(Textarea::new(&self.mission_goal).bordered(true).h(px(120.))),
-                    )
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_1p5()
-                            .child(self.section_label("Project"))
-                            .child(div().flex().flex_wrap().gap_1p5().children(project_chips)),
-                    )
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_1p5()
-                            .child(self.section_label("Agents that may work on it"))
-                            .child(div().flex().flex_wrap().gap_1p5().children(agent_chips))
-                            .child(
-                                div()
-                                    .text_size(px(11.5))
-                                    .text_color(rgb(c_muted()))
-                                    .child(if installed.is_empty() {
-                                        "No agent CLIs are installed. Add one in Settings → Providers."
-                                    } else {
-                                        "The first one you pick writes the plan. The planner picks an agent for each part, and you can change it before starting."
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_1p5()
-                            .child(self.section_label("Parts at once").mr_1())
-                            .children(PARALLEL.iter().enumerate().map(|(i, n)| {
-                                let n = *n;
-                                self.chip(("mission-parallel", i), n.to_string(), parallel == n)
-                                    .h(px(26.))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.mission_form.parallel = n;
-                                        cx.notify();
-                                    }))
-                            }))
-                            .child(div().w(px(16.)))
-                            .child(self.section_label("Second opinion on each part").mr_1())
-                            .children([(0usize, "On", true), (1, "Off", false)].map(
-                                |(i, label, on)| {
-                                    self.chip(("mission-review", i), label.into(), review == on)
-                                        .h(px(26.))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.mission_form.review = on;
-                                            cx.notify();
-                                        }))
-                                },
-                            )),
-                    )
-                    .when_some(form.error.clone(), |el, error| {
-                        el.child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(rgb(c_red()))
-                                .child(error),
-                        )
-                    })
-                    .child(
-                        div().flex().child(
-                            self.button("mission-plan", "Plan mission", true)
-                                .h(px(34.))
-                                .px_4()
-                                .child(icon(IconName::Sparkles, 13., c_canvas()))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.mission_form_defaults(cx);
-                                    this.plan_mission(window, cx);
-                                    cx.notify();
-                                })),
-                        ),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn mission_page(&self, m: &Mission, cx: &mut Context<Self>) -> AnyElement {
-        let mid = m.id;
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == m.project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
-        let stuck = m.parts.iter().any(|p| p.state == PartState::Stuck);
-        let tone = match m.stage {
-            Stage::Ready => c_green(),
-            Stage::Failed => c_red(),
-            _ if stuck || m.stage == Stage::Plan => c_amber(),
-            _ => c_blue(),
-        };
-        let lead = m.lead;
-        let header = div()
-            .min_h(px(46.))
-            .flex_none()
-            .px_4()
-            .py_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .border_b_1()
-            .border_color(divider())
-            .child(icon(IconName::Rocket, 15., c_text()))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(m.goal.lines().next().unwrap_or("").to_string()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .h(px(22.))
-                    .rounded_md()
-                    .bg(tint(c_subtle()))
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_secondary()))
-                    .child(icon(IconName::GitBranch, 11., c_muted()))
-                    .child(format!("{project}  ·  {}", m.branch)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .px_2()
-                    .h(px(22.))
-                    .flex()
-                    .items_center()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(tone))
-                    .text_size(px(11.5))
-                    .text_color(rgb(tone))
-                    .child(
-                        if stuck && matches!(m.stage, Stage::Running | Stage::Paused) {
-                            "Needs you"
-                        } else {
-                            stage_label(m.stage)
-                        },
-                    ),
-            )
-            .when(m.stage == Stage::Running, |el| {
-                el.child(
-                    self.button("mission-pause", "Pause", false)
-                        .h(px(26.))
-                        .px_2()
-                        .text_size(px(12.))
-                        .child(icon(IconName::Pause, 12., c_secondary()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(m) = this.mission_mut(mid) {
-                                m.stage = Stage::Paused;
-                            }
-                            this.save();
-                            cx.notify();
-                        })),
-                )
-            })
-            .when(m.stage == Stage::Paused, |el| {
-                el.child(
-                    self.button("mission-resume", "Resume", true)
-                        .h(px(26.))
-                        .px_2()
-                        .text_size(px(12.))
-                        .child(icon(IconName::Play, 12., c_canvas()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(m) = this.mission_mut(mid) {
-                                m.stage = Stage::Running;
-                            }
-                            this.mission_tick(mid, cx);
-                            this.save();
-                            cx.notify();
-                        })),
-                )
-            })
-            .when(lead != 0 && self.state.session(lead).is_some(), |el| {
-                el.child(
-                    self.button("mission-lead", "Mission session", false)
-                        .h(px(26.))
-                        .px_2()
-                        .text_size(px(12.))
-                        .child(icon(IconName::MessageSquare, 12., c_secondary()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.select(lead);
-                            this.view = View::Session;
-                            cx.notify();
-                        })),
-                )
-            })
-            .when(m.stage == Stage::Ready, |el| {
-                el.child(
-                    self.button("mission-ship", "Review and ship", true)
-                        .h(px(26.))
-                        .px_2()
-                        .text_size(px(12.))
-                        .child(icon(IconName::GitCompare, 12., c_canvas()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.review(lead);
-                            cx.notify();
-                        })),
-                )
-            })
-            .child(
-                self.ghost_button_sized(
-                    ("mission-delete", mid as usize),
-                    IconName::Trash,
-                    "Delete the mission (its sessions stay)",
-                    26.,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.delete_mission(mid);
-                    cx.notify();
-                })),
-            );
-        let mut about = div().px_4().pt_3().v_flex().gap_1();
-        if !m.summary.is_empty() {
-            about = about.child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(rgb(c_secondary()))
-                    .child(m.summary.clone()),
-            );
-        }
-        if !m.note.is_empty() {
-            about = about.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .text_size(px(12.5))
-                    .text_color(rgb(match m.stage {
-                        Stage::Failed => c_red(),
-                        Stage::Ready => c_green(),
-                        _ => c_secondary(),
-                    }))
-                    .child(icon(
-                        match m.stage {
-                            Stage::Ready => IconName::CircleCheck,
-                            Stage::Failed => IconName::CircleAlert,
-                            Stage::Landing if self.proving.contains(&lead) => {
-                                IconName::LoaderCircle
-                            }
-                            _ => IconName::Info,
-                        },
-                        13.,
-                        tone,
-                    ))
-                    .child(m.note.clone()),
-            );
-        }
-        if m.waiting_on_you() {
-            about = about.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .text_size(px(12.5))
-                    .text_color(rgb(c_amber()))
-                    .child(icon(IconName::TriangleAlert, 13., c_amber()))
-                    .child("Nothing else can move until you look at the parts that need you."),
-            );
-        }
-        let body = match m.stage {
-            Stage::Planning => div()
-                .flex_1()
-                .v_flex()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(icon(IconName::LoaderCircle, 22., c_muted()))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(format!(
-                            "{} is reading the project and planning…",
-                            agent::provider(
-                                m.agents.first().map(String::as_str).unwrap_or("claude")
-                            )
-                            .name
-                        )),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_muted()))
-                        .child("It only reads; nothing changes until you start the mission."),
-                )
-                .into_any_element(),
-            Stage::Plan | Stage::Failed => self.plan_review(m, cx),
-            _ => self.mission_board(m, cx),
-        };
-        div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .v_flex()
-            .child(header)
-            .child(about)
-            .child(body)
-            .into_any_element()
-    }
-
-    /// The plan before it starts: each part, its agent and order, and Plan again.
-    fn plan_review(&self, m: &Mission, cx: &mut Context<Self>) -> AnyElement {
-        let mid = m.id;
-        let cards: Vec<AnyElement> = m
-            .parts
-            .iter()
-            .enumerate()
-            .map(|(i, p)| self.mission_plan_card(m, i, p, cx))
-            .collect();
-        let has_parts = !m.parts.is_empty();
-        div()
-            .id("mission-plan")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .px_4()
-            .py_3()
-            .v_flex()
-            .gap_2()
-            .children(cards)
-            .child(
-                div()
-                    .mt_2()
-                    .v_flex()
-                    .gap_1p5()
-                    .child(self.section_label(if has_parts {
-                        "Not quite right? Say what to change"
-                    } else {
-                        "Anything the planner should know?"
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().flex_1().child(
-                                Input::new(&self.mission_feedback).bordered(true).h(px(32.)),
-                            ))
-                            .child(
-                                self.button("mission-replan", "Plan again", !has_parts)
-                                    .child(icon(
-                                        IconName::RotateCw,
-                                        12.,
-                                        if has_parts { c_secondary() } else { c_canvas() },
-                                    ))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let feedback = this
-                                            .mission_feedback
-                                            .read(cx)
-                                            .value()
-                                            .trim()
-                                            .to_string();
-                                        this.mission_feedback
-                                            .update(cx, |i, cx| i.set_value("", window, cx));
-                                        this.run_planner(mid, feedback, cx);
-                                        this.save();
-                                        cx.notify();
-                                    })),
-                            )
-                            .when(has_parts, |el| {
-                                el.child(
-                                    self.button("mission-start", "Start mission", true)
-                                        .child(icon(IconName::Play, 12., c_canvas()))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.start_mission(mid, cx);
-                                        })),
-                                )
-                            }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn mission_plan_card(
-        &self,
-        m: &Mission,
-        index: usize,
-        part: &Part,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mid = m.id;
-        let provider = agent::provider(&part.agent);
-        let deps = m.dep_titles(part);
-        let pool = m.agents.clone();
-        let mut preview: String = part.prompt.chars().take(360).collect();
-        if part.prompt.chars().count() > 360 {
-            preview.push('…');
-        }
-        div()
-            .p_3()
-            .v_flex()
-            .gap_1p5()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(rgb(c_raised()))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .size(px(20.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(tint(c_subtle()))
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child((index + 1).to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(part.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .id(("mission-part-agent", index))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .h(px(24.))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(c_border()))
-                            .cursor_pointer()
-                            .hover(|el| el.bg(tint(c_subtle())))
-                            .text_size(px(12.))
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(
-                                    "Switch the agent for this part",
-                                )
-                                .build(window, cx)
-                            })
-                            .child(self.provider_mark(provider, 12.))
-                            .child(provider.name)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                let Some(p) =
-                                    this.mission_mut(mid).and_then(|m| m.parts.get_mut(index))
-                                else {
-                                    return;
-                                };
-                                let at = pool
-                                    .iter()
-                                    .position(|a| *a == p.agent)
-                                    .map(|i| i + 1)
-                                    .unwrap_or(0);
-                                if let Some(next) = pool.get(at % pool.len().max(1)) {
-                                    p.agent = next.clone();
-                                }
-                                this.save();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        self.ghost_button_sized(
-                            ("mission-part-remove", index),
-                            IconName::X,
-                            "Leave this part out",
-                            24.,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(m) = this.mission_mut(mid) {
-                                m.remove_part(index);
-                            }
-                            this.save();
-                            cx.notify();
-                        })),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(rgb(c_secondary()))
-                    .child(preview),
-            )
-            .when(!deps.is_empty() || !part.files.is_empty(), |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_x_3()
-                        .text_size(px(11.5))
-                        .text_color(rgb(c_muted()))
-                        .when(!deps.is_empty(), |el| {
-                            el.child(format!("After: {}", deps.join(", ")))
-                        })
-                        .when(!part.files.is_empty(), |el| {
-                            el.child(format!("Files: {}", part.files.join(", ")))
-                        }),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// Waiting, Working, Checking and Done, one card per part.
-    fn mission_board(&self, m: &Mission, cx: &mut Context<Self>) -> AnyElement {
-        let titles = ["Waiting", "Working", "Checking", "Done"];
-        let mut columns: Vec<Vec<AnyElement>> =
-            vec![Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        for (i, p) in m.parts.iter().enumerate() {
-            columns[p.state.column()].push(self.part_card(m, i, p, cx));
-        }
-        div()
-            .flex_1()
-            .min_h_0()
-            .px_4()
-            .py_3()
-            .flex()
-            .gap_3()
-            .children(columns.into_iter().enumerate().map(|(c, cards)| {
-                let count = cards.len();
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_muted()))
-                            .child(titles[c].to_uppercase())
-                            .child(count.to_string()),
-                    )
-                    .child(
-                        div()
-                            .id(("mission-column", c))
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .v_flex()
-                            .gap_2()
-                            .p_1()
-                            .rounded_lg()
-                            .bg(tint(c_subtle()))
-                            .children(cards),
-                    )
-            }))
-            .into_any_element()
-    }
-
-    fn part_card(
-        &self,
-        m: &Mission,
-        index: usize,
-        part: &Part,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mid = m.id;
-        let provider = agent::provider(&part.agent);
-        let session = part.session;
-        let stuck = part.state == PartState::Stuck;
-        let tone = match part.state {
-            PartState::Done => c_green(),
-            PartState::Stuck => c_amber(),
-            PartState::Waiting | PartState::Skipped => c_muted(),
-            _ => c_blue(),
-        };
-        let deps: Vec<String> = m
-            .parts
-            .iter()
-            .filter(|d| part.deps.contains(&d.key) && !d.state.settled())
-            .map(|d| d.title.clone())
-            .collect();
-        let asking = session != 0 && self.approval_for(session).is_some();
-        let live = matches!(
-            part.state,
-            PartState::Working | PartState::Checking | PartState::Reviewing | PartState::Merging
-        );
-        let small = |this: &Self, key: &'static str, label: &'static str, primary: bool| {
-            this.button((key, index), label, primary)
-                .h(px(24.))
-                .px_2()
-                .text_size(px(12.))
-        };
-        div()
-            .id(("mission-part", index))
-            .p_2p5()
-            .v_flex()
-            .gap_1p5()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(if stuck { c_amber() } else { c_border() }))
-            .bg(rgb(c_raised()))
-            .when(session != 0, |el| {
-                el.cursor_pointer()
-                    .hover(|el| el.border_color(rgb(c_blue())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select(session);
-                        this.view = View::Session;
-                        cx.notify();
-                    }))
-            })
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(part.title.clone()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .text_size(px(11.5))
-                    .child(self.provider_mark(provider, 12.))
-                    .child(div().text_color(rgb(c_secondary())).child(provider.name))
-                    .child(div().flex_1())
-                    .when(live, |el| el.child(icon(IconName::LoaderCircle, 11., tone)))
-                    .child(div().text_color(rgb(tone)).child(part.state.label())),
-            )
-            .when(asking, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_size(px(11.5))
-                        .text_color(rgb(c_amber()))
-                        .child(icon(IconName::ShieldAlert, 11., c_amber()))
-                        .child("Asks to run a command. Open it to answer."),
-                )
-            })
-            .when(part.state == PartState::Waiting && !deps.is_empty(), |el| {
-                el.child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(rgb(c_muted()))
-                        .child(format!("After {}", deps.join(", "))),
-                )
-            })
-            .when(
-                !part.note.is_empty() && part.state != PartState::Skipped,
-                |el| {
-                    el.child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(rgb(if stuck { c_text() } else { c_muted() }))
-                            .child(part.note.clone()),
-                    )
-                },
-            )
-            .when(stuck, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_1p5()
-                        .child(
-                            small(self, "mission-part-retry", "Try again", true).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.retry_part(mid, index, cx);
-                                }),
-                            ),
-                        )
-                        .child(small(self, "mission-part-skip", "Skip", false).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.skip_part(mid, index, cx);
-                            }),
-                        )),
-                )
-            })
-            .into_any_element()
     }
 }
