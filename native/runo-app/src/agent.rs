@@ -90,20 +90,51 @@ pub const PROVIDERS: [Provider; 10] = [
 ];
 
 /// Whether the CLI keeps its own conversation that a follow-up can resume. Others get
-/// the recent conversation written into each follow-up prompt instead.
+/// the recent conversation written into each follow-up prompt instead. Grok does once
+/// its help lists `--session`; older releases start fresh every turn.
 pub fn resumes(provider: &str) -> bool {
-    matches!(
-        provider,
-        "claude"
-            | "codex"
-            | "opencode"
-            | "gemini"
-            | "qwen"
-            | "cursor"
-            | "copilot"
-            | "amp"
-            | "droid"
-    )
+    match provider {
+        "claude" | "codex" | "opencode" | "gemini" | "qwen" | "cursor" | "copilot" | "amp"
+        | "droid" => true,
+        "grok" => crate::caps::mentions("grok", "--session <"),
+        _ => false,
+    }
+}
+
+/// The conversation id a CLI names on stderr: Grok's headless runs start with
+/// `Session: <id>` there (dimmed), the id `-s` takes to continue it.
+pub fn stderr_conversation(provider: &str, line: &str) -> Option<String> {
+    if provider != "grok" {
+        return None;
+    }
+    let plain = strip_ansi(line);
+    let id = plain.trim().strip_prefix("Session: ")?.trim();
+    (!id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    .then(|| id.to_string())
+}
+
+/// `text` without terminal colour codes (`ESC [ ... letter`).
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// CLIs that take a conversation id chosen by Runo on the first run. Copilot and Gemini
@@ -578,6 +609,9 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             args.push(with_images(spec));
         }
         "grok" => {
+            if spec.resume && !spec.session_id.is_empty() {
+                args.extend([s("-s"), spec.session_id.to_string()]);
+            }
             if !model.is_empty() {
                 args.extend([s("-m"), model]);
             }
@@ -821,6 +855,16 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             } else {
                 Vec::new()
             };
+        }
+        "grok" => {
+            let mut args = with_model(Vec::new(), "-m");
+            if resume {
+                args.extend([s("-s"), id]);
+            } else if !spec.prompt.is_empty() {
+                // The interactive CLI takes its opening message as its argument.
+                args.push(spec.prompt.to_string());
+            }
+            return args;
         }
         _ => {}
     }
@@ -2289,6 +2333,76 @@ mod arg_tests {
         let resumed = run_args("gemini", "edit", true, &[]);
         assert!(resumed.windows(2).any(|w| w == ["--resume", "id-1"]));
         assert!(!resumed.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
+    fn grok_continues_its_session_once_its_help_lists_the_flag() {
+        crate::caps::set("grok", crate::caps::Caps::default());
+        assert!(!resumes("grok"), "older releases start fresh every turn");
+        crate::caps::set(
+            "grok",
+            crate::caps::Caps {
+                help: "  -s, --session <id>             Continue a saved session by id, or use\n                                 'latest'".into(),
+                ..Default::default()
+            },
+        );
+        assert!(resumes("grok"));
+        assert!(!names_conversation("grok"), "Grok names its own sessions");
+        let fresh = run_args("grok", "full", false, &[]);
+        assert!(!fresh.contains(&"-s".to_string()));
+        assert!(fresh.ends_with(&["-p".into(), "hi".into()]));
+        let resumed = run_args("grok", "full", true, &[]);
+        assert_eq!(&resumed[..2], ["-s", "id-1"]);
+        assert!(resumed.ends_with(&["-p".into(), "hi".into()]));
+        // The interactive CLI opens the same session.
+        let sel = sel(&[("model", "grok-4.3")]);
+        let o = AgentOptions::default();
+        let spec = |resume, prompt| RunSpec {
+            provider: "grok",
+            prompt,
+            resume,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "9857aae5fff2",
+            images: &[],
+            memory: None,
+            local: true,
+        };
+        assert_eq!(
+            interactive_args(&spec(true, "")),
+            ["-m", "grok-4.3", "-s", "9857aae5fff2"]
+        );
+        assert_eq!(
+            interactive_args(&spec(false, "start here")),
+            ["-m", "grok-4.3", "start here"]
+        );
+    }
+
+    #[test]
+    fn grok_names_its_session_on_stderr() {
+        // Exactly what grok-dev 1.1.7 prints at the start of a headless run.
+        let line = "\u{1b}[2mSession: 9857aae5fff2\u{1b}[0m";
+        assert_eq!(
+            stderr_conversation("grok", line).as_deref(),
+            Some("9857aae5fff2")
+        );
+        assert_eq!(
+            stderr_conversation("grok", "Session: 9857aae5fff2").as_deref(),
+            Some("9857aae5fff2")
+        );
+        // Only Grok's own line, never a reply or an error that mentions a session.
+        assert_eq!(stderr_conversation("claude", line), None);
+        assert_eq!(stderr_conversation("grok", "Session: "), None);
+        assert_eq!(
+            stderr_conversation("grok", "Session \"abc\" was not found."),
+            None
+        );
+        assert_eq!(stderr_conversation("grok", "Session: two words"), None);
+        assert_eq!(
+            stderr_conversation("grok", "\u{1b}[33m▸ bash: ls\u{1b}[0m"),
+            None
+        );
     }
 
     #[test]
