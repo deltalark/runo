@@ -369,6 +369,12 @@ impl RunoApp {
                 .state
                 .session(id)
                 .is_some_and(|s| s.canvas.is_empty() && !s.cli);
+        // A mission's part is proved even when it changed nothing, and then moves on.
+        let mission = self
+            .state
+            .session(id)
+            .map(|s| s.mission)
+            .unwrap_or_default();
         if let Some((cp, dir)) = checkpoint.filter(|(cp, _)| !cp.is_empty()) {
             self.bg(
                 move || (git::changed_since(&dir, &cp).len(), git::checkpoint(&dir)),
@@ -378,11 +384,19 @@ impl RunoApp {
                         s.snapshot = end;
                     }
                     this.save();
-                    if prove && files > 0 {
+                    if prove && (files > 0 || mission != 0) {
                         this.prove_turn(id, true, cx);
+                    }
+                    if mission != 0 {
+                        this.mission_check(id, cx);
                     }
                 },
             );
+        } else if mission != 0 {
+            if prove {
+                self.prove_turn(id, true, cx);
+            }
+            self.mission_check(id, cx);
         }
         let title = self
             .state

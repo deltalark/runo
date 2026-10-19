@@ -17,6 +17,7 @@ pub(crate) enum Mode {
     Design,
     Architecture,
     Review,
+    Missions,
     GitHub,
     Playbooks,
     History,
@@ -26,11 +27,12 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    /// The modes at the top of the rail, in order; ⌘1 to ⌘6 jump to them.
-    pub(crate) const MAIN: [Mode; 6] = [
+    /// The modes at the top of the rail, in order; ⌘1 to ⌘6 and ⌘9 jump to them.
+    pub(crate) const MAIN: [Mode; 7] = [
         Mode::Home,
         Mode::Sessions,
         Mode::Review,
+        Mode::Missions,
         Mode::GitHub,
         Mode::Playbooks,
         Mode::History,
@@ -52,6 +54,7 @@ impl Mode {
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
             Mode::Review => "Review",
+            Mode::Missions => "Missions",
             Mode::GitHub => "GitHub",
             Mode::Playbooks => "Playbooks",
             Mode::History => "History",
@@ -69,6 +72,7 @@ impl Mode {
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
             Mode::Review => "go-review",
+            Mode::Missions => "go-missions",
             // Kept under its old name so shortcuts people changed still apply.
             Mode::GitHub => "go-reviews",
             Mode::Playbooks => "go-playbooks",
@@ -86,6 +90,7 @@ impl Mode {
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
             Mode::Review => IconName::GitCompare,
+            Mode::Missions => IconName::Rocket,
             Mode::GitHub => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
             Mode::History => IconName::RotateCcwClock,
@@ -103,6 +108,7 @@ impl Mode {
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
             View::Review => Mode::Review,
+            View::Missions => Mode::Missions,
             View::GitHub => Mode::GitHub,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
@@ -281,6 +287,7 @@ impl RunoApp {
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
             Mode::Review => self.open_review(),
+            Mode::Missions => self.open_missions(cx),
             Mode::GitHub => self.load_github(),
             Mode::Playbooks => self.view = View::Automations,
             Mode::History => self.open_history(cx),
@@ -595,6 +602,7 @@ impl RunoApp {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
                 Mode::Review if counts.review > 0 => Some(c_blue()),
+                Mode::Missions => self.missions_badge(),
                 Mode::GitHub if self.gh.needs_you() > 0 => Some(c_amber()),
                 _ => None,
             };
@@ -2972,6 +2980,7 @@ mod tests {
         // Each place on the rail opens a view that lights that same place up again.
         for (view, mode) in [
             (View::Review, Mode::Review),
+            (View::Missions, Mode::Missions),
             (View::GitHub, Mode::GitHub),
             (View::History, Mode::History),
             (View::Notes, Mode::Notes),

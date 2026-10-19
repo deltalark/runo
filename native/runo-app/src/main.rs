@@ -37,6 +37,8 @@ mod install;
 mod keymap;
 mod mcp;
 mod memory_mcp;
+mod mission;
+mod mission_ui;
 mod modelcheck;
 mod models;
 mod notes;
@@ -128,6 +130,7 @@ actions!(
         GoPlaybooks,
         GoReviews,
         GoReview,
+        GoMissions,
         GoHistory,
         GoNotes,
         GoInbox,
@@ -168,6 +171,8 @@ enum View {
     Editor,
     /// Changes waiting to be reviewed and shipped, one session at a time.
     Review,
+    /// Goals planned into parts that several agents work on at once.
+    Missions,
 }
 
 /// What a quick-open entry does when chosen.
@@ -449,6 +454,15 @@ struct RunoApp {
     proving: std::collections::HashSet<u64>,
     /// Sessions waiting on a second opinion, with the agent giving it.
     reviewing: HashMap<u64, &'static str>,
+    /// The mission open on the Missions page; none shows the New mission form.
+    mission_open: Option<u64>,
+    mission_goal: Entity<TextareaState>,
+    mission_feedback: Entity<InputState>,
+    mission_form: mission_ui::MissionForm,
+    /// Sessions whose mission part should be looked at again, such as after a review.
+    mission_wake: Vec<u64>,
+    /// Missions left running at the last quit were picked up again.
+    missions_resumed: bool,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
     /// Images that go with a new session's first prompt.
@@ -1534,6 +1548,19 @@ impl RunoApp {
             turn_files: HashMap::new(),
             proving: Default::default(),
             reviewing: HashMap::new(),
+            mission_open: None,
+            mission_goal: cx.new(|cx| {
+                TextareaState::new(window, cx).placeholder(
+                    "Describe the goal, such as: Add a dark theme with a switch in Settings, and keep it after a restart",
+                )
+            }),
+            mission_feedback: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("What should change in the plan? Such as: merge the two UI parts")
+            }),
+            mission_form: Default::default(),
+            mission_wake: Vec::new(),
+            missions_resumed: false,
             attachments: HashMap::new(),
             launch_images: HashMap::new(),
             new_context: None,
@@ -1826,6 +1853,7 @@ impl RunoApp {
                     .update(cx, |this, cx| {
                         this.take_playbook_requests(cx);
                         this.take_phone_requests(cx);
+                        this.missions_tick_all(cx);
                     })
                     .is_err()
                 {
@@ -2447,7 +2475,12 @@ impl RunoApp {
                     }
                 }
             }
-            Event::Output(key, result) => self.handle_output(key, result),
+            Event::Output(key, result) => {
+                if !self.handle_mission_output(&key, &result) {
+                    self.handle_output(key, result);
+                }
+                self.mission_wakes(cx);
+            }
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
                 self.cli_exited(id);
@@ -2655,6 +2688,7 @@ impl RunoApp {
                 View::Notes => self.open_notes(window, cx),
                 View::GitHub => self.load_github(),
                 View::Review => self.open_review(),
+                View::Missions => self.open_missions(cx),
                 _ => self.view = view,
             },
             Jump::Session(id) => self.open_session(id, window, cx),
@@ -2730,6 +2764,7 @@ impl RunoApp {
                 View::History,
             ),
             ("Go to Review", IconName::GitCompare, View::Review),
+            ("Go to Missions", IconName::Rocket, View::Missions),
             ("Go to GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
@@ -3406,10 +3441,9 @@ impl RunoApp {
         // playbook runs stay in Chat, where their limits hold.
         if cx.global::<AppSettings>().default_view == "cli"
             && agent::imports_cli_turns(&provider)
-            && self
-                .state
-                .session(id)
-                .is_some_and(|s| s.playbook == 0 && cliview::cli_blocker(s).is_none())
+            && self.state.session(id).is_some_and(|s| {
+                s.playbook == 0 && s.mission == 0 && cliview::cli_blocker(s).is_none()
+            })
         {
             // Context a session was started with goes ahead of the task here too.
             let mut task = task;
@@ -8630,6 +8664,7 @@ impl Render for RunoApp {
             View::Automations => self.automations_view(cx),
             View::GitHub => self.github_view(cx),
             View::Review => self.review_view(cx),
+            View::Missions => self.missions_view(cx),
             View::Editor => div()
                 .flex_1()
                 .min_w_0()
@@ -8779,6 +8814,10 @@ impl Render for RunoApp {
             }))
             .on_action(cx.listener(|this, _: &GoReview, window, cx| {
                 this.go(Mode::Review, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoMissions, window, cx| {
+                this.go(Mode::Missions, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoHistory, window, cx| {
@@ -9426,6 +9465,7 @@ fn app_menus() -> Vec<Menu> {
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
             MenuItem::action("Review", GoReview),
+            MenuItem::action("Missions", GoMissions),
             MenuItem::action("GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
             MenuItem::action("History", GoHistory),
