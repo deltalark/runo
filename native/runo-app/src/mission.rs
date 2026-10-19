@@ -61,18 +61,6 @@ pub enum PartState {
 }
 
 impl PartState {
-    /// The board column the part shows in: 0 Waiting, 1 Working, 2 Checking, 3 Done.
-    pub fn column(self) -> usize {
-        match self {
-            PartState::Waiting => 0,
-            PartState::Working | PartState::Stuck => 1,
-            PartState::Checking | PartState::Reviewing | PartState::Proved | PartState::Merging => {
-                2
-            }
-            PartState::Done | PartState::Skipped => 3,
-        }
-    }
-
     /// Finished one way or another: the parts after it may start.
     pub fn settled(self) -> bool {
         matches!(self, PartState::Done | PartState::Skipped)

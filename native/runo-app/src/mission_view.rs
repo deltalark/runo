@@ -6,6 +6,8 @@ use crate::mission::{Mission, Part, PartState, Stage};
 
 /// Width of the list of missions.
 const LIST_WIDTH: f32 = 280.;
+/// Width of the live feed beside the board.
+const FEED_WIDTH: f32 = 300.;
 /// Parallel parts offered on the form.
 const PARALLEL: [u32; 4] = [1, 2, 3, 4];
 /// Goals offered to start from on the New mission page.
@@ -90,32 +92,17 @@ fn small_caps(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// A number with its label under it, for the mission's stats.
-fn stat(value: String, label: impl Into<SharedString>, color: u32) -> Div {
-    div()
-        .flex_1()
-        .min_w(px(96.))
-        .px_3()
-        .py_2()
-        .v_flex()
-        .gap(px(2.))
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(c_border()))
-        .bg(rgb(c_raised()))
-        .child(
-            div()
-                .text_size(px(18.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(color))
-                .child(value),
-        )
-        .child(
-            div()
-                .text_size(px(11.5))
-                .text_color(rgb(c_muted()))
-                .child(label.into()),
-        )
+/// The colour a mission is shown in: where it stands as a whole.
+fn mission_tone(m: &Mission) -> u32 {
+    let stuck = m.parts.iter().any(|p| p.state == PartState::Stuck);
+    match m.stage {
+        Stage::Ready => c_green(),
+        Stage::Failed => c_red(),
+        Stage::Plan => c_amber(),
+        _ if stuck => c_amber(),
+        Stage::Paused => c_muted(),
+        _ => c_blue(),
+    }
 }
 
 fn part_tone(state: PartState) -> u32 {
@@ -234,14 +221,7 @@ impl RunoApp {
         let on = self.mission_open == Some(id);
         let (done, total) = m.progress();
         let stuck = m.parts.iter().any(|p| p.state == PartState::Stuck);
-        let tone = match m.stage {
-            Stage::Ready => c_green(),
-            Stage::Failed => c_red(),
-            Stage::Plan => c_amber(),
-            _ if stuck => c_amber(),
-            Stage::Paused => c_muted(),
-            _ => c_blue(),
-        };
+        let tone = mission_tone(m);
         let label = if stuck && matches!(m.stage, Stage::Running | Stage::Paused) {
             "Needs you"
         } else {
@@ -253,18 +233,38 @@ impl RunoApp {
             m.parts.iter().map(|p| p.agent.clone()).collect()
         };
         let live = matches!(m.stage, Stage::Planning | Stage::Running | Stage::Landing);
+        let counted = total > 0 && !matches!(m.stage, Stage::Plan | Stage::Planning);
+        let fraction = if counted {
+            done as f32 / total as f32
+        } else {
+            0.
+        };
+        let center: AnyElement = match m.stage {
+            Stage::Ready => icon(IconName::Check, 13., tone).into_any_element(),
+            Stage::Planning => spin(("mission-row-spin", id as usize), 12., tone),
+            Stage::Plan | Stage::Failed => icon(IconName::ListTree, 12., tone).into_any_element(),
+            Stage::Paused => icon(IconName::Pause, 11., tone).into_any_element(),
+            _ if stuck => icon(IconName::TriangleAlert, 11., tone).into_any_element(),
+            _ => div()
+                .text_size(px(10.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(format!("{done}/{total}"))
+                .into_any_element(),
+        };
         div()
             .id(("mission-row", id as usize))
-            .mx_1()
-            .px_2p5()
-            .py_2()
-            .v_flex()
-            .gap_1p5()
-            .rounded_lg()
+            .mx_2()
+            .p_2p5()
+            .flex()
+            .items_center()
+            .gap_2p5()
+            .rounded_xl()
             .cursor_pointer()
             .border_1()
             .when(on, |el| {
-                el.bg(tint(c_active())).border_color(rgb(c_border()))
+                el.bg(rgb(c_raised()))
+                    .border_color(rgb(shade(tone, 0.45)))
+                    .shadow_sm()
             })
             .when(!on, |el| {
                 el.border_color(rgba(0)).hover(|el| el.bg(tint(c_subtle())))
@@ -275,39 +275,49 @@ impl RunoApp {
             }))
             .child(
                 div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(short(m.goal.lines().next().unwrap_or(""), 64)),
+                    .relative()
+                    .size(px(36.))
+                    .flex_none()
+                    .child(ring(36., 3.5, fraction, tone))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(center),
+                    ),
             )
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .text_size(px(11.5))
-                    .child(if live {
-                        spin(("mission-row-spin", id as usize), 11., tone)
-                    } else {
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .gap_1()
+                    .child(
                         div()
-                            .size(px(7.))
-                            .rounded_full()
-                            .bg(rgb(tone))
-                            .into_any_element()
-                    })
-                    .child(div().text_color(rgb(tone)).child(label))
-                    .when(total > 0 && m.stage != Stage::Plan, |el| {
-                        el.child(
-                            div()
-                                .text_color(rgb(c_muted()))
-                                .child(format!("·  {done}/{total}")),
-                        )
-                    })
-                    .child(div().flex_1())
-                    .child(self.agent_stack(&agents, 16.)),
+                            .text_size(px(12.5))
+                            .line_height(px(17.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(short(m.goal.lines().next().unwrap_or(""), 60)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .text_size(px(11.))
+                            .when(live, |el| {
+                                el.child(breathing(("mission-row-dot", id as usize), 5., tone))
+                            })
+                            .child(div().text_color(rgb(tone)).child(label))
+                            .child(div().flex_1())
+                            .child(self.agent_stack(&agents, 16.)),
+                    ),
             )
-            .when(total > 0 && m.stage != Stage::Plan, |el| {
-                el.child(self.part_segments(m, 4.))
-            })
             .into_any_element()
     }
 
@@ -756,158 +766,210 @@ impl RunoApp {
             .map(|p| p.name.clone())
             .unwrap_or_default();
         let stuck = m.parts.iter().any(|p| p.state == PartState::Stuck);
-        let tone = match m.stage {
-            Stage::Ready => c_green(),
-            Stage::Failed => c_red(),
-            _ if stuck || m.stage == Stage::Plan => c_amber(),
-            Stage::Paused => c_muted(),
-            _ => c_blue(),
-        };
+        let tone = mission_tone(m);
         let lead = m.lead;
+        let live = matches!(m.stage, Stage::Planning | Stage::Running | Stage::Landing);
+        let on_board = !matches!(m.stage, Stage::Planning | Stage::Plan | Stage::Failed);
+        let (done, total) = m.progress();
         let small = |this: &Self, key: &'static str, label: &'static str, primary: bool| {
             this.button(key, label, primary)
-                .h(px(28.))
-                .px_2p5()
+                .h(px(30.))
+                .px_3()
                 .text_size(px(12.))
         };
+
+        // The ring: parts merged on the board, what's happening before it.
+        let center: AnyElement = match m.stage {
+            Stage::Planning => spin("mission-hero-spin", 18., tone),
+            Stage::Plan | Stage::Failed => icon(IconName::ListTree, 18., tone).into_any_element(),
+            Stage::Ready => icon(IconName::Check, 20., tone).into_any_element(),
+            _ => div()
+                .v_flex()
+                .items_center()
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::BOLD)
+                        .line_height(px(16.))
+                        .child(format!("{done}/{total}")),
+                )
+                .into_any_element(),
+        };
+        let fraction = if total == 0 {
+            0.
+        } else {
+            done as f32 / total as f32
+        };
+        let dial = div()
+            .relative()
+            .size(px(60.))
+            .flex_none()
+            .child(ring(60., 5., if on_board { fraction } else { 0. }, tone))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(center),
+            );
+
+        let pill = div()
+            .px_2()
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(shade(tone, 0.45)))
+            .bg(rgb(shade(tone, 0.14)))
+            .text_color(rgb(tone))
+            .text_size(px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .when(live, |el| {
+                el.child(breathing("mission-stage-dot", 6., tone))
+            })
+            .child(
+                if stuck && matches!(m.stage, Stage::Running | Stage::Paused) {
+                    "Needs you"
+                } else {
+                    stage_label(m.stage)
+                },
+            );
+        let meta = |glyph: IconName, text: String, mono: bool| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .when(mono, |el| el.font_family("monospace"))
+                .child(icon(glyph, 11., c_muted()))
+                .child(text)
+        };
+
+        let actions = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .when(m.stage == Stage::Running, |el| {
+                el.child(
+                    small(self, "mission-pause", "Pause", false)
+                        .child(icon(IconName::Pause, 12., c_secondary()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(m) = this.mission_mut(mid) {
+                                m.stage = Stage::Paused;
+                            }
+                            this.save();
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(m.stage == Stage::Paused, |el| {
+                el.child(
+                    small(self, "mission-resume", "Resume", true)
+                        .child(icon(IconName::Play, 12., c_canvas()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(m) = this.mission_mut(mid) {
+                                m.stage = Stage::Running;
+                            }
+                            this.mission_tick(mid, cx);
+                            this.save();
+                            cx.notify();
+                        })),
+                )
+            })
+            .when(lead != 0 && self.state.session(lead).is_some(), |el| {
+                el.child(
+                    small(self, "mission-lead", "Mission session", false)
+                        .child(icon(IconName::MessageSquare, 12., c_secondary()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select(lead);
+                            this.view = View::Session;
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                self.ghost_button_sized(
+                    ("mission-delete", mid as usize),
+                    IconName::Trash,
+                    "Delete the mission (its sessions stay)",
+                    30.,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.delete_mission(mid);
+                    cx.notify();
+                })),
+            );
+
         let header = div()
             .flex_none()
             .px_5()
-            .pt_4()
-            .pb_3()
+            .pt_5()
+            .pb_4()
             .v_flex()
-            .gap_2()
+            .gap_4()
             .border_b_1()
             .border_color(divider())
+            .bg(linear_gradient(
+                180.,
+                linear_color_stop(rgba((tone << 8) | 0x16), 0.),
+                linear_color_stop(rgba(tone << 8), 1.),
+            ))
             .child(
                 div()
                     .flex()
-                    .items_start()
-                    .gap_3()
+                    .items_center()
+                    .gap_4()
+                    .child(dial)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(17.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .line_clamp(2)
-                            .child(m.goal.trim().to_string()),
-                    )
-                    .when(m.stage == Stage::Running, |el| {
-                        el.child(
-                            small(self, "mission-pause", "Pause", false)
-                                .child(icon(IconName::Pause, 12., c_secondary()))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(m) = this.mission_mut(mid) {
-                                        m.stage = Stage::Paused;
-                                    }
-                                    this.save();
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .when(m.stage == Stage::Paused, |el| {
-                        el.child(
-                            small(self, "mission-resume", "Resume", true)
-                                .child(icon(IconName::Play, 12., c_canvas()))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(m) = this.mission_mut(mid) {
-                                        m.stage = Stage::Running;
-                                    }
-                                    this.mission_tick(mid, cx);
-                                    this.save();
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .when(lead != 0 && self.state.session(lead).is_some(), |el| {
-                        el.child(
-                            small(self, "mission-lead", "Mission session", false)
-                                .child(icon(IconName::MessageSquare, 12., c_secondary()))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select(lead);
-                                    this.view = View::Session;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(
-                        self.ghost_button_sized(
-                            ("mission-delete", mid as usize),
-                            IconName::Trash,
-                            "Delete the mission (its sessions stay)",
-                            28.,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.delete_mission(mid);
-                            cx.notify();
-                        })),
-                    ),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_secondary()))
-                    .child(
-                        div()
-                            .px_2()
-                            .h(px(22.))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .rounded_full()
-                            .bg(rgb(shade(tone, 0.16)))
-                            .text_color(rgb(tone))
-                            .font_weight(FontWeight::MEDIUM)
-                            .when(
-                                matches!(
-                                    m.stage,
-                                    Stage::Planning | Stage::Running | Stage::Landing
-                                ),
-                                |el| el.child(breathing("mission-stage-dot", 6., tone)),
+                            .v_flex()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_3()
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(c_secondary()))
+                                    .child(pill)
+                                    .child(meta(IconName::Folder, project, false))
+                                    .child(meta(
+                                        IconName::GitBranch,
+                                        format!("{} ← {}", m.branch, m.base),
+                                        true,
+                                    )),
                             )
                             .child(
-                                if stuck && matches!(m.stage, Stage::Running | Stage::Paused) {
-                                    "Needs you"
-                                } else {
-                                    stage_label(m.stage)
-                                },
+                                div()
+                                    .text_size(px(18.))
+                                    .line_height(px(24.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .line_clamp(2)
+                                    .child(short(m.goal.trim(), 170)),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(icon(IconName::Folder, 11., c_muted()))
-                            .child(project),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .font_family("monospace")
-                            .child(icon(IconName::GitBranch, 11., c_muted()))
-                            .child(format!("{} ← {}", m.branch, m.base)),
-                    )
-                    .when(!m.parts.is_empty(), |el| {
-                        let agents: Vec<String> = m.parts.iter().map(|p| p.agent.clone()).collect();
-                        el.child(self.agent_stack(&agents, 18.))
-                    }),
+                    .child(actions),
             )
             .when(!m.summary.is_empty(), |el| {
                 el.child(
                     div()
                         .text_size(px(12.5))
+                        .line_height(px(18.))
                         .text_color(rgb(c_muted()))
+                        .line_clamp(2)
                         .child(m.summary.clone()),
                 )
-            });
+            })
+            .when(on_board, |el| el.child(self.mission_metrics(m)));
         let body = match m.stage {
             Stage::Planning => self.planning_view(m),
             Stage::Plan | Stage::Failed => self.plan_review(m, cx),
@@ -923,17 +985,148 @@ impl RunoApp {
             .into_any_element()
     }
 
+    /// The mission's numbers in one row: parts, agents, time and cost.
+    fn mission_metrics(&self, m: &Mission) -> Div {
+        let (done, total) = m.progress();
+        let working = m.parts.iter().filter(|p| p.state.busy()).count();
+        let conflicts: u32 = m.parts.iter().map(|p| p.conflicts).sum();
+        let cents: f64 = m
+            .parts
+            .iter()
+            .map(|p| p.session)
+            .chain(std::iter::once(m.lead))
+            .filter_map(|id| self.state.session(id))
+            .map(crate::health::session_cost)
+            .sum();
+        let elapsed = since(m.started, m.finished);
+        let ready = m.stage == Stage::Ready;
+        let agents: Vec<String> = m.parts.iter().map(|p| p.agent.clone()).collect();
+        let metric = |glyph: IconName, value: String, label: &'static str, color: u32| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .size(px(28.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_lg()
+                        .bg(tint(c_subtle()))
+                        .child(icon(glyph, 13., color)),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(c_text()))
+                                .child(value),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(rgb(c_muted()))
+                                .child(label),
+                        ),
+                )
+        };
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_x_6()
+            .gap_y_3()
+            .child(metric(
+                IconName::GitMerge,
+                format!("{done} of {total}"),
+                "parts merged",
+                if done == total && total > 0 {
+                    c_green()
+                } else {
+                    c_secondary()
+                },
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(self.agent_stack(&agents, 28.))
+                    .child(
+                        div()
+                            .v_flex()
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(working.to_string()),
+                            )
+                            .child(div().text_size(px(10.5)).text_color(rgb(c_muted())).child(
+                                if working == 1 {
+                                    "agent working"
+                                } else {
+                                    "agents working"
+                                },
+                            )),
+                    ),
+            )
+            .child(metric(
+                IconName::Timer,
+                took(elapsed),
+                if ready {
+                    "start to ready"
+                } else {
+                    "running for"
+                },
+                c_secondary(),
+            ))
+            .child(metric(
+                IconName::Coins,
+                if cents > 0. {
+                    format!("${:.2}", cents / 100.)
+                } else {
+                    "—".into()
+                },
+                "agent cost",
+                c_secondary(),
+            ))
+            .when(conflicts > 0, |el| {
+                el.child(metric(
+                    IconName::GitCompare,
+                    conflicts.to_string(),
+                    if conflicts == 1 {
+                        "conflict resolved"
+                    } else {
+                        "conflicts resolved"
+                    },
+                    c_secondary(),
+                ))
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(120.))
+                    .child(self.part_segments(m, 6.)),
+            )
+    }
+
     /// While the planner reads: what it's doing, for how long, and the plan taking shape.
     fn planning_view(&self, m: &Mission) -> AnyElement {
         let planner = agent::provider(m.agents.first().map(String::as_str).unwrap_or("claude"));
         let secs = since(m.created, 0);
         let ghost = |i: usize, w: f32| {
             div()
-                .w_full()
+                .flex_1()
+                .h(px(132.))
                 .p_3()
                 .v_flex()
-                .gap_2()
-                .rounded_lg()
+                .gap_2p5()
+                .rounded_xl()
+                .bg(rgb(c_raised()))
                 .border_1()
                 .border_color(rgb(c_border()))
                 .child(
@@ -972,7 +1165,7 @@ impl RunoApp {
             .overflow_y_scroll()
             .child(
                 div()
-                    .max_w(px(560.))
+                    .max_w(px(800.))
                     .mx_auto()
                     .pt(px(64.))
                     .px_6()
@@ -1016,9 +1209,9 @@ impl RunoApp {
                     )
                     .child(
                         div()
-                            .w_full()
-                            .v_flex()
-                            .gap_2()
+                            .w(px(760.))
+                            .flex()
+                            .gap_3()
                             .child(ghost(0, 0.7))
                             .child(ghost(1, 0.55))
                             .child(ghost(2, 0.8)),
@@ -1039,105 +1232,39 @@ impl RunoApp {
                 agents.push(&p.agent);
             }
         }
-        let wave_views: Vec<AnyElement> = waves
-            .iter()
-            .enumerate()
-            .map(|(w, parts)| {
-                let after: Vec<String> = if w == 0 {
-                    Vec::new()
-                } else {
-                    waves[..w]
-                        .iter()
-                        .flatten()
-                        .filter(|i| {
-                            parts
-                                .iter()
-                                .any(|p| m.parts[*p].deps.contains(&m.parts[**i].key))
-                        })
-                        .map(|i| m.parts[*i].title.clone())
-                        .collect()
-                };
-                let last = w + 1 == waves.len();
-                let note = if w == 0 {
-                    match parts.len() {
-                        1 => "Starts right away".to_string(),
-                        n => format!("{n} parts start at once"),
-                    }
-                } else {
-                    format!("After {}", after.join(", "))
-                };
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(
-                        div()
-                            .w(px(24.))
-                            .flex_none()
-                            .v_flex()
-                            .items_center()
-                            .child(
-                                div()
-                                    .size(px(24.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(rgb(shade(c_blue(), 0.6)))
-                                    .bg(rgb(shade(c_blue(), 0.16)))
-                                    .text_size(px(11.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(c_blue()))
-                                    .child((w + 1).to_string()),
-                            )
-                            .when(!last, |el| {
-                                el.child(
-                                    div()
-                                        .flex_1()
-                                        .w(px(2.))
-                                        .my_1()
-                                        .rounded_full()
-                                        .bg(rgb(c_border())),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .v_flex()
-                            .gap_2()
-                            .pb_5()
-                            .child(
-                                div()
-                                    .h(px(24.))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_size(px(12.5))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(format!("Wave {}", w + 1)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(c_muted()))
-                                            .child(note),
-                                    ),
-                            )
-                            .child(
-                                div().flex().flex_wrap().gap_2().children(
-                                    parts
-                                        .iter()
-                                        .map(|i| self.mission_plan_card(m, *i, &m.parts[*i], cx)),
-                                ),
-                            ),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+        let mut wave_views: Vec<AnyElement> = Vec::new();
+        for (w, parts) in waves.iter().enumerate() {
+            if w > 0 {
+                wave_views.push(wave_link(w, m, &waves));
+            }
+            let after: Vec<String> = if w == 0 {
+                Vec::new()
+            } else {
+                waves[..w]
+                    .iter()
+                    .flatten()
+                    .filter(|i| {
+                        parts
+                            .iter()
+                            .any(|p| m.parts[*p].deps.contains(&m.parts[**i].key))
+                    })
+                    .map(|i| short(&m.parts[*i].title, 28))
+                    .collect()
+            };
+            let note = if w == 0 {
+                "Starts right away".to_string()
+            } else {
+                format!("After {}", after.join(", "))
+            };
+            wave_views.push(wave_column(
+                waves.len() == 1,
+                wave_head(w, parts.len(), note, c_blue(), false),
+                parts
+                    .iter()
+                    .map(|i| self.mission_plan_card(m, *i, &m.parts[*i], cx))
+                    .collect(),
+            ));
+        }
         let summary = format!(
             "{} part{}  ·  {} wave{}  ·  up to {} at once",
             m.parts.len(),
@@ -1189,7 +1316,13 @@ impl RunoApp {
                                 .child(summary),
                         )
                     })
-                    .children(wave_views),
+                    .child(
+                        div()
+                            .id("mission-plan-waves")
+                            .w_full()
+                            .overflow_x_scroll()
+                            .child(div().flex().items_start().gap_1().children(wave_views)),
+                    ),
             )
             .child(
                 div()
@@ -1256,14 +1389,13 @@ impl RunoApp {
         }
         let deps = m.dep_titles(part);
         div()
-            .w(px(400.))
+            .w_full()
             .flex()
-            .rounded_lg()
+            .rounded_xl()
             .border_1()
             .border_color(rgb(c_border()))
             .bg(rgb(c_raised()))
             .overflow_hidden()
-            .child(div().w(px(3.)).flex_none().bg(rgb(provider.color)))
             .child(
                 div()
                     .flex_1()
@@ -1411,146 +1543,41 @@ impl RunoApp {
 
     // ---------- the board ----------
 
+    /// The running mission: the parts flowing wave by wave on the left, and what is
+    /// happening right now on the right.
     fn mission_board(&self, m: &Mission, cx: &mut Context<Self>) -> AnyElement {
-        let (done, total) = m.progress();
-        let working = m.parts.iter().filter(|p| p.state.busy()).count();
-        let conflicts: u32 = m.parts.iter().map(|p| p.conflicts).sum();
-        let cents: f64 = m
-            .parts
-            .iter()
-            .map(|p| p.session)
-            .chain(std::iter::once(m.lead))
-            .filter_map(|id| self.state.session(id))
-            .map(crate::health::session_cost)
-            .sum();
-        let elapsed = since(m.started, m.finished);
-        let ready = m.stage == Stage::Ready;
-        let stats = div()
-            .flex()
-            .flex_wrap()
-            .gap_2()
-            .child(stat(
-                format!("{done}/{total}"),
-                "parts merged",
-                if done == total && total > 0 {
-                    c_green()
-                } else {
-                    c_text()
-                },
-            ))
-            .child(stat(
-                working.to_string(),
-                if working == 1 {
-                    "agent working"
-                } else {
-                    "agents working"
-                },
-                if working > 0 { c_blue() } else { c_text() },
-            ))
-            .child(stat(
-                conflicts.to_string(),
-                if conflicts == 1 {
-                    "conflict resolved"
-                } else {
-                    "conflicts resolved"
-                },
-                c_text(),
-            ))
-            .child(stat(
-                took(elapsed),
-                if ready {
-                    "start to ready"
-                } else {
-                    "running for"
-                },
-                c_text(),
-            ))
-            .child(stat(
-                if cents > 0. {
-                    format!("${:.2}", cents / 100.)
-                } else {
-                    "—".into()
-                },
-                "agent cost",
-                c_text(),
-            ));
         let banner = self.mission_banner(m, cx);
-        let titles = [
-            (
-                "Waiting",
-                c_muted(),
-                "Parts waiting on others, or on a free agent",
-            ),
-            ("Working", c_blue(), "Agents writing code"),
-            (
-                "Checking",
-                c_purple_or_blue(),
-                "Checks, second opinion and merge",
-            ),
-            ("Done", c_green(), "Merged into the mission branch"),
-        ];
-        let mut columns: Vec<Vec<AnyElement>> =
-            vec![Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-        for (i, p) in m.parts.iter().enumerate() {
-            columns[p.state.column()].push(self.part_card(m, i, p, cx));
+        let waves = m.waves();
+        let count = waves.len();
+        let mut columns: Vec<AnyElement> = Vec::new();
+        for (w, parts) in waves.iter().enumerate() {
+            if w > 0 {
+                columns.push(wave_link(w, m, &waves));
+            }
+            let settled = parts.iter().all(|i| m.parts[*i].state.settled());
+            let busy = parts.iter().any(|i| m.parts[*i].state.busy());
+            let (status, tone) = if settled {
+                ("Done", c_green())
+            } else if busy {
+                ("Running", c_blue())
+            } else if parts.iter().any(|i| m.parts[*i].state == PartState::Stuck) {
+                ("Needs you", c_amber())
+            } else {
+                ("Up next", c_muted())
+            };
+            columns.push(wave_column(
+                waves.len() == 1,
+                wave_head(w, parts.len(), status, tone, busy),
+                parts
+                    .iter()
+                    .map(|i| self.part_card(m, *i, &m.parts[*i], cx))
+                    .collect(),
+            ));
         }
-        let board =
-            div()
-                .flex()
-                .items_start()
-                .gap_3()
-                .children(columns.into_iter().enumerate().map(|(c, cards)| {
-                    let (title, color, empty) = titles[c];
-                    let count = cards.len();
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .v_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .px_1()
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .child(div().size(px(7.)).rounded_full().bg(rgb(color)))
-                                .child(small_caps(title.to_uppercase()))
-                                .child(
-                                    div()
-                                        .px_1p5()
-                                        .rounded_full()
-                                        .bg(tint(c_subtle()))
-                                        .text_size(px(10.5))
-                                        .text_color(rgb(c_secondary()))
-                                        .child(count.to_string()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(("mission-column", c))
-                                .flex_1()
-                                .v_flex()
-                                .gap_2()
-                                .p_1p5()
-                                .rounded_xl()
-                                .bg(tint(c_subtle()))
-                                .children(cards)
-                                .when(count == 0, |el| {
-                                    el.child(
-                                        div()
-                                            .py_6()
-                                            .px_3()
-                                            .text_center()
-                                            .text_size(px(11.5))
-                                            .text_color(rgb(c_muted()))
-                                            .child(empty),
-                                    )
-                                }),
-                        )
-                }));
-        div()
-            .id("mission-board")
+        let flow = div()
+            .id("mission-flow")
             .flex_1()
+            .min_w_0()
             .min_h_0()
             .overflow_y_scroll()
             .px_5()
@@ -1558,9 +1585,27 @@ impl RunoApp {
             .v_flex()
             .gap_4()
             .children(banner)
-            .child(stats)
-            .when(total > 0, |el| el.child(self.part_segments(m, 6.)))
-            .child(board)
+            .child(
+                div()
+                    .id("mission-waves")
+                    .w_full()
+                    .overflow_x_scroll()
+                    .child(div().flex().items_start().gap_1().children(columns)),
+            )
+            .when(count == 0, |el| {
+                el.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(rgb(c_muted()))
+                        .child("This mission has no parts."),
+                )
+            });
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .child(flow)
+            .child(self.mission_feed(m))
             .into_any_element()
     }
 
@@ -1575,11 +1620,11 @@ impl RunoApp {
                 .gap_3()
                 .rounded_xl()
                 .border_1()
-                .border_color(rgb(shade(tone, 0.5)))
+                .border_color(rgb(shade(tone, 0.45)))
                 .bg(linear_gradient(
                     90.,
-                    linear_color_stop(rgb(shade(tone, 0.16)), 0.),
-                    linear_color_stop(rgb(shade(tone, 0.04)), 1.),
+                    linear_color_stop(rgb(shade(tone, 0.2)), 0.),
+                    linear_color_stop(rgb(shade(tone, 0.03)), 1.),
                 ))
         };
         let words = |title: String, text: String| {
@@ -1603,13 +1648,15 @@ impl RunoApp {
         };
         let badge = |glyph: IconName, tone: u32| {
             div()
-                .size(px(40.))
+                .size(px(42.))
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .rounded_full()
-                .bg(rgb(shade(tone, 0.22)))
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(shade(tone, 0.5)))
+                .bg(rgb(shade(tone, 0.24)))
                 .child(icon(glyph, 20., tone))
         };
         match m.stage {
@@ -1619,7 +1666,7 @@ impl RunoApp {
                     .child(words("Ready to ship".into(), m.note.clone()))
                     .child(
                         self.button("mission-ship", "Review and ship", true)
-                            .h(px(34.))
+                            .h(px(36.))
                             .px_4()
                             .child(icon(IconName::GitCompare, 13., c_canvas()))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -1633,7 +1680,7 @@ impl RunoApp {
                 card(c_blue())
                     .child(if self.proving.contains(&lead) || self.turn_running(lead) {
                         div()
-                            .size(px(40.))
+                            .size(px(42.))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1668,19 +1715,49 @@ impl RunoApp {
         }
     }
 
-    /// What a part's agent is doing now: its latest step, or its latest words.
-    fn part_activity(&self, session: u64) -> Option<String> {
-        let s = self.state.session(session)?;
-        let last = s.messages.iter().rev().find(|m| m.role == Role::Agent)?;
-        let line = last.steps.last().cloned().or_else(|| {
-            last.text
-                .lines()
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .map(str::to_string)
-        })?;
-        let line = line.trim().to_string();
-        (!line.is_empty()).then_some(line)
+    /// What a part's agent did last: its latest steps, oldest first, or its latest words.
+    fn part_activity(&self, session: u64, lines: usize) -> Vec<String> {
+        let Some(s) = self.state.session(session) else {
+            return Vec::new();
+        };
+        let Some(last) = s.messages.iter().rev().find(|m| m.role == Role::Agent) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = last
+            .steps
+            .iter()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        if let Some(words) = last
+            .text
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+        {
+            out.push(words.to_string());
+        }
+        let skip = out.len().saturating_sub(lines);
+        out.split_off(skip)
+    }
+
+    /// The live line for a part that isn't writing code: what Runo is doing with it.
+    fn part_phase(&self, m: &Mission, part: &Part) -> Option<String> {
+        match part.state {
+            PartState::Checking => Some("Running the project's checks".into()),
+            PartState::Reviewing => {
+                let other = m
+                    .agents
+                    .iter()
+                    .find(|a| **a != part.agent)
+                    .map(|a| agent::provider(a).name)
+                    .unwrap_or("A second agent");
+                Some(format!("{other} is reviewing the changes"))
+            }
+            PartState::Proved | PartState::Merging => Some(format!("Merging into {}", m.branch)),
+            _ => None,
+        }
     }
 
     fn part_card(
@@ -1695,6 +1772,8 @@ impl RunoApp {
         let session = part.session;
         let state = part.state;
         let stuck = state == PartState::Stuck;
+        let done = state == PartState::Done;
+        let busy = state.busy();
         let tone = part_tone(state);
         let asking = session != 0 && self.approval_for(session).is_some();
         let deps: Vec<String> = m
@@ -1703,9 +1782,17 @@ impl RunoApp {
             .filter(|d| part.deps.contains(&d.key) && !d.state.settled())
             .map(|d| d.title.clone())
             .collect();
-        let activity = (state == PartState::Working && session != 0)
-            .then(|| self.part_activity(session))
-            .flatten();
+        let mut console: Vec<String> = if state == PartState::Working && session != 0 {
+            self.part_activity(session, 3)
+        } else {
+            Vec::new()
+        };
+        if let Some(line) = self.part_phase(m, part) {
+            console.push(line);
+        }
+        if state == PartState::Working && console.is_empty() {
+            console.push(format!("{} is writing code", provider.name));
+        }
         let checks = self
             .state
             .session(session)
@@ -1713,83 +1800,222 @@ impl RunoApp {
             .filter(|p| !p.results.is_empty());
         let elapsed = since(part.started, part.finished);
         let step = state.step();
+        let accent = if stuck || asking {
+            c_amber()
+        } else if busy {
+            c_blue()
+        } else if done {
+            c_green()
+        } else {
+            c_border()
+        };
 
-        // Work → Checks → Review → Merge, with the current step breathing.
-        let pipeline = (step.is_some() || stuck).then(|| {
+        // Work → Checks → Review → Merge as a segmented bar, the current step breathing.
+        let steps = (!done && (step.is_some() || stuck)).then(|| {
             let at = step.unwrap_or(0);
             let review = m.review;
-            let shown: Vec<(usize, &str)> = STEPS
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| review || *i != 2)
-                .map(|(i, l)| (i, *l))
-                .collect();
-            let last = shown.last().map(|(i, _)| *i).unwrap_or(0);
-            let mut row = div().flex().items_center().gap_1();
-            for (i, label) in shown {
-                let done = at > i;
-                let now = at == i && !stuck;
-                let color = if done {
-                    c_green()
-                } else if now {
-                    c_blue()
-                } else if stuck && i == 0 {
-                    c_amber()
-                } else {
-                    c_border()
-                };
-                row = row
-                    .child(if now {
-                        breathing(("mission-step", index * 8 + i), 7., color)
-                    } else {
+            div().flex().gap_1().children(
+                STEPS
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| review || *i != 2)
+                    .map(|(i, label)| {
+                        let past = at > i;
+                        let now = at == i;
+                        let color = if past {
+                            c_green()
+                        } else if now && stuck {
+                            c_amber()
+                        } else if now {
+                            c_blue()
+                        } else {
+                            c_border()
+                        };
+                        let bar = div().h(px(3.)).w_full().rounded_full().bg(rgb(color));
                         div()
-                            .size(px(7.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(rgb(color))
-                            .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(10.5))
-                            .text_color(rgb(if done || now {
-                                c_secondary()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .gap_1()
+                            .child(if now && !stuck {
+                                bar.animated(
+                                    ("mission-step", index * 8 + i),
+                                    Animation::new(Duration::from_millis(1400)).repeat(),
+                                    |el, d| el.opacity(0.35 + 0.65 * crate::askbar::pulse(d)),
+                                )
                             } else {
-                                c_muted()
-                            }))
-                            .child(label),
-                    );
-                if i != last {
-                    row = row.child(div().flex_1().min_w(px(6.)).h(px(1.)).bg(rgb(if done {
-                        shade(c_green(), 0.6)
-                    } else {
-                        c_border()
-                    })));
-                }
-            }
-            row
+                                bar.into_any_element()
+                            })
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if past || now {
+                                        c_secondary()
+                                    } else {
+                                        c_muted()
+                                    }))
+                                    .child(*label),
+                            )
+                    }),
+            )
         });
+
+        let chip = div()
+            .flex_none()
+            .h(px(20.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded_full()
+            .bg(rgb(shade(tone, 0.16)))
+            .text_size(px(10.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(tone))
+            .when(busy, |el| {
+                el.child(breathing(("mission-part-dot", index), 5., tone))
+            })
+            .when(done, |el| el.child(icon(IconName::Check, 10., tone)))
+            .child(state.label());
 
         let small = |this: &Self, key: &'static str, label: &'static str, primary: bool| {
             this.button((key, index), label, primary)
-                .h(px(24.))
-                .px_2()
+                .h(px(26.))
+                .px_2p5()
                 .text_size(px(11.5))
         };
+        let footer = div()
+            .flex()
+            .items_center()
+            .gap_2p5()
+            .text_size(px(11.))
+            .text_color(rgb(c_muted()))
+            .when_some(checks, |el, p| {
+                let failed = p.failed().len();
+                let color = if failed == 0 { c_green() } else { c_red() };
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_color(rgb(color))
+                        .child(icon(
+                            if failed == 0 {
+                                IconName::ShieldCheck
+                            } else {
+                                IconName::CircleX
+                            },
+                            11.,
+                            color,
+                        ))
+                        .child(if failed == 0 {
+                            format!(
+                                "{} check{} passed",
+                                p.results.len(),
+                                if p.results.len() == 1 { "" } else { "s" }
+                            )
+                        } else {
+                            format!("{failed} failing")
+                        }),
+                )
+            })
+            .when(part.conflicts > 0, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(icon(IconName::GitMerge, 11., c_muted()))
+                        .child(format!(
+                            "{} conflict{}",
+                            part.conflicts,
+                            if part.conflicts == 1 { "" } else { "s" }
+                        )),
+                )
+            })
+            .when(!done && !part.files.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(icon(IconName::FileCode, 11., c_muted()))
+                        .child(format!(
+                            "{} file{}",
+                            part.files.len(),
+                            if part.files.len() == 1 { "" } else { "s" }
+                        )),
+                )
+            })
+            .child(div().flex_1())
+            .when(elapsed > 0, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(icon(IconName::Timer, 11., c_muted()))
+                        .child(took(elapsed)),
+                )
+            });
+
+        let console_box = (!console.is_empty()).then(|| {
+            let last = console.len() - 1;
+            div()
+                .px_2p5()
+                .py_2()
+                .v_flex()
+                .gap_1()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(c_border()))
+                .bg(rgb(settings::mix(c_canvas(), 0x000000, 0.12)))
+                .font_family("monospace")
+                .text_size(px(10.5))
+                .children(console.into_iter().enumerate().map(|(i, line)| {
+                    let now = i == last;
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .text_color(rgb(if now { c_text() } else { c_muted() }))
+                        .child(if now {
+                            spin(("mission-part-spin", index), 10., c_blue())
+                        } else {
+                            div()
+                                .w(px(10.))
+                                .flex_none()
+                                .text_color(rgb(c_muted()))
+                                .child("›")
+                                .into_any_element()
+                        })
+                        .child(div().flex_1().min_w_0().truncate().child(line))
+                }))
+        });
+
         div()
             .id(("mission-part", index))
-            .flex()
-            .rounded_lg()
+            .w_full()
+            .v_flex()
+            .rounded_xl()
             .border_1()
-            .border_color(rgb(if stuck || asking {
-                c_amber()
+            .border_color(rgb(if busy || stuck || asking {
+                shade(accent, 0.55)
             } else {
                 c_border()
             }))
-            .bg(rgb(c_raised()))
+            .bg(if busy {
+                linear_gradient(
+                    180.,
+                    linear_color_stop(rgb(shade(c_blue(), 0.1)), 0.),
+                    linear_color_stop(rgb(c_raised()), 0.6),
+                )
+            } else {
+                rgb(c_raised()).into()
+            })
             .overflow_hidden()
-            .when(state == PartState::Skipped, |el| el.opacity(0.55))
+            .when(state == PartState::Waiting, |el| el.opacity(0.85))
+            .when(state == PartState::Skipped, |el| el.opacity(0.5))
             .when(session != 0, |el| {
                 el.cursor_pointer()
                     .hover(|el| el.border_color(rgb(shade(c_blue(), 0.7))))
@@ -1799,63 +2025,57 @@ impl RunoApp {
                         cx.notify();
                     }))
             })
-            .child(div().w(px(3.)).flex_none().bg(rgb(provider.color)))
+            .when(done, |el| {
+                el.child(div().h(px(2.)).w_full().bg(rgb(shade(c_green(), 0.7))))
+            })
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .p_2p5()
+                    .p_3()
                     .v_flex()
-                    .gap_2()
+                    .gap_2p5()
                     .child(
                         div()
                             .flex()
                             .items_start()
-                            .gap_2()
+                            .gap_2p5()
+                            .child(self.provider_badge(provider, 28.))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .line_clamp(2)
-                                    .child(part.title.clone()),
+                                    .v_flex()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .text_size(px(13.5))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .line_clamp(2)
+                                            .child(part.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(c_muted()))
+                                            .child(provider.name),
+                                    ),
                             )
-                            .child(self.provider_badge(provider, 18.)),
+                            .child(chip),
                     )
-                    .children(pipeline)
-                    .when_some(activity, |el, line| {
-                        el.child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .rounded_md()
-                                .bg(tint(c_subtle()))
-                                .child(spin(("mission-part-spin", index), 10., c_blue()))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_family("monospace")
-                                        .text_size(px(10.5))
-                                        .text_color(rgb(c_secondary()))
-                                        .child(line),
-                                ),
-                        )
-                    })
+                    .children(steps)
+                    .children(console_box)
                     .when(asking, |el| {
                         el.child(
                             div()
+                                .px_2p5()
+                                .py_1p5()
                                 .flex()
                                 .items_center()
-                                .gap_1()
+                                .gap_1p5()
+                                .rounded_lg()
+                                .bg(rgb(shade(c_amber(), 0.12)))
                                 .text_size(px(11.5))
                                 .text_color(rgb(c_amber()))
-                                .child(icon(IconName::ShieldAlert, 11., c_amber()))
+                                .child(icon(IconName::ShieldAlert, 12., c_amber()))
                                 .child("Asks to run a command. Open it to answer."),
                         )
                     })
@@ -1864,93 +2084,49 @@ impl RunoApp {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap_1()
+                                .gap_1p5()
                                 .text_size(px(11.5))
                                 .text_color(rgb(c_muted()))
-                                .child(icon(IconName::CornerDownRight, 11., c_muted()))
-                                .child(format!("after {}", deps.join(", "))),
+                                .child(icon(IconName::Hourglass, 11., c_muted()))
+                                .child(format!("Starts after {}", deps.join(", "))),
+                        )
+                    })
+                    .when(state == PartState::Waiting && deps.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_muted()))
+                                .child(icon(IconName::Hourglass, 11., c_muted()))
+                                .child("Starts when an agent is free"),
                         )
                     })
                     .when(stuck && !part.note.is_empty(), |el| {
                         el.child(
                             div()
-                                .p_2()
-                                .rounded_md()
+                                .p_2p5()
+                                .rounded_lg()
                                 .bg(rgb(shade(c_amber(), 0.12)))
                                 .text_size(px(11.5))
                                 .text_color(rgb(c_text()))
                                 .child(part.note.clone()),
                         )
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(11.))
-                            .text_color(rgb(c_muted()))
-                            .child(div().text_color(rgb(tone)).child(state.label()))
-                            .when_some(checks, |el, p| {
-                                let failed = p.failed().len();
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_0p5()
-                                        .text_color(rgb(if failed == 0 {
-                                            c_green()
-                                        } else {
-                                            c_red()
-                                        }))
-                                        .child(icon(
-                                            if failed == 0 {
-                                                IconName::CircleCheck
-                                            } else {
-                                                IconName::CircleX
-                                            },
-                                            10.,
-                                            if failed == 0 { c_green() } else { c_red() },
-                                        ))
-                                        .child(if failed == 0 {
-                                            format!(
-                                                "{} check{}",
-                                                p.results.len(),
-                                                if p.results.len() == 1 { "" } else { "s" }
-                                            )
-                                        } else {
-                                            format!("{failed} failing")
-                                        }),
-                                )
-                            })
-                            .when(part.conflicts > 0, |el| {
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_0p5()
-                                        .child(icon(IconName::GitMerge, 10., c_muted()))
-                                        .child(format!(
-                                            "{} conflict{}",
-                                            part.conflicts,
-                                            if part.conflicts == 1 { "" } else { "s" }
-                                        )),
-                                )
-                            })
-                            .child(div().flex_1())
-                            .when(elapsed > 0, |el| el.child(took(elapsed))),
-                    )
+                    .child(footer)
                     .when(stuck, |el| {
                         el.child(
                             div()
                                 .flex()
                                 .gap_1p5()
                                 .child(
-                                    small(self, "mission-part-retry", "Try again", true).on_click(
-                                        cx.listener(move |this, _, _, cx| {
+                                    small(self, "mission-part-retry", "Try again", true)
+                                        .child(icon(IconName::RotateCw, 11., c_canvas()))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
                                             cx.stop_propagation();
                                             this.retry_part(mid, index, cx);
-                                        }),
-                                    ),
+                                        })),
                                 )
                                 .child(small(self, "mission-part-skip", "Skip", false).on_click(
                                     cx.listener(move |this, _, _, cx| {
@@ -1963,11 +2139,358 @@ impl RunoApp {
             )
             .into_any_element()
     }
+
+    /// Everything that happened on the mission, newest first, with what agents are doing
+    /// this moment on top.
+    fn mission_feed(&self, m: &Mission) -> AnyElement {
+        let now = crate::workspace::unix_now();
+        let live = matches!(m.stage, Stage::Running | Stage::Landing);
+        // (when, icon, tone, text)
+        let mut events: Vec<(u64, IconName, u32, String)> = Vec::new();
+        if m.started > 0 {
+            events.push((
+                m.started,
+                IconName::Rocket,
+                c_blue(),
+                format!(
+                    "Mission started with {} part{}",
+                    m.parts.len(),
+                    if m.parts.len() == 1 { "" } else { "s" }
+                ),
+            ));
+        }
+        for p in &m.parts {
+            let name = agent::provider(&p.agent).name;
+            if p.started > 0 {
+                events.push((
+                    p.started,
+                    IconName::Play,
+                    c_blue(),
+                    format!("{name} started {}", p.title),
+                ));
+            }
+            if p.finished > 0 && p.state == PartState::Done {
+                events.push((
+                    p.finished,
+                    IconName::GitMerge,
+                    c_green(),
+                    format!("{} merged", p.title),
+                ));
+            }
+            if p.state == PartState::Skipped && p.finished > 0 {
+                events.push((
+                    p.finished,
+                    IconName::SkipForward,
+                    c_muted(),
+                    format!("{} skipped", p.title),
+                ));
+            }
+        }
+        if m.finished > 0 && m.stage == Stage::Ready {
+            events.push((
+                m.finished,
+                IconName::PartyPopper,
+                c_green(),
+                "Ready to ship".into(),
+            ));
+        }
+        events.sort_by_key(|e| std::cmp::Reverse(e.0));
+
+        let mut now_rows: Vec<AnyElement> = Vec::new();
+        for (i, p) in m.parts.iter().enumerate() {
+            let provider = agent::provider(&p.agent);
+            let line = if p.state == PartState::Stuck {
+                Some((c_amber(), "Needs you".to_string()))
+            } else if p.state.busy() {
+                let last = if p.state == PartState::Working {
+                    self.part_activity(p.session, 1).pop()
+                } else {
+                    self.part_phase(m, p)
+                };
+                Some((
+                    c_blue(),
+                    last.unwrap_or_else(|| format!("{} is writing code", provider.name)),
+                ))
+            } else {
+                None
+            };
+            let Some((tone, line)) = line else {
+                continue;
+            };
+            now_rows.push(
+                div()
+                    .p_2p5()
+                    .v_flex()
+                    .gap_1p5()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(shade(tone, 0.4)))
+                    .bg(rgb(shade(tone, 0.07)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(self.provider_badge(provider, 16.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(p.title.clone()),
+                            )
+                            .child(if tone == c_amber() {
+                                icon(IconName::TriangleAlert, 11., tone).into_any_element()
+                            } else {
+                                spin(("mission-feed-spin", i), 11., tone)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .font_family("monospace")
+                            .text_size(px(10.5))
+                            .text_color(rgb(c_secondary()))
+                            .child(line),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let total = events.len();
+        let timeline = events
+            .into_iter()
+            .enumerate()
+            .map(|(i, (at, glyph, tone, text))| {
+                div()
+                    .flex()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .w(px(22.))
+                            .flex_none()
+                            .v_flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .size(px(22.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(rgb(shade(tone, 0.18)))
+                                    .child(icon(glyph, 11., tone)),
+                            )
+                            .when(i + 1 < total, |el| {
+                                el.child(div().flex_1().w(px(1.)).bg(rgb(c_border())))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pb_3()
+                            .v_flex()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .pt(px(3.))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(c_text()))
+                                    .child(text),
+                            )
+                            .child(div().text_size(px(10.5)).text_color(rgb(c_muted())).child(
+                                match now.saturating_sub(at) {
+                                    0..=4 => "just now".to_string(),
+                                    s => format!("{} ago", took(s)),
+                                },
+                            )),
+                    )
+            });
+
+        div()
+            .id("mission-feed")
+            .w(px(FEED_WIDTH))
+            .flex_none()
+            .h_full()
+            .overflow_y_scroll()
+            .border_l_1()
+            .border_color(divider())
+            .bg(pane(c_sidebar()))
+            .px_4()
+            .py_4()
+            .v_flex()
+            .gap_4()
+            .when(!now_rows.is_empty(), |el| {
+                el.child(
+                    div()
+                        .v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(breathing("mission-feed-live", 6., c_red()))
+                                .child(small_caps("LIVE")),
+                        )
+                        .children(now_rows),
+                )
+            })
+            .child(
+                div()
+                    .v_flex()
+                    .gap_2()
+                    .child(small_caps(if live { "ACTIVITY" } else { "HISTORY" }))
+                    .when(total == 0, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(c_muted()))
+                                .child("What the agents do shows here."),
+                        )
+                    })
+                    .child(div().v_flex().children(timeline)),
+            )
+            .into_any_element()
+    }
 }
 
-/// The colour of the Checking column.
-fn c_purple_or_blue() -> u32 {
-    settings::mix(c_blue(), c_red(), 0.6)
+/// A wave's title over its column: its number, how many parts and where it stands.
+fn wave_head(
+    w: usize,
+    parts: usize,
+    status: impl Into<SharedString>,
+    tone: u32,
+    busy: bool,
+) -> Div {
+    div()
+        .h(px(28.))
+        .px_1()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .size(px(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(rgb(shade(tone, 0.55)))
+                .bg(rgb(shade(tone, 0.16)))
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(tone))
+                .child((w + 1).to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(12.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(format!("Wave {}", w + 1)),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .text_color(rgb(c_muted()))
+                .child(format!("{parts} part{}", if parts == 1 { "" } else { "s" })),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_size(px(11.))
+                .text_color(rgb(tone))
+                .when(busy, |el| {
+                    el.child(breathing(("mission-wave-dot", w), 5., tone))
+                })
+                .child(div().max_w(px(180.)).truncate().child(status.into())),
+        )
+}
+
+/// One wave's column. A mission of one wave lays its parts side by side instead.
+fn wave_column(single: bool, head: Div, cards: Vec<AnyElement>) -> AnyElement {
+    if single {
+        return div()
+            .flex_1()
+            .v_flex()
+            .gap_2p5()
+            .child(head.max_w(px(380.)))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .gap_2p5()
+                    .children(cards.into_iter().map(|c| div().w(px(380.)).child(c))),
+            )
+            .into_any_element();
+    }
+    div()
+        .flex_1()
+        .min_w(px(290.))
+        .max_w(px(440.))
+        .v_flex()
+        .gap_2p5()
+        .child(head)
+        .children(cards)
+        .into_any_element()
+}
+
+/// The arrow between two waves, lit once the wave before it is done.
+fn wave_link(w: usize, m: &Mission, waves: &[Vec<usize>]) -> AnyElement {
+    let lit = waves[w - 1].iter().all(|i| m.parts[*i].state.settled());
+    let color = if lit { c_green() } else { c_border() };
+    div()
+        .w(px(28.))
+        .flex_none()
+        .pt(px(64.))
+        .flex()
+        .items_center()
+        .child(div().flex_1().h(px(1.5)).bg(rgb(color)))
+        .child(icon(IconName::ChevronRight, 13., color))
+        .into_any_element()
+}
+
+/// A progress ring: a track and an arc for `fraction` of it, from twelve o'clock.
+fn ring(size: f32, stroke: f32, fraction: f32, color: u32) -> impl IntoElement {
+    let track = c_border();
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let r = (size - stroke) / 2.;
+            let cx = bounds.origin.x + px(size / 2.);
+            let cy = bounds.origin.y + px(size / 2.);
+            let at = move |a: f32| point(cx + px(r * a.cos()), cy + px(r * a.sin()));
+            let mut arc = |from: f32, to: f32, color: u32| {
+                let mut b = PathBuilder::stroke(px(stroke));
+                b.move_to(at(from));
+                let mut a = from;
+                while a < to - 1e-4 {
+                    let next = (a + std::f32::consts::PI * 0.9).min(to);
+                    b.arc_to(point(px(r), px(r)), px(0.), false, true, at(next));
+                    a = next;
+                }
+                if let Ok(p) = b.build() {
+                    window.paint_path(p, rgb(color));
+                }
+            };
+            let top = -std::f32::consts::FRAC_PI_2;
+            arc(top, top + std::f32::consts::TAU, track);
+            let f = fraction.clamp(0., 1.);
+            if f > 0. {
+                arc(top, top + std::f32::consts::TAU * f, color);
+            }
+        },
+    )
+    .size(px(size))
+    .flex_none()
 }
 
 #[cfg(test)]
