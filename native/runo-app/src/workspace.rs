@@ -557,10 +557,10 @@ impl RunoApp {
             .p_5()
             .v_flex()
             .gap_3()
-            .rounded_2xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(

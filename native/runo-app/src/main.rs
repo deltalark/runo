@@ -3666,7 +3666,8 @@ impl RunoApp {
     }
 
     fn history_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut rows = div().v_flex().gap_2();
+        // One card of rows split by hairlines, like Home's panels.
+        let mut rows = shell::card().v_flex().py_1();
         for (i, past) in self.history.iter().enumerate().take(200) {
             let provider = agent::provider(past.provider);
             let place = match self.project_for(&past.cwd) {
@@ -3680,23 +3681,27 @@ impl RunoApp {
                 .iter()
                 .any(|s| s.agent_session == past.id && s.provider == past.provider);
             let item = past.clone();
+            if i > 0 {
+                rows = rows.child(shell::card_rule());
+            }
             rows = rows.child(stagger(
                 div()
                     .id(("past", i))
-                    .p_3()
+                    .mx_1()
+                    .my_1()
+                    .px_3()
+                    .py_2()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(rgb(c_border()))
+                    .rounded_lg()
                     .cursor_pointer()
-                    .hover(|el| el.bg(tint(c_subtle())))
+                    .hover(|el| el.bg(tint(c_active())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.resume_past(item.clone(), cx);
                         cx.notify();
                     }))
-                    .child(self.provider_badge(provider, 26.))
+                    .child(self.provider_badge(provider, 28.))
                     .child(
                         div()
                             .flex_1()
@@ -3917,16 +3922,16 @@ impl RunoApp {
             .rounded_md()
             .cursor_pointer()
             .text_size(px(12.5))
-            .border_1()
+            // Borderless, by tone: the chosen one raised, the rest a quiet step.
             .when(selected, |el| {
-                el.border_color(rgb(c_blue()))
-                    .bg(tint(c_selected()))
+                el.bg(tint(c_active()))
                     .text_color(rgb(c_text()))
+                    .font_weight(FontWeight::MEDIUM)
             })
             .when(!selected, |el| {
-                el.border_color(rgb(c_border()))
+                el.bg(tint(c_subtle()))
                     .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_subtle())))
+                    .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
             })
             .child(label)
     }
@@ -6438,10 +6443,10 @@ impl RunoApp {
             .p_6()
             .v_flex()
             .gap_4()
-            .rounded_2xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
@@ -6567,10 +6572,10 @@ impl RunoApp {
                         .max_h(px(height.clamp(360., 820.)))
                         .relative()
                         .v_flex()
-                        .rounded_2xl()
+                        .rounded(px(shell::ISLAND_R))
                         .border_1()
                         .border_color(float_edge())
-                        .bg(float(c_canvas()))
+                        .bg(float(c_sheet()))
                         .shadow_2xl()
                         .overflow_hidden()
                         // Clicks inside the dialog must not reach the backdrop.
