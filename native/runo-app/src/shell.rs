@@ -9,14 +9,55 @@ use gpui_kit::component::tooltip::Tooltip;
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
-/// The colour behind the rail's icons: the sidebar's when docked, a raised surface when
-/// it floats.
-fn rail_fill(cx: &App) -> u32 {
-    if cx.global::<AppSettings>().rail == "docked" {
-        c_sidebar()
-    } else {
-        c_raised()
+/// The rail's mark on the open place: a glowing accent line on the window's edge, and a
+/// soft beam of the same light falling from it across the page. Children of a 34px rail
+/// item, which sits 9px in from the edge.
+fn light_beam() -> [AnyElement; 2] {
+    let edge = div()
+        .absolute()
+        .left(px(-9.))
+        .top(px(4.))
+        .w(px(3.))
+        .h(px(26.))
+        .rounded_full()
+        .bg(rgb(c_blue()))
+        .shadow(vec![BoxShadow {
+            color: hsla_of(c_blue(), 0.75),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(10.),
+            spread_radius: px(1.),
+            inset: false,
+        }]);
+    // Stacked bands, the tallest outermost, add up to a beam that is brightest in its
+    // middle and fades out up and down; each fades out to the right on its own.
+    let mut beam = div().absolute().left(px(-9.)).top_0().size_full();
+    for height in [96., 78., 62., 48., 34., 22.] {
+        beam = beam.child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px((34. - height) / 2.))
+                .w(px(340.))
+                .h(px(height))
+                .rounded_full()
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(hsla_of(c_blue(), 0.03), 0.),
+                    linear_color_stop(hsla_of(c_blue(), 0.), 1.),
+                )),
+        );
     }
+    [
+        deferred(beam).with_priority(0).into_any_element(),
+        edge.into_any_element(),
+    ]
+}
+
+/// A colour with its own alpha, for glows and gradients.
+fn hsla_of(color: u32, alpha: f32) -> Hsla {
+    let mut c: Hsla = rgb(color).into();
+    c.a = alpha;
+    c
 }
 
 /// The places on the mode rail.
@@ -561,17 +602,17 @@ impl RunoApp {
             .justify_center()
             .rounded(px(8.))
             .cursor_pointer()
-            .when(on, |el| el.bg(tint(c_active())))
             .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.go(mode, window, cx);
                 cx.notify();
             }))
+            .when(on, |el| el.children(light_beam()))
             .child(icon(
                 mode.glyph(),
                 17.,
-                if on { c_text() } else { c_muted() },
+                if on { c_blue() } else { c_muted() },
             ))
             // A small dot cut into the icon's corner, ringed in the rail's own colour.
             .when_some(badge.filter(|_| !on), |el, color| {
@@ -583,7 +624,7 @@ impl RunoApp {
                         .size(px(8.))
                         .rounded_full()
                         .border_2()
-                        .border_color(rgb(rail_fill(cx)))
+                        .border_color(rgb(c_sidebar()))
                         .bg(rgb(color)),
                 )
             })
@@ -615,47 +656,22 @@ impl RunoApp {
                 .child(self.rail_item(Mode::Settings, None, cx)),
         );
         // The Inbox opens from the bell in the top bar, so the rail doesn't repeat it.
-        let column = div()
+        div()
             .w(px(RAIL_WIDTH))
             .flex_none()
             .h_full()
             .v_flex()
-            .items_center();
-        if cx.global::<AppSettings>().rail == "docked" {
-            return column
-                .pt(px(10.))
-                .pb_2()
-                .gap(px(18.))
-                .border_r_1()
-                .border_color(divider())
-                .bg(pane(c_sidebar()))
-                .child(work)
-                .child(self.project_group(cx))
-                .child(div().flex_1())
-                .child(foot)
-                .into_any_element();
-        }
-        // Floating: one capsule off the window's edge, holding every group, centred down
-        // the side so the page runs behind it.
-        column
-            .justify_center()
-            .child(
-                div()
-                    .v_flex()
-                    .items_center()
-                    .gap(px(14.))
-                    .py(px(8.))
-                    .w(px(44.))
-                    .rounded(px(18.))
-                    .border_1()
-                    .border_color(float_edge())
-                    .bg(float(c_raised()))
-                    .shadow_lg()
-                    .child(work)
-                    .child(self.project_group(cx))
-                    .child(div().w(px(18.)).h(px(1.)).bg(divider()))
-                    .child(foot),
-            )
+            .items_center()
+            .pt(px(10.))
+            .pb_2()
+            .gap(px(18.))
+            .border_r_1()
+            .border_color(divider())
+            .bg(pane(c_sidebar()))
+            .child(work)
+            .child(self.project_group(cx))
+            .child(div().flex_1())
+            .child(foot)
             .into_any_element()
     }
 
@@ -705,8 +721,9 @@ impl RunoApp {
                     .justify_center()
                     .rounded(px(8.))
                     .cursor_pointer()
-                    .when(on || open, |el| el.bg(tint(c_active())))
+                    .when(open, |el| el.bg(tint(c_active())))
                     .when(!(on || open), |el| el.hover(|el| el.bg(tint(c_subtle()))))
+                    .when(on, |el| el.children(light_beam()))
                     .when(!open, |el| {
                         el.tooltip(|window, cx| {
                             Tooltip::new("Playbooks, History and Notes").build(window, cx)
@@ -722,7 +739,7 @@ impl RunoApp {
                     .child(icon(
                         IconName::Ellipsis,
                         17.,
-                        if on { c_text() } else { c_muted() },
+                        if on { c_blue() } else { c_muted() },
                     )),
             )
             .when(open, |el| {
