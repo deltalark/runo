@@ -88,12 +88,16 @@ fn inner_curve(fill: Rgba, edge: Rgba, top: bool, lit: f32) -> Div {
 }
 
 /// The neon outline of a fused shape: its rounded left side, open on the right where it
-/// flows into the sheet.
+/// flows into the sheet. It sits just outside the shape, on the same side of the edge as
+/// the curves' neon, and stops where they begin, so the line runs on round them unbroken.
 fn contour(lit: f32) -> Div {
     div()
         .absolute()
-        .inset_0()
-        .rounded_l(px(FUSE_R))
+        .top(px(-1.))
+        .bottom(px(-1.))
+        .left(px(-1.))
+        .right(px(FUSE_R))
+        .rounded_l(px(FUSE_R + 1.))
         .border_t_1()
         .border_l_1()
         .border_b_1()
@@ -174,9 +178,9 @@ fn rail_tab(key: &'static str) -> AnyElement {
                 .when(lit, |el| {
                     el.bg(wash).shadow(vec![BoxShadow {
                         color: neon(0.45),
-                        offset: point(px(-6.), px(0.)),
+                        offset: point(px(-8.), px(0.)),
                         blur_radius: px(12.),
-                        spread_radius: px(-4.),
+                        spread_radius: px(-7.),
                         inset: false,
                     }])
                 }),
@@ -1086,6 +1090,8 @@ impl RunoApp {
             .pb_2()
             .gap(px(18.))
             .bg(pane(c_rail()))
+            // Keeps the open tab's neon trail inside the rail, under the top bar.
+            .overflow_hidden()
             .child(work)
             .child(self.project_group(cx))
             .child(div().flex_1())
