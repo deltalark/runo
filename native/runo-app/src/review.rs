@@ -97,7 +97,7 @@ impl RunoApp {
                 this.review(id);
                 cx.notify();
             }))
-            .child(self.provider_mark(agent::provider(&session.provider), 14.))
+            .child(self.provider_badge(agent::provider(&session.provider), 28.))
             .child(
                 div()
                     .flex_1()
@@ -136,12 +136,13 @@ impl RunoApp {
             .into_any_element()
     }
 
-    /// Git: what waits to ship and the project's GitHub, as two tabs under one strip.
+    /// Git: what waits to ship and the project's GitHub, as two tabs on the frame, the
+    /// open one cut from the page below it.
     pub(crate) fn git_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let github = self.view == View::GitHub;
         let tab = |id: &'static str, label: &'static str, count: usize, alert: bool, on: bool| {
-            crate::github::segment((id, 0), label, on)
-                .gap(px(6.))
+            shell::strip_tab(id, "git", on)
+                .child(label)
                 .when(count > 0, |el| {
                     el.child(
                         div()
@@ -160,30 +161,26 @@ impl RunoApp {
                     )
                 })
         };
-        let tabs = crate::github::segmented()
-            .child(
-                tab(
-                    "git-ship",
-                    "To ship",
-                    self.review_list().len(),
-                    false,
-                    !github,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.open_review();
-                    this.save();
-                    cx.notify();
-                })),
+        // The open tab is the colour of what sits under it: the waiting list for To
+        // ship, the page for GitHub.
+        let under = if github {
+            glass_fill(c_canvas())
+        } else {
+            pane(c_sheet())
+        };
+        let body = if github {
+            shell::island(
+                div().size_full().flex().child(self.github_view(cx)),
+                glass_fill(c_canvas()),
+                [true, true, false, false],
             )
-            .child(
-                tab("git-github", "GitHub", self.gh.needs_you(), true, github).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.load_github();
-                        this.save();
-                        cx.notify();
-                    }),
-                ),
-            );
+        } else {
+            shell::island(
+                div().size_full().flex().child(self.review_view(cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -191,27 +188,51 @@ impl RunoApp {
             .v_flex()
             .child(
                 div()
-                    .h(px(46.))
+                    .h(px(40.))
                     .flex_none()
-                    .px_4()
+                    .relative()
+                    .px(px(10.))
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(divider())
+                    .items_end()
+                    .gap_1()
+                    .child(shell::strip_fill("git", under))
                     .child(
                         div()
+                            .h(px(28.))
+                            .mb(px(3.))
+                            .px_2()
+                            .mr_1()
+                            .flex()
+                            .items_center()
                             .text_size(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Git"),
                     )
-                    .child(tabs),
+                    .child(
+                        tab(
+                            "git-ship",
+                            "To ship",
+                            self.review_list().len(),
+                            false,
+                            !github,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_review();
+                            this.save();
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        tab("git-github", "GitHub", self.gh.needs_you(), true, github).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.load_github();
+                                this.save();
+                                cx.notify();
+                            }),
+                        ),
+                    ),
             )
-            .child(div().flex_1().min_h_0().flex().child(if github {
-                self.github_view(cx)
-            } else {
-                self.review_view(cx)
-            }))
+            .child(body.flex_1().min_h_0())
             .into_any_element()
     }
 

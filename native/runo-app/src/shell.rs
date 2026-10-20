@@ -560,9 +560,99 @@ pub(crate) fn island(content: impl IntoElement, fill: Rgba, round: [bool; 4]) ->
         .when(bl, |el| el.child(frame_corner(false, true)))
 }
 
+/// One tab in a strip over an island. The open one is cut from the island below
+/// (see `strip_fill`); the rest sit quietly on the frame until hovered.
+pub(crate) fn strip_tab(
+    id: impl Into<ElementId>,
+    strip: &'static str,
+    selected: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .when(selected, |el| {
+            el.h(px(32.))
+                .child(strip_cut(strip))
+                .text_color(rgb(c_text()))
+        })
+        .when(!selected, |el| {
+            el.h(px(28.))
+                .mb(px(3.))
+                .rounded_md()
+                .text_color(rgb(c_secondary()))
+                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+        })
+}
+
+/// The header of a list beside the rail: a large title over a quiet summary line,
+/// with room on the right for the list's add button.
+pub(crate) fn list_header(title: &'static str, summary: impl IntoElement) -> Div {
+    div()
+        .pt(px(16.))
+        .px(px(16.))
+        .flex()
+        .items_start()
+        .justify_between()
+        .child(
+            div()
+                .v_flex()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(19.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(summary),
+                ),
+        )
+}
+
+/// The round, filled add button in a `list_header`.
+pub(crate) fn add_button(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .size(px(30.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(c_text()))
+        .cursor_pointer()
+        .hover(|el| el.opacity(0.85))
+        .child(icon(IconName::Plus, 16., c_canvas()))
+}
+
 /// A strip of the frame's grey, such as the gutter between two islands.
 pub(crate) fn gutter() -> Div {
     div().flex_none().bg(rail_shade())
+}
+
+/// A card on an island: a borderless step lighter than the page, so groups read by
+/// tone rather than by lines.
+pub(crate) fn card() -> Div {
+    div().rounded(px(12.)).bg(tint(c_subtle()))
+}
+
+/// A hairline between rows inside a `card`, inset from its edges.
+pub(crate) fn card_rule() -> Div {
+    div().mx_4().h(px(1.)).flex_none().bg(rgb(c_border()))
 }
 
 /// Let a list's rows fade in one after another when the list opens, each a beat after
@@ -2354,16 +2444,12 @@ impl RunoApp {
     ) -> AnyElement {
         let live = label == "Running" && value != "0";
         let lead = i as f32 * 0.06;
-        div()
+        card()
             .flex_1()
             .min_w_0()
             .p_4()
             .v_flex()
             .gap_1()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_subtle()))
             .relative()
             .child(
                 div()
@@ -2404,7 +2490,7 @@ impl RunoApp {
             )
     }
 
-    fn home_row(&self, session: &Session, note: String, cx: &mut Context<Self>) -> AnyElement {
+    fn home_row(&self, session: &Session, note: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let id = session.id;
         let provider = agent::provider(&session.provider);
         let project = self
@@ -2414,18 +2500,23 @@ impl RunoApp {
             .find(|p| p.id == session.project_id)
             .map(|p| p.name.clone())
             .unwrap_or_default();
+        let chosen = self.cursor == Some(id);
         div()
             .id(("home-row", id as usize))
-            .px_3()
-            .py(px(9.))
+            .relative()
+            .mx_2()
+            .px_2()
+            .py(px(8.))
             .flex()
             .items_center()
             .gap_3()
-            .border_t_1()
-            .border_color(rgb(c_border()))
+            .rounded_lg()
             .cursor_pointer()
-            .hover(|el| el.bg(tint(c_subtle())))
-            .when(self.cursor == Some(id), |el| el.bg(tint(c_selected())))
+            .hover(|el| el.bg(tint(c_active())))
+            .when(chosen, |el| {
+                el.bg(tint(c_active()))
+                    .child(accent_bracket(format!("home-row-bracket-{id}")))
+            })
             .on_mouse_down(
                 MouseButton::Right,
                 self.on_context(ctxmenu::CtxTarget::Session(id), cx),
@@ -2443,12 +2534,13 @@ impl RunoApp {
                 }
                 cx.notify();
             }))
-            .child(self.provider_mark(provider, 14.))
+            .child(self.provider_badge(provider, 28.))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .v_flex()
+                    .gap(px(1.))
                     .child(
                         div()
                             .truncate()
@@ -2481,18 +2573,21 @@ impl RunoApp {
         rows: Vec<AnyElement>,
         empty: &'static str,
     ) -> Div {
-        div()
+        let mut list = div().v_flex().pb_2();
+        for (i, row) in rows.into_iter().enumerate() {
+            if i > 0 {
+                list = list.child(card_rule().my(px(2.)));
+            }
+            list = list.child(cascade(row, format!("home-row-{title}-{i}"), i + 2));
+        }
+        card()
             .flex_1()
             .min_w_0()
             .v_flex()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .overflow_hidden()
             .child(
                 div()
-                    .px_3()
-                    .h(px(40.))
+                    .px_4()
+                    .h(px(42.))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -2506,18 +2601,14 @@ impl RunoApp {
                         format!("home-panel-{title}-{count}"),
                     )),
             )
-            .children(
-                rows.into_iter()
-                    .enumerate()
-                    .map(|(i, row)| cascade(row, format!("home-row-{title}-{i}"), i + 2)),
-            )
+            .child(card_rule().mb_2())
+            .child(list)
             .when(count == 0, |el| {
                 el.child(
                     div()
-                        .px_3()
-                        .py_4()
-                        .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .px_4()
+                        .pt_1()
+                        .pb_4()
                         .text_size(px(12.5))
                         .text_color(rgb(c_muted()))
                         .child(empty),
@@ -2571,18 +2662,23 @@ impl RunoApp {
             match self.bucket(s) {
                 Some(Bucket::NeedsYou) => {
                     let note = self.need(s).map_or("", Need::label);
-                    needs.push(self.home_row(s, note.into(), cx));
+                    needs.push(self.home_row(s, note.into_any_element(), cx));
                 }
                 Some(Bucket::Running) => {
                     let note = self
                         .started
                         .get(&s.id)
                         .map_or("Working".to_string(), |t| elapsed(t.elapsed()));
-                    running.push(self.home_row(s, note, cx));
+                    running.push(self.home_row(s, note.into_any_element(), cx));
                 }
                 Some(Bucket::Review) => {
                     let (_, a, r) = self.stats.get(&s.id).copied().unwrap_or_default();
-                    review.push(self.home_row(s, format!("+{a} −{r}"), cx));
+                    let diff = div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(div().text_color(rgb(c_green())).child(format!("+{a}")))
+                        .child(div().text_color(rgb(c_red())).child(format!("−{r}")));
+                    review.push(self.home_row(s, diff.into_any_element(), cx));
                 }
                 _ => {}
             }
@@ -2600,21 +2696,8 @@ impl RunoApp {
             .map(|p| (p.id, p.path.clone()));
         let no_projects = self.state.projects.is_empty();
         let scope = |label: &'static str, all: bool| {
-            let on = self.home_all == all;
-            div()
-                .id(if all { "home-all" } else { "home-one" })
-                .h(px(26.))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded_md()
-                .cursor_pointer()
-                .text_size(px(12.5))
-                .when(on, |el| el.bg(tint(c_active())).text_color(rgb(c_text())))
-                .when(!on, |el| {
-                    el.text_color(rgb(c_secondary()))
-                        .hover(|el| el.bg(tint(c_subtle())))
-                })
+            let id = if all { "home-all" } else { "home-one" };
+            seg_choice(id, format!("seg-fill-{id}"), self.home_all == all)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.home_all = all;
                     this.cursor = None;
@@ -2826,13 +2909,7 @@ impl RunoApp {
                             )
                             .when(self.state.projects.len() > 1, |el| {
                                 el.child(
-                                    div()
-                                        .flex()
-                                        .p(px(2.))
-                                        .gap(px(2.))
-                                        .rounded_lg()
-                                        .border_1()
-                                        .border_color(rgb(c_border()))
+                                    seg_track()
                                         .child(scope("This project", false))
                                         .child(scope("All projects", true)),
                                 )
@@ -2848,21 +2925,36 @@ impl RunoApp {
                             )
                             .when(!no_projects, |el| {
                                 el.child(
-                                    self.home_button(
-                                        "home-new",
-                                        IconName::SquarePen,
-                                        "New session",
-                                        keymap::label(cx, "new-session"),
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
+                                    div()
+                                        .id("home-new")
+                                        .h(px(32.))
+                                        .px_3()
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap_2()
+                                        .rounded_md()
+                                        .bg(rgb(c_text()))
+                                        .text_color(rgb(c_canvas()))
+                                        .cursor_pointer()
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .hover(|el| el.opacity(0.9))
+                                        .child(icon(IconName::Plus, 14., c_canvas()))
+                                        .child("New session")
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .opacity(0.6)
+                                                .child(keymap::label(cx, "new-session")),
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
                                             if let Some(pid) = this.current_project() {
                                                 this.new_project = Some(pid);
                                             }
                                             this.open_new_session();
                                             cx.notify();
-                                        },
-                                    )),
+                                        })),
                                 )
                             }),
                     )

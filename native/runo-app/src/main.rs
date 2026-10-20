@@ -2934,10 +2934,10 @@ impl RunoApp {
                     // jump in size as results come and go while typing.
                     .h(px(480.))
                     .v_flex()
-                    .rounded_xl()
+                    .rounded(px(shell::ISLAND_R))
                     .border_1()
                     .border_color(float_edge())
-                    .bg(float(c_canvas()))
+                    .bg(float(c_sheet()))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_click(|_, _, cx| cx.stop_propagation())
@@ -2951,6 +2951,30 @@ impl RunoApp {
                             .min_h_0()
                             .max_h(px(480.))
                             .placeholder("Jump to a session, project, file, setting or command…")
+                            .footer(|_, _, _| {
+                                let hint = |keys: &'static str, what: &'static str| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .child(div().text_color(rgb(c_secondary())).child(keys))
+                                        .child(what)
+                                };
+                                div()
+                                    .h(px(34.))
+                                    .px(px(14.))
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(16.))
+                                    .border_t_1()
+                                    .border_color(rgb(c_border()))
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(c_muted()))
+                                    .child(hint("↑↓", "move"))
+                                    .child(hint("↵", "open"))
+                                    .child(hint("Esc", "close"))
+                            })
                             .on_query(move |query, _, cx| {
                                 let query = query.to_string();
                                 let _ = searcher.update(cx, |this, cx| {
@@ -4475,67 +4499,35 @@ impl RunoApp {
             .child(
                 // The list's own header: what it holds and how much is running, with the
                 // new-session button beside it.
-                div()
-                    .pt(px(16.))
-                    .px(px(16.))
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap(px(2.))
-                            .child(
+                shell::list_header(
+                    "Sessions",
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .child(format!("{} sessions", total))
+                        .when(running > 0, |el| {
+                            el.child("·").child(
                                 div()
-                                    .text_size(px(19.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(c_text()))
-                                    .child("Sessions"),
+                                    .text_color(rgb(c_blue()))
+                                    .child(format!("{running} running")),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(4.))
-                                    .text_size(px(11.5))
-                                    .text_color(rgb(c_muted()))
-                                    .child(format!("{} sessions", total))
-                                    .when(running > 0, |el| {
-                                        el.child("·").child(
-                                            div()
-                                                .text_color(rgb(c_blue()))
-                                                .child(format!("{running} running")),
-                                        )
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("new-session")
-                            .relative()
-                            .child(tour::anchor(&self.anchors, "new-session"))
-                            .size(px(30.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(rgb(c_text()))
-                            .cursor_pointer()
-                            .hover(|el| el.opacity(0.85))
-                            .tooltip({
-                                let tip =
-                                    format!("New session  {}", keymap::label(cx, "new-session"));
-                                move |window, cx| {
-                                    gpui_kit::component::tooltip::Tooltip::new(tip.clone())
-                                        .build(window, cx)
-                                }
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.open_new_session();
-                                cx.notify();
-                            }))
-                            .child(icon(IconName::Plus, 16., c_canvas())),
-                    ),
+                        }),
+                )
+                .child(
+                    shell::add_button("new-session")
+                        .child(tour::anchor(&self.anchors, "new-session"))
+                        .tooltip({
+                            let tip = format!("New session  {}", keymap::label(cx, "new-session"));
+                            move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                    .build(window, cx)
+                            }
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_new_session();
+                            cx.notify();
+                        })),
+                ),
             )
             .child(
                 div()
@@ -8888,7 +8880,9 @@ impl Render for RunoApp {
         // The page is an island under the session tabs. Pages with their own list beside
         // the content paint the two layers themselves, so the list is as clear as the
         // sidebar.
-        let page_fill = if matches!(self.view, View::Review | View::Settings) {
+        let page_fill = if matches!(self.view, View::Review | View::GitHub | View::Settings)
+            || (self.view == View::Architecture && self.arch_diagram_open())
+        {
             rgba(0)
         } else {
             glass_fill(c_canvas())

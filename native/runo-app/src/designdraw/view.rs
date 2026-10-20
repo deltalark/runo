@@ -5806,8 +5806,11 @@ impl DesignCanvas {
                             .flex_1()
                             .min_w_0()
                             .h_full()
+                            .relative()
                             .v_flex()
-                            .child(self.canvas_area(cx)),
+                            .child(self.canvas_area(cx))
+                            .child(crate::shell::frame_corner(true, false))
+                            .child(crate::shell::frame_corner(false, false)),
                     )
                     .child(self.right_panel(cx)),
             )
