@@ -23,40 +23,51 @@ fn light_beam(reach: f32) -> [AnyElement; 4] {
         spread_radius: px(spread),
         inset,
     };
-    // Stacked bands add up to a cone: each one taller and starting further out than the
-    // last, all fading out by the far end, so the light is brightest at the tube and
-    // widens as it dims, like a torch's.
+    // The beam is a cone of thin rows, each fading out toward the far end. A row further
+    // from the middle starts further out and is dimmer, so the light spreads as it dims,
+    // like a torch's, with no hard edge anywhere.
     let width = RAIL_WIDTH + reach;
-    let fade = |alpha: f32| {
+    let fade = |from: f32| {
         linear_gradient(
             90.,
-            linear_color_stop(hsla_of(c_blue(), alpha), 0.),
+            linear_color_stop(hsla_of(c_blue(), from), 0.),
             linear_color_stop(hsla_of(c_blue(), 0.), 1.),
         )
     };
-    let band = |left: f32, height: f32, alpha: f32| {
-        div()
-            .absolute()
-            .left(px(left))
-            .top(px((34. - height) / 2.))
-            .w(px(width - left))
-            .h(px(height))
-            .rounded_full()
-            .bg(fade(alpha))
-    };
+    const ROW: f32 = 1.;
+    const SPREAD: f32 = 50.;
     let mut beam = div()
         .absolute()
         .left(px(-9.))
         .top_0()
         .w(px(width))
         .h(px(34.));
-    for i in 0..14 {
-        let i = i as f32;
-        beam = beam.child(band(width * 0.045 * i, 24. + 5. * i, 0.05));
+    let mut y = -SPREAD;
+    while y < SPREAD {
+        let off = (y + ROW / 2.).abs();
+        let start = width * ((off - 8.).max(0.) / (SPREAD - 8.)).powi(2);
+        beam = beam.child(
+            div()
+                .absolute()
+                .left(px(start))
+                .top(px(17. + y))
+                .w(px(width - start))
+                .h(px(ROW))
+                .bg(fade(0.62 * (1. - off / SPREAD).powf(2.2))),
+        );
+        y += ROW;
     }
-    // The hot core down the middle of the beam, in a softer halo.
-    beam = beam.child(band(0., 16., 0.16)).child(band(0., 6., 0.4));
-    // A bloom behind the tile: a small lit core whose glow spreads across the rail.
+    // The hot core down the middle of the beam.
+    beam = beam.child(
+        div()
+            .absolute()
+            .left_0()
+            .top(px(14.))
+            .w(px(width))
+            .h(px(6.))
+            .rounded_full()
+            .bg(fade(0.45)),
+    );
     // A bloom behind the tile: a small lit core whose glow spreads across the rail.
     let bloom = div()
         .absolute()
