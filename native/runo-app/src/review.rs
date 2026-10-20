@@ -76,7 +76,8 @@ impl RunoApp {
         div()
             .id(("review-row", id as usize))
             .relative()
-            .mx_1()
+            .ml(px(10.))
+            .mr_1()
             .px_2()
             .py(px(7.))
             .flex()
@@ -250,6 +251,9 @@ impl RunoApp {
                     .overflow_y_scroll()
                     .v_flex()
                     .gap(px(2.))
+                    // Room above the first row and below the last for the selected row's
+                    // curves, which the scrolling list would otherwise clip.
+                    .py(px(12.))
                     .children(rows)
                     .when(list.is_empty(), |el| {
                         el.child(

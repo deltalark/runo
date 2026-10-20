@@ -57,33 +57,62 @@ fn breathe(el: impl IntoElement + 'static, key: impl Into<SharedString>, ms: u64
     )
 }
 
-/// The curve where an edge turns into the sheet beside it: a square of `fill`, with a
-/// quarter of `edge` rounded into its `corner`, and the neon traced along the curve at
-/// `lit` (none at 0). Empty in glass mode, where the layers are see-through and the two
-/// squares would not add up to the edge's colour.
-fn inner_curve(fill: Rgba, edge: Rgba, top: bool, lit: f32) -> Div {
-    let notch = div().size_full().bg(edge);
-    let notch = if top {
-        notch.rounded_br(px(FUSE_R))
-    } else {
-        notch.rounded_tr(px(FUSE_R))
-    };
-    // The neon along the curve: a ring centred on the notch's far corner, cut to the notch.
-    let arc = div()
-        .absolute()
-        .left(px(-FUSE_R))
-        .top(px(if top { -FUSE_R } else { 0. }))
-        .size(px(2. * FUSE_R))
-        .rounded_full()
-        .border_1()
-        .border_color(neon(lit));
+/// The curve where an edge turns into the sheet beside it: the corner of a `FUSE_R`
+/// square outside a quarter circle, filled with `fill`, so whatever is behind shows in
+/// the rest, with the neon traced along the curve at `lit` (none at 0). Drawn as a path,
+/// not as a square painted over in a guessed colour, so no corner shows darker than what
+/// is around it. Empty in glass mode.
+fn inner_curve(fill: Rgba, top: bool, lit: f32) -> Div {
+    let fill = Hsla::from(fill);
+    let line = neon(lit);
     div()
         .absolute()
         .right_0()
         .size(px(FUSE_R))
-        .overflow_hidden()
         .when(!glass_on(), |el| {
-            el.bg(fill).child(notch).when(lit > 0., |el| el.child(arc))
+            el.child(
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, window, _| {
+                        let (r, k) = (FUSE_R, 0.5523);
+                        let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                        // The top curve turns round the square's top-left corner, the bottom
+                        // one round its bottom-left.
+                        let mut f = PathBuilder::fill();
+                        if top {
+                            f.move_to(p(r, 0.));
+                            f.line_to(p(r, r));
+                            f.line_to(p(0., r));
+                            f.cubic_bezier_to(p(r, 0.), p(k * r, r), p(r, k * r));
+                        } else {
+                            f.move_to(p(0., 0.));
+                            f.line_to(p(r, 0.));
+                            f.line_to(p(r, r));
+                            f.cubic_bezier_to(p(0., 0.), p(r, r - k * r), p(k * r, 0.));
+                        }
+                        f.close();
+                        if let Ok(path) = f.build() {
+                            window.paint_path(path, fill);
+                        }
+                        if lit > 0. {
+                            // Half a pixel in, so it meets the straight edges' 1px lines.
+                            let a = r - 0.5;
+                            let mut l = PathBuilder::stroke(px(1.));
+                            if top {
+                                l.move_to(p(0., a));
+                                l.cubic_bezier_to(p(a, 0.), p(k * a, a), p(a, k * a));
+                            } else {
+                                l.move_to(p(0., r - a));
+                                l.cubic_bezier_to(p(a, r), p(k * a, r - a), p(a, r - k * a));
+                            }
+                            if let Ok(path) = l.build() {
+                                window.paint_path(path, line);
+                            }
+                        }
+                    },
+                )
+                .size_full(),
+            )
         })
 }
 
@@ -107,10 +136,11 @@ fn contour(lit: f32) -> Div {
 /// How far the neon runs along the sheet's edge above and below the tab before it fades.
 const TRAIL: f32 = 96.;
 
-/// A thread of neon along the sheet's edge, fading away from the tab, that draws itself
-/// out once the tab has landed.
-fn trail(key: &'static str, up: bool, from: f32) -> AnyElement {
-    let (near, far) = (neon(0.85), neon(0.));
+/// A thread of neon `len` long along the sheet's edge, fading away from a fused shape at
+/// `glow`, that draws itself out once the shape has landed. It runs up from `gap` above
+/// the shape's top, or down from `gap` below its bottom.
+fn trail(key: &str, up: bool, gap: f32, len: f32, glow: f32) -> AnyElement {
+    let (near, far) = (neon(glow), neon(0.));
     let fade = if up {
         linear_gradient(
             180.,
@@ -130,11 +160,15 @@ fn trail(key: &'static str, up: bool, from: f32) -> AnyElement {
         .w(px(1.))
         .bg(fade)
         .animated(
-            SharedString::from(format!("rail-trail-{key}-{up}")),
+            SharedString::from(format!("trail-{key}-{up}")),
             Animation::new(Duration::from_millis(760)).with_easing(after(0.35)),
             move |el, d| {
-                let h = TRAIL * d;
-                el.h(px(h)).top(px(if up { from - h } else { from }))
+                let h = len * d;
+                if up {
+                    el.h(px(h)).top(px(-gap - h))
+                } else {
+                    el.h(px(h)).bottom(px(-gap - h))
+                }
             },
         )
         .into_any_element()
@@ -147,10 +181,8 @@ fn trail(key: &'static str, up: bool, from: f32) -> AnyElement {
 /// the place opens, and a small accent lands on its lip after it. `sheet` is the fill of
 /// what it is cut from, and `base` that colour unblended, for the neon's wash.
 fn rail_tab(key: &'static str, sheet: Rgba, base: u32) -> AnyElement {
-    let rail = pane(c_rail());
     let reach = (RAIL_WIDTH - 34.) / 2.;
     let height = 34. + 2. * TAB_PAD;
-    let total = height + 2. * FUSE_R;
     let lit = !glass_on();
     let wash = linear_gradient(
         90.,
@@ -185,8 +217,8 @@ fn rail_tab(key: &'static str, sheet: Rgba, base: u32) -> AnyElement {
                     }])
                 }),
         )
-        .child(inner_curve(sheet, rail, true, 0.9).top_0())
-        .child(inner_curve(sheet, rail, false, 0.9).bottom_0())
+        .child(inner_curve(sheet, true, 0.9).top_0())
+        .child(inner_curve(sheet, false, 0.9).bottom_0())
         .when(lit, |el| {
             el.child(
                 div()
@@ -197,8 +229,8 @@ fn rail_tab(key: &'static str, sheet: Rgba, base: u32) -> AnyElement {
                     .h(px(height))
                     .child(breathe(contour(0.95), format!("rail-neon-{key}"), 2600)),
             )
-            .child(trail(key, true, 0.))
-            .child(trail(key, false, total))
+            .child(trail(&format!("rail-{key}"), true, 0., TRAIL, 0.85))
+            .child(trail(&format!("rail-{key}"), false, 0., TRAIL, 0.85))
         })
         .child(
             div()
@@ -305,19 +337,25 @@ fn rail_icon(glyph: IconName, on: bool, key: &'static str) -> AnyElement {
 pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
     let key = key.into();
     let page = glass_fill(c_canvas());
-    let sheet = pane(c_sheet());
     let lit = !glass_on();
+    // A step in from the row's top and bottom, so the join reads lighter than the row and
+    // its curves keep clear of the rows around it.
+    let inset = 2.;
     div()
         .absolute()
-        .top_0()
-        .bottom_0()
+        .top(px(inset))
+        .bottom(px(inset))
         .left_0()
         .right(px(-reach))
         .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
-        .child(inner_curve(page, sheet, true, 0.5).top(px(-FUSE_R)))
-        .child(inner_curve(page, sheet, false, 0.5).bottom(px(-FUSE_R)))
+        .child(inner_curve(page, true, 0.45).top(px(-FUSE_R)))
+        .child(inner_curve(page, false, 0.45).bottom(px(-FUSE_R)))
         .when(lit, |el| {
-            el.child(breathe(contour(0.55), format!("{key}-neon"), 3200))
+            // The neon runs on a little way along the list's edge and fades out there,
+            // instead of stopping dead where the curves meet it.
+            el.child(breathe(contour(0.45), format!("{key}-neon"), 3200))
+                .child(trail(&key, true, FUSE_R, 26., 0.45))
+                .child(trail(&key, false, FUSE_R, 26., 0.45))
         })
         .animated(
             ElementId::Name(key),

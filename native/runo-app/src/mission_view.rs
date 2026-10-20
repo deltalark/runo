@@ -167,7 +167,8 @@ impl RunoApp {
                     .overflow_y_scroll()
                     .v_flex()
                     .gap_1()
-                    .py_1()
+                    // Room for the selected row's curves at the list's ends.
+                    .py(px(12.))
                     .children(rows)
                     .when(none, |el| {
                         el.child(
