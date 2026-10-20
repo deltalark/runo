@@ -764,6 +764,15 @@ fn slide_in<E: IntoElement + Styled + 'static>(
     )
 }
 
+/// How long a page takes to fade in when you move to it: short enough to feel instant,
+/// long enough to read as a soft change rather than a cut.
+const PAGE_MS: u64 = 180;
+
+/// Decelerating cubic: starts quick and settles gently, without the long tail of quint.
+fn ease_out_cubic(t: f32) -> f32 {
+    1. - (1. - t).powi(3)
+}
+
 /// How long panels take to slide open or closed.
 const PANEL_MS: u64 = 280;
 
@@ -885,13 +894,17 @@ fn stagger<E: IntoElement + Styled + 'static>(
     id: impl Into<ElementId>,
     i: usize,
 ) -> AnyElement {
+    // Each row a short beat after the one above, so a long list settles in well under
+    // half a second instead of trickling in.
     let i = i.min(8) as f32;
+    let (beat, each) = (28.0, 180.0);
+    let total = beat * 8.0 + each;
     el.animated(
         id,
-        Animation::new(Duration::from_millis(700)).with_easing(linear),
+        Animation::new(Duration::from_millis(total as u64)).with_easing(linear),
         move |el, d| {
-            let t = ((d * 700.0 - i * 70.0) / 260.0).clamp(0.0, 1.0);
-            el.opacity(t)
+            let t = ((d * total - i * beat) / each).clamp(0.0, 1.0);
+            el.opacity(ease_out_cubic(t))
         },
     )
 }
@@ -3843,8 +3856,10 @@ impl RunoApp {
         label: impl Into<SharedString>,
         primary: bool,
     ) -> Stateful<Div> {
-        div()
-            .id(id)
+        let id = id.into();
+        let button = div()
+            .id(id.clone())
+            .relative()
             .h(px(30.))
             .px(px(10.))
             .flex()
@@ -3856,37 +3871,25 @@ impl RunoApp {
             .cursor_pointer()
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
-            .when(primary, |el| {
-                el.bg(rgb(c_text()))
-                    .text_color(rgb(c_canvas()))
-                    .hover(|el| el.opacity(0.9))
-            })
-            .when(!primary, |el| {
-                el.border_1()
-                    .border_color(rgb(c_border()))
-                    .bg(rgb(c_raised()))
-                    .text_color(rgb(c_text()))
-                    .hover(|el| el.bg(tint(c_subtle())))
-            })
-            .child(label.into())
+            .active(|el| el.opacity(0.75));
+        if primary {
+            button
+                .bg(rgb(c_text()))
+                .text_color(rgb(c_canvas()))
+                .hover(|el| el.opacity(0.9))
+        } else {
+            shell::hover_wash(button, id, tint(c_subtle()), 6.)
+                .border_1()
+                .border_color(rgb(c_border()))
+                .bg(rgb(c_raised()))
+                .text_color(rgb(c_text()))
+        }
+        .child(label.into())
     }
 
     /// Borderless square icon button with a tooltip.
     fn ghost_button(&self, id: &'static str, name: IconName, tip: &'static str) -> Stateful<Div> {
-        div()
-            .id(id)
-            .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
-            })
-            .size(px(28.))
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .cursor_pointer()
-            .hover(|el| el.bg(tint(c_subtle())))
-            .child(icon(name, 15., c_secondary()))
+        self.ghost_button_sized(id, name, tip, 28.)
     }
 
     fn ghost_button_sized(
@@ -3896,8 +3899,10 @@ impl RunoApp {
         tip: &'static str,
         size: f32,
     ) -> Stateful<Div> {
-        div()
-            .id(id)
+        let id = id.into();
+        let button = div()
+            .id(id.clone())
+            .relative()
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tip).build(window, cx)
             })
@@ -3908,8 +3913,12 @@ impl RunoApp {
             .justify_center()
             .rounded_md()
             .cursor_pointer()
-            .hover(|el| el.bg(tint(c_subtle())))
-            .child(icon(name, (size * 0.5).round(), c_secondary()))
+            .active(|el| el.opacity(0.7));
+        shell::hover_wash(button, id, tint(c_subtle()), 6.).child(icon(
+            name,
+            (size * 0.5).round(),
+            c_secondary(),
+        ))
     }
 
     fn chip(&self, id: (&'static str, usize), label: String, selected: bool) -> Stateful<Div> {
@@ -8823,14 +8832,8 @@ impl Render for RunoApp {
         let page_fade = |el: AnyElement, id: &str| {
             div().flex_none().h_full().flex().child(el).animated(
                 SharedString::from(format!("{id}-{mode:?}")),
-                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
-                move |el, d| {
-                    if still {
-                        el
-                    } else {
-                        el.opacity(0.35 + 0.65 * d)
-                    }
-                },
+                Animation::new(Duration::from_millis(PAGE_MS)).with_easing(ease_out_cubic),
+                move |el, d| if still { el } else { el.opacity(d) },
             )
         };
         let left = panel_slide(
@@ -8892,34 +8895,26 @@ impl Render for RunoApp {
         } else {
             glass_fill(c_canvas())
         };
+        // A new page fades up in place inside its island. The island, its corners and
+        // the tabs over it hold still, and nothing moves, so the frame never jumps.
+        let page = div().size_full().flex().child(center).animated(
+            SharedString::from(format!(
+                "center-{}-{}",
+                shown as u8,
+                self.selected.unwrap_or(0)
+            )),
+            Animation::new(Duration::from_millis(PAGE_MS)).with_easing(ease_out_cubic),
+            move |el, delta| if still { el } else { el.opacity(delta) },
+        );
         let center_column = div()
             .flex_1()
             .min_w_0()
             .v_flex()
             .when(show_tabs, |el| el.child(self.tab_strip(cx)))
             .child(
-                shell::island(
-                    div().size_full().flex().child(center),
-                    page_fill,
-                    [false, true, true, !show_left],
-                )
-                .flex_1()
-                .min_h_0(),
-            )
-            .animated(
-                SharedString::from(format!(
-                    "center-{}-{}",
-                    shown as u8,
-                    self.selected.unwrap_or(0)
-                )),
-                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
-                move |el, delta| {
-                    if still {
-                        el
-                    } else {
-                        el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta)))
-                    }
-                },
+                shell::island(page, page_fill, [false, true, true, !show_left])
+                    .flex_1()
+                    .min_h_0(),
             );
         let root = div()
             .size_full()
