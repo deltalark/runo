@@ -1848,6 +1848,16 @@ impl RunoApp {
         card.into_any_element()
     }
 
+    /// Whether the diagram editor is open, which paints its own islands on the frame.
+    pub(crate) fn arch_diagram_open(&self) -> bool {
+        !self.all_scope()
+            && !self.arch.code_map
+            && self.arch.project.is_some_and(|pid| {
+                self.state.projects.iter().any(|p| p.id == pid)
+                    && self.arch.editors.contains_key(&pid)
+            })
+    }
+
     pub(crate) fn architecture_view(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.all_scope() {
             return shell::mode_frame(
@@ -2219,15 +2229,16 @@ impl RunoApp {
             .h_full()
             .v_flex()
             .child(
+                // The header sits on the frame, so the canvas and the inspector below it
+                // read as two islands.
                 div()
                     .flex_none()
-                    .h(px(48.))
+                    .h(px(46.))
                     .px_4()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .bg(rail_shade())
                     .child(icon(Mode::Architecture.glyph(), 16., c_blue()))
                     .child(
                         div()
@@ -2240,7 +2251,15 @@ impl RunoApp {
                     .children(self.canvas_chats(pid, View::Architecture, cx))
                     .child(self.arch_tabs(cx)),
             )
-            .child(div().flex_1().min_h_0().child(editor))
+            .child(
+                shell::island(
+                    div().size_full().flex().child(editor),
+                    rgba(0),
+                    [true, false, false, false],
+                )
+                .flex_1()
+                .min_h_0(),
+            )
             .into_any_element()
     }
 }

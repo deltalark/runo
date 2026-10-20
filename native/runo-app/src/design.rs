@@ -266,7 +266,9 @@ impl RunoApp {
                 div()
                     .absolute()
                     .top(px(8.))
-                    .right(px(crate::designdraw::view::RIGHT_PANEL_W + 12.))
+                    .right(px(crate::designdraw::view::RIGHT_PANEL_W
+                        + crate::shell::GUTTER
+                        + 12.))
                     .child(chats)
             }))
             .into_any_element()
