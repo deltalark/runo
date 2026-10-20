@@ -542,6 +542,17 @@ pub fn pane(color: u32) -> Rgba {
     }
 }
 
+/// The rail's shade, laid over the sheet beside it: the rail's own colour when the
+/// window is solid. In glass mode a see-through veil of it over the sidebar layer, so
+/// the rail stays a clear step darker than its open tab in every glass style.
+pub fn rail_shade() -> Rgba {
+    if glass_on() {
+        with_alpha(c_rail(), if is_dark() { 168 } else { 150 })
+    } else {
+        rgb(c_rail())
+    }
+}
+
 /// Side panels next to the content, such as changes, files and the terminal: between
 /// the sidebar and the content.
 pub fn panel(color: u32) -> Rgba {
@@ -638,6 +649,16 @@ pub fn c_canvas() -> u32 {
 }
 pub fn c_sidebar() -> u32 {
     pick(0xf7f7f8, 0x121214)
+}
+/// The mode rail: the deepest layer, so the open place's tab, cut from the sheet beside
+/// it, stands out from it.
+pub fn c_rail() -> u32 {
+    pick(0xe4e4e8, 0x0f0f11)
+}
+/// The sheet the rail's tab is cut from: the list beside the rail, raised a step above
+/// both the rail and the page, so the tab and the selected row's join to the page read.
+pub fn c_sheet() -> u32 {
+    pick(0xf4f4f6, 0x1d1d21)
 }
 pub fn c_subtle() -> u32 {
     pick(0xf1f1f3, 0x222226)
