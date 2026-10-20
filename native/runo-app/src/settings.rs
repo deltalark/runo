@@ -542,13 +542,12 @@ pub fn pane(color: u32) -> Rgba {
     }
 }
 
-/// The rail in glass mode: half way from the sidebar layer to solid, so the open tab,
-/// cut from the sidebar layer, stays a clear step lighter than the rail in every glass
-/// style, even over a bright desktop.
-pub fn rail_pane() -> Rgba {
+/// The rail's shade, laid over the sheet beside it: the rail's own colour when the
+/// window is solid. In glass mode a see-through veil of it over the sidebar layer, so
+/// the rail stays a clear step darker than its open tab in every glass style.
+pub fn rail_shade() -> Rgba {
     if glass_on() {
-        let a = sidebar_alpha() as u16;
-        with_alpha(c_rail(), (a + (255 - a) / 2) as u8)
+        with_alpha(c_rail(), if is_dark() { 168 } else { 150 })
     } else {
         rgb(c_rail())
     }

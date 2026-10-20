@@ -18,7 +18,7 @@ const TAB_PAD: f32 = 4.;
 /// Radius of the curves where a tab or a selected row flows into the sheet beside it.
 const FUSE_R: f32 = 12.;
 /// Radius of a sheet's top corner where it meets the rail under the top bar.
-pub(crate) const SHEET_R: f32 = 14.;
+const SHEET_R: f32 = 14.;
 /// Radius of the rail's own corners where it turns in above and below the open tab.
 const RAIL_R: f32 = 14.;
 
@@ -151,6 +151,8 @@ pub(crate) fn seg_choice(
 thread_local! {
     /// Where the open tab sits this frame, so the rail can leave a hole for it.
     static TAB_CUT: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
+    /// The layer the open tab is cut from, set while the rail is built.
+    static TAB_SHEET: Cell<Option<Rgba>> = const { Cell::new(None) };
 }
 
 /// The open place's tab on the rail: a piece of what sits beside the rail, the same
@@ -158,46 +160,34 @@ thread_local! {
 /// and below, so the place and its list (or page) read as one sheet. It slides out of
 /// the sheet when the place opens. `sheet` is the fill of what it is cut from.
 ///
-/// The rail is painted around the tab, never under it (see `rail_fill`), so in glass
-/// mode the tab is the same see-through layer as its sheet instead of a second layer
-/// stacked on the rail's.
+/// The tab paints nothing itself. The rail lays the sheet under its whole column and
+/// its own shade over that, cut round the tab (see `rail_fill`), so the tab is the very
+/// layer it joins and no two see-through edges ever meet in glass mode.
 fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
+    TAB_SHEET.set(Some(sheet));
     let reach = (RAIL_WIDTH - 34.) / 2.;
     let height = 34. + 2. * TAB_PAD;
     div()
         .absolute()
-        .top(px(-TAB_PAD - FUSE_R))
-        .bottom(px(-TAB_PAD - FUSE_R))
+        .top(px(-TAB_PAD))
         .left(px(TAB_INSET))
         .right(px(-reach))
-        .child(
-            div()
-                .absolute()
-                .top(px(FUSE_R))
-                .left_0()
-                .right_0()
-                .h(px(height))
-                .rounded_l(px(FUSE_R))
-                .bg(sheet)
-                .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
-                // The sheet behind the rail's turns above and below: the rail leaves
-                // them out, so the tab fills them, the same layer as the rest of it.
-                .child(inner_curve(sheet, true, RAIL_R).top(px(-RAIL_R)))
-                .child(inner_curve(sheet, false, RAIL_R).bottom(px(-RAIL_R))),
-        )
+        .h(px(height))
+        .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
-            move |el, d| el.left(px(TAB_INSET + 12. * (1. - d))).opacity(d),
+            move |el, d| el.left(px(TAB_INSET + 12. * (1. - d))),
         )
 }
 
-/// The rail's own fill: its whole column less the open tab and the curves into it, so
-/// the tab shows whatever its sheet shows. Painted as one path, it looks the same in
-/// every glass style.
-fn rail_fill() -> AnyElement {
-    let fill = Hsla::from(rail_pane());
-    canvas(
+/// The rail's own fill: the open tab's sheet under the whole column, then the rail's
+/// shade over it as one path, its whole column less the tab and the curves into it.
+/// Where the shade's edge is antialiased it blends into the sheet beneath, never into
+/// the desktop, so the outline stays one smooth curve in every glass style.
+fn rail_fill(base: Rgba) -> AnyElement {
+    let fill = Hsla::from(rail_shade());
+    let shade = canvas(
         |_, _, _| TAB_CUT.set(None),
         move |b, _, window, _| {
             let (r, k) = (FUSE_R, 0.5523);
@@ -230,9 +220,13 @@ fn rail_fill() -> AnyElement {
             }
         },
     )
-    .absolute()
-    .inset_0()
-    .into_any_element()
+    .size_full();
+    div()
+        .absolute()
+        .inset_0()
+        .bg(base)
+        .child(shade)
+        .into_any_element()
 }
 
 /// The open place on a page with no list beside the rail, such as the More menu: a quiet
@@ -332,7 +326,7 @@ pub(crate) fn chosen_fill_of(key: impl Into<SharedString>, radius: f32, look: Di
 /// top bar: the corner of a square outside a quarter circle, in the rail's colour, laid
 /// over the sheet's top-left. Empty in glass mode.
 pub(crate) fn sheet_corner() -> Div {
-    let fill = Hsla::from(rail_pane());
+    let fill = Hsla::from(rail_shade());
     div().absolute().top_0().left_0().size(px(SHEET_R)).child(
         canvas(
             |_, _, _| (),
@@ -971,6 +965,7 @@ impl RunoApp {
     }
 
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        TAB_SHEET.set(None);
         let counts = self.counts();
         // The groups part by space alone, so the rail reads as a few calm clusters.
         // Room between the items for the open tab's curves, so they never crowd a neighbour.
@@ -1008,7 +1003,9 @@ impl RunoApp {
             .relative()
             // Keeps the open tab inside the rail, under the top bar.
             .overflow_hidden()
-            .child(rail_fill())
+            .child(rail_fill(
+                TAB_SHEET.get().unwrap_or_else(|| pane(c_sheet())),
+            ))
             .child(work)
             .child(self.project_group(cx))
             .child(div().flex_1())
