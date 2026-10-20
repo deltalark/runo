@@ -174,6 +174,23 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         .right(px(-reach))
         .h(px(height))
         .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
+        // The accent bracket on the tab's leading corner, as on every open tab.
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(px(FUSE_R + 2.))
+                .border_l(px(2.))
+                .border_t(px(2.))
+                .rounded_tl(px(FUSE_R))
+                .border_color(rgb(c_blue()))
+                .animated(
+                    SharedString::from(format!("rail-bracket-{key}")),
+                    Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+                    |el, d| el.opacity(d),
+                ),
+        )
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
