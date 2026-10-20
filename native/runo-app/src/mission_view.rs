@@ -118,40 +118,55 @@ impl RunoApp {
     pub(crate) fn missions_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut missions: Vec<&Mission> = self.state.missions.iter().collect();
         missions.sort_by_key(|m| std::cmp::Reverse(m.id));
-        let rows: Vec<AnyElement> = missions.iter().map(|m| self.mission_row(m, cx)).collect();
+        let rows: Vec<AnyElement> = missions
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                shell::cascade(self.mission_row(m, cx), format!("mission-in-{}", m.id), i)
+            })
+            .collect();
         let none = missions.is_empty();
-        let on_form = self.mission_open.is_none();
+        let running = missions
+            .iter()
+            .filter(|m| matches!(m.stage, Stage::Planning | Stage::Running | Stage::Landing))
+            .count();
         let side = div()
             .w(px(LIST_WIDTH))
             .flex_none()
             .h_full()
+            .relative()
             .v_flex()
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            .bg(pane(c_sheet()))
+            .child(shell::sheet_corner())
             .child(
-                div()
-                    .h(px(46.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(icon(IconName::Rocket, 14., c_text()))
-                    .child("Missions")
-                    .child(div().flex_1())
-                    .child(
-                        self.button("mission-new", "New", false)
-                            .h(px(26.))
-                            .px_2()
-                            .text_size(px(12.))
-                            .when(on_form, |el| el.border_color(rgb(c_blue())))
-                            .child(icon(IconName::Plus, 12., c_secondary()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.mission_open = None;
-                                cx.notify();
-                            })),
-                    ),
+                shell::list_header(
+                    "Missions",
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .child(match missions.len() {
+                            1 => "1 mission".to_string(),
+                            n => format!("{n} missions"),
+                        })
+                        .when(running > 0, |el| {
+                            el.child("·").child(
+                                div()
+                                    .text_color(rgb(c_blue()))
+                                    .child(format!("{running} running")),
+                            )
+                        }),
+                )
+                .child(
+                    shell::add_button("mission-new")
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("New mission")
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.mission_open = None;
+                            cx.notify();
+                        })),
+                ),
             )
             .child(
                 div()
@@ -161,12 +176,13 @@ impl RunoApp {
                     .overflow_y_scroll()
                     .v_flex()
                     .gap_1()
-                    .py_1()
+                    // Room for the selected row's curves at the list's ends.
+                    .py(px(12.))
                     .children(rows)
                     .when(none, |el| {
                         el.child(
                             div()
-                                .px_3()
+                                .px(px(16.))
                                 .py_2()
                                 .text_size(px(12.5))
                                 .text_color(rgb(c_muted()))
@@ -211,7 +227,7 @@ impl RunoApp {
                     .when(i > 0, |el| el.ml(px(-size * 0.3)))
                     .rounded(px((size * 0.3).min(6.)))
                     .border_1()
-                    .border_color(rgb(c_sidebar()))
+                    .border_color(rgb(c_sheet()))
                     .child(self.provider_badge(agent::provider(a), size))
             }))
     }
@@ -253,6 +269,7 @@ impl RunoApp {
         };
         div()
             .id(("mission-row", id as usize))
+            .relative()
             .mx_2()
             .p_2p5()
             .flex()
@@ -261,14 +278,11 @@ impl RunoApp {
             .rounded_xl()
             .cursor_pointer()
             .border_1()
+            .border_color(rgba(0))
             .when(on, |el| {
-                el.bg(rgb(c_raised()))
-                    .border_color(rgb(shade(tone, 0.45)))
-                    .shadow_sm()
+                el.child(shell::row_fuse(format!("mission-fuse-{id}"), 8.))
             })
-            .when(!on, |el| {
-                el.border_color(rgba(0)).hover(|el| el.bg(tint(c_subtle())))
-            })
+            .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.mission_open = Some(id);
                 cx.notify();
@@ -600,20 +614,17 @@ impl RunoApp {
             .child(small_caps("OR START FROM"))
             .children(EXAMPLES.iter().enumerate().map(|(i, text)| {
                 let text = *text;
-                div()
+                shell::card()
                     .id(("mission-example", i))
                     .px_3()
-                    .py_2()
+                    .py(px(9.))
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(c_border()))
                     .cursor_pointer()
                     .text_size(px(12.5))
                     .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+                    .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
                     .child(icon(IconName::Lightbulb, 13., c_amber()))
                     .child(div().flex_1().child(text))
                     .child(icon(IconName::ArrowUpRight, 12., c_muted()))

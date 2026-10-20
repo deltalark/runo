@@ -3925,7 +3925,7 @@ impl ArchEditor {
             .v_flex()
             .border_r_1()
             .border_color(rgb(c_border()))
-            .bg(tint(c_sidebar()))
+            .bg(pane(c_sheet()))
             .child(
                 div()
                     .p_2()
@@ -7338,47 +7338,23 @@ impl ArchEditor {
     fn side_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let tab =
             |id: &'static str, label: &'static str, which: SideTab, cx: &mut Context<Self>| {
-                let on = self.side == which;
-                div()
-                    .id(id)
-                    .h(px(28.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(12.5))
-                    .when(on, |el| {
-                        el.bg(tint(c_selected())).font_weight(FontWeight::MEDIUM)
-                    })
-                    .text_color(rgb(if on { c_text() } else { c_secondary() }))
-                    .hover(|el| el.bg(tint(c_subtle())))
+                crate::shell::seg_choice(id, format!("seg-fill-{id}"), self.side == which)
+                    .flex_1()
+                    .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.side = which;
                         cx.notify();
                     }))
-                    .child(label)
             };
-        div()
-            .w(px(290.))
-            .flex_none()
-            .h_full()
+        let body = div()
+            .size_full()
             .v_flex()
-            .border_l_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_sidebar()))
             .child(
-                div()
-                    .h(px(44.))
-                    .flex_none()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
-                    .child(tab("arch-tab-props", "Properties", SideTab::Properties, cx))
-                    .child(tab("arch-tab-text", "Text", SideTab::Text, cx)),
+                div().flex_none().px_3().pt_3().child(
+                    crate::shell::seg_track()
+                        .child(tab("arch-tab-props", "Properties", SideTab::Properties, cx))
+                        .child(tab("arch-tab-text", "Text", SideTab::Text, cx)),
+                ),
             )
             .child(
                 div()
@@ -7391,6 +7367,19 @@ impl ArchEditor {
                         SideTab::Properties => self.properties(cx),
                         SideTab::Text => self.text_panel(cx),
                     }),
+            );
+        // The inspector is an island of its own, a gutter's width from the canvas.
+        div()
+            .w(px(290. + crate::shell::GUTTER))
+            .flex_none()
+            .h_full()
+            .flex()
+            .child(crate::shell::gutter().w(px(crate::shell::GUTTER)).h_full())
+            .child(
+                crate::shell::island(body, panel(c_sheet()), [true, true, false, true])
+                    .flex_1()
+                    .min_w_0()
+                    .h_full(),
             )
             .into_any_element()
     }
@@ -7477,9 +7466,12 @@ impl Render for ArchEditor {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
                     .v_flex()
                     .child(self.toolbar(cx))
-                    .child(self.canvas_area(scene, &theme, cx)),
+                    .child(self.canvas_area(scene, &theme, cx))
+                    .child(crate::shell::frame_corner(true, false))
+                    .child(crate::shell::frame_corner(false, false)),
             )
             .child(self.side_panel(cx))
             .when_some(ghost, |el, ((w, h), label, at)| {

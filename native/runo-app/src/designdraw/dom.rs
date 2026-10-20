@@ -49,7 +49,7 @@ if (!window.__runo) window.__runo = (() => {
     'border-top-width', 'border-top-color', 'border-top-style', 'border-top-left-radius',
     'box-shadow', 'flex-wrap', 'position', 'top', 'left', 'right', 'bottom', 'z-index', 'background-image',
     'fill', 'stroke', 'stroke-width', 'filter', 'object-fit', 'object-position', 'object-view-box',
-    'background-size', 'background-position', 'background-repeat'];
+    'background-size', 'background-position', 'background-repeat', 'rotate', 'overflow'];
   // The one icon an element is or holds, as an icon button or a tab does.
   const iconEl = (el) => {
     const all = el.matches('.icon') ? [el] : Array.from(el.querySelectorAll('.icon'));
@@ -287,6 +287,44 @@ if (!window.__runo) window.__runo = (() => {
       // Out of the flow it would shrink to its content, so it keeps the width it had.
       if ((mode === 'absolute' || mode === 'fixed') && !el.style.width) {
         el.style.setProperty('width', Math.round(wide) + 'px');
+      }
+      if (!el.getAttribute('style')) el.removeAttribute('style');
+    },
+    // Line it up in what holds it, as design tools' align buttons do: a floating element
+    // moves to that edge or the middle; one in an auto layout sits there across the layout,
+    // or is pushed there along it by auto margins.
+    align: (el, side) => {
+      const horiz = side === 'left' || side === 'hcenter' || side === 'right';
+      const how = getComputedStyle(el).position;
+      if (how === 'absolute' || how === 'fixed') {
+        const p = how === 'fixed' ? null : el.offsetParent || el.parentElement;
+        const r = el.getBoundingClientRect();
+        const w = p ? p.clientWidth : innerWidth;
+        const h = p ? p.clientHeight : innerHeight;
+        const put = (k, v, other) => {
+          el.style.setProperty(k, Math.round(v) + 'px');
+          el.style.removeProperty(other);
+        };
+        if (side === 'left') put('left', 0, 'right');
+        else if (side === 'right') put('right', 0, 'left');
+        else if (side === 'hcenter') put('left', (w - r.width) / 2, 'right');
+        else if (side === 'top') put('top', 0, 'bottom');
+        else if (side === 'bottom') put('bottom', 0, 'top');
+        else put('top', (h - r.height) / 2, 'bottom');
+        return;
+      }
+      const ps = el.parentElement ? getComputedStyle(el.parentElement) : null;
+      const flex = !!ps && ps.display.includes('flex');
+      const row = flex && !ps.flexDirection.startsWith('column');
+      const at = { left: 'flex-start', top: 'flex-start', hcenter: 'center', vcenter: 'center',
+        right: 'flex-end', bottom: 'flex-end' }[side];
+      if (flex && horiz !== row) {
+        el.style.setProperty('align-self', at);
+      } else if (horiz || flex) {
+        const [a, b] = horiz ? ['margin-left', 'margin-right'] : ['margin-top', 'margin-bottom'];
+        const auto = (k, on) => on ? el.style.setProperty(k, 'auto') : el.style.removeProperty(k);
+        auto(a, at !== 'flex-start');
+        auto(b, at !== 'flex-end');
       }
       if (!el.getAttribute('style')) el.removeAttribute('style');
     },

@@ -5,59 +5,653 @@
 
 use super::*;
 use gpui_kit::component::tooltip::Tooltip;
+use std::cell::Cell;
 
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
-/// The rail's mark on the open place: a glowing accent line on the window's edge, and a
-/// soft beam of the same light falling from it across the page. Children of a 34px rail
-/// item, which sits 9px in from the edge.
-fn light_beam() -> [AnyElement; 2] {
-    let edge = div()
-        .absolute()
-        .left(px(-9.))
-        .top(px(4.))
-        .w(px(3.))
-        .h(px(26.))
-        .rounded_full()
-        .bg(rgb(c_blue()))
-        .shadow(vec![BoxShadow {
-            color: hsla_of(c_blue(), 0.75),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(10.),
-            spread_radius: px(1.),
-            inset: false,
-        }]);
-    // Stacked bands, the tallest outermost, add up to a beam that is brightest in its
-    // middle and fades out up and down; each fades out to the right on its own.
-    let mut beam = div().absolute().left(px(-9.)).top_0().size_full();
-    for height in [96., 78., 62., 48., 34., 22.] {
-        beam = beam.child(
-            div()
-                .absolute()
-                .left_0()
-                .top(px((34. - height) / 2.))
-                .w(px(340.))
-                .h(px(height))
-                .rounded_full()
-                .bg(linear_gradient(
-                    90.,
-                    linear_color_stop(hsla_of(c_blue(), 0.03), 0.),
-                    linear_color_stop(hsla_of(c_blue(), 0.), 1.),
-                )),
-        );
-    }
-    [
-        deferred(beam).with_priority(0).into_any_element(),
-        edge.into_any_element(),
-    ]
+/// Where the open place's tab sits on its 34px rail item: starting just outside the
+/// item on the left, 8px in from the rail's edge, reaching 9px past it to the rail's
+/// other edge on the right, and a little past it at the top and bottom.
+const TAB_INSET: f32 = -1.;
+const TAB_PAD: f32 = 4.;
+/// Radius of the curves where a tab or a selected row flows into the sheet beside it.
+const FUSE_R: f32 = 12.;
+/// Radius of a sheet's top corner where it meets the rail under the top bar.
+const SHEET_R: f32 = 14.;
+/// Radius of the rail's own corners where it turns in above and below the open tab.
+const RAIL_R: f32 = 14.;
+
+/// How long the shell's small transitions take: quick enough to feel immediate, long
+/// enough that a change reads as a change rather than a jump.
+const QUICK: u64 = 160;
+
+/// Hold still for the first `lead` of an animation, then ease out over the rest: lets a
+/// detail land after the motion it belongs to.
+fn after(lead: f32) -> impl Fn(f32) -> f32 {
+    move |t| ease_out_quint()(((t - lead) / (1. - lead)).clamp(0., 1.))
 }
 
-/// A colour with its own alpha, for glows and gradients.
-fn hsla_of(color: u32, alpha: f32) -> Hsla {
-    let mut c: Hsla = rgb(color).into();
-    c.a = alpha;
-    c
+/// The curve where an edge turns into the sheet beside it: the corner of an `r`
+/// square outside a quarter circle, filled with `fill`, so whatever is behind shows in
+/// the rest. Drawn as a path, not as a square painted over in a guessed colour, so no
+/// corner shows darker than what is around it. It sits beside its shape, never over it,
+/// so it matches in glass mode too.
+fn inner_curve(fill: Rgba, top: bool, r: f32) -> Div {
+    let fill = Hsla::from(fill);
+    div().absolute().right_0().size(px(r)).child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let k = 0.5523;
+                let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                // The top curve turns round the square's top-left corner, the bottom
+                // one round its bottom-left.
+                let mut f = PathBuilder::fill();
+                if top {
+                    f.move_to(p(r, 0.));
+                    f.line_to(p(r, r));
+                    f.line_to(p(0., r));
+                    f.cubic_bezier_to(p(r, 0.), p(k * r, r), p(r, k * r));
+                } else {
+                    f.move_to(p(0., 0.));
+                    f.line_to(p(r, 0.));
+                    f.line_to(p(r, r));
+                    f.cubic_bezier_to(p(0., 0.), p(r, r - k * r), p(k * r, 0.));
+                }
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, fill);
+                }
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// The one touch of accent on a selected row: a thin bracket in the accent that hugs the
+/// row's left edge and wraps round its rounded corners, like "(". It draws in once the
+/// row has landed.
+pub(crate) fn accent_bracket(key: impl Into<SharedString>) -> AnyElement {
+    div()
+        .absolute()
+        .top(px(1.))
+        .bottom(px(1.))
+        .left(px(-5.))
+        .w(px(FUSE_R + 2.))
+        .border_l(px(2.))
+        .rounded_l(px(FUSE_R + 2.))
+        .border_color(rgb(c_blue()))
+        .animated(
+            ElementId::Name(key.into()),
+            Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+            |el, d| el.opacity(d),
+        )
+        .into_any_element()
+}
+
+/// The track behind a row of connected choices, such as the sidebar's filter or a
+/// setting's options: a shallow well a step darker than what it sits on. Every
+/// segmented control uses it, so they all read the same.
+pub(crate) fn seg_track() -> Div {
+    div()
+        .flex()
+        .items_center()
+        .p(px(3.))
+        .gap(px(2.))
+        .rounded(px(9.))
+        .bg(rgba(if is_dark() { 0x00000047 } else { 0x0000000d }))
+}
+
+/// The raised pill under the chosen choice in a `seg_track`, which fades in when it is
+/// chosen. A child of the choice, which must be `relative` and add it first.
+pub(crate) fn seg_pill(key: impl Into<SharedString>) -> AnyElement {
+    chosen_fill_of(
+        key,
+        7.,
+        div()
+            // A touch more lift through glass, where the desktop behind thins it.
+            .bg(rgba(match (is_dark(), glass_on()) {
+                (true, false) => 0xffffff17,
+                (true, true) => 0xffffff21,
+                (false, false) => 0xffffffff,
+                (false, true) => 0xffffffd9,
+            }))
+            .shadow_sm(),
+    )
+}
+
+/// One choice in a `seg_track`: the chosen one on its pill in full text colour, the
+/// rest quieter until hovered.
+pub(crate) fn seg_choice(
+    id: impl Into<ElementId>,
+    key: impl Into<SharedString>,
+    on: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .h(px(26.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(5.))
+        .rounded(px(7.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .when(on, |el| el.child(seg_pill(key)).text_color(rgb(c_text())))
+        .when(!on, |el| {
+            el.text_color(rgb(c_secondary()))
+                .hover(|el| el.text_color(rgb(c_text())))
+        })
+}
+
+thread_local! {
+    /// Where the open tab sits this frame, so the rail can leave a hole for it.
+    static TAB_CUT: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
+    /// The layer the open tab is cut from, set while the rail is built.
+    static TAB_SHEET: Cell<Option<Rgba>> = const { Cell::new(None) };
+}
+
+/// The open place's tab on the rail: a piece of what sits beside the rail, the same
+/// colour, that reaches out around the icon, with the rail's edge curving into it above
+/// and below, so the place and its list (or page) read as one sheet. It slides out of
+/// the sheet when the place opens. `sheet` is the fill of what it is cut from.
+///
+/// The tab paints nothing itself. The rail lays the sheet under its whole column and
+/// its own shade over that, cut round the tab (see `rail_fill`), so the tab is the very
+/// layer it joins and no two see-through edges ever meet in glass mode.
+fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
+    TAB_SHEET.set(Some(sheet));
+    let reach = (RAIL_WIDTH - 34.) / 2.;
+    let height = 34. + 2. * TAB_PAD;
+    div()
+        .absolute()
+        .top(px(-TAB_PAD))
+        .left(px(TAB_INSET))
+        .right(px(-reach))
+        .h(px(height))
+        .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
+        .animated(
+            SharedString::from(format!("rail-tab-{key}")),
+            Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+            move |el, d| el.left(px(TAB_INSET + 12. * (1. - d))),
+        )
+}
+
+/// The rail's own fill: the open tab's sheet under the whole column, then the rail's
+/// shade over it as one path, its whole column less the tab and the curves into it.
+/// Where the shade's edge is antialiased it blends into the sheet beneath, never into
+/// the desktop, so the outline stays one smooth curve in every glass style.
+fn rail_fill(base: Rgba) -> AnyElement {
+    let fill = Hsla::from(rail_shade());
+    let shade = canvas(
+        |_, _, _| TAB_CUT.set(None),
+        move |b, _, window, _| {
+            let (r, k) = (FUSE_R, 0.5523);
+            let at = |x: Pixels, y: Pixels| point(x, y);
+            // A quarter turn from `from` to `to` round the square corner `c`.
+            let turn =
+                |f: &mut PathBuilder, from: Point<Pixels>, c: Point<Pixels>, to: Point<Pixels>| {
+                    f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
+                };
+            let (left, top, right, bottom) = (b.origin.x, b.origin.y, b.right(), b.bottom());
+            let mut f = PathBuilder::fill();
+            f.move_to(at(left, top));
+            f.line_to(at(right, top));
+            if let Some(t) = TAB_CUT.get() {
+                let (tx, ty, tb, r, o) = (t.origin.x, t.origin.y, t.bottom(), px(r), px(RAIL_R));
+                f.line_to(at(right, ty - o));
+                turn(&mut f, at(right, ty - o), at(right, ty), at(right - o, ty));
+                f.line_to(at(tx + r, ty));
+                turn(&mut f, at(tx + r, ty), at(tx, ty), at(tx, ty + r));
+                f.line_to(at(tx, tb - r));
+                turn(&mut f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
+                f.line_to(at(right - o, tb));
+                turn(&mut f, at(right - o, tb), at(right, tb), at(right, tb + o));
+            }
+            f.line_to(at(right, bottom));
+            f.line_to(at(left, bottom));
+            f.close();
+            if let Ok(path) = f.build() {
+                window.paint_path(path, fill);
+            }
+        },
+    )
+    .size_full();
+    div()
+        .absolute()
+        .inset_0()
+        .bg(base)
+        .child(shade)
+        .into_any_element()
+}
+
+/// The open place on a page with no list beside the rail, such as the More menu: a quiet
+/// tile under the icon, which fades up when the place opens.
+fn rail_tile(key: &'static str) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(8.))
+        .bg(tint(c_active()))
+        .animated(
+            SharedString::from(format!("rail-tile-{key}")),
+            Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+            |el, d| el.opacity(d),
+        )
+}
+
+/// A rail icon: the open place's at full strength, the rest muted.
+fn rail_icon(glyph: IconName, on: bool) -> AnyElement {
+    div()
+        .relative()
+        .child(icon(glyph, 18., if on { c_text() } else { c_muted() }))
+        .into_any_element()
+}
+
+/// A list's selected row joined to the page beside the list: a fill in the page's colour
+/// from the row out to the list's edge, with the list curving into it above and below,
+/// the same way the rail's tab joins the list, and a short accent rule on its left edge.
+/// `reach` is how far the list's edge is past the row's right side. It slides in from the
+/// page when the row is picked. A child of the row, which must be `relative` and draw it
+/// first, under its content.
+pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
+    let key = key.into();
+    let page = glass_fill(c_canvas());
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right(px(-reach))
+        .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
+        .child(inner_curve(page, true, FUSE_R).top(px(-FUSE_R)))
+        .child(inner_curve(page, false, FUSE_R).bottom(px(-FUSE_R)))
+        .child(accent_bracket(format!("{key}-rule")))
+        .animated(
+            ElementId::Name(key),
+            Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+            |el, d| el.left(px(12. * (1. - d))).opacity(d),
+        )
+}
+
+/// Let a small detail, such as a count or a badge, settle in with a quick fade when it
+/// appears or its value changes. Key it by its value.
+pub(crate) fn pop(el: impl IntoElement + 'static, key: impl Into<SharedString>) -> AnyElement {
+    div().relative().child(el).animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+        |el, d| el.opacity(0.3 + 0.7 * d),
+    )
+}
+
+/// A live status dot: the one thing in the shell that moves on its own, a slow, soft pulse
+/// while an agent is working.
+pub(crate) fn live_dot(color: u32, size: f32, key: impl Into<SharedString>) -> AnyElement {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded_full()
+        .bg(rgb(color))
+        .animated(
+            ElementId::Name(key.into()),
+            Animation::new(Duration::from_millis(1800))
+                .repeat()
+                .with_easing(pulsating_between(0.4, 1.)),
+            |el, d| el.opacity(d),
+        )
+}
+
+/// The fill under a chosen item, such as a segment, that fades in when the item is
+/// chosen, with its own look. A child of the item, which must be `relative` and add it
+/// first, under its content.
+pub(crate) fn chosen_fill_of(key: impl Into<SharedString>, radius: f32, look: Div) -> AnyElement {
+    look.absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .rounded(px(radius))
+        .animated(
+            ElementId::Name(key.into()),
+            Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+            |el, d| el.opacity(d),
+        )
+}
+
+/// The rounded top corner of a sheet beside the rail, where it meets the rail under the
+/// top bar: the corner of a square outside a quarter circle, in the rail's colour, laid
+/// over the sheet's top-left. Empty in glass mode.
+pub(crate) fn sheet_corner() -> Div {
+    let fill = Hsla::from(rail_shade());
+    div().absolute().top_0().left_0().size(px(SHEET_R)).child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let (r, k) = (SHEET_R, 0.5523);
+                let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                let mut f = PathBuilder::fill();
+                f.move_to(p(0., 0.));
+                f.line_to(p(r, 0.));
+                f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, fill);
+                }
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// The gap between the window's islands, in the frame's grey.
+pub(crate) const GUTTER: f32 = 8.;
+/// Radius of an island's rounded corners.
+pub(crate) const ISLAND_R: f32 = 14.;
+/// Radius of an open tab's top corners, and of the curves where it flows into its island.
+const STRIP_TAB_R: f32 = 9.;
+const STRIP_FLARE_R: f32 = 8.;
+
+thread_local! {
+    /// Where each fused strip's open tab sits this frame, keyed by strip.
+    static STRIP_CUTS: std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A quarter turn from `from` to `to` round the square corner `c`.
+fn turn(f: &mut PathBuilder, from: Point<Pixels>, c: Point<Pixels>, to: Point<Pixels>) {
+    let k = 0.5523;
+    f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
+}
+
+/// Marks the open tab of a fused strip, so the strip leaves it out of the frame's grey.
+/// A child of the open tab, which must be `relative`.
+pub(crate) fn strip_cut(strip: &'static str) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                move |b, _, _| STRIP_CUTS.with_borrow_mut(|c| c.insert(strip, b)),
+                |_, _, _, _| {},
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// The fill of a strip of tabs over an island: the frame's grey across the strip, less
+/// the open tab, which is the island's own colour and flows into it with curves on both
+/// sides, and the accent bracket on its leading corner. The grey and the tab are two
+/// paths that never overlap, so the join looks the same in every glass style. A child
+/// of the strip, which must be `relative`, added first so it sits under the tabs.
+pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
+    let frame = Hsla::from(rail_shade());
+    let island = Hsla::from(island);
+    let accent = Hsla::from(rgb(c_blue()));
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                move |_, _, _| STRIP_CUTS.with_borrow_mut(|c| c.remove(strip)),
+                move |b, _, window, _| {
+                    let at = |x: Pixels, y: Pixels| point(x, y);
+                    let (left, top, right, bottom) =
+                        (b.origin.x, b.origin.y, b.right(), b.bottom());
+                    let (fr, tr) = (px(STRIP_FLARE_R), px(STRIP_TAB_R));
+                    // A tab scrolled partly out of the strip is not cut.
+                    let cut = STRIP_CUTS
+                        .with_borrow(|c| c.get(strip).copied())
+                        .filter(|t| t.origin.x - fr >= left && t.right() + fr <= right);
+                    let mut f = PathBuilder::fill();
+                    f.move_to(at(left, top));
+                    f.line_to(at(right, top));
+                    f.line_to(at(right, bottom));
+                    if let Some(t) = cut {
+                        let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
+                        f.line_to(at(x1 + fr, bottom));
+                        turn(
+                            &mut f,
+                            at(x1 + fr, bottom),
+                            at(x1, bottom),
+                            at(x1, bottom - fr),
+                        );
+                        f.line_to(at(x1, y0 + tr));
+                        turn(&mut f, at(x1, y0 + tr), at(x1, y0), at(x1 - tr, y0));
+                        f.line_to(at(x0 + tr, y0));
+                        turn(&mut f, at(x0 + tr, y0), at(x0, y0), at(x0, y0 + tr));
+                        f.line_to(at(x0, bottom - fr));
+                        turn(
+                            &mut f,
+                            at(x0, bottom - fr),
+                            at(x0, bottom),
+                            at(x0 - fr, bottom),
+                        );
+                    }
+                    f.line_to(at(left, bottom));
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, frame);
+                    }
+                    let Some(t) = cut else { return };
+                    let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
+                    let mut f = PathBuilder::fill();
+                    f.move_to(at(x0 - fr, bottom));
+                    turn(
+                        &mut f,
+                        at(x0 - fr, bottom),
+                        at(x0, bottom),
+                        at(x0, bottom - fr),
+                    );
+                    f.line_to(at(x0, y0 + tr));
+                    turn(&mut f, at(x0, y0 + tr), at(x0, y0), at(x0 + tr, y0));
+                    f.line_to(at(x1 - tr, y0));
+                    turn(&mut f, at(x1 - tr, y0), at(x1, y0), at(x1, y0 + tr));
+                    f.line_to(at(x1, bottom - fr));
+                    turn(
+                        &mut f,
+                        at(x1, bottom - fr),
+                        at(x1, bottom),
+                        at(x1 + fr, bottom),
+                    );
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, island);
+                    }
+                    // The bracket: up the tab's left edge and round its top corner.
+                    let (i, reach) = (px(1.), px(9.));
+                    let mut f = PathBuilder::stroke(px(2.));
+                    f.move_to(at(x0 + i, y0 + tr + reach));
+                    f.line_to(at(x0 + i, y0 + tr));
+                    turn(
+                        &mut f,
+                        at(x0 + i, y0 + tr),
+                        at(x0 + i, y0 + i),
+                        at(x0 + tr, y0 + i),
+                    );
+                    f.line_to(at(x0 + tr + reach, y0 + i));
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, accent);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// One rounded corner of an island: the corner of a square outside a quarter circle, in
+/// the frame's grey, so the island reads as rounded over whatever it holds. The island's
+/// own fill is rounded too, so the two never overlap in glass mode.
+pub(crate) fn frame_corner(top: bool, left: bool) -> AnyElement {
+    let fill = Hsla::from(rail_shade());
+    let r = ISLAND_R;
+    div()
+        .absolute()
+        .size(px(r))
+        .map(|el| if top { el.top_0() } else { el.bottom_0() })
+        .map(|el| if left { el.left_0() } else { el.right_0() })
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |b, _, window, _| {
+                    let k = 0.5523;
+                    // Drawn as the top-left corner, then mirrored into place.
+                    let p = |x: f32, y: f32| {
+                        let x = if left { x } else { r - x };
+                        let y = if top { y } else { r - y };
+                        point(b.origin.x + px(x), b.origin.y + px(y))
+                    };
+                    let mut f = PathBuilder::fill();
+                    f.move_to(p(0., 0.));
+                    f.line_to(p(r, 0.));
+                    f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, fill);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// An island on the frame: `content` on a fill with the given corners rounded, as
+/// top-left, top-right, bottom-right and bottom-left. A transparent fill leaves the
+/// layers to the content, as on pages that paint their own list beside the page.
+pub(crate) fn island(content: impl IntoElement, fill: Rgba, round: [bool; 4]) -> Div {
+    let r = px(ISLAND_R);
+    let [tl, tr, br, bl] = round;
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .bg(fill)
+        .when(tl, |el| el.rounded_tl(r))
+        .when(tr, |el| el.rounded_tr(r))
+        .when(br, |el| el.rounded_br(r))
+        .when(bl, |el| el.rounded_bl(r))
+        .child(content)
+        .when(tl, |el| el.child(frame_corner(true, true)))
+        .when(tr, |el| el.child(frame_corner(true, false)))
+        .when(br, |el| el.child(frame_corner(false, false)))
+        .when(bl, |el| el.child(frame_corner(false, true)))
+}
+
+/// One tab in a strip over an island. The open one is cut from the island below
+/// (see `strip_fill`); the rest sit quietly on the frame until hovered.
+pub(crate) fn strip_tab(
+    id: impl Into<ElementId>,
+    strip: &'static str,
+    selected: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .when(selected, |el| {
+            el.h(px(32.))
+                .child(strip_cut(strip))
+                .text_color(rgb(c_text()))
+        })
+        .when(!selected, |el| {
+            el.h(px(28.))
+                .mb(px(3.))
+                .rounded_md()
+                .text_color(rgb(c_secondary()))
+                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+        })
+}
+
+/// The header of a list beside the rail: a large title over a quiet summary line,
+/// with room on the right for the list's add button.
+pub(crate) fn list_header(title: &'static str, summary: impl IntoElement) -> Div {
+    div()
+        .pt(px(16.))
+        .px(px(16.))
+        .flex()
+        .items_start()
+        .justify_between()
+        .child(
+            div()
+                .v_flex()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(19.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(summary),
+                ),
+        )
+}
+
+/// The round, filled add button in a `list_header`.
+pub(crate) fn add_button(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .size(px(30.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(c_text()))
+        .cursor_pointer()
+        .hover(|el| el.opacity(0.85))
+        .child(icon(IconName::Plus, 16., c_canvas()))
+}
+
+/// A strip of the frame's grey, such as the gutter between two islands.
+pub(crate) fn gutter() -> Div {
+    div().flex_none().bg(rail_shade())
+}
+
+/// A card on an island: a borderless step lighter than the page, so groups read by
+/// tone rather than by lines.
+pub(crate) fn card() -> Div {
+    div().rounded(px(12.)).bg(tint(c_subtle()))
+}
+
+/// A hairline between rows inside a `card`, inset from its edges.
+pub(crate) fn card_rule() -> Div {
+    div().mx_4().h(px(1.)).flex_none().bg(rgb(c_border()))
+}
+
+/// Let a list's rows fade in one after another when the list opens, each a beat after
+/// the one above it.
+pub(crate) fn cascade(
+    el: impl IntoElement + 'static,
+    key: impl Into<SharedString>,
+    i: usize,
+) -> AnyElement {
+    let lead = i.min(8) as f32 * 0.04;
+    div().relative().child(el).animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(QUICK + 20 * i.min(8) as u64))
+            .with_easing(after(lead)),
+        |el, d| el.opacity(d),
+    )
 }
 
 /// The places on the mode rail.
@@ -608,12 +1202,16 @@ impl RunoApp {
                 this.go(mode, window, cx);
                 cx.notify();
             }))
-            .when(on, |el| el.children(light_beam()))
-            .child(icon(
-                mode.glyph(),
-                17.,
-                if on { c_blue() } else { c_muted() },
-            ))
+            .when(on, |el| {
+                // The tab is cut from the list beside the rail, or from the page itself
+                // where nothing sits between them.
+                el.child(if self.has_panel(cx) {
+                    rail_tab(mode.label(), pane(c_sheet()))
+                } else {
+                    rail_tab(mode.label(), glass_fill(c_canvas()))
+                })
+            })
+            .child(rail_icon(mode.glyph(), on))
             // A small dot cut into the icon's corner, ringed in the rail's own colour.
             .when_some(badge.filter(|_| !on), |el, color| {
                 el.child(
@@ -624,17 +1222,45 @@ impl RunoApp {
                         .size(px(8.))
                         .rounded_full()
                         .border_2()
-                        .border_color(rgb(c_sidebar()))
+                        .border_color(rgb(c_rail()))
                         .bg(rgb(color)),
                 )
             })
             .into_any_element()
     }
 
+    /// Whether the open place has a list beside the rail for its tab to join: the
+    /// sessions sidebar, the missions and review lists, or Design's layers.
+    pub(crate) fn has_panel(&self, cx: &App) -> bool {
+        match self.mode() {
+            Mode::Sessions => self.show_sidebar,
+            Mode::Missions | Mode::Settings => true,
+            Mode::Git => self.view == View::Review,
+            Mode::Design => self
+                .design
+                .project
+                .and_then(|p| self.design.canvases.get(&p))
+                .is_some_and(|canvas| canvas.read(cx).layers_shown()),
+            // The diagram editor's shape palette sits against the rail; the code map and
+            // the project chooser have nothing there.
+            Mode::Architecture => {
+                !self.all_scope()
+                    && !self.arch.code_map
+                    && self
+                        .arch
+                        .project
+                        .is_some_and(|p| self.arch.editors.contains_key(&p))
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        TAB_SHEET.set(None);
         let counts = self.counts();
         // The groups part by space alone, so the rail reads as a few calm clusters.
-        let group = || div().v_flex().items_center().gap(px(4.));
+        // Room between the items for the open tab's curves, so they never crowd a neighbour.
+        let group = || div().v_flex().items_center().gap(px(8.));
         let mut work = group().relative().child(tour::anchor(&self.anchors, "nav"));
         for mode in &Mode::MAIN[..Mode::WORK] {
             // Amber: something there needs you. Blue: agents are working, or work waits
@@ -665,9 +1291,12 @@ impl RunoApp {
             .pt(px(10.))
             .pb_2()
             .gap(px(18.))
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            .relative()
+            // Keeps the open tab inside the rail, under the top bar.
+            .overflow_hidden()
+            .child(rail_fill(
+                TAB_SHEET.get().unwrap_or_else(|| pane(c_sheet())),
+            ))
             .child(work)
             .child(self.project_group(cx))
             .child(div().flex_1())
@@ -723,7 +1352,7 @@ impl RunoApp {
                     .cursor_pointer()
                     .when(open, |el| el.bg(tint(c_active())))
                     .when(!(on || open), |el| el.hover(|el| el.bg(tint(c_subtle()))))
-                    .when(on, |el| el.children(light_beam()))
+                    .when(on, |el| el.child(rail_tile("more")))
                     .when(!open, |el| {
                         el.tooltip(|window, cx| {
                             Tooltip::new("Playbooks, History and Notes").build(window, cx)
@@ -736,11 +1365,7 @@ impl RunoApp {
                         };
                         cx.notify();
                     }))
-                    .child(icon(
-                        IconName::Ellipsis,
-                        17.,
-                        if on { c_blue() } else { c_muted() },
-                    )),
+                    .child(rail_icon(IconName::Ellipsis, on)),
             )
             .when(open, |el| {
                 el.child(
@@ -1179,9 +1804,8 @@ impl RunoApp {
             .gap_2()
             .pl(px(lead))
             .pr_2()
-            .border_b_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            // The frame's grey, the same as the rail and the gutters between islands.
+            .bg(rail_shade())
             .window_control_area(WindowControlArea::Drag)
             // Three zones: the two sides share what the search box leaves, so the box
             // sits in the middle of the window on every page instead of moving with the
@@ -1457,7 +2081,7 @@ impl RunoApp {
                                         .text_size(px(9.5))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0xffffff))
-                                        .child(inbox.to_string()),
+                                        .child(pop(inbox.to_string(), format!("top-inbox-{inbox}"))),
                                 )
                             }),
                     )
@@ -1733,10 +2357,10 @@ impl RunoApp {
             .flex_none()
             .flex()
             .items_end()
-            .bg(pane(c_sidebar()))
-            // Every part of the strip draws its own bottom edge except the open tab, which
-            // runs straight into the page below.
-            .child(strip_edge(div().w(px(8.))))
+            .relative()
+            // The frame's grey, with the open tab cut out of it and joined to the page.
+            .child(strip_fill("tabs", glass_fill(c_canvas())))
+            .child(strip_edge(div().w(px(10.))))
             .child(
                 div()
                     .flex_1()
@@ -1791,17 +2415,25 @@ impl RunoApp {
 
     // ---------- Home ----------
 
-    fn stat_card(&self, label: &'static str, value: String, hint: String, color: u32) -> Div {
-        div()
+    /// One of Home's four numbers. The cards fade in one after another, the number settles
+    /// in again whenever it changes, and a live count's dot pulses while agents work.
+    fn stat_card(
+        &self,
+        i: usize,
+        label: &'static str,
+        value: String,
+        hint: String,
+        color: u32,
+    ) -> AnyElement {
+        let live = label == "Running" && value != "0";
+        let lead = i as f32 * 0.06;
+        card()
             .flex_1()
             .min_w_0()
             .p_4()
             .v_flex()
             .gap_1()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_subtle()))
+            .relative()
             .child(
                 div()
                     .flex()
@@ -1809,15 +2441,24 @@ impl RunoApp {
                     .gap_2()
                     .text_size(px(12.))
                     .text_color(rgb(c_secondary()))
-                    .child(div().size(px(7.)).rounded_full().bg(rgb(color)))
+                    .child(if live {
+                        live_dot(color, 7., format!("stat-live-{label}"))
+                    } else {
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(rgb(color))
+                            .into_any_element()
+                    })
                     .child(label),
             )
-            .child(
+            .child(pop(
                 div()
                     .text_size(px(24.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(value),
-            )
+                    .child(value.clone()),
+                format!("stat-{label}-{value}"),
+            ))
             .child(
                 div()
                     .text_size(px(12.))
@@ -1825,9 +2466,14 @@ impl RunoApp {
                     .truncate()
                     .child(hint),
             )
+            .animated(
+                SharedString::from(format!("stat-card-{label}")),
+                Animation::new(Duration::from_millis(QUICK + 80)).with_easing(after(lead)),
+                |el, d| el.opacity(d),
+            )
     }
 
-    fn home_row(&self, session: &Session, note: String, cx: &mut Context<Self>) -> AnyElement {
+    fn home_row(&self, session: &Session, note: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let id = session.id;
         let provider = agent::provider(&session.provider);
         let project = self
@@ -1837,18 +2483,23 @@ impl RunoApp {
             .find(|p| p.id == session.project_id)
             .map(|p| p.name.clone())
             .unwrap_or_default();
+        let chosen = self.cursor == Some(id);
         div()
             .id(("home-row", id as usize))
-            .px_3()
-            .py(px(9.))
+            .relative()
+            .mx_2()
+            .px_2()
+            .py(px(8.))
             .flex()
             .items_center()
             .gap_3()
-            .border_t_1()
-            .border_color(rgb(c_border()))
+            .rounded_lg()
             .cursor_pointer()
-            .hover(|el| el.bg(tint(c_subtle())))
-            .when(self.cursor == Some(id), |el| el.bg(tint(c_selected())))
+            .hover(|el| el.bg(tint(c_active())))
+            .when(chosen, |el| {
+                el.bg(tint(c_active()))
+                    .child(accent_bracket(format!("home-row-bracket-{id}")))
+            })
             .on_mouse_down(
                 MouseButton::Right,
                 self.on_context(ctxmenu::CtxTarget::Session(id), cx),
@@ -1866,12 +2517,13 @@ impl RunoApp {
                 }
                 cx.notify();
             }))
-            .child(self.provider_mark(provider, 14.))
+            .child(self.provider_badge(provider, 28.))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .v_flex()
+                    .gap(px(1.))
                     .child(
                         div()
                             .truncate()
@@ -1904,38 +2556,42 @@ impl RunoApp {
         rows: Vec<AnyElement>,
         empty: &'static str,
     ) -> Div {
-        div()
+        let mut list = div().v_flex().pb_2();
+        for (i, row) in rows.into_iter().enumerate() {
+            if i > 0 {
+                list = list.child(card_rule().my(px(2.)));
+            }
+            list = list.child(cascade(row, format!("home-row-{title}-{i}"), i + 2));
+        }
+        card()
             .flex_1()
             .min_w_0()
             .v_flex()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .overflow_hidden()
             .child(
                 div()
-                    .px_3()
-                    .h(px(40.))
+                    .px_4()
+                    .h(px(42.))
                     .flex()
                     .items_center()
                     .gap_2()
                     .font_weight(FontWeight::MEDIUM)
                     .child(title)
-                    .child(
+                    .child(pop(
                         div()
                             .text_size(px(12.))
                             .text_color(rgb(c_muted()))
                             .child(count.to_string()),
-                    ),
+                        format!("home-panel-{title}-{count}"),
+                    )),
             )
-            .children(rows)
+            .child(card_rule().mb_2())
+            .child(list)
             .when(count == 0, |el| {
                 el.child(
                     div()
-                        .px_3()
-                        .py_4()
-                        .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .px_4()
+                        .pt_1()
+                        .pb_4()
                         .text_size(px(12.5))
                         .text_color(rgb(c_muted()))
                         .child(empty),
@@ -1989,18 +2645,23 @@ impl RunoApp {
             match self.bucket(s) {
                 Some(Bucket::NeedsYou) => {
                     let note = self.need(s).map_or("", Need::label);
-                    needs.push(self.home_row(s, note.into(), cx));
+                    needs.push(self.home_row(s, note.into_any_element(), cx));
                 }
                 Some(Bucket::Running) => {
                     let note = self
                         .started
                         .get(&s.id)
                         .map_or("Working".to_string(), |t| elapsed(t.elapsed()));
-                    running.push(self.home_row(s, note, cx));
+                    running.push(self.home_row(s, note.into_any_element(), cx));
                 }
                 Some(Bucket::Review) => {
                     let (_, a, r) = self.stats.get(&s.id).copied().unwrap_or_default();
-                    review.push(self.home_row(s, format!("+{a} −{r}"), cx));
+                    let diff = div()
+                        .flex()
+                        .gap(px(6.))
+                        .child(div().text_color(rgb(c_green())).child(format!("+{a}")))
+                        .child(div().text_color(rgb(c_red())).child(format!("−{r}")));
+                    review.push(self.home_row(s, diff.into_any_element(), cx));
                 }
                 _ => {}
             }
@@ -2018,21 +2679,8 @@ impl RunoApp {
             .map(|p| (p.id, p.path.clone()));
         let no_projects = self.state.projects.is_empty();
         let scope = |label: &'static str, all: bool| {
-            let on = self.home_all == all;
-            div()
-                .id(if all { "home-all" } else { "home-one" })
-                .h(px(26.))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded_md()
-                .cursor_pointer()
-                .text_size(px(12.5))
-                .when(on, |el| el.bg(tint(c_active())).text_color(rgb(c_text())))
-                .when(!on, |el| {
-                    el.text_color(rgb(c_secondary()))
-                        .hover(|el| el.bg(tint(c_subtle())))
-                })
+            let id = if all { "home-all" } else { "home-one" };
+            seg_choice(id, format!("seg-fill-{id}"), self.home_all == all)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.home_all = all;
                     this.cursor = None;
@@ -2140,24 +2788,28 @@ impl RunoApp {
                     .flex()
                     .gap_3()
                     .child(self.stat_card(
+                        0,
                         "Needs you",
                         n_needs.to_string(),
                         "blocked, or finished unseen".into(),
                         c_amber(),
                     ))
                     .child(self.stat_card(
+                        1,
                         "Running",
                         n_running.to_string(),
                         "agents working now".into(),
                         c_blue(),
                     ))
                     .child(self.stat_card(
+                        2,
                         "Ready to review",
                         n_review.to_string(),
                         "idle with changes".into(),
                         c_green(),
                     ))
                     .child(self.stat_card(
+                        3,
                         "Spend today",
                         format!("${:.2}", spend_today / 100.0),
                         "reported by Claude Code and OpenCode, all projects".into(),
@@ -2240,13 +2892,7 @@ impl RunoApp {
                             )
                             .when(self.state.projects.len() > 1, |el| {
                                 el.child(
-                                    div()
-                                        .flex()
-                                        .p(px(2.))
-                                        .gap(px(2.))
-                                        .rounded_lg()
-                                        .border_1()
-                                        .border_color(rgb(c_border()))
+                                    seg_track()
                                         .child(scope("This project", false))
                                         .child(scope("All projects", true)),
                                 )
@@ -2262,21 +2908,36 @@ impl RunoApp {
                             )
                             .when(!no_projects, |el| {
                                 el.child(
-                                    self.home_button(
-                                        "home-new",
-                                        IconName::SquarePen,
-                                        "New session",
-                                        keymap::label(cx, "new-session"),
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
+                                    div()
+                                        .id("home-new")
+                                        .h(px(32.))
+                                        .px_3()
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap_2()
+                                        .rounded_md()
+                                        .bg(rgb(c_text()))
+                                        .text_color(rgb(c_canvas()))
+                                        .cursor_pointer()
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .hover(|el| el.opacity(0.9))
+                                        .child(icon(IconName::Plus, 14., c_canvas()))
+                                        .child("New session")
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .opacity(0.6)
+                                                .child(keymap::label(cx, "new-session")),
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
                                             if let Some(pid) = this.current_project() {
                                                 this.new_project = Some(pid);
                                             }
                                             this.open_new_session();
                                             cx.notify();
-                                        },
-                                    )),
+                                        })),
                                 )
                             }),
                     )
@@ -2678,38 +3339,32 @@ pub(crate) fn mode_frame(
 /// A project's square badge: its icon on its colour, or its initial.
 /// A piece of the tab strip that carries the strip's bottom edge.
 fn strip_edge(el: Div) -> Div {
-    el.h_full().border_b_1().border_color(divider())
+    el.h_full()
 }
 
-/// Where a tab sits in the strip, with the gap after it. Only the open tab's slot has no
-/// bottom edge.
-fn tab_slot(active: bool, tab: Stateful<Div>) -> Div {
-    let slot = div().h_full().flex_none().flex().items_end().child(tab);
-    if active {
-        slot.child(strip_edge(div().w(px(4.))))
-    } else {
-        strip_edge(slot.pr_1())
-    }
+/// Where a tab sits in the strip, with the gap after it.
+fn tab_slot(_active: bool, tab: Stateful<Div>) -> Div {
+    div()
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_end()
+        .pr(px(4.))
+        .child(tab)
 }
 
-/// A tab's outline: the open tab is the page's own colour with no bottom edge, so it
-/// joins the page under the strip; the others float above the strip's edge.
+/// A tab's look: the open tab is cut from the page below the strip, which the strip's
+/// fill paints (see `strip_fill`); the others sit quietly on the frame.
 fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
     if active {
-        el.h(px(32.))
-            .rounded_t_md()
-            .border_t_1()
-            .border_l_1()
-            .border_r_1()
-            .border_color(divider())
-            .bg(glass_fill(c_canvas()))
+        el.relative()
+            .h(px(31.))
+            .child(strip_cut("tabs"))
             .text_color(rgb(c_text()))
     } else {
         el.h(px(28.))
             .mb(px(3.))
             .rounded_md()
-            .border_1()
-            .border_color(transparent_black())
             .text_color(rgb(c_secondary()))
             .hover(|el| el.bg(tint(c_subtle())))
     }
