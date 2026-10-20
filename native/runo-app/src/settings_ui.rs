@@ -1755,42 +1755,21 @@ impl RunoApp {
                 })
                 .into_any_element(),
             Ctl::Segment(opts, current, set) => {
-                let mut group = div()
-                    .flex()
-                    .items_center()
-                    .p(px(3.))
-                    .gap(px(2.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(c_border()))
-                    .bg(rgb(c_canvas()));
+                let mut group = crate::shell::seg_track();
                 for (j, (value, label)) in opts.into_iter().enumerate() {
                     let selected = value == current;
                     let set = set.clone();
                     group = group.child(
-                        div()
-                            .id(("setting-seg", ix * 16 + j))
-                            .h(px(28.))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_sm()
-                            .when(selected, |el| {
-                                el.bg(tint(c_selected()))
-                                    .text_color(rgb(c_blue()))
-                                    .font_weight(FontWeight::MEDIUM)
-                            })
-                            .when(!selected, |el| {
-                                el.text_color(rgb(c_secondary()))
-                                    .hover(|el| el.bg(tint(c_subtle())))
-                            })
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                let (set, value) = (set.clone(), value.clone());
-                                settings::update(cx, move |s| set(s, value));
-                            }))
-                            .child(label),
+                        crate::shell::seg_choice(
+                            ("setting-seg", ix * 16 + j),
+                            format!("setting-seg-{ix}-{j}"),
+                            selected,
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            let (set, value) = (set.clone(), value.clone());
+                            settings::update(cx, move |s| set(s, value));
+                        }))
+                        .child(label),
                     );
                 }
                 group.into_any_element()
@@ -2463,12 +2442,13 @@ impl RunoApp {
             None => icon(
                 page.icon(),
                 16.,
-                if selected { c_blue() } else { c_secondary() },
+                if selected { c_text() } else { c_secondary() },
             )
             .into_any_element(),
         };
         div()
             .id(SharedString::from(format!("snav-{}", page.label())))
+            .relative()
             .h(px(34.))
             .px_2()
             .flex()
@@ -2477,14 +2457,20 @@ impl RunoApp {
             .rounded_lg()
             .cursor_pointer()
             .text_sm()
+            // Chosen the way a selected session is: a raised fill with the accent's
+            // bracket at its edge, so every list in the app marks its choice alike.
             .when(selected, |el| {
                 el.bg(tint(c_selected()))
-                    .text_color(rgb(c_blue()))
+                    .child(crate::shell::accent_bracket(format!(
+                        "snav-mark-{}",
+                        page.label()
+                    )))
+                    .text_color(rgb(c_text()))
                     .font_weight(FontWeight::MEDIUM)
             })
             .when(!selected, |el| {
-                el.text_color(rgb(c_text()))
-                    .hover(|el| el.bg(tint(c_subtle())))
+                el.text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_page = page;
@@ -2520,7 +2506,7 @@ impl RunoApp {
             .p_3()
             .border_r_1()
             .border_color(divider())
-            .bg(pane(c_sidebar()));
+            .bg(pane(c_sheet()));
         let mut groups = div()
             .id("settings-nav")
             .flex_1()

@@ -895,6 +895,11 @@ impl DesignCanvas {
         cx.notify();
     }
 
+    /// Whether the layers panel is out beside the rail.
+    pub(crate) fn layers_shown(&self) -> bool {
+        !self.layers_hidden
+    }
+
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.check_files(cx);
         self.refs = crate::design::load(&self.root);

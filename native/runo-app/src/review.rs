@@ -75,7 +75,9 @@ impl RunoApp {
             .unwrap_or_default();
         div()
             .id(("review-row", id as usize))
-            .mx_1()
+            .relative()
+            .ml(px(10.))
+            .mr_1()
             .px_2()
             .py(px(7.))
             .flex()
@@ -83,7 +85,9 @@ impl RunoApp {
             .gap_2()
             .rounded_md()
             .cursor_pointer()
-            .when(on, |el| el.bg(tint(c_active())))
+            .when(on, |el| {
+                el.child(shell::row_fuse(format!("review-fuse-{id}"), 4.))
+            })
             .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .on_mouse_down(
                 MouseButton::Right,
@@ -218,16 +222,16 @@ impl RunoApp {
         let rows: Vec<AnyElement> = list
             .iter()
             .filter_map(|id| self.state.session(*id))
-            .map(|s| self.review_row(s, cx))
+            .enumerate()
+            .map(|(i, s)| shell::cascade(self.review_row(s, cx), format!("review-in-{}", s.id), i))
             .collect();
         let side = div()
             .w(px(LIST_WIDTH))
             .flex_none()
             .h_full()
+            .relative()
             .v_flex()
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            .bg(pane(c_sheet()))
             .child(
                 div()
                     .px_3()
@@ -246,6 +250,9 @@ impl RunoApp {
                     .overflow_y_scroll()
                     .v_flex()
                     .gap(px(2.))
+                    // Room above the first row and below the last for the selected row's
+                    // curves, which the scrolling list would otherwise clip.
+                    .py(px(12.))
                     .children(rows)
                     .when(list.is_empty(), |el| {
                         el.child(
