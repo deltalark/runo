@@ -605,7 +605,7 @@ impl DesignCanvas {
             .border_r_1()
             .border_color(rgb(c_border()))
             // The sidebar's own sheet, so the rail's Design tab joins it.
-            .bg(pane(c_sidebar()))
+            .bg(pane(c_sheet()))
             .child(
                 div()
                     .h(px(36.))

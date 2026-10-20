@@ -133,7 +133,7 @@ impl RunoApp {
             .h_full()
             .relative()
             .v_flex()
-            .bg(pane(c_sidebar()))
+            .bg(pane(c_sheet()))
             .child(shell::list_edge())
             .child(
                 div()
@@ -217,7 +217,7 @@ impl RunoApp {
                     .when(i > 0, |el| el.ml(px(-size * 0.3)))
                     .rounded(px((size * 0.3).min(6.)))
                     .border_1()
-                    .border_color(rgb(c_sidebar()))
+                    .border_color(rgb(c_sheet()))
                     .child(self.provider_badge(agent::provider(a), size))
             }))
     }
@@ -733,7 +733,20 @@ impl RunoApp {
                                 linear_color_stop(rgb(shade(c_blue(), 0.35)), 0.),
                                 linear_color_stop(rgb(shade(c_blue(), 0.08)), 1.),
                             ))
-                            .child(icon(IconName::Rocket, 22., c_blue())),
+                            // The rocket idles in flight: a slow drift up and to the right and back.
+                            .child(
+                                div()
+                                    .relative()
+                                    .child(icon(IconName::Rocket, 22., c_blue()))
+                                    .animated(
+                                        "mission-rocket",
+                                        Animation::new(Duration::from_millis(2800)).repeat(),
+                                        |el, t| {
+                                            let s = (t * std::f32::consts::TAU).sin();
+                                            el.left(px(1.5 * s)).top(px(-2. * s))
+                                        },
+                                    ),
+                            ),
                     )
                     .child(
                         div()

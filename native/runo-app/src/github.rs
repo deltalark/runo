@@ -1450,7 +1450,14 @@ pub(crate) fn segment(id: (&'static str, usize), label: &'static str, on: bool) 
         .rounded_md()
         .cursor_pointer()
         .text_size(px(12.5))
-        .when(on, |el| el.bg(tint(c_active())).text_color(rgb(c_text())))
+        .relative()
+        .when(on, |el| {
+            el.child(crate::shell::chosen_fill(
+                format!("segment-{}-{}", id.0, id.1),
+                6.,
+            ))
+            .text_color(rgb(c_text()))
+        })
         .when(!on, |el| {
             el.text_color(rgb(c_secondary()))
                 .hover(|el| el.bg(tint(c_subtle())))

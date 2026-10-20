@@ -639,10 +639,19 @@ pub fn c_canvas() -> u32 {
 pub fn c_sidebar() -> u32 {
     pick(0xf7f7f8, 0x121214)
 }
-/// The mode rail: a step deeper than the side panels, so the open place's tab, cut from
-/// the panel's own sheet, stands out from it.
+/// The mode rail: the deepest layer, so the open place's tab, cut from the sheet beside
+/// it, stands out from it.
 pub fn c_rail() -> u32 {
-    pick(0xe6e6ea, 0x080809)
+    pick(0xe2e2e8, 0x0a0a0c)
+}
+/// The sheet the rail's tab is cut from: the list beside the rail, raised a step above
+/// both the rail and the page, so the tab and the selected row's join to the page read.
+pub fn c_sheet() -> u32 {
+    pick(0xf2f2f5, 0x1f1f25)
+}
+/// The neon traced around the open place's tab and the selected row's join.
+pub fn c_neon() -> u32 {
+    pick(0x5b5ff5, 0x8a92ff)
 }
 pub fn c_subtle() -> u32 {
     pick(0xf1f1f3, 0x222226)

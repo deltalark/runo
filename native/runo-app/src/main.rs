@@ -849,6 +849,7 @@ fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyE
                     .bg(tint(c_subtle()))
                     .border_1()
                     .border_color(rgb(c_border()))
+                    .relative()
                     .child(
                         icon(name, 20., c_secondary()).animated(
                             (id, 1usize),
@@ -857,6 +858,12 @@ fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyE
                                 .with_easing(pulsating_between(0.55, 1.)),
                             |el, t| el.opacity(t),
                         ),
+                    )
+                    // It floats, rising and settling gently, so an empty page still breathes.
+                    .animated(
+                        (id, 2usize),
+                        Animation::new(Duration::from_millis(3200)).repeat(),
+                        |el, t| el.top(px(-2.5 * (t * std::f32::consts::TAU).sin())),
                     ),
             )
             .child(
@@ -3909,24 +3916,25 @@ impl RunoApp {
 
     /// Status dot; pulses while the agent is working.
     fn status_dot(&self, status: Status, id: impl Into<ElementId>, size: f32) -> AnyElement {
-        let dot = div()
+        let id = id.into();
+        if status == Status::Working {
+            return div()
+                .id(id.clone())
+                .flex_none()
+                .child(shell::sonar(
+                    Self::status_color(status),
+                    size,
+                    format!("pulse-{id}"),
+                ))
+                .into_any_element();
+        }
+        div()
             .id(id)
             .size(px(size))
             .flex_none()
             .rounded_full()
-            .bg(rgb(Self::status_color(status)));
-        if status == Status::Working {
-            dot.animated(
-                "pulse",
-                Animation::new(Duration::from_millis(1200))
-                    .repeat()
-                    .with_easing(pulsating_between(0.3, 1.0)),
-                |el, delta| el.opacity(delta),
-            )
+            .bg(rgb(Self::status_color(status)))
             .into_any_element()
-        } else {
-            dot.into_any_element()
-        }
     }
 
     /// The agent's glyph in its colour, without a background, for dense rows.
@@ -3986,8 +3994,11 @@ impl RunoApp {
             .rounded_md()
             .cursor_pointer()
             .text_size(px(13.))
+            .relative()
             .text_color(rgb(if selected { c_text() } else { c_secondary() }))
-            .when(selected, |el| el.bg(tint(c_active())))
+            .when(selected, |el| {
+                el.child(shell::chosen_fill(format!("nav-fill-{id}"), 6.))
+            })
             .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
             .on_click(cx.listener(move |this, _, window, cx| {
                 match view {
@@ -3999,18 +4010,23 @@ impl RunoApp {
                 }
                 cx.notify();
             }))
-            .child(icon(name, 15., if selected { c_text() } else { c_muted() }))
+            .child(if selected {
+                shell::pop(icon(name, 15., c_text()), format!("nav-icon-{id}"))
+            } else {
+                icon(name, 15., c_muted()).into_any_element()
+            })
             .child(div().flex_1().child(label))
             .when(count > 0 && view != View::Inbox, |el| {
-                el.child(
+                el.child(shell::pop(
                     div()
                         .text_size(px(11.5))
                         .text_color(rgb(c_muted()))
                         .child(count.to_string()),
-                )
+                    format!("nav-count-{id}-{count}"),
+                ))
             })
             .when(count > 0 && view == View::Inbox, |el| {
-                el.child(
+                el.child(shell::pop(
                     div()
                         .min_w(px(18.))
                         .h(px(16.))
@@ -4024,7 +4040,8 @@ impl RunoApp {
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(0xffffff))
                         .child(count.to_string()),
-                )
+                    format!("nav-badge-{id}-{count}"),
+                ))
             })
     }
 
@@ -4389,7 +4406,10 @@ impl RunoApp {
                                 .text_size(px(10.5))
                                 .text_color(rgb(c_muted()))
                                 .group_hover("project", |el| el.opacity(0.))
-                                .child(sessions.len().to_string()),
+                                .child(shell::pop(
+                                    sessions.len().to_string(),
+                                    format!("project-count-{pid}-{}", sessions.len()),
+                                )),
                         )
                     })
                     .child(
@@ -4444,8 +4464,12 @@ impl RunoApp {
                             .child("No sessions yet"),
                     );
                 }
-                for session in sessions {
-                    rows = rows.child(self.session_row(session, cx));
+                for (i, session) in sessions.iter().enumerate() {
+                    rows = rows.child(shell::cascade(
+                        self.session_row(session, cx),
+                        format!("session-in-{}", session.id),
+                        i,
+                    ));
                 }
                 // Opening a project folds its sessions down into place.
                 group = group.child(rows.animated(
@@ -4465,7 +4489,7 @@ impl RunoApp {
             .h_full()
             .relative()
             .v_flex()
-            .bg(pane(c_sidebar()))
+            .bg(pane(c_sheet()))
             .child(shell::list_edge())
             .child(
                 div()
@@ -7376,8 +7400,10 @@ impl RunoApp {
             .cursor_pointer()
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
+            .relative()
             .when(selected, |el| {
-                el.bg(tint(c_active())).text_color(rgb(c_text()))
+                el.child(shell::chosen_fill(format!("rt-fill-{}", tab as u8), 6.))
+                    .text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
                 el.text_color(rgb(c_secondary()))
@@ -7387,7 +7413,11 @@ impl RunoApp {
                 this.right_tab = tab;
                 cx.notify();
             }))
-            .child(icon(name, 13., if selected { c_text() } else { c_muted() }))
+            .child(if selected {
+                shell::pop(icon(name, 13., c_text()), format!("rt-icon-{}", tab as u8))
+            } else {
+                icon(name, 13., c_muted()).into_any_element()
+            })
             .child(label)
     }
 

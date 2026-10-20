@@ -519,14 +519,24 @@ impl RunoApp {
                 .text_size(px(12.))
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
+                .relative()
                 .when(active, |el| {
-                    el.bg(rgb(c_canvas())).text_color(rgb(c_text())).shadow_sm()
+                    el.child(crate::shell::chosen_fill_of(
+                        format!("{key}-fill"),
+                        6.,
+                        div().bg(rgb(c_canvas())).shadow_sm(),
+                    ))
+                    .text_color(rgb(c_text()))
                 })
                 .when(!active, |el| {
                     el.text_color(rgb(c_muted()))
                         .hover(|el| el.text_color(rgb(c_text())))
                 })
-                .child(icon(glyph, 12., if active { c_text() } else { c_muted() }))
+                .child(if active {
+                    crate::shell::pop(icon(glyph, 12., c_text()), format!("{key}-icon"))
+                } else {
+                    icon(glyph, 12., c_muted()).into_any_element()
+                })
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_cli_view(id, on, cx)))
         };

@@ -28,32 +28,134 @@ fn after(lead: f32) -> impl Fn(f32) -> f32 {
     move |t| ease_out_quint()(((t - lead) / (1. - lead)).clamp(0., 1.))
 }
 
+/// The neon at `alpha`, for the contour and its glow.
+fn neon(alpha: f32) -> Hsla {
+    let mut c = rgb(c_neon());
+    c.a = alpha;
+    c.into()
+}
+
+/// A soft glow of the neon around an element, `blur` wide.
+fn glow(alpha: f32, blur: f32) -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: neon(alpha),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(blur),
+        spread_radius: px(0.),
+        inset: false,
+    }]
+}
+
+/// Breathe a lit detail slowly between dim and full, so the neon feels alive.
+fn breathe(el: impl IntoElement + 'static, key: impl Into<SharedString>, ms: u64) -> AnyElement {
+    div().absolute().inset_0().child(el).animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(ms))
+            .repeat()
+            .with_easing(pulsating_between(0.55, 1.)),
+        |el, d| el.opacity(d),
+    )
+}
+
 /// The curve where an edge turns into the sheet beside it: a square of `fill`, with a
-/// quarter of `edge` rounded into its `corner`. Empty in glass mode, where the layers
-/// are see-through and the two squares would not add up to the edge's colour.
-fn inner_curve(fill: Rgba, edge: Rgba, top: bool) -> Div {
+/// quarter of `edge` rounded into its `corner`, and the neon traced along the curve at
+/// `lit` (none at 0). Empty in glass mode, where the layers are see-through and the two
+/// squares would not add up to the edge's colour.
+fn inner_curve(fill: Rgba, edge: Rgba, top: bool, lit: f32) -> Div {
     let notch = div().size_full().bg(edge);
     let notch = if top {
         notch.rounded_br(px(FUSE_R))
     } else {
         notch.rounded_tr(px(FUSE_R))
     };
+    // The neon along the curve: a ring centred on the notch's far corner, cut to the notch.
+    let arc = div()
+        .absolute()
+        .left(px(-FUSE_R))
+        .top(px(if top { -FUSE_R } else { 0. }))
+        .size(px(2. * FUSE_R))
+        .rounded_full()
+        .border_1()
+        .border_color(neon(lit));
     div()
         .absolute()
         .right_0()
         .size(px(FUSE_R))
-        .when(!glass_on(), |el| el.bg(fill).child(notch))
+        .overflow_hidden()
+        .when(!glass_on(), |el| {
+            el.bg(fill).child(notch).when(lit > 0., |el| el.child(arc))
+        })
 }
 
-/// The open place's tab on the rail: a piece of the panel beside the rail, the same
+/// The neon outline of a fused shape: its rounded left side, open on the right where it
+/// flows into the sheet.
+fn contour(lit: f32) -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded_l(px(FUSE_R))
+        .border_t_1()
+        .border_l_1()
+        .border_b_1()
+        .border_color(neon(lit))
+}
+
+/// How far the neon runs along the sheet's edge above and below the tab before it fades.
+const TRAIL: f32 = 96.;
+
+/// A thread of neon along the sheet's edge, fading away from the tab, that draws itself
+/// out once the tab has landed.
+fn trail(key: &'static str, up: bool, from: f32) -> AnyElement {
+    let (near, far) = (neon(0.85), neon(0.));
+    let fade = if up {
+        linear_gradient(
+            180.,
+            linear_color_stop(far, 0.),
+            linear_color_stop(near, 1.),
+        )
+    } else {
+        linear_gradient(
+            180.,
+            linear_color_stop(near, 0.),
+            linear_color_stop(far, 1.),
+        )
+    };
+    div()
+        .absolute()
+        .right_0()
+        .w(px(1.))
+        .bg(fade)
+        .animated(
+            SharedString::from(format!("rail-trail-{key}-{up}")),
+            Animation::new(Duration::from_millis(760)).with_easing(after(0.35)),
+            move |el, d| {
+                let h = TRAIL * d;
+                el.h(px(h)).top(px(if up { from - h } else { from }))
+            },
+        )
+        .into_any_element()
+}
+
+/// The open place's tab on the rail: a piece of the sheet beside the rail, the same
 /// colour, that reaches out around the icon, with the rail's edge curving into it above
-/// and below, so the place and its list read as one sheet. It pours out of the panel
-/// when the place opens, and a small accent lands on its lip after it.
+/// and below, so the place and its list read as one sheet. A neon contour runs around
+/// it and on along the sheet's edge, breathing slowly. It pours out of the sheet when
+/// the place opens, and a small accent lands on its lip after it.
 fn rail_tab(key: &'static str) -> AnyElement {
-    let sheet = pane(c_sidebar());
+    let sheet = pane(c_sheet());
     let rail = pane(c_rail());
     let reach = (RAIL_WIDTH - 34.) / 2.;
     let height = 34. + 2. * TAB_PAD;
+    let total = height + 2. * FUSE_R;
+    let lit = !glass_on();
+    let wash = linear_gradient(
+        90.,
+        linear_color_stop(
+            rgb(mix(c_neon(), c_sheet(), if is_dark() { 0.2 } else { 0.12 })),
+            0.,
+        ),
+        linear_color_stop(sheet, 0.85),
+    );
     div()
         .absolute()
         .top(px(-TAB_PAD - FUSE_R))
@@ -68,10 +170,32 @@ fn rail_tab(key: &'static str) -> AnyElement {
                 .right_0()
                 .h(px(height))
                 .rounded_l(px(FUSE_R))
-                .bg(sheet),
+                .bg(sheet)
+                .when(lit, |el| {
+                    el.bg(wash).shadow(vec![BoxShadow {
+                        color: neon(0.45),
+                        offset: point(px(-6.), px(0.)),
+                        blur_radius: px(12.),
+                        spread_radius: px(-4.),
+                        inset: false,
+                    }])
+                }),
         )
-        .child(inner_curve(sheet, rail, true).top_0())
-        .child(inner_curve(sheet, rail, false).bottom_0())
+        .child(inner_curve(sheet, rail, true, 0.9).top_0())
+        .child(inner_curve(sheet, rail, false, 0.9).bottom_0())
+        .when(lit, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(FUSE_R))
+                    .left_0()
+                    .right_0()
+                    .h(px(height))
+                    .child(breathe(contour(0.95), format!("rail-neon-{key}"), 2600)),
+            )
+            .child(trail(key, true, 0.))
+            .child(trail(key, false, total))
+        })
         .child(
             div()
                 .absolute()
@@ -80,7 +204,8 @@ fn rail_tab(key: &'static str) -> AnyElement {
                 .w(px(3.))
                 .h(px(16.))
                 .rounded_full()
-                .bg(rgb(c_blue()))
+                .bg(rgb(c_neon()))
+                .when(lit, |el| el.shadow(glow(0.9, 8.)))
                 .animated(
                     SharedString::from(format!("rail-tab-lip-{key}")),
                     Animation::new(Duration::from_millis(520)).with_easing(after(0.45)),
@@ -99,13 +224,25 @@ fn rail_tab(key: &'static str) -> AnyElement {
 }
 
 /// The open place on a page with no list beside the rail: a lit tile under the icon,
-/// which fades up when the place opens.
+/// ringed in a breath of neon, which fades up when the place opens.
 fn rail_tile(key: &'static str) -> AnyElement {
     div()
         .absolute()
         .inset_0()
-        .rounded(px(8.))
+        .rounded(px(9.))
         .bg(tint(c_active()))
+        .when(!glass_on(), |el| {
+            el.child(breathe(
+                div()
+                    .size_full()
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(neon(0.55))
+                    .shadow(glow(0.25, 10.)),
+                format!("rail-tile-neon-{key}"),
+                2600,
+            ))
+        })
         .animated(
             SharedString::from(format!("rail-tile-{key}")),
             Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()),
@@ -113,42 +250,178 @@ fn rail_tile(key: &'static str) -> AnyElement {
         )
 }
 
-/// A rail icon. The open place's icon is lit, and slides in a step with its tab.
+/// A rail icon. The open place's icon is lit in the neon's light with a soft halo under
+/// it; when the place opens it slides in a step with its tab and pops, swelling a touch
+/// and settling.
 fn rail_icon(glyph: IconName, on: bool, key: &'static str) -> AnyElement {
-    let el = div()
-        .relative()
-        .child(icon(glyph, 17., if on { c_text() } else { c_muted() }));
     if !on {
-        return el.into_any_element();
+        return div()
+            .relative()
+            .child(icon(glyph, 17., c_muted()))
+            .into_any_element();
     }
-    el.animated(
-        SharedString::from(format!("rail-icon-{key}")),
-        Animation::new(Duration::from_millis(380)).with_easing(ease_out_back),
-        |el, d| el.left(px(5. * (1. - d))).opacity(0.5 + 0.5 * d),
-    )
+    let lit = mix(c_neon(), c_text(), if is_dark() { 0.45 } else { 0.7 });
+    let halo = div()
+        .absolute()
+        .left(px(2.))
+        .top(px(2.))
+        .size(px(13.))
+        .rounded_full()
+        .shadow(glow(if is_dark() { 0.55 } else { 0.3 }, 12.));
+    div()
+        .relative()
+        .size(px(17.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(!glass_on(), |el| {
+            el.child(breathe(halo, format!("rail-halo-{key}"), 2600))
+        })
+        .child(div().animated(
+            SharedString::from(format!("rail-icon-{key}")),
+            Animation::new(Duration::from_millis(460)),
+            move |el, t| {
+                let slide = ease_out_back((t / 0.8).min(1.));
+                let pop = (std::f32::consts::PI * (t / 0.7).min(1.)).sin();
+                el.relative()
+                    .left(px(5. * (1. - slide)))
+                    .opacity(0.5 + 0.5 * slide.min(1.))
+                    .child(icon(glyph, 17. + 2.5 * pop, lit))
+            },
+        ))
+        .into_any_element()
 }
 
 /// A list's selected row joined to the page beside the list: a fill in the page's colour
 /// from the row out to the list's edge, with the list curving into it above and below,
-/// the same way the rail's tab joins the list. `reach` is how far the list's edge is past
-/// the row's right side. It sweeps in from the page when the row is picked. A child of
-/// the row, which must be `relative` and draw it first, under its content.
+/// the same way the rail's tab joins the list, traced in a fainter neon. `reach` is how
+/// far the list's edge is past the row's right side. It sweeps in from the page when the
+/// row is picked. A child of the row, which must be `relative` and draw it first, under
+/// its content.
 pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
+    let key = key.into();
     let page = glass_fill(c_canvas());
-    let sheet = pane(c_sidebar());
+    let sheet = pane(c_sheet());
+    let lit = !glass_on();
     div()
         .absolute()
         .top_0()
         .bottom_0()
         .left_0()
         .right(px(-reach))
-        .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
-        .child(inner_curve(page, sheet, true).top(px(-FUSE_R)))
-        .child(inner_curve(page, sheet, false).bottom(px(-FUSE_R)))
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded_l(px(FUSE_R))
+                .bg(page)
+                .when(lit, |el| el.shadow(glow(0.18, 16.))),
+        )
+        .child(inner_curve(page, sheet, true, 0.5).top(px(-FUSE_R)))
+        .child(inner_curve(page, sheet, false, 0.5).bottom(px(-FUSE_R)))
+        .when(lit, |el| {
+            el.child(breathe(contour(0.55), format!("{key}-neon"), 3200))
+        })
         .animated(
-            ElementId::Name(key.into()),
+            ElementId::Name(key),
             Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()),
             |el, d| el.left(px(48. * (1. - d))).opacity(0.4 + 0.6 * d),
+        )
+}
+
+/// Let a small detail, such as a count or a badge, pop into place: it rises a step and
+/// swells a touch past its size before settling. Key it by its value so it pops again
+/// whenever the value changes.
+pub(crate) fn pop(el: impl IntoElement + 'static, key: impl Into<SharedString>) -> AnyElement {
+    div().relative().child(el).animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(380)).with_easing(ease_out_back),
+        |el, d| el.top(px(4. * (1. - d))).opacity(d.min(1.)),
+    )
+}
+
+/// Give an icon that has news a small ring every few seconds: a quick, fading shake,
+/// then stillness.
+pub(crate) fn ring(el: impl IntoElement + 'static, key: impl Into<SharedString>) -> AnyElement {
+    div().relative().child(el).animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(4800)).repeat(),
+        |el, t| {
+            let k = (t / 0.14).min(1.);
+            let shake = (k * 4. * std::f32::consts::PI).sin() * 1.8 * (1. - k);
+            el.left(px(shake))
+        },
+    )
+}
+
+/// A live status dot: a steady core with a ring that ripples out of it and fades, like a
+/// sonar, so work in progress reads at a glance anywhere in the app.
+pub(crate) fn sonar(color: u32, size: f32, key: impl Into<SharedString>) -> AnyElement {
+    let key = key.into();
+    div()
+        .relative()
+        .size(px(size))
+        .flex_none()
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .border_1()
+                .border_color(rgb(color))
+                .animated(
+                    ElementId::Name(format!("{key}-ring").into()),
+                    Animation::new(Duration::from_millis(1600))
+                        .repeat()
+                        .with_easing(ease_out_quint()),
+                    move |el, d| {
+                        let grow = size * 0.9 * d;
+                        el.top(px(-grow))
+                            .left(px(-grow))
+                            .size(px(size + 2. * grow))
+                            .opacity(0.8 * (1. - d))
+                    },
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .bg(rgb(color))
+                .animated(
+                    ElementId::Name(format!("{key}-core").into()),
+                    Animation::new(Duration::from_millis(1600))
+                        .repeat()
+                        .with_easing(pulsating_between(0.7, 1.)),
+                    |el, d| el.opacity(d),
+                ),
+        )
+        .into_any_element()
+}
+
+/// The fill under a chosen item, such as a segment, a nav row or a tab, that grows out
+/// from the middle when the item is chosen. A child of the item, which must be
+/// `relative` and add it first, under its content.
+pub(crate) fn chosen_fill(key: impl Into<SharedString>, radius: f32) -> AnyElement {
+    chosen_fill_of(key, radius, div().bg(tint(c_active())))
+}
+
+/// `chosen_fill` with its own look, such as a raised card under a toggle's option.
+pub(crate) fn chosen_fill_of(key: impl Into<SharedString>, radius: f32, look: Div) -> AnyElement {
+    look.absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .rounded(px(radius))
+        .animated(
+            ElementId::Name(key.into()),
+            Animation::new(Duration::from_millis(320)).with_easing(ease_out_back),
+            |el, d| {
+                let inset = 14. * (1. - d);
+                el.left(px(inset)).right(px(inset)).opacity(d.min(1.))
+            },
         )
 }
 
@@ -1574,13 +1847,19 @@ impl RunoApp {
                     .child(
                         div()
                             .relative()
-                            .child(
-                                self.ghost_button("top-inbox", IconName::Bell, "Inbox")
+                            .child({
+                                let bell = self
+                                    .ghost_button("top-inbox", IconName::Bell, "Inbox")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.go(Mode::Inbox, window, cx);
                                         cx.notify();
-                                    })),
-                            )
+                                    }));
+                                if inbox > 0 {
+                                    ring(bell, "top-inbox-ring")
+                                } else {
+                                    bell.into_any_element()
+                                }
+                            })
                             .when(inbox > 0, |el| {
                                 el.child(
                                     div()
@@ -1598,7 +1877,7 @@ impl RunoApp {
                                         .text_size(px(9.5))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0xffffff))
-                                        .child(inbox.to_string()),
+                                        .child(pop(inbox.to_string(), format!("top-inbox-{inbox}"))),
                                 )
                             }),
                     )
@@ -1932,7 +2211,18 @@ impl RunoApp {
 
     // ---------- Home ----------
 
-    fn stat_card(&self, label: &'static str, value: String, hint: String, color: u32) -> Div {
+    /// One of Home's four numbers. The cards rise in one after another, the number pops in
+    /// again whenever it changes, and a live count's dot ripples while agents work.
+    fn stat_card(
+        &self,
+        i: usize,
+        label: &'static str,
+        value: String,
+        hint: String,
+        color: u32,
+    ) -> AnyElement {
+        let live = label == "Running" && value != "0";
+        let lead = i as f32 * 0.12;
         div()
             .flex_1()
             .min_w_0()
@@ -1943,6 +2233,7 @@ impl RunoApp {
             .border_1()
             .border_color(rgb(c_border()))
             .bg(tint(c_subtle()))
+            .relative()
             .child(
                 div()
                     .flex()
@@ -1950,21 +2241,35 @@ impl RunoApp {
                     .gap_2()
                     .text_size(px(12.))
                     .text_color(rgb(c_secondary()))
-                    .child(div().size(px(7.)).rounded_full().bg(rgb(color)))
+                    .child(if live {
+                        sonar(color, 7., format!("stat-live-{label}"))
+                    } else {
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .bg(rgb(color))
+                            .into_any_element()
+                    })
                     .child(label),
             )
-            .child(
+            .child(pop(
                 div()
                     .text_size(px(24.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(value),
-            )
+                    .child(value.clone()),
+                format!("stat-{label}-{value}"),
+            ))
             .child(
                 div()
                     .text_size(px(12.))
                     .text_color(rgb(c_muted()))
                     .truncate()
                     .child(hint),
+            )
+            .animated(
+                SharedString::from(format!("stat-card-{label}")),
+                Animation::new(Duration::from_millis(520)).with_easing(after(lead)),
+                |el, d| el.opacity(d).top(px(8. * (1. - d))),
             )
     }
 
@@ -2062,14 +2367,19 @@ impl RunoApp {
                     .gap_2()
                     .font_weight(FontWeight::MEDIUM)
                     .child(title)
-                    .child(
+                    .child(pop(
                         div()
                             .text_size(px(12.))
                             .text_color(rgb(c_muted()))
                             .child(count.to_string()),
-                    ),
+                        format!("home-panel-{title}-{count}"),
+                    )),
             )
-            .children(rows)
+            .children(
+                rows.into_iter()
+                    .enumerate()
+                    .map(|(i, row)| cascade(row, format!("home-row-{title}-{i}"), i + 2)),
+            )
             .when(count == 0, |el| {
                 el.child(
                     div()
@@ -2281,24 +2591,28 @@ impl RunoApp {
                     .flex()
                     .gap_3()
                     .child(self.stat_card(
+                        0,
                         "Needs you",
                         n_needs.to_string(),
                         "blocked, or finished unseen".into(),
                         c_amber(),
                     ))
                     .child(self.stat_card(
+                        1,
                         "Running",
                         n_running.to_string(),
                         "agents working now".into(),
                         c_blue(),
                     ))
                     .child(self.stat_card(
+                        2,
                         "Ready to review",
                         n_review.to_string(),
                         "idle with changes".into(),
                         c_green(),
                     ))
                     .child(self.stat_card(
+                        3,
                         "Spend today",
                         format!("${:.2}", spend_today / 100.0),
                         "reported by Claude Code and OpenCode, all projects".into(),
