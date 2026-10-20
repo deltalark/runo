@@ -581,19 +581,26 @@ impl RunoApp {
         let tip = task.map(|t| t.command.clone());
         div()
             .flex_none()
-            .h(px(22.))
-            .pl_2()
+            .pl(px(10.))
             .pr_1()
             .flex()
             .items_center()
             .gap_1()
-            .rounded_md()
             .text_size(px(12.))
             .font_weight(FontWeight::MEDIUM)
+            .relative()
+            // The open tab is cut from the terminal's island below the strip.
             .when(selected, |el| {
-                el.bg(tint(c_active())).text_color(rgb(c_text()))
+                el.h(px(29.))
+                    .child(shell::strip_cut("term"))
+                    .text_color(rgb(c_text()))
             })
-            .when(!selected, |el| el.text_color(rgb(c_muted())))
+            .when(!selected, |el| {
+                el.h(px(24.))
+                    .mb(px(3.))
+                    .rounded_md()
+                    .text_color(rgb(c_muted()))
+            })
             .child(
                 div()
                     .id(SharedString::from(format!("shell-tab-{id}")))
