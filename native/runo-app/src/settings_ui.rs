@@ -2520,7 +2520,7 @@ impl RunoApp {
             .p_3()
             .border_r_1()
             .border_color(divider())
-            .bg(pane(c_sidebar()));
+            .bg(pane(c_sheet()));
         let mut groups = div()
             .id("settings-nav")
             .flex_1()

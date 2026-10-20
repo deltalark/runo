@@ -3925,7 +3925,7 @@ impl ArchEditor {
             .v_flex()
             .border_r_1()
             .border_color(rgb(c_border()))
-            .bg(tint(c_sidebar()))
+            .bg(pane(c_sheet()))
             .child(
                 div()
                     .p_2()

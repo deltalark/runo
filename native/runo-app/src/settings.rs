@@ -649,9 +649,15 @@ pub fn c_rail() -> u32 {
 pub fn c_sheet() -> u32 {
     pick(0xf2f2f5, 0x1f1f25)
 }
-/// The neon traced around the open place's tab and the selected row's join.
+/// The neon traced around the open place's tab and the selected row's join: the accent
+/// chosen in Settings, lifted toward white in dark mode so it glows.
 pub fn c_neon() -> u32 {
-    pick(0x5b5ff5, 0x8a92ff)
+    let accent = ACCENT.load(Ordering::Relaxed);
+    if is_dark() {
+        mix(accent, 0xffffff, 0.72)
+    } else {
+        accent
+    }
 }
 pub fn c_subtle() -> u32 {
     pick(0xf1f1f3, 0x222226)

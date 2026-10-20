@@ -144,9 +144,9 @@ fn trail(key: &'static str, up: bool, from: f32) -> AnyElement {
 /// colour, that reaches out around the icon, with the rail's edge curving into it above
 /// and below, so the place and its list read as one sheet. A neon contour runs around
 /// it and on along the sheet's edge, breathing slowly. It pours out of the sheet when
-/// the place opens, and a small accent lands on its lip after it.
-fn rail_tab(key: &'static str) -> AnyElement {
-    let sheet = pane(c_sheet());
+/// the place opens, and a small accent lands on its lip after it. `sheet` is the fill of
+/// what it is cut from, and `base` that colour unblended, for the neon's wash.
+fn rail_tab(key: &'static str, sheet: Rgba, base: u32) -> AnyElement {
     let rail = pane(c_rail());
     let reach = (RAIL_WIDTH - 34.) / 2.;
     let height = 34. + 2. * TAB_PAD;
@@ -155,7 +155,7 @@ fn rail_tab(key: &'static str) -> AnyElement {
     let wash = linear_gradient(
         90.,
         linear_color_stop(
-            rgb(mix(c_neon(), c_sheet(), if is_dark() { 0.2 } else { 0.12 })),
+            rgb(mix(c_neon(), base, if is_dark() { 0.2 } else { 0.12 })),
             0.,
         ),
         linear_color_stop(sheet, 0.85),
@@ -313,14 +313,7 @@ pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
         .bottom_0()
         .left_0()
         .right(px(-reach))
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .rounded_l(px(FUSE_R))
-                .bg(page)
-                .when(lit, |el| el.shadow(glow(0.18, 16.))),
-        )
+        .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
         .child(inner_curve(page, sheet, true, 0.5).top(px(-FUSE_R)))
         .child(inner_curve(page, sheet, false, 0.5).bottom(px(-FUSE_R)))
         .when(lit, |el| {
@@ -1005,10 +998,12 @@ impl RunoApp {
                 cx.notify();
             }))
             .when(on, |el| {
+                // The tab is cut from the list beside the rail, or from the page itself
+                // where nothing sits between them.
                 el.child(if self.has_panel(cx) {
-                    rail_tab(mode.label())
+                    rail_tab(mode.label(), pane(c_sheet()), c_sheet())
                 } else {
-                    rail_tile(mode.label())
+                    rail_tab(mode.label(), glass_fill(c_canvas()), c_canvas())
                 })
             })
             .child(rail_icon(mode.glyph(), on, mode.label()))
@@ -1044,13 +1039,23 @@ impl RunoApp {
     pub(crate) fn has_panel(&self, cx: &App) -> bool {
         match self.mode() {
             Mode::Sessions => self.show_sidebar,
-            Mode::Missions => true,
+            Mode::Missions | Mode::Settings => true,
             Mode::Git => self.view == View::Review,
             Mode::Design => self
                 .design
                 .project
                 .and_then(|p| self.design.canvases.get(&p))
                 .is_some_and(|canvas| canvas.read(cx).layers_shown()),
+            // The diagram editor's shape palette sits against the rail; the code map and
+            // the project chooser have nothing there.
+            Mode::Architecture => {
+                !self.all_scope()
+                    && !self.arch.code_map
+                    && self
+                        .arch
+                        .project
+                        .is_some_and(|p| self.arch.editors.contains_key(&p))
+            }
             _ => false,
         }
     }
@@ -1058,7 +1063,8 @@ impl RunoApp {
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let counts = self.counts();
         // The groups part by space alone, so the rail reads as a few calm clusters.
-        let group = || div().v_flex().items_center().gap(px(4.));
+        // Room between the items for the open tab's curves, so they never crowd a neighbour.
+        let group = || div().v_flex().items_center().gap(px(8.));
         let mut work = group().relative().child(tour::anchor(&self.anchors, "nav"));
         for mode in &Mode::MAIN[..Mode::WORK] {
             // Amber: something there needs you. Blue: agents are working, or work waits
