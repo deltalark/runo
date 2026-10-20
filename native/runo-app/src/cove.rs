@@ -37,6 +37,40 @@ pub fn binary() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Whether this machine's `cove` takes `--auto-pause` (Cove 0.1 with pause support).
+/// Asked once.
+pub fn has_auto_pause() -> bool {
+    static ANSWER: OnceLock<bool> = OnceLock::new();
+    *ANSWER.get_or_init(|| {
+        binary().is_some_and(|bin| {
+            Command::new(bin)
+                .args(["exec", "--help"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--auto-pause"))
+        })
+    })
+}
+
+/// This computer's name, for naming the key Runo pairs with.
+pub fn host_name() -> String {
+    Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            Command::new("hostname")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "this computer".into())
+}
+
 /// Whether Cove is installed and its server answers. Cached and refreshed in the
 /// background, so it is cheap to call while rendering.
 pub fn available() -> bool {

@@ -1305,8 +1305,29 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
                 if c.remote() {
                     rows.push(conn_text(
                         c,
+                        "Pairing code",
+                        "Run cove pair on the server and type the code it prints. Runo gets a key of its own, which cove keys rm there revokes.",
+                        "ABCD-EFGH",
+                        c.pair_code.clone(),
+                        |c, v| c.pair_code = v,
+                    ));
+                    let paired = match connections::pair_result(id) {
+                        Some((_, text)) => text,
+                        None if c.api_key.trim().is_empty() => "Not paired yet.".into(),
+                        None => "Runo has a key for this server.".into(),
+                    };
+                    rows.push(row(
+                        "Pair",
+                        &paired,
+                        Ctl::Button(
+                            "Pair".into(),
+                            Rc::new(move |this, cx| this.pair_connection(id, cx)),
+                        ),
+                    ));
+                    rows.push(conn_text(
+                        c,
                         "API key",
-                        "Run cove key on the server.",
+                        "Filled in by pairing. Or run cove key on the server and paste it here.",
                         "",
                         c.api_key.clone(),
                         |c, v| c.api_key = v,
@@ -1342,7 +1363,22 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
                         }
                     })),
                 ));
-                rows.push(conn_choice(c, "Stop when idle", "Stop a session's VM when nothing has run in it for a while. It starts again on the next message.", options(&[("0", "Never"), ("15", "After 15 min"), ("30", "After 30 min"), ("60", "After 1 hour"), ("240", "After 4 hours")]), c.idle_stop.to_string(), |c, v| c.idle_stop = v.parse().unwrap_or(0)));
+                rows.push(conn_choice(c, "When idle", "Pause or stop a session's VM when nothing has run in it for a while. It carries on with the next message.", options(&[("0", "Keep running"), ("15", "After 15 min"), ("30", "After 30 min"), ("60", "After 1 hour"), ("240", "After 4 hours")]), c.idle_stop.to_string(), |c, v| c.idle_stop = v.parse().unwrap_or(0)));
+                if c.idle_stop > 0 {
+                    rows.push(row(
+                        "Idle VMs",
+                        "Pause keeps the VM's memory and running programs, so it picks up exactly where it was, and on a Linux server it uses no memory while paused. Stop shuts it down; the next message boots it again.",
+                        Ctl::Segment(
+                            options(&[("pause", "Pause"), ("stop", "Stop")]),
+                            if c.idle_pause { "pause" } else { "stop" }.into(),
+                            Rc::new(move |s, v| {
+                                if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                                    c.idle_pause = v == "pause";
+                                }
+                            }),
+                        ),
+                    ));
+                }
             }
         }
         rows.push(conn_text(c, "Keys passed in", "Environment variables from this machine the agent gets there, comma separated. Nothing else reaches it.", connections::DEFAULT_KEYS, c.keys.clone(), |c, v| c.keys = v));
