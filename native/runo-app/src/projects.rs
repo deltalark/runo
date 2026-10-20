@@ -80,6 +80,10 @@ pub(crate) struct ProjectForm {
     pub filled_name: String,
     /// The setup command to put in its field on the next render.
     pub sync_setup: Option<String>,
+    /// The checks to put in their field on the next render.
+    pub sync_checks: Option<String>,
+    /// Failing checks go back to the agent on their own this many times in a row.
+    pub fix_rounds: u32,
     pub error: Option<String>,
     /// A folder path to put in the path field on the next render (after Browse).
     pub sync_path: Option<String>,
@@ -586,6 +590,8 @@ impl RunoApp {
             focus_name: true,
             filled_name: String::new(),
             sync_setup: Some(String::new()),
+            sync_checks: Some(String::new()),
+            fix_rounds: 0,
             error: None,
             sync_path: Some(String::new()),
             path_error: None,
@@ -629,6 +635,8 @@ impl RunoApp {
             focus_name: true,
             filled_name: String::new(),
             sync_setup: Some(p.setup.clone()),
+            sync_checks: Some(p.checks.clone()),
+            fix_rounds: p.fix_rounds,
             error: None,
             sync_path: None,
             path_error: None,
@@ -909,6 +917,14 @@ impl RunoApp {
             self.project_setup
                 .update(cx, |input, cx| input.set_value(setup, window, cx));
         }
+        if let Some(checks) = self
+            .project_form
+            .as_mut()
+            .and_then(|f| f.sync_checks.take())
+        {
+            self.project_checks
+                .update(cx, |input, cx| input.set_value(checks, window, cx));
+        }
         let Some((name, focus)) = self
             .project_form
             .as_mut()
@@ -930,6 +946,8 @@ impl RunoApp {
         };
         let name = self.project_name.read(cx).value().trim().to_string();
         let setup = self.project_setup.read(cx).value().trim().to_string();
+        let checks = self.project_checks.read(cx).value().trim().to_string();
+        let fix_rounds = form.fix_rounds;
         let color = COLORS[form.color].0.to_string();
         let glyph = ICONS[form.icon].0.to_string();
         if let Some(pid) = form.editing {
@@ -940,6 +958,8 @@ impl RunoApp {
                 p.color = color;
                 p.icon = glyph;
                 p.setup = setup;
+                p.checks = checks;
+                p.fix_rounds = fix_rounds;
             }
             self.project_form = None;
             self.save();
@@ -1001,6 +1021,8 @@ impl RunoApp {
                 self.project_form = None;
                 if let Some(p) = self.state.projects.last_mut() {
                     p.setup = setup;
+                    p.checks = checks;
+                    p.fix_rounds = fix_rounds;
                 }
                 self.save();
             }
@@ -1091,6 +1113,7 @@ impl RunoApp {
             0 => c_secondary(),
             hex => hex,
         };
+        let checks = form.blank.is_none().then(|| self.checks_field(cx));
         let label = |text: &'static str| {
             div()
                 .text_size(px(11.5))
@@ -1524,7 +1547,9 @@ impl RunoApp {
                         ))
                         .child(div().text_xs().text_color(rgb(c_muted())).truncate().child(
                             match (editing, blank) {
-                                (true, _) => "Change how this project looks in the sidebar",
+                                (true, _) => {
+                                    "Change how this project looks and how its work is checked"
+                                }
                                 (false, Some(Mode::Design)) => {
                                     "Start with design references and notes, before any code"
                                 }
@@ -1540,6 +1565,8 @@ impl RunoApp {
             .id("project-card")
             .w(px(520.))
             .max_w(relative(0.94))
+            .max_h(relative(0.92))
+            .overflow_y_scroll()
             .p_6()
             .v_flex()
             .gap_4()
@@ -1595,6 +1622,7 @@ impl RunoApp {
                             .child("Runs in each new worktree before its agent starts, such as npm install. Empty uses the one in Settings."),
                     ),
             ))
+            .children(checks)
             .child(div().v_flex().gap_1p5().child(label("Color")).child(swatches))
             .child(div().v_flex().gap_1p5().child(label("Icon")).child(glyphs))
             .when(!editing && blank.is_none(), |el| {

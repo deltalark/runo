@@ -309,6 +309,17 @@ pub struct Project {
     /// picks one the repository allows.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub merge_method: String,
+    /// Commands run after each turn that changed files, one per line (tests, lint,
+    /// typecheck, build). Empty runs none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checks: String,
+    /// How many times in a row failing checks go back to the agent on their own; 0 asks.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub fix_rounds: u32,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 fn default_mode() -> String {
@@ -414,6 +425,9 @@ pub struct Session {
     /// turn of the session keeps to it. Empty means no limits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limits: Vec<String>,
+    /// Proof of done for the last turn: its checks and the second opinion on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<crate::proof::Proof>,
 }
 
 /// A prompt waiting for the agent, with the images attached to it.

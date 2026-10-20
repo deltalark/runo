@@ -118,7 +118,7 @@ pub fn stderr_conversation(provider: &str, line: &str) -> Option<String> {
 }
 
 /// `text` without terminal colour codes (`ESC [ ... letter`).
-fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {

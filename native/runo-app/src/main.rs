@@ -47,6 +47,8 @@ mod persist;
 mod phone;
 mod playbooks;
 mod projects;
+mod proof;
+mod proof_ui;
 mod pty;
 mod review;
 mod schedule;
@@ -222,6 +224,8 @@ struct RunoApp {
     project_name: Entity<InputState>,
     /// The project form's worktree setup command.
     project_setup: Entity<InputState>,
+    /// The project popup's checks, one command per line.
+    project_checks: Entity<TextareaState>,
     /// The New project popup's folder path, typed or filled in by Browse.
     project_path: Entity<InputState>,
     /// The project form's repository URL, when cloning.
@@ -441,6 +445,10 @@ struct RunoApp {
     stream_failed: std::collections::HashSet<u64>,
     /// Files changed by each session's latest turn, once it finished (for Undo / Keep).
     turn_files: HashMap<u64, usize>,
+    /// Sessions whose checks are running after their last turn.
+    proving: std::collections::HashSet<u64>,
+    /// Sessions waiting on a second opinion, with the agent giving it.
+    reviewing: HashMap<u64, &'static str>,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
     /// Images that go with a new session's first prompt.
@@ -1393,6 +1401,8 @@ impl RunoApp {
             project_name,
             project_setup: cx
                 .new(|cx| InputState::new(window, cx).placeholder("npm install (optional)")),
+            project_checks: cx
+                .new(|cx| TextareaState::new(window, cx).placeholder("npm test\nnpm run lint")),
             project_path: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("Type or paste a folder path, such as ~/code/app")
@@ -1522,6 +1532,8 @@ impl RunoApp {
             signed_out: Default::default(),
             stream_failed: Default::default(),
             turn_files: HashMap::new(),
+            proving: Default::default(),
+            reviewing: HashMap::new(),
             attachments: HashMap::new(),
             launch_images: HashMap::new(),
             new_context: None,
@@ -5004,6 +5016,12 @@ impl RunoApp {
                     el.children(
                         self.turn_bar(index, cx)
                             .map(|bar| rise(div().child(bar), ("turn-rise", index), 360)),
+                    )
+                })
+                .when(is_last && !working, |el| {
+                    el.children(
+                        self.proof_card(index, cx)
+                            .map(|card| rise(div().child(card), ("proof-rise", index), 400)),
                     )
                 })
                 .when(!message.text.is_empty(), |el| {

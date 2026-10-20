@@ -362,15 +362,25 @@ impl RunoApp {
                 .map(|m| (m.checkpoint.clone(), s.dir.clone()))
         });
         // How many files the turn changed, and a snapshot of where it ended for Undo.
+        // A turn that finished with changed files gets its checks run (Proof of done).
+        let prove = ok
+            && !stopped
+            && self
+                .state
+                .session(id)
+                .is_some_and(|s| s.canvas.is_empty() && !s.cli);
         if let Some((cp, dir)) = checkpoint.filter(|(cp, _)| !cp.is_empty()) {
             self.bg(
                 move || (git::changed_since(&dir, &cp).len(), git::checkpoint(&dir)),
-                move |this, (files, end), _| {
+                move |this, (files, end), cx| {
                     this.turn_files.insert(id, files);
                     if let (Ok(end), Some(s)) = (end, this.state.session_mut(id)) {
                         s.snapshot = end;
                     }
                     this.save();
+                    if prove && files > 0 {
+                        this.prove_turn(id, true, cx);
+                    }
                 },
             );
         }
@@ -1077,7 +1087,8 @@ impl RunoApp {
                     self.fail("turn", format!("Could not write a commit message: {first}"));
                 }
             }
-        } else if self.handle_recap(&key, result.clone())
+        } else if self.handle_review(&key, result.clone())
+            || self.handle_recap(&key, result.clone())
             || self.handle_alert_job(&key, result.clone())
         {
         } else if !self.handle_browser_job(&key, result.clone()) {

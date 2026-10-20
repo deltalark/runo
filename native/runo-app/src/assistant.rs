@@ -34,6 +34,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/guide/undo-turn.md"),
     ),
     (
+        "proof-of-done",
+        include_str!("../../../docs/guide/proof-of-done.md"),
+    ),
+    (
         "switch-agent",
         include_str!("../../../docs/guide/switch-agent.md"),
     ),
@@ -996,6 +1000,10 @@ mod tests {
         assert_eq!(
             top("How do I undo what the agent just did?"),
             Some("undo-turn")
+        );
+        assert_eq!(
+            top("How do I make Runo run my tests after each turn?"),
+            Some("proof-of-done")
         );
         assert!(search("zebra quantum lasagna").is_empty());
     }
