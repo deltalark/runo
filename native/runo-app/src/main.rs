@@ -4271,7 +4271,11 @@ impl RunoApp {
             let color = projects::color_of(project);
             // Each project is one block: its header, then its sessions as cards under
             // it. Space between blocks keeps them apart.
-            let mut group = div().v_flex().mx_1().when(!first, |el| el.mt(px(10.)));
+            // A hairline between projects, so each group reads as one block.
+            let mut group = div().v_flex().mx_1().when(!first, |el| {
+                el.mt(px(8.))
+                    .child(div().mx_2().mb(px(8.)).h(px(1.)).bg(rgb(c_border())))
+            });
             first = false;
             group = group.child(
                 div()
@@ -4419,7 +4423,8 @@ impl RunoApp {
                     .relative(),
             );
             if open || !filter.is_empty() {
-                let mut rows = div().v_flex().gap(px(2.)).mt(px(2.)).mb_1();
+                // Sessions sit a step in from their project's name.
+                let mut rows = div().v_flex().gap(px(2.)).mt(px(2.)).mb_1().pl(px(15.));
                 if sessions.is_empty() {
                     rows = rows.child(
                         div()
@@ -4457,6 +4462,14 @@ impl RunoApp {
             .v_flex()
             .bg(pane(c_sheet()))
             .rounded_bl(px(shell::ISLAND_R))
+            // Beside the session tabs the sheet meets the frame, so it curves away there.
+            .when(
+                self.mode() == Mode::Sessions && !self.tabs.is_empty(),
+                |el| {
+                    el.rounded_tr(px(shell::ISLAND_R))
+                        .child(shell::frame_corner(true, false))
+                },
+            )
             .child(shell::sheet_corner())
             .child(shell::frame_corner(false, true))
             .child(
@@ -8252,6 +8265,8 @@ impl RunoApp {
             .session_shells(id)
             .map(|sh| self.shell_tab_button(sh, cx))
             .collect();
+        // With no tab open, nothing joins the island, so its top-left corner rounds too.
+        let fused = shell.is_some() || has_output;
         let body = match shell {
             Some(sh) => self.shell_view(sh, window, cx),
             None if has_output => {
@@ -8440,7 +8455,7 @@ impl RunoApp {
                     ),
             )
             .child(
-                shell::island(body, glass_fill(c_canvas()), [false, true, true, true])
+                shell::island(body, glass_fill(c_canvas()), [!fused, true, true, true])
                     .flex_1()
                     .min_h_0(),
             )
