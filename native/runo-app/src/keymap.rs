@@ -40,7 +40,7 @@ pub(crate) const SHORTCUTS: [Shortcut; 26] = [
     Shortcut {
         id: "sidebar",
         title: "Sidebar",
-        desc: "Show or hide the sessions sidebar.",
+        desc: "Show or hide the sessions sidebar, or the layers panel in Design.",
         default: &["secondary-\\"],
     },
     Shortcut {
@@ -75,8 +75,8 @@ pub(crate) const SHORTCUTS: [Shortcut; 26] = [
     },
     Shortcut {
         id: "go-review",
-        title: "Review",
-        desc: "Go to Review: check and ship the work agents finished.",
+        title: "Git: To ship",
+        desc: "Go to Git's To ship tab: check and ship the work agents finished.",
         default: &["secondary-3"],
     },
     Shortcut {
@@ -87,8 +87,8 @@ pub(crate) const SHORTCUTS: [Shortcut; 26] = [
     },
     Shortcut {
         id: "go-reviews",
-        title: "GitHub",
-        desc: "Go to GitHub: pull requests, issues and Actions.",
+        title: "Git: GitHub",
+        desc: "Go to Git's GitHub tab: pull requests, issues and Actions.",
         default: &["secondary-4"],
     },
     Shortcut {

@@ -16,9 +16,9 @@ pub(crate) enum Mode {
     Sessions,
     Design,
     Architecture,
-    Review,
     Missions,
-    GitHub,
+    /// What waits to ship and the project's GitHub, as two tabs of one place.
+    Git,
     Playbooks,
     History,
     Inbox,
@@ -27,16 +27,19 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    /// The modes at the top of the rail, in order; ⌘1 to ⌘6 and ⌘9 jump to them.
-    pub(crate) const MAIN: [Mode; 7] = [
+    /// The modes at the top of the rail, in order. The first `WORK` are the day's work;
+    /// the rest, what's been kept, sit apart.
+    pub(crate) const MAIN: [Mode; 6] = [
         Mode::Home,
         Mode::Sessions,
-        Mode::Review,
         Mode::Missions,
-        Mode::GitHub,
+        Mode::Git,
         Mode::Playbooks,
         Mode::History,
     ];
+
+    /// How many of `MAIN` make the first group on the rail.
+    const WORK: usize = 4;
 
     /// The current project's own modes, grouped under its badge below the main ones; ⌘7
     /// and ⌘8.
@@ -53,9 +56,8 @@ impl Mode {
             Mode::Sessions => "Sessions",
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
-            Mode::Review => "Review",
             Mode::Missions => "Missions",
-            Mode::GitHub => "GitHub",
+            Mode::Git => "Git",
             Mode::Playbooks => "Playbooks",
             Mode::History => "History",
             Mode::Inbox => "Inbox",
@@ -71,10 +73,9 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
-            Mode::Review => "go-review",
             Mode::Missions => "go-missions",
-            // Kept under its old name so shortcuts people changed still apply.
-            Mode::GitHub => "go-reviews",
+            // Git's To ship tab; `go-reviews` opens its GitHub tab.
+            Mode::Git => "go-review",
             Mode::Playbooks => "go-playbooks",
             Mode::History => "go-history",
             Mode::Inbox => "go-inbox",
@@ -89,9 +90,8 @@ impl Mode {
             Mode::Sessions => IconName::CodeXml,
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
-            Mode::Review => IconName::GitCompare,
             Mode::Missions => IconName::Rocket,
-            Mode::GitHub => IconName::GitPullRequest,
+            Mode::Git => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
             Mode::History => IconName::RotateCcwClock,
             Mode::Inbox => IconName::Inbox,
@@ -107,9 +107,8 @@ impl Mode {
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
-            View::Review => Mode::Review,
             View::Missions => Mode::Missions,
-            View::GitHub => Mode::GitHub,
+            View::Review | View::GitHub => Mode::Git,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
             View::Notes => Mode::Notes,
@@ -286,9 +285,9 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
-            Mode::Review => self.open_review(),
             Mode::Missions => self.open_missions(cx),
-            Mode::GitHub => self.load_github(),
+            Mode::Git if self.git_github => self.load_github(),
+            Mode::Git => self.open_review(),
             Mode::Playbooks => self.view = View::Automations,
             Mode::History => self.open_history(cx),
             Mode::Inbox => self.view = View::Inbox,
@@ -543,11 +542,11 @@ impl RunoApp {
         div()
             .id(SharedString::from(format!("rail-{}", mode.label())))
             .relative()
-            .size(px(38.))
+            .size(px(34.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded_lg()
+            .rounded(px(8.))
             .cursor_pointer()
             .when(on, |el| el.bg(tint(c_active())))
             .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
@@ -558,29 +557,20 @@ impl RunoApp {
             }))
             .child(icon(
                 mode.glyph(),
-                18.,
+                17.,
                 if on { c_text() } else { c_muted() },
             ))
-            .when(on, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left(px(-7.))
-                        .top(px(10.))
-                        .w(px(3.))
-                        .h(px(18.))
-                        .rounded_full()
-                        .bg(rgb(c_blue())),
-                )
-            })
+            // A small dot cut into the icon's corner, ringed in the rail's own colour.
             .when_some(badge.filter(|_| !on), |el, color| {
                 el.child(
                     div()
                         .absolute()
-                        .top(px(6.))
-                        .right(px(6.))
-                        .size(px(7.))
+                        .top(px(5.))
+                        .right(px(5.))
+                        .size(px(8.))
                         .rounded_full()
+                        .border_2()
+                        .border_color(rgb(c_sidebar()))
                         .bg(rgb(color)),
                 )
             })
@@ -589,28 +579,28 @@ impl RunoApp {
 
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let counts = self.counts();
-        let mut top = div()
-            .v_flex()
-            .items_center()
-            .gap_1()
-            .relative()
-            .child(tour::anchor(&self.anchors, "nav"));
-        for mode in Mode::MAIN {
+        // The groups part by space alone, so the rail reads as a few calm clusters.
+        let group = || div().v_flex().items_center().gap(px(4.));
+        let mut work = group().relative().child(tour::anchor(&self.anchors, "nav"));
+        let mut repo = group();
+        for (i, mode) in Mode::MAIN.into_iter().enumerate() {
             // Amber: something there needs you. Blue: agents are working, or work waits
             // to be reviewed.
             let badge = match mode {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
-                Mode::Review if counts.review > 0 => Some(c_blue()),
                 Mode::Missions => self.missions_badge(),
-                Mode::GitHub if self.gh.needs_you() > 0 => Some(c_amber()),
+                Mode::Git if self.gh.needs_you() > 0 => Some(c_amber()),
+                Mode::Git if counts.review > 0 => Some(c_blue()),
                 _ => None,
             };
-            top = top.child(self.rail_item(mode, badge, cx));
+            let item = self.rail_item(mode, badge, cx);
+            if i < Mode::WORK {
+                work = work.child(item);
+            } else {
+                repo = repo.child(item);
+            }
         }
-        top = top
-            .child(div().my_1().w(px(22.)).h(px(1.)).bg(divider()))
-            .child(self.project_group(cx));
         // The Inbox opens from the bell in the top bar, so the rail doesn't repeat it.
         div()
             .w(px(RAIL_WIDTH))
@@ -618,24 +608,23 @@ impl RunoApp {
             .h_full()
             .v_flex()
             .items_center()
-            .py_2()
+            .pt(px(10.))
+            .pb_2()
+            .gap(px(18.))
             .border_r_1()
             .border_color(divider())
             .bg(pane(c_sidebar()))
-            .child(top)
+            .child(work)
+            .child(repo)
+            .child(self.project_group(cx))
             .child(div().flex_1())
             .child(
-                div()
-                    .v_flex()
-                    .items_center()
-                    .gap_1()
-                    .child(self.rail_item(Mode::Notes, None, cx))
-                    .child(
-                        div()
-                            .relative()
-                            .child(tour::anchor(&self.anchors, "settings"))
-                            .child(self.rail_item(Mode::Settings, None, cx)),
-                    ),
+                group().child(self.rail_item(Mode::Notes, None, cx)).child(
+                    div()
+                        .relative()
+                        .child(tour::anchor(&self.anchors, "settings"))
+                        .child(self.rail_item(Mode::Settings, None, cx)),
+                ),
             )
     }
 
@@ -649,30 +638,28 @@ impl RunoApp {
         };
         let badge = div()
             .id("rail-project")
-            .size(px(30.))
+            .size(px(34.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
+            .rounded(px(8.))
             .cursor_pointer()
-            .hover(|el| el.bg(tint(c_active())))
+            .hover(|el| el.bg(tint(c_subtle())))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.menu = Some("project-switch".into());
                 cx.notify();
             }))
             .child(match project {
-                Some(p) => project_mark(p, 20.).into_any_element(),
+                Some(p) => project_mark(p, 18.).into_any_element(),
                 None => icon(IconName::LayoutGrid, 15., c_muted()).into_any_element(),
             });
+        // A short rule above the badge marks where the project's own pages begin.
         let mut group = div()
             .v_flex()
             .items_center()
-            .gap_1()
-            .py(px(3.))
-            .w(px(44.))
-            .rounded_xl()
-            .bg(tint(c_subtle()))
+            .gap(px(4.))
+            .child(div().mb(px(12.)).w(px(18.)).h(px(1.)).bg(divider()))
             .child(badge);
         for mode in Mode::PLAN {
             group = group.child(self.rail_item(mode, None, cx));
@@ -862,7 +849,7 @@ impl RunoApp {
             .map(|s| s.id)
             .max();
         match (self.mode(), latest) {
-            (Mode::GitHub, _) => self.load_github(),
+            (Mode::Git, _) if self.view == View::GitHub => self.load_github(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
                 self.view = View::Home;
@@ -2979,9 +2966,9 @@ mod tests {
     fn every_rail_place_owns_its_views() {
         // Each place on the rail opens a view that lights that same place up again.
         for (view, mode) in [
-            (View::Review, Mode::Review),
+            (View::Review, Mode::Git),
             (View::Missions, Mode::Missions),
-            (View::GitHub, Mode::GitHub),
+            (View::GitHub, Mode::Git),
             (View::History, Mode::History),
             (View::Notes, Mode::Notes),
             (View::Automations, Mode::Playbooks),

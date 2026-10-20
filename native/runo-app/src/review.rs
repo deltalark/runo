@@ -46,6 +46,7 @@ impl RunoApp {
             self.refresh();
         }
         self.view = View::Review;
+        self.git_github = false;
     }
 
     /// Show one session in Review.
@@ -57,6 +58,7 @@ impl RunoApp {
         }
         self.select(id);
         self.view = View::Review;
+        self.git_github = false;
     }
 
     fn review_row(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
@@ -130,6 +132,85 @@ impl RunoApp {
             .into_any_element()
     }
 
+    /// Git: what waits to ship and the project's GitHub, as two tabs under one strip.
+    pub(crate) fn git_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let github = self.view == View::GitHub;
+        let tab = |id: &'static str, label: &'static str, count: usize, alert: bool, on: bool| {
+            crate::github::segment((id, 0), label, on)
+                .gap(px(6.))
+                .when(count > 0, |el| {
+                    el.child(
+                        div()
+                            .px(px(5.))
+                            .rounded_full()
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .when(alert, |el| {
+                                el.bg(rgba((c_amber() << 8) | 0x33))
+                                    .text_color(rgb(c_amber()))
+                            })
+                            .when(!alert, |el| {
+                                el.bg(tint(c_subtle())).text_color(rgb(c_secondary()))
+                            })
+                            .child(count.to_string()),
+                    )
+                })
+        };
+        let tabs = crate::github::segmented()
+            .child(
+                tab(
+                    "git-ship",
+                    "To ship",
+                    self.review_list().len(),
+                    false,
+                    !github,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_review();
+                    this.save();
+                    cx.notify();
+                })),
+            )
+            .child(
+                tab("git-github", "GitHub", self.gh.needs_you(), true, github).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.load_github();
+                        this.save();
+                        cx.notify();
+                    }),
+                ),
+            );
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .v_flex()
+            .child(
+                div()
+                    .h(px(46.))
+                    .flex_none()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(divider())
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Git"),
+                    )
+                    .child(tabs),
+            )
+            .child(div().flex_1().min_h_0().flex().child(if github {
+                self.github_view(cx)
+            } else {
+                self.review_view(cx)
+            }))
+            .into_any_element()
+    }
+
     /// The Review page: the waiting list on the left, the picked session's changes and
     /// ship controls beside it.
     pub(crate) fn review_view(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -149,25 +230,8 @@ impl RunoApp {
             .bg(pane(c_sidebar()))
             .child(
                 div()
-                    .h(px(46.))
                     .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Review")
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(rgb(c_muted()))
-                            .child(list.len().to_string()),
-                    ),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .pt_1()
+                    .pt_3()
                     .pb_1()
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)

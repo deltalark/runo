@@ -46,7 +46,7 @@ const STEPS: &[Step] = &[
         side: Side::Right,
         glyph: IconName::Layers,
         title: "Everything in one place",
-        body: "The rail on the left switches between Home, Sessions, Review, GitHub, Playbooks and History, then Design and Architecture, with Notes and Settings at the bottom. Press {go-home} to {go-history} to jump between them. The bell in the top bar opens the Inbox ({go-inbox}).",
+        body: "The rail on the left switches between Home, Sessions, Missions, Git, Playbooks and History, then Design and Architecture, with Notes and Settings at the bottom. Press {go-home} to {go-history} to jump between them. The bell in the top bar opens the Inbox ({go-inbox}).",
     },
     Step {
         anchor: Some("projects"),
@@ -81,7 +81,7 @@ const STEPS: &[Step] = &[
         side: Side::Left,
         glyph: IconName::GitCompare,
         title: "Review the work",
-        body: "Changes shows every edit as a diff, and Review and ship takes it to commit, push and pull request. Files lets you read and edit the code yourself, and the Browser button over the chat opens your app in its own tab.",
+        body: "Changes shows every edit as a diff, and Review and ship opens it in Git to commit, push and open a pull request. Files lets you read and edit the code yourself, and the Browser button over the chat opens your app in its own tab.",
     },
     Step {
         anchor: Some("terminal"),
@@ -436,7 +436,7 @@ impl RunoApp {
             (
                 IconName::Layers,
                 format!(
-                    "A rail on the left for Home, Sessions, Review, GitHub, Playbooks and History ({} to {}).",
+                    "A rail on the left for Home, Sessions, Missions, Git, Playbooks and History ({} to {}).",
                     keymap::label(cx, "go-home"),
                     keymap::label(cx, "go-history")
                 ),
