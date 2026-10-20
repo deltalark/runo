@@ -2,7 +2,7 @@
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -71,7 +71,10 @@ pub struct Shell {
     /// that stops reading never blocks the window.
     input: Sender<Vec<u8>>,
     master: Box<dyn MasterPty + Send>,
-    child: Mutex<Box<dyn Child + Send + Sync>>,
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    /// 0 until the process is reaped, then 1 if it succeeded and 2 if it failed.
+    /// Set before `exited`, so a caller that sees `exited` can read the status.
+    outcome: Arc<AtomicU8>,
     exited: Arc<AtomicBool>,
     /// Set by the reader when output arrives, cleared when the UI repaints.
     dirty: Arc<AtomicBool>,
@@ -128,6 +131,41 @@ fn windows_shell() -> Option<Program> {
         env: Vec::new(),
         unset: Vec::new(),
     })
+}
+
+/// Reap `child` and store 1 or 2 in `outcome`. The lock is not held while waiting,
+/// so the shell can still be killed. Returns without a status if waiting fails.
+/// Safe to call from more than one thread; the first status wins.
+fn record_exit(child: &Mutex<Box<dyn Child + Send + Sync>>, outcome: &AtomicU8) {
+    loop {
+        if outcome.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let polled = {
+            let Ok(mut child) = child.lock() else {
+                return;
+            };
+            child.try_wait()
+        };
+        match polled {
+            Ok(Some(status)) => {
+                let value = if status.success() { 1 } else { 2 };
+                let _ = outcome.compare_exchange(0, value, Ordering::Release, Ordering::Relaxed);
+                return;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(_) => return,
+        }
+    }
+}
+
+/// Say the program has ended, once. `outcome` must already be stored.
+fn note_exit(exited: &AtomicBool, wake: &Mutex<Box<dyn Fn(u64) + Send>>, id: u64) {
+    if !exited.swap(true, Ordering::AcqRel) {
+        if let Ok(wake) = wake.lock() {
+            wake(id);
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -196,7 +234,9 @@ impl Shell {
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
         }
-        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+        let child = Arc::new(Mutex::new(
+            pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?,
+        ));
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -219,15 +259,53 @@ impl Shell {
             }
         });
         let exited = Arc::new(AtomicBool::new(false));
+        let outcome = Arc::new(AtomicU8::new(0));
         let dirty = Arc::new(AtomicBool::new(false));
         let last_output = Arc::new(AtomicU64::new(now_ms()));
+        let wake = Arc::new(Mutex::new(Box::new(wake) as Box<dyn Fn(u64) + Send>));
         {
-            let (parser, exited, dirty, last, answers) = (
+            // The process can end before the PTY read does (Windows often never
+            // signals EOF), or the read can end first (Unix). Either way the status
+            // is stored before `exited` flips.
+            let (outcome, child, exited, last, wake) = (
+                outcome.clone(),
+                Arc::clone(&child),
+                exited.clone(),
+                last_output.clone(),
+                Arc::clone(&wake),
+            );
+            std::thread::spawn(move || {
+                record_exit(&child, &outcome);
+                let started = std::time::Instant::now();
+                let mut quiet = 0u8;
+                while started.elapsed() < std::time::Duration::from_millis(500) {
+                    if exited.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let mark = last.load(Ordering::Acquire);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    if last.load(Ordering::Acquire) == mark {
+                        quiet += 1;
+                        if quiet >= 2 {
+                            break;
+                        }
+                    } else {
+                        quiet = 0;
+                    }
+                }
+                note_exit(&exited, &wake, id);
+            });
+        }
+        {
+            let (parser, exited, outcome, child, dirty, last, answers, wake) = (
                 parser.clone(),
                 exited.clone(),
+                outcome.clone(),
+                Arc::clone(&child),
                 dirty.clone(),
                 last_output.clone(),
                 input.clone(),
+                Arc::clone(&wake),
             );
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
@@ -255,13 +333,17 @@ impl Shell {
                                 let _ = answers.send(reply);
                             }
                             if !dirty.swap(true, Ordering::AcqRel) {
-                                wake(id);
+                                if let Ok(wake) = wake.lock() {
+                                    wake(id);
+                                }
                             }
                         }
                     }
                 }
-                exited.store(true, Ordering::Release);
-                wake(id);
+                // The PTY can close before the process is reaped. Record the status
+                // first, then say it has exited, so success() is never a guess.
+                record_exit(&child, &outcome);
+                note_exit(&exited, &wake, id);
             });
         }
         let name = program
@@ -288,7 +370,8 @@ impl Shell {
             parser,
             input,
             master: pair.master,
-            child: Mutex::new(child),
+            child,
+            outcome,
             exited,
             dirty,
             size: Mutex::new((rows, cols)),
@@ -498,14 +581,14 @@ impl Shell {
         }
     }
 
-    /// Whether the program exited successfully, once it has exited.
-    /// Non-blocking: callers on the UI thread must not wait here.
+    /// Whether the program exited successfully. Recorded when the reader reaps it,
+    /// before `exited` becomes true, and read here without waiting.
     pub fn success(&self) -> Option<bool> {
-        let mut c = self.child.lock().ok()?;
-        c.try_wait()
-            .ok()
-            .flatten()
-            .map(|status| status.success())
+        match self.outcome.load(Ordering::Acquire) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
     }
 
     /// Ask the program to finish up: Runo's connection runner ends the program on the
@@ -1014,6 +1097,42 @@ mod tests {
         }
         assert!(shell.text().contains("hi runo"), "{}", shell.text());
         assert_eq!(shell.success(), Some(false));
+    }
+
+    /// The exit status is known as soon as the shell says the program has ended.
+    #[test]
+    fn exit_status_is_known_when_the_program_ends() {
+        let dir = std::env::temp_dir();
+        let run = |code: u32| {
+            let line = format!("exit {code}");
+            let command = if cfg!(windows) {
+                let mut command = std::process::Command::new("cmd");
+                command.args(["/C", &line]);
+                command
+            } else {
+                let mut command = std::process::Command::new("sh");
+                command.args(["-c", &line]);
+                command
+            };
+            let shell = Shell::spawn_program(
+                1,
+                1,
+                dir.to_str().unwrap(),
+                10,
+                40,
+                Some(Program::of(&command)),
+                |_| {},
+            )
+            .unwrap();
+            let start = Instant::now();
+            while !shell.exited() && start.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(shell.exited(), "{}", shell.text());
+            shell.success()
+        };
+        assert_eq!(run(4), Some(false));
+        assert_eq!(run(0), Some(true));
     }
 
     #[cfg(unix)]
