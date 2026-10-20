@@ -347,6 +347,207 @@ pub(crate) fn sheet_corner() -> Div {
     )
 }
 
+/// The gap between the window's islands, in the frame's grey.
+pub(crate) const GUTTER: f32 = 8.;
+/// Radius of an island's rounded corners.
+pub(crate) const ISLAND_R: f32 = 14.;
+/// Radius of an open tab's top corners, and of the curves where it flows into its island.
+const STRIP_TAB_R: f32 = 9.;
+const STRIP_FLARE_R: f32 = 8.;
+
+thread_local! {
+    /// Where each fused strip's open tab sits this frame, keyed by strip.
+    static STRIP_CUTS: std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A quarter turn from `from` to `to` round the square corner `c`.
+fn turn(f: &mut PathBuilder, from: Point<Pixels>, c: Point<Pixels>, to: Point<Pixels>) {
+    let k = 0.5523;
+    f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
+}
+
+/// Marks the open tab of a fused strip, so the strip leaves it out of the frame's grey.
+/// A child of the open tab, which must be `relative`.
+pub(crate) fn strip_cut(strip: &'static str) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                move |b, _, _| STRIP_CUTS.with_borrow_mut(|c| c.insert(strip, b)),
+                |_, _, _, _| {},
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// The fill of a strip of tabs over an island: the frame's grey across the strip, less
+/// the open tab, which is the island's own colour and flows into it with curves on both
+/// sides, and the accent bracket on its leading corner. The grey and the tab are two
+/// paths that never overlap, so the join looks the same in every glass style. A child
+/// of the strip, which must be `relative`, added first so it sits under the tabs.
+pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
+    let frame = Hsla::from(rail_shade());
+    let island = Hsla::from(island);
+    let accent = Hsla::from(rgb(c_blue()));
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                move |_, _, _| STRIP_CUTS.with_borrow_mut(|c| c.remove(strip)),
+                move |b, _, window, _| {
+                    let at = |x: Pixels, y: Pixels| point(x, y);
+                    let (left, top, right, bottom) =
+                        (b.origin.x, b.origin.y, b.right(), b.bottom());
+                    let (fr, tr) = (px(STRIP_FLARE_R), px(STRIP_TAB_R));
+                    // A tab scrolled partly out of the strip is not cut.
+                    let cut = STRIP_CUTS
+                        .with_borrow(|c| c.get(strip).copied())
+                        .filter(|t| t.origin.x - fr >= left && t.right() + fr <= right);
+                    let mut f = PathBuilder::fill();
+                    f.move_to(at(left, top));
+                    f.line_to(at(right, top));
+                    f.line_to(at(right, bottom));
+                    if let Some(t) = cut {
+                        let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
+                        f.line_to(at(x1 + fr, bottom));
+                        turn(
+                            &mut f,
+                            at(x1 + fr, bottom),
+                            at(x1, bottom),
+                            at(x1, bottom - fr),
+                        );
+                        f.line_to(at(x1, y0 + tr));
+                        turn(&mut f, at(x1, y0 + tr), at(x1, y0), at(x1 - tr, y0));
+                        f.line_to(at(x0 + tr, y0));
+                        turn(&mut f, at(x0 + tr, y0), at(x0, y0), at(x0, y0 + tr));
+                        f.line_to(at(x0, bottom - fr));
+                        turn(
+                            &mut f,
+                            at(x0, bottom - fr),
+                            at(x0, bottom),
+                            at(x0 - fr, bottom),
+                        );
+                    }
+                    f.line_to(at(left, bottom));
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, frame);
+                    }
+                    let Some(t) = cut else { return };
+                    let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
+                    let mut f = PathBuilder::fill();
+                    f.move_to(at(x0 - fr, bottom));
+                    turn(
+                        &mut f,
+                        at(x0 - fr, bottom),
+                        at(x0, bottom),
+                        at(x0, bottom - fr),
+                    );
+                    f.line_to(at(x0, y0 + tr));
+                    turn(&mut f, at(x0, y0 + tr), at(x0, y0), at(x0 + tr, y0));
+                    f.line_to(at(x1 - tr, y0));
+                    turn(&mut f, at(x1 - tr, y0), at(x1, y0), at(x1, y0 + tr));
+                    f.line_to(at(x1, bottom - fr));
+                    turn(
+                        &mut f,
+                        at(x1, bottom - fr),
+                        at(x1, bottom),
+                        at(x1 + fr, bottom),
+                    );
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, island);
+                    }
+                    // The bracket: up the tab's left edge and round its top corner.
+                    let (i, reach) = (px(1.), px(9.));
+                    let mut f = PathBuilder::stroke(px(2.));
+                    f.move_to(at(x0 + i, y0 + tr + reach));
+                    f.line_to(at(x0 + i, y0 + tr));
+                    turn(
+                        &mut f,
+                        at(x0 + i, y0 + tr),
+                        at(x0 + i, y0 + i),
+                        at(x0 + tr, y0 + i),
+                    );
+                    f.line_to(at(x0 + tr + reach, y0 + i));
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, accent);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// One rounded corner of an island: the corner of a square outside a quarter circle, in
+/// the frame's grey, so the island reads as rounded over whatever it holds. The island's
+/// own fill is rounded too, so the two never overlap in glass mode.
+pub(crate) fn frame_corner(top: bool, left: bool) -> AnyElement {
+    let fill = Hsla::from(rail_shade());
+    let r = ISLAND_R;
+    div()
+        .absolute()
+        .size(px(r))
+        .map(|el| if top { el.top_0() } else { el.bottom_0() })
+        .map(|el| if left { el.left_0() } else { el.right_0() })
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |b, _, window, _| {
+                    let k = 0.5523;
+                    // Drawn as the top-left corner, then mirrored into place.
+                    let p = |x: f32, y: f32| {
+                        let x = if left { x } else { r - x };
+                        let y = if top { y } else { r - y };
+                        point(b.origin.x + px(x), b.origin.y + px(y))
+                    };
+                    let mut f = PathBuilder::fill();
+                    f.move_to(p(0., 0.));
+                    f.line_to(p(r, 0.));
+                    f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, fill);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// An island on the frame: `content` on a fill with the given corners rounded, as
+/// top-left, top-right, bottom-right and bottom-left. A transparent fill leaves the
+/// layers to the content, as on pages that paint their own list beside the page.
+pub(crate) fn island(content: impl IntoElement, fill: Rgba, round: [bool; 4]) -> Div {
+    let r = px(ISLAND_R);
+    let [tl, tr, br, bl] = round;
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .bg(fill)
+        .when(tl, |el| el.rounded_tl(r))
+        .when(tr, |el| el.rounded_tr(r))
+        .when(br, |el| el.rounded_br(r))
+        .when(bl, |el| el.rounded_bl(r))
+        .child(content)
+        .when(tl, |el| el.child(frame_corner(true, true)))
+        .when(tr, |el| el.child(frame_corner(true, false)))
+        .when(br, |el| el.child(frame_corner(false, false)))
+        .when(bl, |el| el.child(frame_corner(false, true)))
+}
+
+/// A strip of the frame's grey, such as the gutter between two islands.
+pub(crate) fn gutter() -> Div {
+    div().flex_none().bg(rail_shade())
+}
+
 /// Let a list's rows fade in one after another when the list opens, each a beat after
 /// the one above it.
 pub(crate) fn cascade(
@@ -1513,9 +1714,8 @@ impl RunoApp {
             .gap_2()
             .pl(px(lead))
             .pr_2()
-            .border_b_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            // The frame's grey, the same as the rail and the gutters between islands.
+            .bg(rail_shade())
             .window_control_area(WindowControlArea::Drag)
             // Three zones: the two sides share what the search box leaves, so the box
             // sits in the middle of the window on every page instead of moving with the
@@ -2067,10 +2267,10 @@ impl RunoApp {
             .flex_none()
             .flex()
             .items_end()
-            .bg(pane(c_sidebar()))
-            // Every part of the strip draws its own bottom edge except the open tab, which
-            // runs straight into the page below.
-            .child(strip_edge(div().w(px(8.))))
+            .relative()
+            // The frame's grey, with the open tab cut out of it and joined to the page.
+            .child(strip_fill("tabs", glass_fill(c_canvas())))
+            .child(strip_edge(div().w(px(10.))))
             .child(
                 div()
                     .flex_1()
@@ -3047,38 +3247,32 @@ pub(crate) fn mode_frame(
 /// A project's square badge: its icon on its colour, or its initial.
 /// A piece of the tab strip that carries the strip's bottom edge.
 fn strip_edge(el: Div) -> Div {
-    el.h_full().border_b_1().border_color(divider())
+    el.h_full()
 }
 
-/// Where a tab sits in the strip, with the gap after it. Only the open tab's slot has no
-/// bottom edge.
-fn tab_slot(active: bool, tab: Stateful<Div>) -> Div {
-    let slot = div().h_full().flex_none().flex().items_end().child(tab);
-    if active {
-        slot.child(strip_edge(div().w(px(4.))))
-    } else {
-        strip_edge(slot.pr_1())
-    }
+/// Where a tab sits in the strip, with the gap after it.
+fn tab_slot(_active: bool, tab: Stateful<Div>) -> Div {
+    div()
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_end()
+        .pr(px(4.))
+        .child(tab)
 }
 
-/// A tab's outline: the open tab is the page's own colour with no bottom edge, so it
-/// joins the page under the strip; the others float above the strip's edge.
+/// A tab's look: the open tab is cut from the page below the strip, which the strip's
+/// fill paints (see `strip_fill`); the others sit quietly on the frame.
 fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
     if active {
-        el.h(px(32.))
-            .rounded_t_md()
-            .border_t_1()
-            .border_l_1()
-            .border_r_1()
-            .border_color(divider())
-            .bg(glass_fill(c_canvas()))
+        el.relative()
+            .h(px(31.))
+            .child(strip_cut("tabs"))
             .text_color(rgb(c_text()))
     } else {
         el.h(px(28.))
             .mb(px(3.))
             .rounded_md()
-            .border_1()
-            .border_color(transparent_black())
             .text_color(rgb(c_secondary()))
             .hover(|el| el.bg(tint(c_subtle())))
     }

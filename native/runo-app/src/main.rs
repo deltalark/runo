@@ -4456,7 +4456,9 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
+            .rounded_bl(px(shell::ISLAND_R))
             .child(shell::sheet_corner())
+            .child(shell::frame_corner(false, true))
             .child(
                 // The list's own header: what it holds and how much is running, with the
                 // new-session button beside it.
@@ -7363,23 +7365,25 @@ impl RunoApp {
         let selected = self.right_tab == tab;
         div()
             .id(SharedString::from(format!("rt-{label}")))
-            .h(px(26.))
-            .px(px(10.))
+            .px(px(12.))
             .flex()
             .items_center()
             .gap(px(6.))
-            .rounded_md()
             .cursor_pointer()
             .text_size(px(12.5))
             .font_weight(FontWeight::MEDIUM)
             .relative()
             .when(selected, |el| {
-                el.child(shell::seg_pill(format!("rt-fill-{}", tab as u8)))
+                el.h(px(32.))
+                    .child(shell::strip_cut("panel"))
                     .text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
-                el.text_color(rgb(c_secondary()))
-                    .hover(|el| el.text_color(rgb(c_text())))
+                el.h(px(28.))
+                    .mb(px(3.))
+                    .rounded_md()
+                    .text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.right_tab = tab;
@@ -8156,20 +8160,24 @@ impl RunoApp {
         div()
             .id("term-output")
             .flex_none()
-            .h(px(22.))
-            .px_2()
+            .px(px(10.))
             .flex()
             .items_center()
             .gap(px(5.))
-            .rounded_md()
             .cursor_pointer()
             .text_size(px(12.))
             .font_weight(FontWeight::MEDIUM)
+            .relative()
             .when(selected, |el| {
-                el.bg(tint(c_active())).text_color(rgb(c_text()))
+                el.h(px(29.))
+                    .child(shell::strip_cut("term"))
+                    .text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
-                el.text_color(rgb(c_muted()))
+                el.h(px(24.))
+                    .mb(px(3.))
+                    .rounded_md()
+                    .text_color(rgb(c_muted()))
                     .hover(|el| el.text_color(rgb(c_text())))
             })
             .on_click(cx.listener(|this, _, _, cx| {
@@ -8310,17 +8318,17 @@ impl RunoApp {
             .relative()
             .child(tour::anchor(&self.anchors, "terminal"))
             .v_flex()
-            .border_t_1()
-            .border_color(divider())
-            .bg(window_fill(c_term_bg()))
             .child(
+                // The terminal's tabs, cut from the terminal's island below them.
                 div()
-                    .h(px(32.))
+                    .h(px(36.))
                     .flex_none()
-                    .px_2()
+                    .px(px(10.))
+                    .relative()
                     .flex()
-                    .items_center()
+                    .items_end()
                     .gap_1()
+                    .child(shell::strip_fill("term", glass_fill(c_canvas())))
                     .child(
                         // Tabs scroll sideways rather than push the buttons out of a narrow panel.
                         div()
@@ -8329,7 +8337,7 @@ impl RunoApp {
                             .min_w_0()
                             .h_full()
                             .flex()
-                            .items_center()
+                            .items_end()
                             .gap_1()
                             .overflow_x_scroll()
                             .when(has_output, |el| {
@@ -8349,6 +8357,7 @@ impl RunoApp {
                     .child(
                         div()
                             .flex_none()
+                            .h_full()
                             .flex()
                             .items_center()
                             .gap_1()
@@ -8430,7 +8439,11 @@ impl RunoApp {
                             ),
                     ),
             )
-            .child(body)
+            .child(
+                shell::island(body, glass_fill(c_canvas()), [false, true, true, true])
+                    .flex_1()
+                    .min_h_0(),
+            )
             .child(
                 // Drag the top edge to make the panel taller or shorter.
                 div()
@@ -8470,49 +8483,47 @@ impl RunoApp {
     }
 
     fn right_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = fade(
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(match self.right_tab {
+                    RightTab::Changes => self.changes_tab(cx),
+                    RightTab::Files => self.files_tab(cx),
+                }),
+            SharedString::from(format!(
+                "rtab-{}-{}",
+                self.right_tab as u8,
+                self.selected.unwrap_or(0)
+            )),
+            260,
+        );
         div()
             .w(px(self.panel_width))
             .flex_none()
             .h_full()
             .relative()
+            .flex()
             .child(tour::anchor(&self.anchors, "right-pane"))
-            .child(
-                // Drag the edge to make the panel narrower or wider.
-                div()
-                    .id("panel-edge")
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(px(5.))
-                    .cursor_col_resize()
-                    .when(self.resizing_panel, |el| el.bg(rgb(c_blue())))
-                    .hover(|el| el.bg(tint(c_active())))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.resizing_panel = true;
-                            cx.stop_propagation();
-                            cx.notify();
-                        }),
-                    ),
-            )
-            .v_flex()
-            .border_l_1()
-            .border_color(divider())
-            .bg(panel(c_sidebar()))
+            .child(shell::gutter().w(px(shell::GUTTER)).h_full())
             .child(
                 div()
-                    .h(px(44.))
-                    .flex_none()
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .v_flex()
                     .child(
-                        shell::seg_track()
+                        // Changes and Files: tabs cut from the panel below them.
+                        div()
+                            .h(px(40.))
+                            .flex_none()
+                            .relative()
+                            .flex()
+                            .items_end()
+                            .gap_1()
+                            .px(px(10.))
+                            .child(shell::strip_fill("panel", panel(c_sheet())))
                             .child(self.right_tab_button(
                                 RightTab::Changes,
                                 IconName::GitCompare,
@@ -8529,26 +8540,35 @@ impl RunoApp {
                                 "Files".into(),
                                 cx,
                             )),
+                    )
+                    .child(
+                        shell::island(body, panel(c_sheet()), [false, true, true, true])
+                            .flex_1()
+                            .min_h_0(),
+                    )
+                    .child(self.terminal_panel(window, cx)),
+            )
+            .child(
+                // Drag the gutter to make the panel narrower or wider.
+                div()
+                    .id("panel-edge")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(shell::GUTTER))
+                    .cursor_col_resize()
+                    .when(self.resizing_panel, |el| el.bg(rgb(c_blue())))
+                    .hover(|el| el.bg(tint(c_active())))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.resizing_panel = true;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
                     ),
             )
-            .child(fade(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(match self.right_tab {
-                        RightTab::Changes => self.changes_tab(cx),
-                        RightTab::Files => self.files_tab(cx),
-                    }),
-                SharedString::from(format!(
-                    "rtab-{}-{}",
-                    self.right_tab as u8,
-                    self.selected.unwrap_or(0)
-                )),
-                260,
-            ))
-            .child(self.terminal_panel(window, cx))
     }
 }
 
@@ -8850,6 +8870,43 @@ impl Render for RunoApp {
             .palette
             .clone()
             .map(|state| self.palette_view(state, cx));
+        // The page is an island under the session tabs. Pages with their own list beside
+        // the content paint the two layers themselves, so the list is as clear as the
+        // sidebar.
+        let page_fill = if matches!(self.view, View::Review | View::Settings) {
+            rgba(0)
+        } else {
+            glass_fill(c_canvas())
+        };
+        let center_column = div()
+            .flex_1()
+            .min_w_0()
+            .v_flex()
+            .when(show_tabs, |el| el.child(self.tab_strip(cx)))
+            .child(
+                shell::island(
+                    div().size_full().flex().child(center),
+                    page_fill,
+                    [false, true, true, !show_left],
+                )
+                .flex_1()
+                .min_h_0(),
+            )
+            .animated(
+                SharedString::from(format!(
+                    "center-{}-{}",
+                    shown as u8,
+                    self.selected.unwrap_or(0)
+                )),
+                Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
+                move |el, delta| {
+                    if still {
+                        el
+                    } else {
+                        el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta)))
+                    }
+                },
+            );
         let root = div()
             .size_full()
             .relative()
@@ -9105,7 +9162,9 @@ impl Render for RunoApp {
                     }
                 }),
             )
-            .bg(window_fill(c_canvas()))
+            // The frame's grey behind everything, so a page fading in never shows a lighter
+            // window through it.
+            .bg(window_fill(c_rail()))
             .text_color(rgb(c_text()))
             .text_size(px(13.))
             .font_family(cx.theme().font_family.clone())
@@ -9116,37 +9175,25 @@ impl Render for RunoApp {
                     .min_h_0()
                     .flex()
                     .child(self.mode_rail(cx))
-                    .children(left)
                     .child(
+                        // Everything beside the rail sits on the frame as islands, with a
+                        // gutter of the frame's grey along the right and bottom.
                         div()
                             .flex_1()
                             .min_w_0()
                             .v_flex()
-                            // Pages with their own list beside the content paint the two
-                            // layers themselves, so the list is as clear as the sidebar.
-                            .when(!matches!(self.view, View::Review | View::Settings), |el| {
-                                el.bg(glass_fill(c_canvas()))
-                            })
-                            .when(show_tabs, |el| el.child(self.tab_strip(cx)))
-                            .child(div().flex_1().min_h_0().flex().child(center))
-                            .animated(
-                                SharedString::from(format!(
-                                    "center-{}-{}",
-                                    shown as u8,
-                                    self.selected.unwrap_or(0)
-                                )),
-                                Animation::new(Duration::from_millis(200))
-                                    .with_easing(ease_out_quint()),
-                                move |el, delta| {
-                                    if still {
-                                        el
-                                    } else {
-                                        el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta)))
-                                    }
-                                },
-                            ),
-                    )
-                    .children(right),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .children(left)
+                                    .child(center_column)
+                                    .children(right)
+                                    .child(shell::gutter().w(px(shell::GUTTER)).h_full()),
+                            )
+                            .child(shell::gutter().h(px(shell::GUTTER)).w_full()),
+                    ),
             )
             .child(
                 div()
@@ -9157,9 +9204,7 @@ impl Render for RunoApp {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .border_t_1()
-                    .border_color(divider())
-                    .bg(pane(c_sidebar()))
+                    .bg(rail_shade())
                     .text_size(px(11.5))
                     .gap_4()
                     .child(fade(
