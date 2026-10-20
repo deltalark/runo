@@ -200,22 +200,20 @@ impl RunoApp {
                     cx.notify();
                 })),
             );
-        div()
+        shell::card()
             .id(("inbox-row", id as usize))
             .on_mouse_down(
                 MouseButton::Right,
                 self.on_context(ctxmenu::CtxTarget::Session(id), cx),
             )
+            .relative()
             .p_3()
             .v_flex()
             .gap_2()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(if self.cursor == Some(id) {
-                c_blue()
-            } else {
-                c_border()
-            }))
+            .when(self.cursor == Some(id), |el| {
+                el.bg(tint(c_active()))
+                    .child(shell::accent_bracket(format!("inbox-bracket-{id}")))
+            })
             .child(
                 div()
                     .flex()
@@ -275,16 +273,23 @@ impl RunoApp {
         url: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
+        shell::card()
             .id(("inbox-gh", n))
             .p_3()
             .flex()
             .items_center()
             .gap_3()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .child(icon(glyph, 16., color))
+            .child(
+                div()
+                    .size(px(26.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .bg(rgb(settings::mix(color, c_canvas(), 0.16)))
+                    .child(icon(glyph, 14., color)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -313,7 +318,17 @@ impl RunoApp {
     pub(crate) fn inbox_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let waiting = self.needs_you();
         let mut rows = div().v_flex().gap_2();
+        let blocked = waiting
+            .iter()
+            .filter(|(_, need)| *need == Need::Blocked)
+            .count();
         for (n, (session, need)) in waiting.iter().enumerate() {
+            if n == 0 && blocked > 0 {
+                rows = rows.child(section("Waiting on you", blocked));
+            }
+            if n == blocked {
+                rows = rows.child(section("Finished unseen", waiting.len() - blocked));
+            }
             rows = rows.child(stagger(
                 self.inbox_row(n, session, *need, cx),
                 SharedString::from(format!("inbox-in-{}", session.id)),
@@ -323,6 +338,9 @@ impl RunoApp {
         let requested = self.gh.requested();
         let failed = github::latest_failures(&self.gh.runs);
         let mut n = 0;
+        if !requested.is_empty() || !failed.is_empty() {
+            rows = rows.child(section("GitHub", requested.len() + failed.len()));
+        }
         for pr in requested {
             rows = rows.child(self.inbox_gh_row(
                 n,
@@ -382,4 +400,19 @@ impl RunoApp {
             });
         self.page("Inbox", div().v_flex().gap_3().child(header).child(rows))
     }
+}
+
+/// A quiet label over one group of the Inbox, with its count.
+fn section(label: &'static str, count: usize) -> Div {
+    div()
+        .pt_2()
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_between()
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(c_muted()))
+        .child(label.to_uppercase())
+        .child(count.to_string())
 }
