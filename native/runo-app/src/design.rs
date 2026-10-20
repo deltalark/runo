@@ -248,7 +248,8 @@ impl RunoApp {
         }
     }
 
-    /// The design canvas, edge to edge under a slim header.
+    /// The design canvas, edge to edge: the project is in the top bar and the canvas has
+    /// its own head, so the agents asked from it float over its top right corner.
     fn design_canvas(
         &self,
         pid: u64,
@@ -259,29 +260,15 @@ impl RunoApp {
             .flex_1()
             .min_w_0()
             .h_full()
-            .v_flex()
-            .child(
+            .relative()
+            .child(div().size_full().child(canvas))
+            .children(self.canvas_chats(pid, View::Design, cx).map(|chats| {
                 div()
-                    .flex_none()
-                    .h(px(48.))
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
-                    .child(icon(Mode::Design.glyph(), 16., c_blue()))
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Design"),
-                    )
-                    .child(self.mode_project_chip(cx))
-                    .child(div().flex_1())
-                    .children(self.canvas_chats(pid, View::Design, cx)),
-            )
-            .child(div().flex_1().min_h_0().child(canvas))
+                    .absolute()
+                    .top(px(8.))
+                    .right(px(crate::designdraw::view::RIGHT_PANEL_W + 12.))
+                    .child(chats)
+            }))
             .into_any_element()
     }
 

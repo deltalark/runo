@@ -2,7 +2,6 @@
 //! the left, and on the right a Design tab of typed fields grouped into sections, a
 //! Prototype tab, the theme and the checks.
 
-use super::shapes::Shape;
 use super::*;
 use crate::designdraw::export::{self, Format};
 use crate::designdraw::fields::{self, FIELDS, SHADOWS};
@@ -269,270 +268,9 @@ impl DesignCanvas {
         )
     }
 
-    // ---- The top bar
-
-    pub(super) fn fig_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let sep = || div().w(px(1.)).h(px(18.)).mx_1().bg(rgb(c_border()));
-        let tool = |id: &'static str, name: IconName, tip_text: &'static str, on: bool| {
-            div()
-                .id(id)
-                .size(px(32.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .when(on, |el| el.bg(rgb(c_blue())))
-                .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
-                .tooltip(tip(tip_text))
-                .child(icon(name, 16., if on { 0xffffff } else { c_text() }))
-        };
-        let title = self
-            .screen
-            .as_ref()
-            .and_then(|id| self.canvas.screen(id))
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| "Design".into());
-        let hand = self.hand;
-        div()
-            .h(px(44.))
-            .flex_none()
-            .px_2()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .border_b_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_canvas()))
-            .child(
-                tool(
-                    "design-layers-toggle",
-                    if self.layers_hidden {
-                        IconName::PanelLeftOpen
-                    } else {
-                        IconName::PanelLeftClose
-                    },
-                    if self.layers_hidden {
-                        "Show layers (⌘\\)"
-                    } else {
-                        "Hide layers (⌘\\)"
-                    },
-                    false,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_layers(cx))),
-            )
-            .child(sep())
-            .child(
-                tool(
-                    "design-tool-move",
-                    IconName::MousePointer2,
-                    "Move (V)",
-                    !hand && !self.commenting && self.shape.is_none(),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.set_shape(None, cx);
-                    this.hand = false;
-                    this.commenting = false;
-                    this.comment_open = None;
-                    cx.notify();
-                })),
-            )
-            .child(
-                tool(
-                    "design-tool-frame",
-                    IconName::Frame,
-                    "New screen (F)",
-                    self.new_open,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.new_open = !this.new_open;
-                    cx.notify();
-                })),
-            )
-            .children(
-                [
-                    (
-                        Shape::Rect,
-                        "design-tool-rect",
-                        IconName::Square,
-                        "Rectangle (R)",
-                    ),
-                    (
-                        Shape::Ellipse,
-                        "design-tool-ellipse",
-                        IconName::Circle,
-                        "Ellipse (O)",
-                    ),
-                    (Shape::Line, "design-tool-line", IconName::Minus, "Line (L)"),
-                    (
-                        Shape::Arrow,
-                        "design-tool-arrow",
-                        IconName::MoveUpRight,
-                        "Arrow (Shift+L)",
-                    ),
-                    (Shape::Pen, "design-tool-pen", IconName::PenTool, "Pen (P)"),
-                ]
-                .map(|(shape, id, name, text)| {
-                    tool(id, name, text, self.shape == Some(shape)).on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            let on = this.shape == Some(shape);
-                            this.set_shape((!on).then_some(shape), cx);
-                        },
-                    ))
-                }),
-            )
-            .child(
-                tool("design-tool-text", IconName::Type, "Text (T)", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.insert("<p>Text</p>", cx))),
-            )
-            .child(
-                tool("design-tool-image", IconName::Image, "Image", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.image_tool(cx))),
-            )
-            .child(
-                tool("design-tool-hand", IconName::Hand, "Hand (H)", hand).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.hand = !this.hand;
-                        this.commenting = false;
-                        this.comment_open = None;
-                        cx.notify();
-                    },
-                )),
-            )
-            .child(
-                tool(
-                    "design-tool-comment",
-                    comments::comment_icon(),
-                    "Comment (C)",
-                    self.commenting,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_commenting(cx))),
-            )
-            .child(sep())
-            .child(
-                tool("design-tool-ai", IconName::Sparkles, "Ask AI", false)
-                    .on_click(cx.listener(|this, _, window, cx| this.focus_ask(window, cx))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .justify_center()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(c_text()))
-                    .child(div().truncate().child(title)),
-            )
-            .child(
-                icon_btn("design-undo", IconName::Undo2, "Undo (⌘Z)", false)
-                    .when(
-                        self.undo.is_empty() && !self.ai.as_ref().is_some_and(|ai| ai.changed),
-                        |el| el.opacity(0.4),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.undo(cx))),
-            )
-            .child(
-                icon_btn("design-redo", IconName::Redo2, "Redo (⇧⌘Z)", false)
-                    .when(self.redo.is_empty(), |el| el.opacity(0.4))
-                    .on_click(cx.listener(|this, _, _, cx| this.redo(cx))),
-            )
-            .child(sep())
-            .child(
-                icon_btn(
-                    "design-arrange",
-                    IconName::Workflow,
-                    "Arrange along the flow",
-                    false,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.arrange(cx))),
-            )
-            .child(
-                icon_btn(
-                    "design-hotspots",
-                    IconName::MousePointerClick,
-                    "Show links between screens",
-                    self.hotspots,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.hotspots = !this.hotspots;
-                    cx.notify();
-                })),
-            )
-            .child(
-                icon_btn(
-                    "design-dark",
-                    if self.dark {
-                        IconName::Moon
-                    } else {
-                        IconName::Sun
-                    },
-                    "Light or dark",
-                    self.dark,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let d = !this.dark;
-                    this.set_dark(d, cx)
-                })),
-            )
-            .child(sep())
-            .child(
-                div()
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .child(
-                        icon_btn("design-zoom-out", IconName::Minus, "Zoom out (⌘-)", false)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.zoom_step(1. / 1.25);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("design-zoom")
-                            .w(px(44.))
-                            .text_center()
-                            .cursor_pointer()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_text()))
-                            .tooltip(tip("Zoom to fit (⇧1)"))
-                            .child(format!("{}%", (self.zoom * 100.).round()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.fit();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        icon_btn("design-zoom-in", IconName::Plus, "Zoom in (⌘=)", false).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.zoom_step(1.25);
-                                cx.notify();
-                            }),
-                        ),
-                    ),
-            )
-            .child(sep())
-            .child(if self.playing.is_some() {
-                text_btn("design-play", "Stop", Some(IconName::Square), true).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.playing = None;
-                        cx.notify();
-                    },
-                ))
-            } else {
-                text_btn("design-play", "Present", Some(IconName::Play), true)
-                    .tooltip(tip("Click through the prototype"))
-                    .on_click(cx.listener(|this, _, _, cx| this.play(cx)))
-            })
-            .into_any_element()
-    }
-
     // ---- The layers panel on the left
 
-    pub(super) fn layers_side(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn layers_side(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let picked: Vec<dom::Path> = self
             .element
             .iter()
@@ -540,12 +278,15 @@ impl DesignCanvas {
             .map(|e| e.path.clone())
             .collect();
         let mut list = div().v_flex().px_1().pb_3();
-        if self.canvas.screens.is_empty() {
+        if self.screens_here().next().is_none() {
             list = list.child(div().px_2().pt_2().child(caption(
                 "Screens and what's on them show here. Add one with the frame tool.",
             )));
         }
         for (si, s) in self.canvas.screens.iter().enumerate() {
+            if !self.on_page(s) {
+                continue;
+            }
             let on = self.screen.as_ref() == Some(&s.id) && self.element.is_none();
             let open = self.screen.as_ref() == Some(&s.id);
             let id = s.id.clone();
@@ -579,15 +320,7 @@ impl DesignCanvas {
                         c_muted(),
                     ))
                     .child(icon(IconName::Hash, 12., c_secondary()))
-                    .child(div().flex_1().min_w_0().truncate().child(s.name.clone()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(rgb(c_muted()))
-                            .child(s.device.label()),
-                    ),
+                    .child(div().flex_1().min_w_0().truncate().child(s.name.clone())),
             );
             if !open || self.layers_of.as_ref() != Some(&s.id) {
                 continue;
@@ -606,6 +339,7 @@ impl DesignCanvas {
             .border_color(rgb(c_border()))
             // The sidebar's own sheet, so the rail's Design tab joins it.
             .bg(pane(c_sheet()))
+            .child(self.file_head(cx))
             .child(
                 div()
                     .h(px(36.))
@@ -626,17 +360,32 @@ impl DesignCanvas {
                             ))
                             .child(side_tab("design-left-assets", "Assets", self.assets, cx))
                             .child(side_tab("design-left-history", "History", self.history, cx)),
-                    )
-                    .child(
-                        mini("design-layers-add", IconName::Plus, "New screen (F)", false)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.new_open = !this.new_open;
-                                cx.notify();
-                            })),
                     ),
             )
+            .when(!self.assets && !self.history, |el| {
+                el.child(self.pages_list(window, cx)).child(
+                    div()
+                        .h(px(30.))
+                        .flex_none()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child("Layers")
+                        .child(
+                            mini("design-layers-add", IconName::Plus, "New screen (F)", false)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.new_open = !this.new_open;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .when(
-                !self.assets && !self.history && !self.canvas.screens.is_empty(),
+                !self.assets && !self.history && self.screens_here().next().is_some(),
                 |el| el.child(self.find_box()),
             )
             .child(
@@ -864,6 +613,7 @@ impl DesignCanvas {
             .border_l_1()
             .border_color(rgb(c_border()))
             .bg(tint(c_canvas()))
+            .child(self.right_head(cx))
             .child(
                 div()
                     .h(px(36.))
@@ -890,7 +640,10 @@ impl DesignCanvas {
                         Panel::Checks,
                         cx,
                     ))
-                    .child(tab("design-tab-code", "Code", 0, Panel::Code, cx)),
+                    .when(self.panel == Panel::Code, |el| {
+                        el.child(tab("design-tab-code", "Code", 0, Panel::Code, cx))
+                    })
+                    .child(self.zoom_button(cx)),
             )
             .child(
                 div()
@@ -1030,398 +783,21 @@ impl DesignCanvas {
             .child(sec("Insert", None).child(self.blocks(cx)))
     }
 
-    /// An element, or several, picked on a screen: its fields, section by section.
+    /// An element, or several, picked on a screen: its fields, section by section, in the
+    /// order design tools keep them.
     fn element_panel(&self, el: &Element, cx: &mut Context<Self>) -> Div {
         let multi = !self.also.is_empty();
         let mut out = div().v_flex();
-        // The header: what's picked, and what can be done to it.
-        let title: SharedString = if multi {
-            format!("{} elements", self.also.len() + 1).into()
-        } else {
-            el.name.clone().unwrap_or_else(|| el.label.clone()).into()
-        };
-        let mut tools = div().flex().items_center().gap(px(2.));
-        if multi {
-            tools = tools
-                .child(
-                    mini("design-group", IconName::Group, "Group (⌘G)", false)
-                        .on_click(cx.listener(|this, _, _, cx| this.group(false, cx))),
-                )
-                .child(
-                    mini("design-ungroup", IconName::Ungroup, "Ungroup (⇧⌘G)", false)
-                        .on_click(cx.listener(|this, _, _, cx| this.ungroup(cx))),
-                );
-        } else {
-            tools = tools
-                .child(
-                    mini("design-up", IconName::ArrowUp, "Move up (⌥↑)", false)
-                        .on_click(cx.listener(|this, _, _, cx| this.nudge(-1, cx))),
-                )
-                .child(
-                    mini("design-down", IconName::ArrowDown, "Move down (⌥↓)", false)
-                        .on_click(cx.listener(|this, _, _, cx| this.nudge(1, cx))),
-                )
-                .child(
-                    mini(
-                        "design-parent",
-                        IconName::ArrowUpLeft,
-                        "Select its parent (Esc)",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| this.escape(window, cx))),
-                )
-                .when(el.component.is_none(), |el| {
-                    el.child(
-                        mini(
-                            "design-make-component",
-                            components::component_icon(),
-                            "Create component (⌥⌘K)",
-                            false,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.create_component(cx))),
-                    )
-                });
-        }
-        tools = tools
-            .child(
-                mini(
-                    "design-lock",
-                    if el.locked {
-                        IconName::Lock
-                    } else {
-                        IconName::LockOpen
-                    },
-                    if el.locked {
-                        "Unlock (⇧⌘L)"
-                    } else {
-                        "Lock (⇧⌘L)"
-                    },
-                    el.locked,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.lock_selected(cx))),
-            )
-            .child(
-                mini("design-dup", IconName::Copy, "Duplicate (⌘D)", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.duplicate_element(cx))),
-            )
-            .child(
-                mini("design-del", IconName::Trash, "Delete (⌫)", false)
-                    .on_click(cx.listener(|this, _, _, cx| this.delete_element(cx))),
-            );
-        out = out.child(
-            div()
-                .px_3()
-                .pt_2()
-                .pb_1()
-                .v_flex()
-                .gap(px(2.))
-                .border_b_1()
-                .border_color(rgb(c_border()))
-                .child(
-                    div()
-                        .h(px(24.))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(icon(
-                            if multi {
-                                IconName::Group
-                            } else if el.component.is_some() {
-                                components::component_icon()
-                            } else {
-                                layer_icon(&el.tag)
-                            },
-                            13.,
-                            if !multi && el.component.is_some() {
-                                components::PURPLE
-                            } else {
-                                c_secondary()
-                            },
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(12.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(c_text()))
-                                .child(title),
-                        ),
-                )
-                .child(tools.ml(px(-4.))),
-        );
+        out = out.child(self.selection_head(el, multi, cx));
         out = out.children(self.vector_tools(el, cx));
         out = out.children(self.component_section(cx));
         out = out.children(self.code_link_section());
-        if !multi {
-            out = out.child(self.style_section(el, cx));
-        }
+        out = out.child(self.position_section(el, multi, cx));
+        out = out.child(self.layout_section(el, cx));
         if !multi {
             out = out
                 .children(self.icon_section(el, cx))
                 .children(self.picture_section(el, cx));
-        }
-
-        // Layout: size and padding.
-        out = out.child(
-            sec("Layout", None)
-                .child(pair(self.fld("w", mark("W")), self.fld("h", mark("H"))))
-                .child(label_row(
-                    "Width",
-                    self.choice_row(
-                        "width",
-                        el,
-                        &[("Hug", "fit-content"), ("Fill", "100%"), ("Auto", "")],
-                        cx,
-                    ),
-                ))
-                .child(pair(
-                    self.fld("pad-x", mark_icon(IconName::MoveHorizontal)),
-                    self.fld("pad-y", mark_icon(IconName::MoveVertical)),
-                )),
-        );
-
-        // Position: in the flow, floating over what holds it, stuck on scroll, or pinned.
-        let place = match el.style("position").as_str() {
-            "absolute" => "absolute",
-            "sticky" => "sticky",
-            "fixed" => "fixed",
-            _ => "",
-        };
-        let mut places = div().flex().flex_wrap().gap(px(4.));
-        for (i, (label, mode, hint)) in [
-            ("In flow", "", "Laid out with what's around it"),
-            (
-                "Floating",
-                "absolute",
-                "Over what holds it, where it is now",
-            ),
-            ("Sticky", "sticky", "Stays at the top as the screen scrolls"),
-            ("Pinned", "fixed", "Fixed to the screen"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            places = places.child(
-                chip_btn(("design-position", i), label, place == mode)
-                    .tooltip(tip(hint))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.op("position", &[json!(mode)], After::Same, cx)
-                    })),
-            );
-        }
-        let mut position = sec("Position", None).child(places);
-        if !place.is_empty() {
-            // The edges it keeps its distance to, and how far.
-            let set = |k: &str| !el.inline.get(k).is_none_or(|v| v.trim().is_empty());
-            let right = set("right") && !set("left");
-            let bottom = set("bottom") && !set("top");
-            let mut sides = div().flex().flex_wrap().gap(px(4.));
-            let mut choices = vec![("Top", "top", !bottom), ("Bottom", "bottom", bottom)];
-            if place != "sticky" {
-                choices.splice(0..0, [("Left", "left", !right), ("Right", "right", right)]);
-            }
-            for (i, (label, side, on)) in choices.into_iter().enumerate() {
-                sides = sides.child(
-                    chip_btn(("design-anchor", i), label, on)
-                        .tooltip(tip("Keep its distance to this edge"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.op("anchor", &[json!(side)], After::Same, cx)
-                        })),
-                );
-            }
-            position = position.child(sides);
-            let across = if right {
-                self.fld("r", mark("R"))
-            } else {
-                self.fld("x", mark("X"))
-            };
-            let down = if bottom {
-                self.fld("b", mark("B"))
-            } else {
-                self.fld("y", mark("Y"))
-            };
-            position = position.child(if place == "sticky" {
-                div().flex().child(down)
-            } else {
-                pair(across, down)
-            });
-        }
-        out = out.child(position);
-
-        // Auto layout.
-        if el.is_flex() {
-            let across = fields::row(el);
-            let (cell_c, cell_r) = fields::cell(el);
-            let mut grid = div()
-                .size(px(66.))
-                .flex_none()
-                .p(px(3.))
-                .grid()
-                .grid_cols(3)
-                .rounded(px(5.))
-                .bg(tint(c_subtle()));
-            for r in 0..3 {
-                for c in 0..3 {
-                    let on = (c, r) == (cell_c, cell_r);
-                    let (j, a) = fields::align_for(c, r, across);
-                    grid = grid.child(
-                        div()
-                            .id(("design-align", r * 3 + c))
-                            .size(px(20.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .rounded(px(3.))
-                            .hover(|el| el.bg(tint(c_active())))
-                            .child(
-                                div()
-                                    .when(on, |el| {
-                                        el.w(px(if across { 4. } else { 12. }))
-                                            .h(px(if across { 12. } else { 4. }))
-                                            .bg(rgb(c_blue()))
-                                    })
-                                    .when(!on, |el| el.size(px(3.)).bg(rgb(c_muted())))
-                                    .rounded_full(),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.set_styles(&[("justify-content", j), ("align-items", a)], cx)
-                            })),
-                    );
-                }
-            }
-            let spread = el.style("justify-content") == "space-between";
-            let wraps = el.style("flex-wrap") == "wrap";
-            out = out.child(
-                sec(
-                    "Auto layout",
-                    Some(
-                        mini(
-                            "design-al-off",
-                            IconName::Minus,
-                            "Remove auto layout",
-                            false,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_styles(
-                                &[
-                                    ("display", "block"),
-                                    ("flex-direction", ""),
-                                    ("gap", ""),
-                                    ("justify-content", ""),
-                                    ("align-items", ""),
-                                ],
-                                cx,
-                            )
-                        }))
-                        .into_any_element(),
-                    ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .flex()
-                                .gap(px(2.))
-                                .p(px(2.))
-                                .rounded(px(5.))
-                                .bg(tint(c_subtle()))
-                                .child(
-                                    mini(
-                                        "design-al-down",
-                                        IconName::ArrowDown,
-                                        "Vertical layout",
-                                        !across,
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.set_style("flex-direction", "column", cx)
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    mini(
-                                        "design-al-across",
-                                        IconName::ArrowRight,
-                                        "Horizontal layout",
-                                        across,
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.set_style("flex-direction", "row", cx)
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    mini(
-                                        "design-al-wrap",
-                                        IconName::Grid3x3,
-                                        "Wrap onto more lines",
-                                        wraps,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.set_style(
-                                                "flex-wrap",
-                                                if wraps { "" } else { "wrap" },
-                                                cx,
-                                            )
-                                        },
-                                    )),
-                                ),
-                        )
-                        .child(self.fld(
-                            "gap",
-                            mark_icon(if across {
-                                IconName::AlignHorizontalSpaceBetween
-                            } else {
-                                IconName::AlignVerticalSpaceBetween
-                            }),
-                        )),
-                )
-                .child(
-                    div().flex().gap(px(8.)).child(grid).child(
-                        div()
-                            .v_flex()
-                            .gap(px(4.))
-                            .child(caption("Where the children sit"))
-                            .child(
-                                chip_btn("design-al-spread", "Space between", spread).on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.set_style(
-                                            "justify-content",
-                                            if spread { "" } else { "space-between" },
-                                            cx,
-                                        )
-                                    }),
-                                ),
-                            ),
-                    ),
-                ),
-            );
-        } else {
-            out = out.child(
-                sec(
-                    "Auto layout",
-                    Some(
-                        mini(
-                            "design-al-on",
-                            IconName::Plus,
-                            "Add auto layout (⇧A)",
-                            false,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.auto_layout(cx)))
-                        .into_any_element(),
-                    ),
-                )
-                .child(caption(
-                    "Lay children out in a row or column, with even gaps.",
-                )),
-            );
         }
 
         // Appearance.
@@ -1668,6 +1044,9 @@ impl DesignCanvas {
                 )),
         );
 
+        if !multi {
+            out = out.child(self.style_section(el, cx));
+        }
         out.child(self.export_section(if multi { "selection" } else { &el.label }, cx))
             .child(self.insert_section(el, multi, cx))
     }
@@ -2043,5 +1422,586 @@ impl DesignCanvas {
                 .child(sec("Speed", None).child(speeds));
         }
         out
+    }
+}
+
+/// How a width or height is sized, as design tools name it, from its own style.
+fn sizing(el: &Element, key: &str) -> &'static str {
+    match el.inline.get(key).map(|v| v.trim()) {
+        Some("fit-content") | Some("max-content") => "Hug",
+        Some("100%") => "Fill",
+        Some(v) if !v.is_empty() => "Fixed",
+        _ => "Auto",
+    }
+}
+
+impl DesignCanvas {
+    /// What's picked, what kind of layer it is, and its menu.
+    fn selection_head(&self, el: &Element, multi: bool, cx: &mut Context<Self>) -> AnyElement {
+        let title: SharedString = if multi {
+            format!("{} layers", self.also.len() + 1).into()
+        } else {
+            el.name.clone().unwrap_or_else(|| el.label.clone()).into()
+        };
+        let kind = if multi {
+            "Selection"
+        } else if el.component.is_some() {
+            "Instance"
+        } else if el.tag == "svg" {
+            "Vector"
+        } else if el.text.is_some() {
+            "Text"
+        } else if el.is_flex() {
+            "Auto layout"
+        } else {
+            "Frame"
+        };
+        let open = self.flyout == Some(super::chrome::Flyout::Selection(None));
+        let mut tools = div().flex().items_center().gap(px(2.));
+        if multi {
+            tools = tools
+                .child(
+                    mini("design-group", IconName::Group, "Group (⌘G)", false)
+                        .on_click(cx.listener(|this, _, _, cx| this.group(false, cx))),
+                )
+                .child(
+                    mini("design-ungroup", IconName::Ungroup, "Ungroup (⇧⌘G)", false)
+                        .on_click(cx.listener(|this, _, _, cx| this.ungroup(cx))),
+                );
+        } else if el.component.is_none() {
+            tools = tools.child(
+                mini(
+                    "design-make-component",
+                    components::component_icon(),
+                    "Create component (⌥⌘K)",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.create_component(cx))),
+            );
+        }
+        tools = tools
+            .child(
+                mini(
+                    "design-sel-ai",
+                    IconName::Sparkles,
+                    "Ask AI about it (/)",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.focus_ask(window, cx))),
+            )
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        mini("design-sel-more", IconName::Ellipsis, "More", open).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.flyout =
+                                    (!open).then_some(super::chrome::Flyout::Selection(None));
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .when(open, |el| {
+                        el.child(div().absolute().top(px(26.)).right_0().child(self.menu_at(
+                            "design-sel-panel-menu",
+                            self.selection_items(),
+                            230.,
+                            Anchor::TopRight,
+                            cx,
+                        )))
+                    }),
+            );
+        div()
+            .px_3()
+            .h(px(44.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .border_b_1()
+            .border_color(rgb(c_border()))
+            .child(icon(
+                if multi {
+                    IconName::Group
+                } else if el.component.is_some() {
+                    components::component_icon()
+                } else {
+                    layer_icon(&el.tag)
+                },
+                13.,
+                if !multi && el.component.is_some() {
+                    components::PURPLE
+                } else {
+                    c_secondary()
+                },
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(rgb(c_muted()))
+                            .child(kind),
+                    ),
+            )
+            .child(tools)
+            .into_any_element()
+    }
+
+    /// A field that opens a short menu of choices, as design tools show Hug and Fill.
+    fn choice_field(
+        &self,
+        id: &'static str,
+        lead: AnyElement,
+        label: impl Into<SharedString>,
+        flyout: super::chrome::Flyout,
+        items: Vec<super::chrome::Item>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let open = self.flyout.as_ref() == Some(&flyout);
+        div()
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .child(
+                div()
+                    .id(id)
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .bg(tint(c_subtle()))
+                    .border_1()
+                    .border_color(if open {
+                        rgb(c_blue())
+                    } else {
+                        tint(c_subtle())
+                    })
+                    .hover(|el| el.border_color(rgb(c_border())))
+                    .text_size(px(12.))
+                    .text_color(rgb(c_text()))
+                    .child(lead)
+                    .child(div().flex_1().min_w_0().truncate().child(label.into()))
+                    .child(icon(IconName::ChevronDown, 10., c_muted()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.flyout = (!open).then(|| flyout.clone());
+                        cx.notify();
+                    })),
+            )
+            .when(open, |el| {
+                el.child(div().absolute().top(px(30.)).left_0().child(self.menu_at(
+                    "design-choice-menu",
+                    items,
+                    170.,
+                    Anchor::TopLeft,
+                    cx,
+                )))
+            })
+    }
+
+    /// Where it sits: lined up in what holds it, its place, how it's positioned and its
+    /// rotation.
+    fn position_section(&self, el: &Element, multi: bool, cx: &mut Context<Self>) -> Div {
+        use super::chrome::{Flyout, Item};
+        let mut aligns = div().flex().gap(px(6.));
+        for (group, sides) in [
+            (
+                0,
+                [
+                    ("left", IconName::AlignStartVertical, "Align left"),
+                    (
+                        "hcenter",
+                        IconName::AlignCenterVertical,
+                        "Align horizontal centres",
+                    ),
+                    ("right", IconName::AlignEndVertical, "Align right"),
+                ],
+            ),
+            (
+                1,
+                [
+                    ("top", IconName::AlignStartHorizontal, "Align top"),
+                    (
+                        "vcenter",
+                        IconName::AlignCenterHorizontal,
+                        "Align vertical centres",
+                    ),
+                    ("bottom", IconName::AlignEndHorizontal, "Align bottom"),
+                ],
+            ),
+        ] {
+            let mut seg = div()
+                .flex()
+                .gap(px(2.))
+                .p(px(2.))
+                .rounded(px(5.))
+                .bg(tint(c_subtle()));
+            for (i, (side, name, t)) in sides.into_iter().enumerate() {
+                seg = seg.child(
+                    mini(("design-align-to", group * 3 + i), name, t, false).on_click(cx.listener(
+                        move |this, _, _, cx| this.op("align", &[json!(side)], After::Same, cx),
+                    )),
+                );
+            }
+            aligns = aligns.child(seg);
+        }
+        let place = match el.style("position").as_str() {
+            "absolute" => "absolute",
+            "sticky" => "sticky",
+            "fixed" => "fixed",
+            _ => "",
+        };
+        let places = [
+            ("In flow", "", "Laid out with what's around it"),
+            (
+                "Floating",
+                "absolute",
+                "Over what holds it, where it is now",
+            ),
+            ("Sticky", "sticky", "Stays at the top as the screen scrolls"),
+            ("Pinned", "fixed", "Fixed to the screen"),
+        ];
+        let now = places
+            .iter()
+            .find(|p| p.1 == place)
+            .map(|p| p.0)
+            .unwrap_or("In flow");
+        let items = places
+            .iter()
+            .map(|(label, mode, _)| {
+                let mode: &'static str = mode;
+                Item::new(*label, "", move |this, _, cx| {
+                    this.op("position", &[json!(mode)], After::Same, cx)
+                })
+            })
+            .collect();
+        let mut out = sec("Position", None);
+        if !multi {
+            out = out.child(aligns);
+        }
+        if place.is_empty() {
+            // In the flow, where it is shows but is set by its layout.
+            let read = |id: &'static str, m: &'static str, v: f32| {
+                div()
+                    .id(id)
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(28.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(5.))
+                    .bg(tint(c_subtle()))
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .tooltip(tip(
+                        "Set by the layout. Make it Floating to place it freely.",
+                    ))
+                    .child(mark(m))
+                    .child(format!("{}", v.round()))
+            };
+            out = out.child(pair(
+                read("design-x-read", "X", el.rect.x),
+                read("design-y-read", "Y", el.rect.y),
+            ));
+        } else {
+            let set = |k: &str| !el.inline.get(k).is_none_or(|v| v.trim().is_empty());
+            let right = set("right") && !set("left");
+            let bottom = set("bottom") && !set("top");
+            let across = if right {
+                self.fld("r", mark("R"))
+            } else {
+                self.fld("x", mark("X"))
+            };
+            let down = if bottom {
+                self.fld("b", mark("B"))
+            } else {
+                self.fld("y", mark("Y"))
+            };
+            out = out.child(if place == "sticky" {
+                div().flex().child(down)
+            } else {
+                pair(across, down)
+            });
+        }
+        out = out.child(pair(
+            self.choice_field(
+                "design-place",
+                mark_icon(IconName::Move),
+                now,
+                Flyout::Place,
+                items,
+                cx,
+            ),
+            self.fld("rotate", mark_icon(IconName::RotateCw)),
+        ));
+        if !place.is_empty() {
+            // The edges it keeps its distance to, as constraints do.
+            let set = |k: &str| !el.inline.get(k).is_none_or(|v| v.trim().is_empty());
+            let right = set("right") && !set("left");
+            let bottom = set("bottom") && !set("top");
+            let mut sides = div().flex().flex_wrap().gap(px(4.));
+            let mut choices = vec![("Top", "top", !bottom), ("Bottom", "bottom", bottom)];
+            if place != "sticky" {
+                choices.splice(0..0, [("Left", "left", !right), ("Right", "right", right)]);
+            }
+            for (i, (label, side, on)) in choices.into_iter().enumerate() {
+                sides = sides.child(
+                    chip_btn(("design-anchor", i), label, on)
+                        .tooltip(tip("Keep its distance to this edge"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.op("anchor", &[json!(side)], After::Same, cx)
+                        })),
+                );
+            }
+            out = out.child(label_row("Constraints", sides));
+        }
+        out
+    }
+
+    /// Size and auto layout: width and height with how each is sized, then, in an auto
+    /// layout, its direction, where children sit, the gap and the padding.
+    fn layout_section(&self, el: &Element, cx: &mut Context<Self>) -> Div {
+        use super::chrome::{Flyout, Item};
+        let size_items = |key: &'static str, px_now: f32| -> Vec<Item> {
+            let fixed = format!("{}px", px_now.round());
+            vec![
+                Item::new("Fixed", "", move |this, _, cx| {
+                    this.set_style(key, &fixed, cx)
+                }),
+                Item::new("Hug contents", "", move |this, _, cx| {
+                    this.set_style(key, "fit-content", cx)
+                }),
+                Item::new("Fill container", "", move |this, _, cx| {
+                    this.set_style(key, "100%", cx)
+                }),
+                Item::new("Auto", "", move |this, _, cx| this.set_style(key, "", cx)),
+            ]
+        };
+        let sizes = pair(
+            self.choice_field(
+                "design-size-w",
+                mark_icon(IconName::MoveHorizontal),
+                sizing(el, "width"),
+                Flyout::Size("w"),
+                size_items("width", el.rect.w),
+                cx,
+            ),
+            self.choice_field(
+                "design-size-h",
+                mark_icon(IconName::MoveVertical),
+                sizing(el, "height"),
+                Flyout::Size("h"),
+                size_items("height", el.rect.h),
+                cx,
+            ),
+        );
+        let dims = pair(self.fld("w", mark("W")), self.fld("h", mark("H")));
+        let padding = pair(
+            self.fld("pad-x", mark_icon(IconName::ArrowLeftRight)),
+            self.fld("pad-y", mark_icon(IconName::ArrowUpDown)),
+        );
+        let clips = el.style("overflow") == "hidden";
+        let clip = div()
+            .id("design-clip")
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .text_size(px(12.))
+            .text_color(rgb(c_text()))
+            .child(
+                div()
+                    .size(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(3.))
+                    .border_1()
+                    .border_color(rgb(if clips { c_blue() } else { c_border() }))
+                    .when(clips, |el| {
+                        el.bg(rgb(c_blue()))
+                            .child(icon(IconName::Check, 10., 0xffffff))
+                    }),
+            )
+            .child("Clip content")
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_style("overflow", if clips { "" } else { "hidden" }, cx)
+            }));
+        if !el.is_flex() {
+            return sec(
+                "Layout",
+                Some(
+                    mini(
+                        "design-al-on",
+                        IconName::Plus,
+                        "Add auto layout (⇧A)",
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.auto_layout(cx)))
+                    .into_any_element(),
+                ),
+            )
+            .child(dims)
+            .child(sizes)
+            .child(padding)
+            .child(clip);
+        }
+        let across = fields::row(el);
+        let wraps = el.style("flex-wrap") == "wrap";
+        let (cell_c, cell_r) = fields::cell(el);
+        let mut grid = div()
+            .size(px(66.))
+            .flex_none()
+            .p(px(3.))
+            .grid()
+            .grid_cols(3)
+            .rounded(px(5.))
+            .bg(tint(c_subtle()));
+        for r in 0..3 {
+            for c in 0..3 {
+                let on = (c, r) == (cell_c, cell_r);
+                let (j, a) = fields::align_for(c, r, across);
+                grid = grid.child(
+                    div()
+                        .id(("design-align", r * 3 + c))
+                        .size(px(20.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .rounded(px(3.))
+                        .hover(|el| el.bg(tint(c_active())))
+                        .child(
+                            div()
+                                .when(on, |el| {
+                                    el.w(px(if across { 4. } else { 12. }))
+                                        .h(px(if across { 12. } else { 4. }))
+                                        .bg(rgb(c_blue()))
+                                })
+                                .when(!on, |el| el.size(px(3.)).bg(rgb(c_muted())))
+                                .rounded_full(),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_styles(&[("justify-content", j), ("align-items", a)], cx)
+                        })),
+                );
+            }
+        }
+        let spread = el.style("justify-content") == "space-between";
+        let direction = div()
+            .flex()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(5.))
+            .bg(tint(c_subtle()))
+            .child(
+                mini(
+                    "design-al-down",
+                    IconName::ArrowDown,
+                    "Vertical layout",
+                    !across,
+                )
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.set_style("flex-direction", "column", cx)),
+                ),
+            )
+            .child(
+                mini(
+                    "design-al-across",
+                    IconName::ArrowRight,
+                    "Horizontal layout",
+                    across,
+                )
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.set_style("flex-direction", "row", cx)),
+                ),
+            )
+            .child(
+                mini(
+                    "design-al-wrap",
+                    IconName::Grid3x3,
+                    "Wrap onto more lines",
+                    wraps,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_style("flex-wrap", if wraps { "" } else { "wrap" }, cx)
+                })),
+            );
+        sec(
+            "Auto layout",
+            Some(
+                mini(
+                    "design-al-off",
+                    IconName::Minus,
+                    "Remove auto layout",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_styles(
+                        &[
+                            ("display", "block"),
+                            ("flex-direction", ""),
+                            ("gap", ""),
+                            ("justify-content", ""),
+                            ("align-items", ""),
+                        ],
+                        cx,
+                    )
+                }))
+                .into_any_element(),
+            ),
+        )
+        .child(direction)
+        .child(dims)
+        .child(sizes)
+        .child(
+            div().flex().gap(px(8.)).child(grid).child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .gap(px(6.))
+                    .child(self.fld(
+                        "gap",
+                        mark_icon(if across {
+                            IconName::AlignHorizontalSpaceBetween
+                        } else {
+                            IconName::AlignVerticalSpaceBetween
+                        }),
+                    ))
+                    .child(
+                        chip_btn("design-al-spread", "Space between", spread).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.set_style(
+                                    "justify-content",
+                                    if spread { "" } else { "space-between" },
+                                    cx,
+                                )
+                            }),
+                        ),
+                    ),
+            ),
+        )
+        .child(padding)
+        .child(clip)
     }
 }
