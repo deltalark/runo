@@ -450,7 +450,7 @@ impl Shell {
             pixel_height: 0,
         });
         if let Ok(mut p) = self.parser.lock() {
-            p.set_size(rows, cols);
+            set_size_keeping_cursor(&mut p, rows, cols);
         }
     }
 
@@ -852,10 +852,55 @@ pub fn find_in(lines: &[String], query: &str) -> Vec<(usize, usize, usize)> {
     hits
 }
 
+/// Resize the screen without losing its newest lines. Made shorter, vt100 drops the
+/// rows at the bottom, which are the newest output and the prompt; so the rows above the
+/// cursor scroll up into the scrollback first, as a terminal does. A full-screen program
+/// redraws itself for the new size, so its screen is left as it is.
+fn set_size_keeping_cursor(p: &mut vt100::Parser, rows: u16, cols: u16) {
+    let (old_rows, _) = p.screen().size();
+    let (row, col) = p.screen().cursor_position();
+    if rows < old_rows && row >= rows && !p.screen().alternate_screen() {
+        let shift = row + 1 - rows;
+        // From the bottom row, each line feed scrolls the screen up by one.
+        let mut bytes = format!("\x1b[{old_rows};1H").into_bytes();
+        bytes.extend(std::iter::repeat_n(b'\n', usize::from(shift)));
+        p.process(&bytes);
+        p.set_size(rows, cols);
+        p.process(format!("\x1b[{};{}H", row - shift + 1, col + 1).as_bytes());
+    } else {
+        p.set_size(rows, cols);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_shorter_screen_keeps_the_newest_lines() {
+        let mut p = vt100::Parser::new(10, 20, 100);
+        for i in 1..=15 {
+            p.process(format!("line {i}\r\n").as_bytes());
+        }
+        p.process(b"$ ");
+        set_size_keeping_cursor(&mut p, 6, 20);
+        let text = p.screen().contents();
+        let last: Vec<&str> = text.lines().collect();
+        assert_eq!(last.len(), 6);
+        assert_eq!(last[4], "line 15");
+        assert_eq!(last[5].trim_end(), "$");
+        assert_eq!(p.screen().cursor_position(), (5, 2));
+        // What scrolled off is in the scrollback.
+        p.set_scrollback(4);
+        assert!(p.screen().contents().starts_with("line 7"));
+        // Short output that still fits stays where it is.
+        let mut q = vt100::Parser::new(10, 20, 100);
+        q.process(b"one\r\ntwo");
+        set_size_keeping_cursor(&mut q, 6, 20);
+        assert!(q.screen().contents().starts_with("one\ntwo"));
+        assert_eq!(q.screen().cursor_position(), (1, 3));
+    }
 
     #[test]
     fn keys_map_to_xterm_sequences() {

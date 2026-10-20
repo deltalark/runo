@@ -18,6 +18,29 @@ pub enum Status {
     Working,
     Done,
     Failed,
+    /// The person stopped the turn on purpose: not an error.
+    Stopped,
+}
+
+impl Status {
+    /// The word shown for a session's status, everywhere it is shown.
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::Idle => "Idle",
+            Status::Working => "Working",
+            Status::Done => "Completed",
+            Status::Failed => "Failed",
+            Status::Stopped => "Stopped",
+        }
+    }
+}
+
+/// How a tool step in an agent turn stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepState {
+    Running,
+    Done,
+    Failed,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -64,6 +87,13 @@ pub struct Message {
     /// User turns run from a playbook: what the person typed with it, if anything.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// Agent turns: steps (by index into `steps`) whose tool reported an error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_steps: Vec<usize>,
+    /// Agent turns: steps still waiting for their result, as (index into `steps`, the
+    /// tool call's id). Only meaningful while the turn runs, so it isn't saved.
+    #[serde(skip)]
+    pub running_steps: Vec<(usize, String)>,
 }
 
 /// Token use of one agent turn.
@@ -218,7 +248,34 @@ impl Message {
             questions: Vec::new(),
             playbook: String::new(),
             note: String::new(),
+            failed_steps: Vec::new(),
+            running_steps: Vec::new(),
         }
+    }
+
+    /// Where step `i` stands, for its icon: still running (only while the turn is live),
+    /// failed, or done.
+    pub fn step_state(&self, i: usize, live: bool) -> StepState {
+        if live && self.running_steps.iter().any(|(j, _)| *j == i) {
+            StepState::Running
+        } else if self.failed_steps.contains(&i) {
+            StepState::Failed
+        } else {
+            StepState::Done
+        }
+    }
+
+    /// A started step's result arrived: it is no longer running, and is marked failed
+    /// when its tool reported an error. Returns false when no step has that id.
+    pub fn finish_step(&mut self, id: &str, ok: bool) -> bool {
+        let Some(at) = self.running_steps.iter().position(|(_, s)| s == id) else {
+            return false;
+        };
+        let (i, _) = self.running_steps.remove(at);
+        if !ok && !self.failed_steps.contains(&i) {
+            self.failed_steps.push(i);
+        }
+        true
     }
 
     /// A message stamped with the current local time, for the conversation header.
@@ -248,6 +305,21 @@ pub struct Project {
     /// uses the one in Settings.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub setup: String,
+    /// How pull requests are merged on GitHub: "merge", "squash" or "rebase"; empty
+    /// picks one the repository allows.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub merge_method: String,
+    /// Commands run after each turn that changed files, one per line (tests, lint,
+    /// typecheck, build). Empty runs none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checks: String,
+    /// How many times in a row failing checks go back to the agent on their own; 0 asks.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub fix_rounds: u32,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 fn default_mode() -> String {
@@ -353,6 +425,12 @@ pub struct Session {
     /// turn of the session keeps to it. Empty means no limits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limits: Vec<String>,
+    /// Proof of done for the last turn: its checks and the second opinion on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<crate::proof::Proof>,
+    /// The mission this session works for: one of its parts, or its own session.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub mission: u64,
 }
 
 /// A prompt waiting for the agent, with the images attached to it.
@@ -480,6 +558,31 @@ pub struct State {
     /// Cost reported by the agents per day ("%Y-%m-%d"), in US cents; the last 31 days.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub spend: std::collections::BTreeMap<String, f64>,
+    /// Turns started and tokens reported per day ("%Y-%m-%d"), for the turn and token
+    /// limits; the last 31 days, like `spend`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub day_use: std::collections::BTreeMap<String, DayUse>,
+    /// Goals planned into parts that agents work on at once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missions: Vec<crate::mission::Mission>,
+}
+
+/// What agents did on one day, across every session.
+#[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct DayUse {
+    /// Turns started.
+    #[serde(default)]
+    pub turns: u32,
+    /// Input and output tokens the agents reported, cached ones not counted.
+    #[serde(default)]
+    pub tokens: u64,
+}
+
+/// Drop the oldest days past a month.
+fn keep_month<V>(days: &mut std::collections::BTreeMap<String, V>) {
+    while days.len() > 31 {
+        days.pop_first();
+    }
 }
 
 /// How a project's notes are kept and used.
@@ -807,10 +910,28 @@ impl State {
             return;
         }
         *self.spend.entry(day.to_string()).or_default() += cents;
-        while self.spend.len() > 31 {
-            let first = self.spend.keys().next().cloned().unwrap_or_default();
-            self.spend.remove(&first);
+        keep_month(&mut self.spend);
+    }
+
+    /// Count a turn started on `day`, keeping a month of days.
+    pub fn add_turn(&mut self, day: &str) {
+        self.day_use.entry(day.to_string()).or_default().turns += 1;
+        keep_month(&mut self.day_use);
+    }
+
+    /// Add a turn's reported tokens to `day`, keeping a month of days.
+    pub fn add_tokens(&mut self, day: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
         }
+        let used = self.day_use.entry(day.to_string()).or_default();
+        used.tokens = used.tokens.saturating_add(tokens);
+        keep_month(&mut self.day_use);
+    }
+
+    /// Turns and tokens on `day`; a day with nothing yet, such as a new one, is zero.
+    pub fn used_on(&self, day: &str) -> DayUse {
+        self.day_use.get(day).copied().unwrap_or_default()
     }
 
     /// Record an event for the Activity feed, keeping the latest 500.
@@ -1325,6 +1446,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_session_reads_stopped_not_failed() {
+        assert_eq!(Status::Stopped.label(), "Stopped");
+        assert_eq!(Status::Failed.label(), "Failed");
+        let saved: Status =
+            serde_json::from_str(&serde_json::to_string(&Status::Stopped).unwrap()).unwrap();
+        assert!(saved == Status::Stopped);
+    }
+
+    #[test]
+    fn steps_run_until_finished_and_keep_failures() {
+        let mut m = Message::new(Role::Agent, "");
+        m.steps = vec!["Ran sleep 60".into(), "Ran false".into()];
+        m.running_steps = vec![(0, "a".into()), (1, "b".into())];
+        assert_eq!(m.step_state(0, true), StepState::Running);
+        assert_eq!(
+            m.step_state(0, false),
+            StepState::Done,
+            "nothing runs once the turn is over"
+        );
+        assert!(m.finish_step("b", false));
+        assert!(!m.finish_step("b", false), "already finished");
+        assert_eq!(m.step_state(1, true), StepState::Failed);
+        assert!(m.finish_step("a", true));
+        assert_eq!(m.step_state(0, true), StepState::Done);
+        let saved: Message = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(saved.failed_steps, [1]);
+        assert!(saved.running_steps.is_empty());
+    }
+
+    #[test]
     fn queued_prompts_load_from_older_saves() {
         let old: Vec<Queued> =
             serde_json::from_str(r#"["Fix it",{"text":"Look","images":["a.png"]}]"#).unwrap();
@@ -1403,5 +1554,63 @@ mod tests {
         }
         assert_eq!(state.spend.len(), 31);
         assert!(!state.spend.contains_key("2026-10-13"));
+    }
+
+    #[test]
+    fn turns_and_tokens_add_up_per_day_and_keep_a_month() {
+        let mut state = State::default();
+        state.add_turn("2026-10-13");
+        state.add_turn("2026-10-13");
+        state.add_tokens("2026-10-13", 1_500);
+        state.add_tokens("2026-10-13", 0);
+        state.add_tokens("2026-10-13", 500);
+        assert_eq!(
+            state.used_on("2026-10-13"),
+            DayUse {
+                turns: 2,
+                tokens: 2_000
+            }
+        );
+        // A new day starts from nothing, and yesterday's count stays as it was.
+        assert_eq!(state.used_on("2026-10-14"), DayUse::default());
+        state.add_turn("2026-10-14");
+        assert_eq!(state.used_on("2026-10-14").turns, 1);
+        assert_eq!(state.used_on("2026-10-13").turns, 2);
+        // Tokens alone start a day too, with no turns.
+        state.add_tokens("2026-10-15", 7);
+        assert_eq!(
+            state.used_on("2026-10-15"),
+            DayUse {
+                turns: 0,
+                tokens: 7
+            }
+        );
+        for day in 1..=40 {
+            state.add_turn(&format!("2026-11-{day:02}"));
+        }
+        assert_eq!(state.day_use.len(), 31);
+        assert!(!state.day_use.contains_key("2026-10-13"));
+        assert_eq!(state.used_on("2026-10-13"), DayUse::default());
+    }
+
+    #[test]
+    fn turns_and_tokens_per_day_survive_a_restart() {
+        let mut state = State::default();
+        state.add_turn("2026-10-13");
+        state.add_tokens("2026-10-13", 42);
+        let text = serde_json::to_string(&state).unwrap();
+        let back: State = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            back.used_on("2026-10-13"),
+            DayUse {
+                turns: 1,
+                tokens: 42
+            }
+        );
+        // A state saved before these counts reads as none.
+        let mut saved = serde_json::to_value(&back).unwrap();
+        saved.as_object_mut().unwrap().remove("day_use");
+        let old: State = serde_json::from_value(saved).unwrap();
+        assert!(old.day_use.is_empty());
     }
 }

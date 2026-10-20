@@ -316,9 +316,108 @@ pub struct PrStatus {
     pub comments: usize,
     /// A review the session's agent wrote and nobody posted yet.
     pub draft_review: Option<ReviewDraft>,
+    /// GitHub's `mergeStateStatus`: CLEAN, BLOCKED (required checks or reviews not met),
+    /// UNSTABLE, BEHIND, DIRTY, and so on.
+    pub merge_state: String,
+    /// Auto-merge is turned on: GitHub merges it once its checks pass.
+    pub auto_merge: bool,
 }
 
-/// Parse `gh pr view --json number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments`.
+impl PrStatus {
+    /// Worth offering "Merge when checks pass": checks are still running, or the base
+    /// branch's rules block merging for now.
+    pub fn waits_for_checks(&self) -> bool {
+        self.state == "OPEN"
+            && !self.draft
+            && !self.auto_merge
+            && (self.pending > 0 || self.merge_state == "BLOCKED")
+    }
+}
+
+/// A way GitHub can merge a pull request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub const ALL: [MergeMethod; 3] =
+        [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase];
+
+    /// How it is saved in a project.
+    pub fn key(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.key() == key)
+    }
+
+    /// The `gh pr merge` flag.
+    pub fn flag(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "--merge",
+            MergeMethod::Squash => "--squash",
+            MergeMethod::Rebase => "--rebase",
+        }
+    }
+
+    /// Short name for the picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "Merge",
+            MergeMethod::Squash => "Squash",
+            MergeMethod::Rebase => "Rebase",
+        }
+    }
+
+    /// What it does, for the confirmation.
+    pub fn describe(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "with a merge commit",
+            MergeMethod::Squash => "squashed into one commit",
+            MergeMethod::Rebase => "rebased onto the base branch",
+        }
+    }
+}
+
+/// Parse `gh repo view --json mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed`
+/// into the methods the repository allows, in the order Merge, Squash, Rebase.
+pub fn parse_merge_methods(json: &str) -> Option<Vec<MergeMethod>> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    let fields = [
+        ("mergeCommitAllowed", MergeMethod::Merge),
+        ("squashMergeAllowed", MergeMethod::Squash),
+        ("rebaseMergeAllowed", MergeMethod::Rebase),
+    ];
+    if fields.iter().all(|(f, _)| v[*f].as_bool().is_none()) {
+        return None;
+    }
+    Some(
+        fields
+            .into_iter()
+            .filter(|(f, _)| v[*f].as_bool() == Some(true))
+            .map(|(_, m)| m)
+            .collect(),
+    )
+}
+
+/// The method to merge with: the one remembered for the project when the repository
+/// still allows it, else squash, else a merge commit, else rebase.
+pub fn default_merge_method(allowed: &[MergeMethod], remembered: &str) -> Option<MergeMethod> {
+    MergeMethod::from_key(remembered)
+        .into_iter()
+        .chain([MergeMethod::Squash, MergeMethod::Merge, MergeMethod::Rebase])
+        .find(|m| allowed.contains(m))
+}
+
+/// Parse `gh pr view --json number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments,mergeStateStatus,autoMergeRequest`.
 pub fn parse_pr_status(json: &str) -> Option<PrStatus> {
     let v: Value = serde_json::from_str(json).ok()?;
     let number = v["number"].as_u64()?;
@@ -329,6 +428,8 @@ pub fn parse_pr_status(json: &str) -> Option<PrStatus> {
         state: s(&v["state"]),
         draft: v["isDraft"].as_bool() == Some(true),
         review: s(&v["reviewDecision"]),
+        merge_state: s(&v["mergeStateStatus"]),
+        auto_merge: v["autoMergeRequest"].is_object(),
         ..Default::default()
     };
     for check in v["statusCheckRollup"].as_array().into_iter().flatten() {
@@ -588,6 +689,7 @@ impl RunoApp {
     /// Show Reviews and fetch PRs, issues and runs for the chosen project.
     pub(crate) fn load_github(&mut self) {
         self.view = View::GitHub;
+        self.git_github = true;
         if self.demo {
             self.gh.prs = vec![GhItem {
                 number: 42,
@@ -1204,7 +1306,7 @@ impl RunoApp {
         };
         let blocked = self.gh.error.map(|block| self.gh_blocked(block, cx));
         self.page(
-            "GitHub",
+            "",
             div().v_flex().gap_3().child(chips).children(blocked).when(
                 self.gh.error.is_none(),
                 |el| {
@@ -1492,6 +1594,72 @@ mod tests {
                 "ann on `src/a.rs:3`: Use a match",
             ]
         );
+    }
+
+    #[test]
+    fn reads_the_merge_methods_a_repo_allows() {
+        use MergeMethod::*;
+        let all =
+            r#"{"mergeCommitAllowed":true,"rebaseMergeAllowed":true,"squashMergeAllowed":true}"#;
+        assert_eq!(parse_merge_methods(all), Some(vec![Merge, Squash, Rebase]));
+        let some =
+            r#"{"mergeCommitAllowed":false,"rebaseMergeAllowed":true,"squashMergeAllowed":true}"#;
+        assert_eq!(parse_merge_methods(some), Some(vec![Squash, Rebase]));
+        let none =
+            r#"{"mergeCommitAllowed":false,"rebaseMergeAllowed":false,"squashMergeAllowed":false}"#;
+        assert_eq!(parse_merge_methods(none), Some(vec![]));
+        assert_eq!(parse_merge_methods("{}"), None);
+        assert_eq!(parse_merge_methods("not json"), None);
+        for m in MergeMethod::ALL {
+            assert_eq!(MergeMethod::from_key(m.key()), Some(m));
+        }
+        assert_eq!(MergeMethod::from_key(""), None);
+    }
+
+    #[test]
+    fn picks_the_merge_method_to_offer_first() {
+        use MergeMethod::*;
+        // Squash first, then a merge commit, then rebase.
+        assert_eq!(
+            default_merge_method(&[Merge, Squash, Rebase], ""),
+            Some(Squash)
+        );
+        assert_eq!(default_merge_method(&[Merge, Rebase], ""), Some(Merge));
+        assert_eq!(default_merge_method(&[Rebase], ""), Some(Rebase));
+        assert_eq!(default_merge_method(&[], ""), None);
+        // The project's remembered choice wins while the repository allows it.
+        assert_eq!(
+            default_merge_method(&[Merge, Squash, Rebase], "rebase"),
+            Some(Rebase)
+        );
+        assert_eq!(
+            default_merge_method(&[Merge, Squash], "rebase"),
+            Some(Squash)
+        );
+        assert_eq!(
+            default_merge_method(&[Merge, Squash], "bogus"),
+            Some(Squash)
+        );
+    }
+
+    #[test]
+    fn offers_merge_when_checks_pass_while_they_run_or_block() {
+        let base = r#""number":3,"state":"OPEN","isDraft":false"#;
+        let running = parse_pr_status(&format!(
+            r#"{{{base},"mergeStateStatus":"UNSTABLE","autoMergeRequest":null,"statusCheckRollup":[{{"name":"ci","status":"IN_PROGRESS","conclusion":""}}]}}"#
+        ))
+        .unwrap();
+        assert!(!running.auto_merge && running.waits_for_checks());
+        let blocked =
+            parse_pr_status(&format!(r#"{{{base},"mergeStateStatus":"BLOCKED"}}"#)).unwrap();
+        assert!(blocked.waits_for_checks());
+        let clean = parse_pr_status(&format!(r#"{{{base},"mergeStateStatus":"CLEAN"}}"#)).unwrap();
+        assert!(!clean.waits_for_checks());
+        let on = parse_pr_status(&format!(
+            r#"{{{base},"mergeStateStatus":"BLOCKED","autoMergeRequest":{{"mergeMethod":"SQUASH"}}}}"#
+        ))
+        .unwrap();
+        assert!(on.auto_merge && !on.waits_for_checks());
     }
 
     #[test]

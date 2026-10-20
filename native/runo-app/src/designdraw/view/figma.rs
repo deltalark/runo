@@ -307,6 +307,24 @@ impl DesignCanvas {
             .bg(tint(c_canvas()))
             .child(
                 tool(
+                    "design-layers-toggle",
+                    if self.layers_hidden {
+                        IconName::PanelLeftOpen
+                    } else {
+                        IconName::PanelLeftClose
+                    },
+                    if self.layers_hidden {
+                        "Show layers (⌘\\)"
+                    } else {
+                        "Hide layers (⌘\\)"
+                    },
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_layers(cx))),
+            )
+            .child(sep())
+            .child(
+                tool(
                     "design-tool-move",
                     IconName::MousePointer2,
                     "Move (V)",

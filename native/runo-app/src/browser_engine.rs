@@ -252,6 +252,16 @@ pub fn not_found_message() -> &'static str {
     }
 }
 
+/// The first-run offer of the built-in browser when no browser was found. Browsers live
+/// in Applications on a Mac; elsewhere they could be anywhere on the computer.
+pub fn offer_without_browser(macos: bool) -> &'static str {
+    if macos {
+        "Runo can open your app in the Browser tab using a headless Chromium. None was found in Applications; install Chrome, Edge or Brave, then turn this on in Settings."
+    } else {
+        "Runo can open your app in the Browser tab using a headless Chromium. None was found on this computer; install Chrome, Edge, Brave or Chromium, then turn this on in Settings."
+    }
+}
+
 /// The browser's name from its executable path, e.g. "Google Chrome".
 pub fn browser_name(path: &Path) -> String {
     path.file_name()
@@ -1203,6 +1213,14 @@ fn decode_image(data: &str, format: image::ImageFormat) -> Option<Arc<RenderImag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_offer_names_applications_only_on_a_mac() {
+        assert!(offer_without_browser(true).contains("in Applications"));
+        let elsewhere = offer_without_browser(false);
+        assert!(!elsewhere.contains("Applications"));
+        assert!(elsewhere.contains("on this computer"));
+    }
 
     #[test]
     fn messages_are_nul_framed_and_split() {

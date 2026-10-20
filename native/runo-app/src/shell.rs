@@ -9,6 +9,57 @@ use gpui_kit::component::tooltip::Tooltip;
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
+/// The rail's mark on the open place: a glowing accent line on the window's edge, and a
+/// soft beam of the same light falling from it across the page. Children of a 34px rail
+/// item, which sits 9px in from the edge.
+fn light_beam() -> [AnyElement; 2] {
+    let edge = div()
+        .absolute()
+        .left(px(-9.))
+        .top(px(4.))
+        .w(px(3.))
+        .h(px(26.))
+        .rounded_full()
+        .bg(rgb(c_blue()))
+        .shadow(vec![BoxShadow {
+            color: hsla_of(c_blue(), 0.75),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(10.),
+            spread_radius: px(1.),
+            inset: false,
+        }]);
+    // Stacked bands, the tallest outermost, add up to a beam that is brightest in its
+    // middle and fades out up and down; each fades out to the right on its own.
+    let mut beam = div().absolute().left(px(-9.)).top_0().size_full();
+    for height in [96., 78., 62., 48., 34., 22.] {
+        beam = beam.child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px((34. - height) / 2.))
+                .w(px(340.))
+                .h(px(height))
+                .rounded_full()
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(hsla_of(c_blue(), 0.03), 0.),
+                    linear_color_stop(hsla_of(c_blue(), 0.), 1.),
+                )),
+        );
+    }
+    [
+        deferred(beam).with_priority(0).into_any_element(),
+        edge.into_any_element(),
+    ]
+}
+
+/// A colour with its own alpha, for glows and gradients.
+fn hsla_of(color: u32, alpha: f32) -> Hsla {
+    let mut c: Hsla = rgb(color).into();
+    c.a = alpha;
+    c
+}
+
 /// The places on the mode rail.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
@@ -16,8 +67,9 @@ pub(crate) enum Mode {
     Sessions,
     Design,
     Architecture,
-    Review,
-    GitHub,
+    Missions,
+    /// What waits to ship and the project's GitHub, as two tabs of one place.
+    Git,
     Playbooks,
     History,
     Inbox,
@@ -26,15 +78,22 @@ pub(crate) enum Mode {
 }
 
 impl Mode {
-    /// The modes at the top of the rail, in order; ⌘1 to ⌘6 jump to them.
+    /// The modes at the top of the rail, in order. The first `WORK` are the day's work;
+    /// the rest, what's been kept, sit apart.
     pub(crate) const MAIN: [Mode; 6] = [
         Mode::Home,
         Mode::Sessions,
-        Mode::Review,
-        Mode::GitHub,
+        Mode::Missions,
+        Mode::Git,
         Mode::Playbooks,
         Mode::History,
     ];
+
+    /// How many of `MAIN` stay out on the rail; the rest wait in its More menu.
+    const WORK: usize = 4;
+
+    /// The places in the rail's More menu, used less than the ones out on the rail.
+    pub(crate) const MORE: [Mode; 3] = [Mode::Playbooks, Mode::History, Mode::Notes];
 
     /// The current project's own modes, grouped under its badge below the main ones; ⌘7
     /// and ⌘8.
@@ -51,8 +110,8 @@ impl Mode {
             Mode::Sessions => "Sessions",
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
-            Mode::Review => "Review",
-            Mode::GitHub => "GitHub",
+            Mode::Missions => "Missions",
+            Mode::Git => "Git",
             Mode::Playbooks => "Playbooks",
             Mode::History => "History",
             Mode::Inbox => "Inbox",
@@ -68,9 +127,9 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
-            Mode::Review => "go-review",
-            // Kept under its old name so shortcuts people changed still apply.
-            Mode::GitHub => "go-reviews",
+            Mode::Missions => "go-missions",
+            // Git's To ship tab; `go-reviews` opens its GitHub tab.
+            Mode::Git => "go-review",
             Mode::Playbooks => "go-playbooks",
             Mode::History => "go-history",
             Mode::Inbox => "go-inbox",
@@ -85,8 +144,8 @@ impl Mode {
             Mode::Sessions => IconName::CodeXml,
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
-            Mode::Review => IconName::GitCompare,
-            Mode::GitHub => IconName::GitPullRequest,
+            Mode::Missions => IconName::Rocket,
+            Mode::Git => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
             Mode::History => IconName::RotateCcwClock,
             Mode::Inbox => IconName::Inbox,
@@ -102,8 +161,8 @@ impl Mode {
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
-            View::Review => Mode::Review,
-            View::GitHub => Mode::GitHub,
+            View::Missions => Mode::Missions,
+            View::Review | View::GitHub => Mode::Git,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
             View::Notes => Mode::Notes,
@@ -280,8 +339,9 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
-            Mode::Review => self.open_review(),
-            Mode::GitHub => self.load_github(),
+            Mode::Missions => self.open_missions(cx),
+            Mode::Git if self.git_github => self.load_github(),
+            Mode::Git => self.open_review(),
             Mode::Playbooks => self.view = View::Automations,
             Mode::History => self.open_history(cx),
             Mode::Inbox => self.view = View::Inbox,
@@ -371,15 +431,19 @@ impl RunoApp {
         counts
     }
 
-    /// Note a finished turn's cost under today, for the top bar's spend.
+    /// Note a finished turn's cost and tokens under today, for the top bar's spend and
+    /// the daily limits.
     pub(crate) fn record_spend(&mut self, id: u64) {
-        let cents = self
+        let usage = self
             .state
             .session(id)
             .and_then(|s| s.messages.iter().rev().find(|m| m.role == Role::Agent))
-            .map(|m| m.usage.cost_cents)
+            .map(|m| m.usage)
             .unwrap_or_default();
-        self.state.add_spend(&store::today(), cents);
+        let today = store::today();
+        self.state.add_spend(&today, usage.cost_cents);
+        self.state
+            .add_tokens(&today, crate::health::turn_tokens(&usage));
     }
 
     // ---------- keyboard ----------
@@ -614,73 +678,65 @@ impl RunoApp {
         div()
             .id(SharedString::from(format!("rail-{}", mode.label())))
             .relative()
-            .size(px(38.))
+            .size(px(34.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded_lg()
+            .rounded(px(8.))
             .cursor_pointer()
-            .when(on, |el| el.bg(tint(c_active())))
             .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.go(mode, window, cx);
                 cx.notify();
             }))
+            .when(on, |el| el.children(light_beam()))
             .child(icon(
                 mode.glyph(),
-                18.,
-                if on { c_text() } else { c_muted() },
+                17.,
+                if on { c_blue() } else { c_muted() },
             ))
-            .when(on, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left(px(-7.))
-                        .top(px(10.))
-                        .w(px(3.))
-                        .h(px(18.))
-                        .rounded_full()
-                        .bg(rgb(c_blue())),
-                )
-            })
+            // A small dot cut into the icon's corner, ringed in the rail's own colour.
             .when_some(badge.filter(|_| !on), |el, color| {
                 el.child(
                     div()
                         .absolute()
-                        .top(px(6.))
-                        .right(px(6.))
-                        .size(px(7.))
+                        .top(px(5.))
+                        .right(px(5.))
+                        .size(px(8.))
                         .rounded_full()
+                        .border_2()
+                        .border_color(rgb(c_sidebar()))
                         .bg(rgb(color)),
                 )
             })
             .into_any_element()
     }
 
-    pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let counts = self.counts();
-        let mut top = div()
-            .v_flex()
-            .items_center()
-            .gap_1()
-            .relative()
-            .child(tour::anchor(&self.anchors, "nav"));
-        for mode in Mode::MAIN {
+        // The groups part by space alone, so the rail reads as a few calm clusters.
+        let group = || div().v_flex().items_center().gap(px(4.));
+        let mut work = group().relative().child(tour::anchor(&self.anchors, "nav"));
+        for mode in &Mode::MAIN[..Mode::WORK] {
             // Amber: something there needs you. Blue: agents are working, or work waits
-            // to be reviewed.
+            // to be shipped.
             let badge = match mode {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
-                Mode::Review if counts.review > 0 => Some(c_blue()),
-                Mode::GitHub if self.gh.needs_you() > 0 => Some(c_amber()),
+                Mode::Missions => self.missions_badge(),
+                Mode::Git if self.gh.needs_you() > 0 => Some(c_amber()),
+                Mode::Git if counts.review > 0 => Some(c_blue()),
                 _ => None,
             };
-            top = top.child(self.rail_item(mode, badge, cx));
+            work = work.child(self.rail_item(*mode, badge, cx));
         }
-        top = top
-            .child(div().my_1().w(px(22.)).h(px(1.)).bg(divider()))
-            .child(self.project_group(cx));
+        let foot = group().child(self.rail_more(cx)).child(
+            div()
+                .relative()
+                .child(tour::anchor(&self.anchors, "settings"))
+                .child(self.rail_item(Mode::Settings, None, cx)),
+        );
         // The Inbox opens from the bell in the top bar, so the rail doesn't repeat it.
         div()
             .w(px(RAIL_WIDTH))
@@ -688,25 +744,115 @@ impl RunoApp {
             .h_full()
             .v_flex()
             .items_center()
-            .py_2()
+            .pt(px(10.))
+            .pb_2()
+            .gap(px(18.))
             .border_r_1()
             .border_color(divider())
             .bg(pane(c_sidebar()))
-            .child(top)
+            .child(work)
+            .child(self.project_group(cx))
             .child(div().flex_1())
-            .child(
+            .child(foot)
+            .into_any_element()
+    }
+
+    /// The ⋯ at the foot of the rail: Playbooks, History and Notes in a menu beside it.
+    /// It lights up while one of them is open.
+    fn rail_more(&self, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu.as_deref() == Some("rail-more");
+        let on = Mode::MORE.contains(&self.mode());
+        let mut list = div().v_flex().p_1();
+        for mode in Mode::MORE {
+            let here = self.mode() == mode;
+            list = list.child(
                 div()
-                    .v_flex()
+                    .id(SharedString::from(format!("rail-more-{}", mode.label())))
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
                     .items_center()
-                    .gap_1()
-                    .child(self.rail_item(Mode::Notes, None, cx))
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .when(here, |el| el.bg(tint(c_active())))
+                    .hover(|el| el.bg(tint(c_active())))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.go(mode, window, cx);
+                        cx.notify();
+                    }))
+                    .child(icon(mode.glyph(), 15., c_secondary()))
+                    .child(div().flex_1().child(mode.label()))
                     .child(
                         div()
-                            .relative()
-                            .child(tour::anchor(&self.anchors, "settings"))
-                            .child(self.rail_item(Mode::Settings, None, cx)),
+                            .text_size(px(11.))
+                            .text_color(rgb(c_muted()))
+                            .child(keymap::label(cx, mode.shortcut())),
                     ),
+            );
+        }
+        div()
+            .relative()
+            .child(
+                div()
+                    .id("rail-more")
+                    .size(px(34.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .when(open, |el| el.bg(tint(c_active())))
+                    .when(!(on || open), |el| el.hover(|el| el.bg(tint(c_subtle()))))
+                    .when(on, |el| el.children(light_beam()))
+                    .when(!open, |el| {
+                        el.tooltip(|window, cx| {
+                            Tooltip::new("Playbooks, History and Notes").build(window, cx)
+                        })
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = match this.menu.as_deref() {
+                            Some("rail-more") => None,
+                            _ => Some("rail-more".into()),
+                        };
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        IconName::Ellipsis,
+                        17.,
+                        if on { c_blue() } else { c_muted() },
+                    )),
             )
+            .when(open, |el| {
+                el.child(
+                    div().absolute().left(px(46.)).bottom_0().child(
+                        deferred(
+                            anchored()
+                                .anchor(Anchor::BottomLeft)
+                                .snap_to_window_with_margin(px(8.))
+                                .child(
+                                    div()
+                                        .id("rail-more-menu")
+                                        .w(px(200.))
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(float_edge())
+                                        .bg(float(c_raised()))
+                                        .shadow_lg()
+                                        .occlude()
+                                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                            this.menu = None;
+                                            cx.notify();
+                                        }))
+                                        .child(list),
+                                ),
+                        )
+                        .with_priority(2),
+                    ),
+                )
+            })
+            .into_any_element()
     }
 
     /// Design and Architecture under the badge of the project they show, so they read as
@@ -719,30 +865,28 @@ impl RunoApp {
         };
         let badge = div()
             .id("rail-project")
-            .size(px(30.))
+            .size(px(34.))
             .flex()
             .items_center()
             .justify_center()
-            .rounded_md()
+            .rounded(px(8.))
             .cursor_pointer()
-            .hover(|el| el.bg(tint(c_active())))
+            .hover(|el| el.bg(tint(c_subtle())))
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.menu = Some("project-switch".into());
                 cx.notify();
             }))
             .child(match project {
-                Some(p) => project_mark(p, 20.).into_any_element(),
+                Some(p) => project_mark(p, 18.).into_any_element(),
                 None => icon(IconName::LayoutGrid, 15., c_muted()).into_any_element(),
             });
+        // A short rule above the badge marks where the project's own pages begin.
         let mut group = div()
             .v_flex()
             .items_center()
-            .gap_1()
-            .py(px(3.))
-            .w(px(44.))
-            .rounded_xl()
-            .bg(tint(c_subtle()))
+            .gap(px(4.))
+            .child(div().mb(px(12.)).w(px(18.)).h(px(1.)).bg(divider()))
             .child(badge);
         for mode in Mode::PLAN {
             group = group.child(self.rail_item(mode, None, cx));
@@ -932,7 +1076,7 @@ impl RunoApp {
             .map(|s| s.id)
             .max();
         match (self.mode(), latest) {
-            (Mode::GitHub, _) => self.load_github(),
+            (Mode::Git, _) if self.view == View::GitHub => self.load_github(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
                 self.view = View::Home;
@@ -3049,8 +3193,9 @@ mod tests {
     fn every_rail_place_owns_its_views() {
         // Each place on the rail opens a view that lights that same place up again.
         for (view, mode) in [
-            (View::Review, Mode::Review),
-            (View::GitHub, Mode::GitHub),
+            (View::Review, Mode::Git),
+            (View::Missions, Mode::Missions),
+            (View::GitHub, Mode::Git),
             (View::History, Mode::History),
             (View::Notes, Mode::Notes),
             (View::Automations, Mode::Playbooks),

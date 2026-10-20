@@ -810,6 +810,7 @@ fn status_name(status: Status) -> &'static str {
         Status::Working => "working",
         Status::Done => "done",
         Status::Failed => "failed",
+        Status::Stopped => "stopped",
     }
 }
 

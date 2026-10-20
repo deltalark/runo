@@ -33,6 +33,9 @@ pub(crate) enum Confirm {
     CleanUp(u64),
     /// Merge the session's pull request on GitHub.
     MergePr(u64),
+    /// Turn on auto-merge for the session's pull request, so GitHub merges it once its
+    /// checks pass.
+    AutoMergePr(u64),
     /// Post the review the session's agent wrote to its pull request.
     PostReview(u64),
 }
@@ -465,6 +468,10 @@ impl RunoApp {
                 if self.selected == Some(id) {
                     self.refresh();
                 }
+                // A mission's own worktree is the branch its parts start from.
+                if self.state.session(id).is_some_and(|s| s.mission != 0) {
+                    self.missions_tick_all(cx);
+                }
             }
             Err(error) => {
                 self.pending_start.remove(&id);
@@ -781,7 +788,7 @@ impl RunoApp {
                             "view",
                             which,
                             "--json",
-                            "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments",
+                            "number,url,title,state,isDraft,reviewDecision,statusCheckRollup,reviews,comments,mergeStateStatus,autoMergeRequest",
                         ])
                         .current_dir(&dir)
                         .stdin(std::process::Stdio::null())
@@ -810,6 +817,9 @@ impl RunoApp {
                                 s.pr_url = status.url.clone();
                             }
                         }
+                        if status.state == "OPEN" {
+                            this.load_merge_methods(id);
+                        }
                         this.pr_status.insert(id, status);
                     }
                     None => {
@@ -820,44 +830,137 @@ impl RunoApp {
         );
     }
 
-    /// Merge the session's pull request on GitHub, trying the merge methods the
-    /// repository may allow in turn.
-    pub(crate) fn merge_pr(&mut self, id: u64) {
+    /// Read which merge methods the GitHub repository of the session's project allows,
+    /// once per project for the app's run.
+    pub(crate) fn load_merge_methods(&mut self, id: u64) {
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        let (project, dir) = (session.project_id, session.dir.clone());
+        if self.merge_methods.contains_key(&project) || !self.merge_methods_loading.insert(project)
+        {
+            return;
+        }
+        self.bg(
+            move || {
+                std::process::Command::new("gh")
+                    .args([
+                        "repo",
+                        "view",
+                        "--json",
+                        "mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed",
+                    ])
+                    .current_dir(&dir)
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .and_then(|o| github::parse_merge_methods(&String::from_utf8_lossy(&o.stdout)))
+            },
+            move |this, methods, _| {
+                this.merge_methods_loading.remove(&project);
+                if let Some(methods) = methods {
+                    this.merge_methods.insert(project, methods);
+                }
+            },
+        );
+    }
+
+    /// The merge methods the session's repository allows, once read, and the one to use:
+    /// the project's remembered choice, else squash, else a merge commit, else rebase.
+    pub(crate) fn merge_choice(
+        &self,
+        id: u64,
+    ) -> Option<(github::MergeMethod, &[github::MergeMethod])> {
+        let project_id = self.state.session(id)?.project_id;
+        let allowed = self.merge_methods.get(&project_id)?;
+        let remembered = self
+            .state
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map_or("", |p| p.merge_method.as_str());
+        Some((github::default_merge_method(allowed, remembered)?, allowed))
+    }
+
+    /// Remember how the session's project merges pull requests.
+    fn pick_merge_method(&mut self, id: u64, method: github::MergeMethod) {
+        let Some(project_id) = self.state.session(id).map(|s| s.project_id) else {
+            return;
+        };
+        if let Some(p) = self.state.projects.iter_mut().find(|p| p.id == project_id) {
+            p.merge_method = method.key().to_string();
+            self.save();
+        }
+    }
+
+    /// Merge the session's pull request on GitHub with the picked method, or with `auto`
+    /// turn on auto-merge so GitHub merges it once its checks pass.
+    pub(crate) fn merge_pr(&mut self, id: u64, auto: bool) {
         let (Some(pr), Some(dir)) = (
             self.pr_status.get(&id).cloned(),
             self.state.session(id).map(|s| s.dir.clone()),
         ) else {
             return;
         };
-        if !self.begin(id, &format!("Merging pull request #{}.", pr.number)) {
+        let Some((method, _)) = self.merge_choice(id) else {
+            self.fail(
+                "git",
+                "Could not merge the pull request: Runo could not read which merge methods the repository allows (gh repo view).".into(),
+            );
+            self.load_merge_methods(id);
+            return;
+        };
+        let doing = if auto {
+            format!("Turning on auto-merge for pull request #{}.", pr.number)
+        } else {
+            format!("Merging pull request #{}.", pr.number)
+        };
+        if !self.begin(id, &doing) {
             return;
         }
         let number = pr.number.to_string();
         self.bg(
             move || {
-                let mut last = String::new();
-                for method in ["--merge", "--squash", "--rebase"] {
-                    let out = std::process::Command::new("gh")
-                        .args(["pr", "merge", &number, method])
-                        .current_dir(&dir)
-                        .env("GIT_TERMINAL_PROMPT", "0")
-                        .stdin(std::process::Stdio::null())
-                        .output();
-                    match out {
-                        Ok(o) if o.status.success() => return Ok(()),
-                        Ok(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
-                        Err(e) => return Err(format!("could not run gh: {e}")),
-                    }
-                    // Only a refused method is worth another try.
-                    if !last.to_lowercase().contains("not allowed") {
-                        break;
-                    }
+                let mut args = vec!["pr", "merge", &number, method.flag()];
+                if auto {
+                    args.push("--auto");
                 }
-                Err(last)
+                let out = std::process::Command::new("gh")
+                    .args(&args)
+                    .current_dir(&dir)
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .map_err(|e| format!("could not run gh: {e}"))?;
+                if out.status.success() {
+                    Ok(())
+                } else {
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    Err(if err.is_empty() {
+                        String::from_utf8_lossy(&out.stdout).trim().to_string()
+                    } else {
+                        err
+                    })
+                }
             },
             move |this, result, _| {
                 this.git_busy.remove(&id);
                 match result {
+                    Ok(()) if auto => {
+                        this.state.log(
+                            id,
+                            format!("Turned on auto-merge for pull request #{}", pr.number),
+                        );
+                        this.info = Some((
+                            format!(
+                                "Auto-merge is on: GitHub merges #{} once its checks pass.",
+                                pr.number
+                            ),
+                            std::time::Instant::now(),
+                        ));
+                        this.save();
+                    }
                     Ok(()) => {
                         this.state
                             .log(id, format!("Merged pull request #{}", pr.number));
@@ -869,6 +972,9 @@ impl RunoApp {
                             this.confirm_git = Some(Confirm::CleanUp(id));
                         }
                         this.save();
+                    }
+                    Err(error) if auto => {
+                        this.fail("git", format!("Could not turn on auto-merge: {error}"))
                     }
                     Err(error) => {
                         this.fail("git", format!("Could not merge the pull request: {error}"))
@@ -1262,7 +1368,8 @@ impl RunoApp {
             Confirm::Keep(id) => self.keep_racer(id),
             Confirm::Merge(id) => self.merge_into_base(id),
             Confirm::CleanUp(id) => self.clean_up(id),
-            Confirm::MergePr(id) => self.merge_pr(id),
+            Confirm::MergePr(id) => self.merge_pr(id, false),
+            Confirm::AutoMergePr(id) => self.merge_pr(id, true),
             Confirm::PostReview(id) => self.post_review(id),
         }
     }
@@ -1310,10 +1417,13 @@ impl RunoApp {
             ),
             Confirm::MergePr(m) if m == id => {
                 let pr = self.pr_status.get(&id)?;
+                let how = self
+                    .merge_choice(id)
+                    .map_or("with a method the repository allows", |(m, _)| m.describe());
                 (
                     format!("Merge pull request #{}?", pr.number),
                     format!(
-                        "Merges it on GitHub with a method the repository allows{}. Then you can clean up the worktree and branch.",
+                        "Merges it on GitHub {how}{}. Then you can clean up the worktree and branch.",
                         if pr.failed.is_empty() {
                             ""
                         } else {
@@ -1321,6 +1431,18 @@ impl RunoApp {
                         }
                     ),
                     "Merge PR",
+                )
+            }
+            Confirm::AutoMergePr(m) if m == id => {
+                let pr = self.pr_status.get(&id)?;
+                let (method, _) = self.merge_choice(id)?;
+                (
+                    format!("Merge #{} when checks pass?", pr.number),
+                    format!(
+                        "Turns on auto-merge: GitHub merges it {} once the required checks pass and nothing else blocks it.",
+                        method.describe()
+                    ),
+                    "Turn on auto-merge",
                 )
             }
             Confirm::PostReview(p) if p == id => {
@@ -1554,6 +1676,9 @@ impl RunoApp {
         };
         let url = pr.url.clone();
         let open = pr.state == "OPEN";
+        let choice = self
+            .merge_choice(id)
+            .map(|(method, allowed)| (method, allowed.to_vec()));
         div()
             .v_flex()
             .gap_1()
@@ -1579,6 +1704,13 @@ impl RunoApp {
                     })
                     .when_some(review, |el, (text, color)| {
                         el.child(div().text_color(rgb(color)).child(format!("· {text}")))
+                    })
+                    .when(open && pr.auto_merge, |el| {
+                        el.child(
+                            div()
+                                .text_color(rgb(c_green()))
+                                .child("· auto-merge on"),
+                        )
                     }),
             )
             .child(
@@ -1638,6 +1770,45 @@ impl RunoApp {
                                     cx.notify();
                                 })),
                         )
+                    })
+                    .when_some(choice.filter(|_| open && !pr.draft), |el, (method, allowed)| {
+                        el.when(allowed.len() > 1, |el| {
+                            el.child(allowed.iter().enumerate().fold(
+                                github::segmented().p(px(1.)),
+                                |row, (i, &m)| {
+                                    row.child(
+                                        github::segment(("merge-method", i), m.label(), m == method)
+                                            .h(px(20.))
+                                            .px_2()
+                                            .text_size(px(11.5))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.pick_merge_method(id, m);
+                                                cx.notify();
+                                            })),
+                                    )
+                                },
+                            ))
+                        })
+                        .when(pr.waits_for_checks(), |el| {
+                            el.child(
+                                self.ship_button(
+                                    "auto-merge-pr",
+                                    "Merge when checks pass",
+                                    IconName::Clock,
+                                    true,
+                                )
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(
+                                        "Turn on auto-merge (gh pr merge --auto): GitHub merges it once the required checks pass",
+                                    )
+                                    .build(window, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.confirm_git = Some(Confirm::AutoMergePr(id));
+                                    cx.notify();
+                                })),
+                            )
+                        })
                     })
                     .when(pr.state == "MERGED", |el| {
                         el.child(

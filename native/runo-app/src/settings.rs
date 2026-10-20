@@ -139,7 +139,8 @@ pub struct AppSettings {
     pub playbook_keep_runs: u32,
     /// Run a scheduled playbook once on launch when it came due while Runo was closed.
     pub playbook_catch_up: bool,
-    /// Run scheduled playbooks while Runo is closed, from a launchd agent (macOS).
+    /// Run scheduled playbooks while Runo is closed, from a background job: launchd on
+    /// macOS, a systemd user timer on Linux, Task Scheduler on Windows.
     pub playbooks_while_closed: bool,
     /// Ask before a playbook an agent asked for starts.
     pub confirm_agent_playbooks: bool,
@@ -150,6 +151,12 @@ pub struct AppSettings {
     /// Spending limits in US dollars, per session and per day; 0 for none.
     pub session_limit_usd: u32,
     pub daily_limit_usd: u32,
+    /// Turns a session may start before the next waits; 0 for no limit.
+    pub session_turn_limit: u32,
+    /// Turns across every session per day; 0 for no limit.
+    pub daily_turn_limit: u32,
+    /// Thousands of tokens agents may report per day; 0 for no limit.
+    pub daily_token_limit_k: u32,
     /// Agents that may run at the same time on this machine; 0 for no cap.
     pub max_running: u32,
     /// Look for a newer Runo on GitHub now and then.
@@ -233,6 +240,9 @@ impl Default for AppSettings {
             stuck_after_mins: 10,
             session_limit_usd: 0,
             daily_limit_usd: 0,
+            session_turn_limit: 0,
+            daily_turn_limit: 0,
+            daily_token_limit_k: 0,
             max_running: 0,
             check_runo_updates: true,
             phone_bridge: false,
@@ -324,9 +334,12 @@ impl AppSettings {
         STUCK_AFTER.store(self.stuck_after_mins, Ordering::Relaxed);
         SESSION_LIMIT.store(self.session_limit_usd, Ordering::Relaxed);
         DAILY_LIMIT.store(self.daily_limit_usd, Ordering::Relaxed);
+        SESSION_TURNS.store(self.session_turn_limit, Ordering::Relaxed);
+        DAILY_TURNS.store(self.daily_turn_limit, Ordering::Relaxed);
+        DAILY_TOKENS_K.store(self.daily_token_limit_k, Ordering::Relaxed);
         MAX_RUNNING.store(self.max_running, Ordering::Relaxed);
         CATCH_UP.store(self.playbook_catch_up, Ordering::Relaxed);
-        crate::pbrunner::sync_launch_agent(self.playbooks_while_closed);
+        crate::pbrunner::sync_job(self.playbooks_while_closed);
         crate::phone::sync(self.phone_bridge, self.phone_everywhere);
         crate::terminal::configure(
             self.term_font_size,
@@ -383,6 +396,9 @@ static KEEP_RUNS: AtomicU32 = AtomicU32::new(10);
 static STUCK_AFTER: AtomicU32 = AtomicU32::new(10);
 static SESSION_LIMIT: AtomicU32 = AtomicU32::new(0);
 static DAILY_LIMIT: AtomicU32 = AtomicU32::new(0);
+static SESSION_TURNS: AtomicU32 = AtomicU32::new(0);
+static DAILY_TURNS: AtomicU32 = AtomicU32::new(0);
+static DAILY_TOKENS_K: AtomicU32 = AtomicU32::new(0);
 static MAX_RUNNING: AtomicU32 = AtomicU32::new(0);
 
 /// Minutes of silence before an agent is flagged as maybe stuck; 0 never.
@@ -390,12 +406,30 @@ pub fn stuck_after_mins() -> u32 {
     STUCK_AFTER.load(Ordering::Relaxed)
 }
 
-/// Spending limits in US cents (session, day); 0 for none.
-pub fn spend_limits() -> (f64, f64) {
-    (
-        SESSION_LIMIT.load(Ordering::Relaxed) as f64 * 100.,
-        DAILY_LIMIT.load(Ordering::Relaxed) as f64 * 100.,
-    )
+/// The limits that hold new turns; 0 for none.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Limits {
+    /// What a session's agents may cost, in US cents.
+    pub session_cents: f64,
+    /// What agents may cost per day, in US cents.
+    pub day_cents: f64,
+    /// Turns per session.
+    pub session_turns: u32,
+    /// Turns per day, across every session.
+    pub day_turns: u32,
+    /// Tokens agents may report per day.
+    pub day_tokens: u64,
+}
+
+/// The limits set under Settings > General > Limits.
+pub fn limits() -> Limits {
+    Limits {
+        session_cents: SESSION_LIMIT.load(Ordering::Relaxed) as f64 * 100.,
+        day_cents: DAILY_LIMIT.load(Ordering::Relaxed) as f64 * 100.,
+        session_turns: SESSION_TURNS.load(Ordering::Relaxed),
+        day_turns: DAILY_TURNS.load(Ordering::Relaxed),
+        day_tokens: u64::from(DAILY_TOKENS_K.load(Ordering::Relaxed)) * 1000,
+    }
 }
 
 /// Agents allowed to run at once; 0 for no cap.

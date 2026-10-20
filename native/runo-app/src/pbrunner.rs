@@ -1,4 +1,5 @@
-//! Scheduled playbooks while Runo is closed. On macOS a launchd agent runs
+//! Scheduled playbooks while Runo is closed. A background job (launchd on macOS, a
+//! systemd user timer on Linux, Task Scheduler on Windows; see `job`) runs
 //! `runo --run-due-playbooks` every few minutes; it runs each due playbook in a new
 //! worktree, after the project's setup command, with the same agent settings and limits
 //! as a run in Runo, and leaves the result in a file. Runo
@@ -11,11 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The launchd job's label.
-#[cfg(target_os = "macos")]
-const LABEL: &str = "dev.runo.playbooks";
+mod job;
+pub use job::{note as job_note, sync as sync_job};
 
-/// How often launchd starts the runner.
+/// How often the background job starts the runner.
 const INTERVAL_SECS: u64 = 300;
 
 /// Runo counts as open while its heartbeat is this recent.
@@ -71,6 +71,32 @@ pub fn beat() {
 /// Whether the runner is working on this playbook now.
 pub fn running(playbook: u64) -> bool {
     age(&running_file(playbook)).is_some_and(|a| a < RUN_LIMIT.as_secs() + 600)
+}
+
+/// What the runner has made that Runo has no session for yet: the folders and branches
+/// of finished runs not picked up, and branch prefixes of runs still going.
+pub fn in_flight() -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (mut dirs, mut branches, mut prefixes) = (Vec::new(), Vec::new(), Vec::new());
+    let Ok(entries) = std::fs::read_dir(runs_dir()) else {
+        return (dirs, branches, prefixes);
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(id) = name.strip_prefix("running-") {
+            if id.parse::<u64>().is_ok_and(running) {
+                prefixes.push(format!("runo/playbook-{id}-"));
+            }
+        } else if name.starts_with("done-") {
+            let run = std::fs::read(entry.path())
+                .ok()
+                .and_then(|b| serde_json::from_slice::<HeadlessRun>(&b).ok());
+            if let Some(run) = run {
+                dirs.push(run.dir);
+                branches.push(run.branch);
+            }
+        }
+    }
+    (dirs, branches, prefixes)
 }
 
 /// Runs the runner finished, oldest first. Their files are removed as they are read.
@@ -188,7 +214,7 @@ pub fn run_due() -> i32 {
     if age(&dir.join("alive")).is_some_and(|a| a < ALIVE_SECS) {
         return 0;
     }
-    // One runner at a time; launchd may start the next while a long run goes on.
+    // One runner at a time; the background job may start the next while a long run goes on.
     let Ok(lock) = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -538,92 +564,6 @@ impl RunoApp {
     }
 }
 
-/// Keep the launchd agent in line with the setting: installed and pointing at this
-/// copy of Runo when on, gone when off. Runs in the background.
-pub fn sync_launch_agent(enabled: bool) {
-    #[cfg(target_os = "macos")]
-    std::thread::spawn(move || {
-        let Some(home) = std::env::var_os("HOME") else {
-            return;
-        };
-        let plist = PathBuf::from(home)
-            .join("Library/LaunchAgents")
-            .join(format!("{LABEL}.plist"));
-        let domain = format!("gui/{}", unsafe { libc::getuid() });
-        let job = format!("{domain}/{LABEL}");
-        let launchctl = |args: &[&str]| {
-            let _ = std::process::Command::new("launchctl")
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        };
-        let current = std::fs::read_to_string(&plist).ok();
-        if !enabled {
-            if current.is_some() {
-                launchctl(&["bootout", job.as_str()]);
-                let _ = std::fs::remove_file(&plist);
-            }
-            return;
-        }
-        let Ok(exe) = std::env::current_exe() else {
-            return;
-        };
-        let wanted = launch_plist(
-            &exe.to_string_lossy(),
-            &runs_dir().join("runner.log").to_string_lossy(),
-        );
-        if current.as_deref() == Some(wanted.as_str()) {
-            return;
-        }
-        if let Some(parent) = plist.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::create_dir_all(runs_dir());
-        if std::fs::write(&plist, wanted).is_ok() {
-            let path = plist.to_string_lossy().into_owned();
-            launchctl(&["bootout", job.as_str()]);
-            launchctl(&["bootstrap", domain.as_str(), path.as_str()]);
-        }
-    });
-    #[cfg(not(target_os = "macos"))]
-    let _ = enabled;
-}
-
-/// The launchd job: the runner every few minutes, in the background.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn launch_plist(exe: &str, log: &str) -> String {
-    let esc = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    };
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>dev.runo.playbooks</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{}</string>
-    <string>--run-due-playbooks</string>
-  </array>
-  <key>StartInterval</key><integer>{INTERVAL_SECS}</integer>
-  <key>RunAtLoad</key><false/>
-  <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>{}</string>
-  <key>StandardErrorPath</key><string>{}</string>
-</dict>
-</plist>
-"#,
-        esc(exe),
-        esc(log),
-        esc(log)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,19 +687,6 @@ mod tests {
             read_output("grok", "/w", " Plain reply \n"),
             ("Plain reply".to_string(), None, String::new())
         );
-    }
-
-    #[test]
-    fn the_launch_agent_runs_the_runner() {
-        let plist = launch_plist(
-            "/Applications/R&D/Runo.app/Contents/MacOS/Runo",
-            "/tmp/l.log",
-        );
-        assert!(
-            plist.contains("<string>/Applications/R&amp;D/Runo.app/Contents/MacOS/Runo</string>")
-        );
-        assert!(plist.contains("<string>--run-due-playbooks</string>"));
-        assert!(plist.contains("<integer>300</integer>"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod browser;
 mod browser_engine;
 mod caps;
 mod chatctl;
+mod cleanup;
 mod cliview;
 mod connections;
 mod connections_ui;
@@ -36,6 +37,9 @@ mod install;
 mod keymap;
 mod mcp;
 mod memory_mcp;
+mod mission;
+mod mission_ui;
+mod mission_view;
 mod modelcheck;
 mod models;
 mod notes;
@@ -46,6 +50,8 @@ mod persist;
 mod phone;
 mod playbooks;
 mod projects;
+mod proof;
+mod proof_ui;
 mod pty;
 mod review;
 mod schedule;
@@ -82,7 +88,7 @@ use shell::Mode;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
-use store::{Message, Note, Project, Role, Session, State, Status};
+use store::{Message, Note, Project, Role, Session, State, Status, StepState};
 
 const DEMO_DIFF: &str = "@@ -42,13 +42,20 @@ impl NavItem {
      impl NavItem {
@@ -132,6 +138,7 @@ actions!(
         GoPlaybooks,
         GoReviews,
         GoReview,
+        GoMissions,
         GoHistory,
         GoNotes,
         GoInbox,
@@ -172,6 +179,8 @@ enum View {
     Editor,
     /// Changes waiting to be reviewed and shipped, one session at a time.
     Review,
+    /// Goals planned into parts that several agents work on at once.
+    Missions,
 }
 
 /// What a quick-open entry does when chosen.
@@ -201,6 +210,8 @@ enum RightTab {
 struct RunoApp {
     state: State,
     demo: bool,
+    /// Git opens on its GitHub tab, the one used last, rather than To ship.
+    git_github: bool,
     selected: Option<u64>,
     view: View,
     right_tab: RightTab,
@@ -228,6 +239,10 @@ struct RunoApp {
     project_name: Entity<InputState>,
     /// The project form's worktree setup command.
     project_setup: Entity<InputState>,
+    /// The project popup's checks, one command per line.
+    project_checks: Entity<TextareaState>,
+    /// The New project popup's folder path, typed or filled in by Browse.
+    project_path: Entity<InputState>,
     /// The project form's repository URL, when cloning.
     clone_url: Entity<InputState>,
     /// A freshly installed CLI found off PATH, to save as the agent's binary.
@@ -261,6 +276,8 @@ struct RunoApp {
     settings_areas: HashMap<String, Entity<TextareaState>>,
     /// The open form for adding or editing one of Runo's MCP servers.
     mcp_form: Option<McpForm>,
+    /// Settings > Worktrees > Clean up.
+    cleanup: settings_ui::CleanupView,
     settings_menu: Option<String>,
     discovered: Option<Discovered>,
     applied_dark: Option<bool>,
@@ -368,6 +385,10 @@ struct RunoApp {
     /// Sessions open as tabs in the work area, in tab order.
     tabs: Vec<u64>,
     tab_scroll: ScrollHandle,
+    /// The terminal panel's Output box, so it can follow new output.
+    term_scroll: ScrollHandle,
+    /// The session and number of lines the Output box last showed, to notice new ones.
+    term_seen: std::cell::Cell<(u64, usize)>,
     /// The project in the top bar; the open session's project unless the person switched.
     project: Option<u64>,
     /// The row picked with the arrow keys in the sidebar, Home or the Inbox.
@@ -439,6 +460,23 @@ struct RunoApp {
     stream_failed: std::collections::HashSet<u64>,
     /// Files changed by each session's latest turn, once it finished (for Undo / Keep).
     turn_files: HashMap<u64, usize>,
+    /// Sessions whose checks are running after their last turn.
+    proving: std::collections::HashSet<u64>,
+    /// Sessions waiting on a second opinion, with the agent giving it.
+    reviewing: HashMap<u64, &'static str>,
+    /// The mission open on the Missions page; none shows the New mission form.
+    mission_open: Option<u64>,
+    mission_goal: Entity<TextareaState>,
+    mission_feedback: Entity<InputState>,
+    mission_form: mission_ui::MissionForm,
+    /// Sessions whose mission part should be looked at again, such as after a review.
+    mission_wake: Vec<u64>,
+    /// Missions left running at the last quit were picked up again.
+    missions_resumed: bool,
+    /// The mission whose Delete is waiting to be confirmed.
+    mission_deleting: Option<u64>,
+    /// The activity beside a mission's board is hidden.
+    mission_feed_hidden: bool,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
     /// Images that go with a new session's first prompt.
@@ -531,6 +569,10 @@ struct RunoApp {
     /// Each session's pull request, and the sessions whose PR is being looked up.
     pr_status: HashMap<u64, github::PrStatus>,
     pr_loading: std::collections::HashSet<u64>,
+    /// The merge methods each project's GitHub repository allows, read once a run, and
+    /// the projects being read.
+    merge_methods: HashMap<u64, Vec<github::MergeMethod>>,
+    merge_methods_loading: std::collections::HashSet<u64>,
     pr_form: Option<ship::PrForm>,
     pr_title: Entity<InputState>,
     pr_base: Entity<InputState>,
@@ -1347,6 +1389,8 @@ impl RunoApp {
             expanded: state.projects.iter().map(|p| p.id).collect(),
             tabs: Vec::new(),
             tab_scroll: ScrollHandle::new(),
+            term_scroll: ScrollHandle::new(),
+            term_seen: Default::default(),
             project: None,
             cursor: None,
             ctx_index: None,
@@ -1368,6 +1412,7 @@ impl RunoApp {
             view: View::Session,
             state,
             demo,
+            git_github: false,
             selected,
             right_tab: RightTab::Changes,
             browser_open: false,
@@ -1385,6 +1430,12 @@ impl RunoApp {
             project_name,
             project_setup: cx
                 .new(|cx| InputState::new(window, cx).placeholder("npm install (optional)")),
+            project_checks: cx
+                .new(|cx| TextareaState::new(window, cx).placeholder("npm test\nnpm run lint")),
+            project_path: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Type or paste a folder path, such as ~/code/app")
+            }),
             clone_url: cx.new(|cx| {
                 InputState::new(window, cx).placeholder("https://github.com/owner/repo.git")
             }),
@@ -1408,6 +1459,7 @@ impl RunoApp {
             settings_inputs: HashMap::new(),
             settings_areas: HashMap::new(),
             mcp_form: None,
+            cleanup: Default::default(),
             settings_menu: None,
             discovered: None,
             applied_dark: None,
@@ -1509,6 +1561,25 @@ impl RunoApp {
             signed_out: Default::default(),
             stream_failed: Default::default(),
             turn_files: HashMap::new(),
+            proving: Default::default(),
+            reviewing: HashMap::new(),
+            mission_open: None,
+            mission_goal: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder(
+                        "Describe the goal, such as: Add a dark theme with a switch in Settings, and keep it after a restart",
+                    )
+                    .submit_on_enter(true)
+            }),
+            mission_feedback: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("What should change in the plan? Such as: merge the two UI parts")
+            }),
+            mission_form: Default::default(),
+            mission_wake: Vec::new(),
+            missions_resumed: false,
+            mission_deleting: None,
+            mission_feed_hidden: false,
             attachments: HashMap::new(),
             launch_images: HashMap::new(),
             new_context: None,
@@ -1568,6 +1639,8 @@ impl RunoApp {
             diff_against: "HEAD".into(),
             pr_status: HashMap::new(),
             pr_loading: Default::default(),
+            merge_methods: HashMap::new(),
+            merge_methods_loading: Default::default(),
             pr_form: None,
             pr_title: cx.new(|cx| InputState::new(window, cx).placeholder("Pull request title")),
             pr_base: cx.new(|cx| InputState::new(window, cx).placeholder("main")),
@@ -1711,6 +1784,15 @@ impl RunoApp {
         );
         let remove_name_sub = cx.subscribe_in(&app.remove_name, window, repaint);
         let clone_url_sub = cx.subscribe_in(&app.clone_url, window, repaint);
+        let project_path_sub = cx.subscribe_in(
+            &app.project_path,
+            window,
+            |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.project_path_typed(cx);
+                }
+            },
+        );
         let auto_name_sub = cx.subscribe_in(&app.auto_name, window, repaint);
         let auto_prompt_sub = cx.subscribe_in(
             &app.auto_prompt,
@@ -1721,6 +1803,28 @@ impl RunoApp {
                 }
             },
         );
+        // Enter on the plan's feedback plans again; the goal box plans like a prompt sends.
+        let replan_sub = cx.subscribe_in(
+            &app.mission_feedback,
+            window,
+            |this, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    if let Some(mid) = this.mission_open {
+                        this.replan(mid, window, cx);
+                    }
+                }
+            },
+        );
+        let goal_sub = cx.subscribe_in(&app.mission_goal, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { shift, secondary } = event {
+                let on_enter = cx.global::<AppSettings>().send_on_enter;
+                if *secondary || (on_enter && !*shift) {
+                    this.plan_mission(window, cx);
+                    cx.notify();
+                }
+            }
+        });
+        app._subscriptions.extend([replan_sub, goal_sub]);
         app._subscriptions.extend([
             branch_sub,
             task_sub,
@@ -1735,6 +1839,7 @@ impl RunoApp {
             finder_sub,
             remove_name_sub,
             clone_url_sub,
+            project_path_sub,
             auto_name_sub,
             auto_prompt_sub,
         ]);
@@ -1824,6 +1929,7 @@ impl RunoApp {
                     .update(cx, |this, cx| {
                         this.take_playbook_requests(cx);
                         this.take_phone_requests(cx);
+                        this.missions_tick_all(cx);
                     })
                     .is_err()
                 {
@@ -2155,6 +2261,19 @@ impl RunoApp {
                                 m.text.push_str(&text);
                             }
                             stream::Update::Step(step) => m.steps.push(step),
+                            stream::Update::Started { id, label } => {
+                                m.running_steps.push((m.steps.len(), id));
+                                m.steps.push(label);
+                            }
+                            stream::Update::Finished { id, ok } => {
+                                // The step may sit in an earlier reply when an error
+                                // message came between.
+                                for m in session.messages.iter_mut().rev() {
+                                    if m.finish_step(&id, ok) {
+                                        break;
+                                    }
+                                }
+                            }
                             stream::Update::Summary(summary) => {
                                 m.meta = match &model {
                                     Some(model) => format!("{model} · {summary}"),
@@ -2218,6 +2337,12 @@ impl RunoApp {
             Event::Err(Target::Session(id), line) => {
                 if agent::waits_for_sign_in(&line) {
                     self.sign_in_wait(id, &line);
+                }
+                // Grok names its conversation on stderr; the next turn continues it.
+                if let Some(session) = self.state.session_mut(id) {
+                    if let Some(found) = agent::stderr_conversation(&session.provider, &line) {
+                        session.agent_session = found;
+                    }
                 }
                 let log = self.stderr.entry(id).or_default();
                 log.push(line);
@@ -2300,7 +2425,13 @@ impl RunoApp {
                             session.messages.remove(at);
                         }
                     }
-                    session.status = if ok { Status::Done } else { Status::Failed };
+                    session.status = if ok {
+                        Status::Done
+                    } else if stopped {
+                        Status::Stopped
+                    } else {
+                        Status::Failed
+                    };
                     session.remote_turn = false;
                     session.unread = !on_screen;
                     if silent {
@@ -2394,7 +2525,12 @@ impl RunoApp {
                         }
                         let text = text.trim_start().to_string();
                         if !text.is_empty() {
-                            session.messages.push(Message::new(Role::System, text));
+                            let mut m = Message::new(Role::System, text);
+                            // A stop the person asked for reads as a note, not an error.
+                            if stopped {
+                                m.meta = "stopped".into();
+                            }
+                            session.messages.push(m);
                         }
                     }
                 }
@@ -2415,7 +2551,12 @@ impl RunoApp {
                     }
                 }
             }
-            Event::Output(key, result) => self.handle_output(key, result),
+            Event::Output(key, result) => {
+                if !self.handle_mission_output(&key, &result) {
+                    self.handle_output(key, result);
+                }
+                self.mission_wakes(cx);
+            }
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
                 self.cli_exited(id);
@@ -2623,6 +2764,7 @@ impl RunoApp {
                 View::Notes => self.open_notes(window, cx),
                 View::GitHub => self.load_github(),
                 View::Review => self.open_review(),
+                View::Missions => self.open_missions(cx),
                 _ => self.view = view,
             },
             Jump::Session(id) => self.open_session(id, window, cx),
@@ -2724,8 +2866,9 @@ impl RunoApp {
                 IconName::RotateCcwClock,
                 View::History,
             ),
-            ("Go to Review", IconName::GitCompare, View::Review),
-            ("Go to GitHub", IconName::GitPullRequest, View::GitHub),
+            ("Go to Git: To ship", IconName::GitCompare, View::Review),
+            ("Go to Missions", IconName::Rocket, View::Missions),
+            ("Go to Git: GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
             ("Go to Design", IconName::PanelsTopLeft, View::Design),
@@ -3401,10 +3544,9 @@ impl RunoApp {
         // playbook runs stay in Chat, where their limits hold.
         if cx.global::<AppSettings>().default_view == "cli"
             && agent::imports_cli_turns(&provider)
-            && self
-                .state
-                .session(id)
-                .is_some_and(|s| s.playbook == 0 && cliview::cli_blocker(s).is_none())
+            && self.state.session(id).is_some_and(|s| {
+                s.playbook == 0 && s.mission == 0 && cliview::cli_blocker(s).is_none()
+            })
         {
             // Context a session was started with goes ahead of the task here too.
             let mut task = task;
@@ -3726,16 +3868,13 @@ impl RunoApp {
             Status::Working => c_blue(),
             Status::Done => c_green(),
             Status::Failed => c_red(),
+            // Stopped on purpose: neutral, not an error.
+            Status::Stopped => c_muted(),
         }
     }
 
     fn status_label(status: Status) -> &'static str {
-        match status {
-            Status::Idle => "Idle",
-            Status::Working => "Working",
-            Status::Done => "Completed",
-            Status::Failed => "Failed",
-        }
+        status.label()
     }
 
     fn button(
@@ -4538,14 +4677,39 @@ impl RunoApp {
             )
     }
 
-    fn step_row(&self, text: &str) -> impl IntoElement {
+    /// One tool step: a pulsing dot while it runs, then a check, or a red cross when
+    /// its tool failed.
+    fn step_row(&self, text: &str, state: StepState, key: (u64, usize, usize)) -> impl IntoElement {
+        let mark = match state {
+            StepState::Running => div()
+                .size(px(12.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(c_blue()))
+                        .animated(
+                            SharedString::from(format!("step-run-{}-{}-{}", key.0, key.1, key.2)),
+                            Animation::new(Duration::from_millis(1200))
+                                .repeat()
+                                .with_easing(pulsating_between(0.3, 1.)),
+                            |el, t| el.opacity(t),
+                        ),
+                )
+                .into_any_element(),
+            StepState::Failed => icon(IconName::X, 12., c_red()).into_any_element(),
+            StepState::Done => icon(IconName::Check, 12., c_muted()).into_any_element(),
+        };
         div()
             .flex()
             .items_center()
             .gap_2()
             .h(px(24.))
             .text_size(px(12.5))
-            .child(icon(IconName::Check, 12., c_muted()))
+            .child(mark)
             .child(
                 div()
                     .truncate()
@@ -4818,7 +4982,10 @@ impl RunoApp {
             return self.sync_card(index, message, cx);
         }
         if message.role == Role::System
-            && matches!(message.meta.as_str(), "moved" | "note" | "warning")
+            && matches!(
+                message.meta.as_str(),
+                "moved" | "note" | "warning" | "stopped"
+            )
         {
             return fade(
                 div()
@@ -4834,6 +5001,7 @@ impl RunoApp {
                     .text_color(rgb(c_secondary()))
                     .child(match message.meta.as_str() {
                         "note" => icon(IconName::Info, 13., c_blue()),
+                        "stopped" => icon(IconName::CircleStop, 13., c_muted()),
                         "warning" => icon(IconName::TriangleAlert, 13., c_amber()),
                         _ => icon(IconName::Server, 13., c_blue()),
                     })
@@ -4885,7 +5053,7 @@ impl RunoApp {
         let shown = if open { message.steps.len() } else { 0 };
         for (i, step) in message.steps.iter().take(shown).enumerate() {
             steps = steps.child(stagger(
-                div().child(self.step_row(step)),
+                div().child(self.step_row(step, message.step_state(i, live), (key.0, index, i))),
                 SharedString::from(format!("step-{}-{}-{}", key.0, index, i)),
                 i,
             ));
@@ -4985,6 +5153,12 @@ impl RunoApp {
                     el.children(
                         self.turn_bar(index, cx)
                             .map(|bar| rise(div().child(bar), ("turn-rise", index), 360)),
+                    )
+                })
+                .when(is_last && !working, |el| {
+                    el.children(
+                        self.proof_card(index, cx)
+                            .map(|card| rise(div().child(card), ("proof-rise", index), 400)),
                     )
                 })
                 .when(!message.text.is_empty(), |el| {
@@ -5354,6 +5528,40 @@ impl RunoApp {
                     }),
             )
             .child(div().flex_1())
+            // A mission's part or its own session: back to the mission's board.
+            .children(self.mission(session.mission).map(|m| {
+                let mid = m.id;
+                let lead = m.lead == session.id;
+                div()
+                    .id("hdr-mission")
+                    .h(px(26.))
+                    .px_2()
+                    .mr_2()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(5.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(if lead {
+                            "This session lands the mission. Back to its board."
+                        } else {
+                            "This session is one part of a mission. Back to its board."
+                        })
+                        .build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.mission_open = Some(mid);
+                        this.open_missions(cx);
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::Rocket, 12., c_secondary()))
+                    .child("Mission board")
+            }))
             // Asked from a canvas: back to it, where its changes show.
             .children(shell::canvas_of(session).map(|view| {
                 let id = session.id;
@@ -6207,12 +6415,14 @@ impl RunoApp {
                     .p_8()
                     .v_flex()
                     .gap_4()
-                    .child(
-                        div()
-                            .text_size(px(20.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(title),
-                    )
+                    .when(!title.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(20.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(title),
+                        )
+                    })
                     .child(body),
             )
             .into_any_element()
@@ -8088,6 +8298,19 @@ impl RunoApp {
         let body = match shell {
             Some(sh) => self.shell_view(sh, window, cx),
             None if has_output => {
+                // New output keeps the newest line in view, unless the person scrolled
+                // up to read; a session's output opens at its end.
+                let lines = self.terminal[&id].len();
+                let (seen_id, seen) = self.term_seen.replace((id, lines));
+                if seen_id != id
+                    || (lines != seen
+                        && terminal::follows_tail(
+                            f32::from(self.term_scroll.offset().y),
+                            f32::from(self.term_scroll.max_offset().y),
+                        ))
+                {
+                    self.term_scroll.scroll_to_bottom();
+                }
                 let text: Vec<&str> = self.terminal[&id]
                     .iter()
                     .rev()
@@ -8096,23 +8319,35 @@ impl RunoApp {
                     .map(String::as_str)
                     .collect();
                 fade(
-                    div().flex_1().min_h_0().overflow_y_scrollbar().child(
-                        div()
-                            .v_flex()
-                            .font_family(self.mono_font.clone())
-                            .text_xs()
-                            .p_3()
-                            .child(
-                                TextView::markdown(
-                                    SharedString::from(format!("term-{id}")),
-                                    format!(
-                                        "```text\n{}\n```",
-                                        text.join("\n").replace("```", "'''")
-                                    ),
-                                )
-                                .selectable(true),
-                            ),
-                    ),
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .relative()
+                        .child(
+                            div()
+                                .id("term-out")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.term_scroll)
+                                .child(
+                                    div()
+                                        .v_flex()
+                                        .font_family(self.mono_font.clone())
+                                        .text_xs()
+                                        .p_3()
+                                        .child(
+                                            TextView::markdown(
+                                                SharedString::from(format!("term-{id}")),
+                                                format!(
+                                                    "```text\n{}\n```",
+                                                    text.join("\n").replace("```", "'''")
+                                                ),
+                                            )
+                                            .selectable(true),
+                                        ),
+                                ),
+                        )
+                        .vertical_scrollbar(&self.term_scroll),
                     SharedString::from(format!("termbody-{id}")),
                     220,
                 )
@@ -8566,8 +8801,8 @@ impl Render for RunoApp {
             View::Notes => self.notes_view(cx),
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
-            View::GitHub => self.github_view(cx),
-            View::Review => self.review_view(cx),
+            View::GitHub | View::Review => self.git_view(cx),
+            View::Missions => self.missions_view(cx),
             View::Editor => div()
                 .flex_1()
                 .min_w_0()
@@ -8711,12 +8946,19 @@ impl Render for RunoApp {
                 this.go(Mode::Playbooks, window, cx);
                 cx.notify();
             }))
+            // Both land in Git, each on its own tab.
             .on_action(cx.listener(|this, _: &GoReviews, window, cx| {
-                this.go(Mode::GitHub, window, cx);
+                this.git_github = true;
+                this.go(Mode::Git, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoReview, window, cx| {
-                this.go(Mode::Review, window, cx);
+                this.git_github = false;
+                this.go(Mode::Git, window, cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoMissions, window, cx| {
+                this.go(Mode::Missions, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoHistory, window, cx| {
@@ -8780,7 +9022,18 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
-                // The sidebar belongs to Sessions; elsewhere the shortcut opens Sessions with it.
+                // The sidebar belongs to Sessions, and Design's is its layers panel; elsewhere
+                // the shortcut opens Sessions with it.
+                if this.mode() == Mode::Design {
+                    if let Some(canvas) = this
+                        .design
+                        .project
+                        .and_then(|p| this.design.canvases.get(&p))
+                    {
+                        canvas.update(cx, |c, cx| c.toggle_layers(cx));
+                    }
+                    return;
+                }
                 if this.mode() != Mode::Sessions {
                     this.show_sidebar = true;
                     this.go(Mode::Sessions, window, cx);
@@ -8899,7 +9152,11 @@ impl Render for RunoApp {
                         let total = f32::from(window.viewport_size().width);
                         let x = total - f32::from(e.position.x);
                         // Leave the chat room for its header and composer.
-                        let sidebar = if this.show_sidebar { this.sidebar_width } else { 0. };
+                        let sidebar = if this.show_sidebar {
+                            this.sidebar_width
+                        } else {
+                            0.
+                        };
                         let max = (total - shell::RAIL_WIDTH - sidebar - CHAT_MIN)
                             .clamp(PANEL_MIN, PANEL_MAX);
                         this.panel_width = x.clamp(PANEL_MIN, max);
@@ -8957,20 +9214,22 @@ impl Render for RunoApp {
                             .when(show_tabs, |el| el.child(self.tab_strip(cx)))
                             .child(div().flex_1().min_h_0().flex().child(center))
                             .animated(
-                        SharedString::from(format!(
-                            "center-{}-{}",
-                            shown as u8,
-                            self.selected.unwrap_or(0)
-                        )),
-                        Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()),
-                        move |el, delta| {
-                            if still {
-                                el
-                            } else {
-                                el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta)))
-                            }
-                        },
-                    ))
+                                SharedString::from(format!(
+                                    "center-{}-{}",
+                                    shown as u8,
+                                    self.selected.unwrap_or(0)
+                                )),
+                                Animation::new(Duration::from_millis(200))
+                                    .with_easing(ease_out_quint()),
+                                move |el, delta| {
+                                    if still {
+                                        el
+                                    } else {
+                                        el.opacity(0.35 + 0.65 * delta).top(px(6. * (1. - delta)))
+                                    }
+                                },
+                            ),
+                    )
                     .children(right),
             )
             .child(
@@ -9066,19 +9325,19 @@ impl Render for RunoApp {
                                                     .map(|m| m.usage.cost_cents)
                                                     .sum();
                                                 let reports = agent::reports_cost(&s.provider);
-                                                let about = if reports {
-                                                    format!("session cost ${:.2}", cost / 100.0)
-                                                } else {
-                                                    format!(
-                                                        "{} reports no cost, so spending limits don't count it",
-                                                        agent::provider(&s.provider).name
-                                                    )
-                                                };
+                                                let about = agent::cost_limit_note(&s.provider)
+                                                    .unwrap_or_else(|| {
+                                                        format!("session cost ${:.2}", cost / 100.0)
+                                                    });
                                                 (u, cost, reports, about)
                                             })
                                     }),
                                 |el, (usage, cost, reports, about)| {
-                                    let window = if usage.window > 0 { usage.window } else { 200_000 };
+                                    let window = if usage.window > 0 {
+                                        usage.window
+                                    } else {
+                                        200_000
+                                    };
                                     let pct = (usage.context() as f32 / window as f32).min(1.0);
                                     el.child(
                                         div()
@@ -9130,10 +9389,7 @@ impl Render for RunoApp {
                     ),
             )
             .when(self.view == View::NewSession, |el| {
-                el.child(self.new_session_modal(
-                    f32::from(window.viewport_size().height) - 96.,
-                    cx,
-                ))
+                el.child(self.new_session_modal(f32::from(window.viewport_size().height) - 96., cx))
             })
             .children(self.alerts_view(cx))
             .children(self.assistant_view(cx))
@@ -9291,7 +9547,8 @@ fn main() {
     if args.get(1).map(String::as_str) == Some("--phone") {
         std::process::exit(phone::serve(args.get(2).map(String::as_str)));
     }
-    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed (launchd).
+    // `runo --run-due-playbooks`: scheduled playbooks while Runo is closed, started by
+    // the background job (launchd, a systemd user timer or Task Scheduler).
     if args.get(1).map(String::as_str) == Some("--run-due-playbooks") {
         shellenv::init();
         std::process::exit(pbrunner::run_due());
@@ -9395,8 +9652,9 @@ fn app_menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
-            MenuItem::action("Review", GoReview),
-            MenuItem::action("GitHub", GoReviews),
+            MenuItem::action("Git: To ship", GoReview),
+            MenuItem::action("Missions", GoMissions),
+            MenuItem::action("Git: GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
             MenuItem::action("History", GoHistory),
             MenuItem::action("Notes", GoNotes),

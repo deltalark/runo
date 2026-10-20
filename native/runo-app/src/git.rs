@@ -506,6 +506,41 @@ pub fn remove_worktree(repo: &str, dir: &str) -> Result<(), String> {
     git(repo, &["worktree", "remove", "--force", dir]).map(|_| ())
 }
 
+/// `git worktree list --porcelain`: one block per worktree, the repository's own first.
+pub fn worktree_list(repo: &str) -> Result<String, String> {
+    git(repo, &["worktree", "list", "--porcelain"])
+}
+
+/// Forget worktrees whose folder is gone.
+pub fn prune_worktrees(repo: &str) -> Result<(), String> {
+    git(repo, &["worktree", "prune"]).map(|_| ())
+}
+
+/// Local branches under `prefix`, such as `runo/`.
+pub fn local_branches(repo: &str, prefix: &str) -> Vec<String> {
+    let pattern = format!("refs/heads/{}", prefix.trim_end_matches('/'));
+    git(
+        repo,
+        &["for-each-ref", "--format=%(refname:short)", &pattern],
+    )
+    .map(|out| {
+        out.lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with(prefix))
+            .map(String::from)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Whether the worktree has uncommitted changes, untracked files included. None when
+/// git can't tell, such as for a folder that is not a worktree.
+pub fn has_uncommitted(dir: &str) -> Option<bool> {
+    git(dir, &["status", "--porcelain"])
+        .ok()
+        .map(|s| !s.trim().is_empty())
+}
+
 /// Delete a branch. Without `force` git refuses when it holds unmerged work.
 pub fn delete_branch(repo: &str, branch: &str, force: bool) -> Result<(), String> {
     git(repo, &["branch", if force { "-D" } else { "-d" }, branch]).map(|_| ())
@@ -1179,6 +1214,26 @@ pub fn changed_since(dir: &str, checkpoint: &str) -> Vec<String> {
         return Vec::new();
     };
     diff_names(dir, checkpoint, &tree).unwrap_or_default()
+}
+
+/// The patch of everything that changed since a checkpoint, files made since included,
+/// cut to about `limit` bytes.
+pub fn patch_since(dir: &str, checkpoint: &str, limit: usize) -> String {
+    let Ok(tree) = snapshot_tree(dir) else {
+        return String::new();
+    };
+    let mut text = git(dir, &["diff", "--stat", checkpoint, &tree]).unwrap_or_default();
+    text.push('\n');
+    text.push_str(&git(dir, &["diff", checkpoint, &tree]).unwrap_or_default());
+    if text.len() > limit {
+        let mut cut = limit;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n[diff truncated]");
+    }
+    text
 }
 
 /// What a restore did.

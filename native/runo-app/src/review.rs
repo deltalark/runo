@@ -16,10 +16,13 @@ impl RunoApp {
             .sessions
             .iter()
             .filter(|s| {
+                // A mission's parts ship with the mission, from its own session.
                 !s.archived
                     && s.canvas.is_empty()
                     && !self.is_running(s)
-                    && self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
+                    && (s.mission == 0 || self.mission_ready(s.id))
+                    && (self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
+                        || self.mission_ready(s.id))
             })
             .map(|s| s.id)
             .collect();
@@ -37,19 +40,32 @@ impl RunoApp {
                 self.select(first);
             }
         }
+        // A mission's work is all in commits: show everything since its base.
+        if !self.diff_base && self.selected.is_some_and(|id| self.mission_ready(id)) {
+            self.diff_base = true;
+            self.refresh();
+        }
         self.view = View::Review;
+        self.git_github = false;
     }
 
     /// Show one session in Review.
     pub(crate) fn review(&mut self, id: u64) {
+        // A mission's work is all in commits: show everything since its base.
+        if self.mission_ready(id) {
+            self.diff_base = true;
+            self.selected_file = None;
+        }
         self.select(id);
         self.view = View::Review;
+        self.git_github = false;
     }
 
     fn review_row(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let id = session.id;
         let on = self.selected == Some(id);
         let (files, added, removed) = self.stats.get(&id).copied().unwrap_or_default();
+        let mission = self.mission_ready(id);
         let project = self
             .state
             .projects
@@ -96,20 +112,102 @@ impl RunoApp {
                             .text_size(px(11.5))
                             .text_color(rgb(c_muted()))
                             .child(match files {
+                                _ if mission => format!("Mission branch  ·  {project}"),
                                 1 => format!("1 file  ·  {project}"),
                                 n => format!("{n} files  ·  {project}"),
                             }),
                     ),
             )
+            .when(!mission, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap_1()
+                        .text_size(px(11.5))
+                        .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
+                        .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Git: what waits to ship and the project's GitHub, as two tabs under one strip.
+    pub(crate) fn git_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let github = self.view == View::GitHub;
+        let tab = |id: &'static str, label: &'static str, count: usize, alert: bool, on: bool| {
+            crate::github::segment((id, 0), label, on)
+                .gap(px(6.))
+                .when(count > 0, |el| {
+                    el.child(
+                        div()
+                            .px(px(5.))
+                            .rounded_full()
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .when(alert, |el| {
+                                el.bg(rgba((c_amber() << 8) | 0x33))
+                                    .text_color(rgb(c_amber()))
+                            })
+                            .when(!alert, |el| {
+                                el.bg(tint(c_subtle())).text_color(rgb(c_secondary()))
+                            })
+                            .child(count.to_string()),
+                    )
+                })
+        };
+        let tabs = crate::github::segmented()
+            .child(
+                tab(
+                    "git-ship",
+                    "To ship",
+                    self.review_list().len(),
+                    false,
+                    !github,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_review();
+                    this.save();
+                    cx.notify();
+                })),
+            )
+            .child(
+                tab("git-github", "GitHub", self.gh.needs_you(), true, github).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.load_github();
+                        this.save();
+                        cx.notify();
+                    }),
+                ),
+            );
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .v_flex()
             .child(
                 div()
+                    .h(px(46.))
                     .flex_none()
+                    .px_4()
                     .flex()
-                    .gap_1()
-                    .text_size(px(11.5))
-                    .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
-                    .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
+                    .items_center()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(divider())
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Git"),
+                    )
+                    .child(tabs),
             )
+            .child(div().flex_1().min_h_0().flex().child(if github {
+                self.github_view(cx)
+            } else {
+                self.review_view(cx)
+            }))
             .into_any_element()
     }
 
@@ -132,25 +230,8 @@ impl RunoApp {
             .bg(pane(c_sidebar()))
             .child(
                 div()
-                    .h(px(46.))
                     .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Review")
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::NORMAL)
-                            .text_color(rgb(c_muted()))
-                            .child(list.len().to_string()),
-                    ),
-            )
-            .child(
-                div()
-                    .px_3()
-                    .pt_1()
+                    .pt_3()
                     .pb_1()
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
