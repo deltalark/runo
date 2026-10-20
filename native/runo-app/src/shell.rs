@@ -543,6 +543,85 @@ pub(crate) fn island(content: impl IntoElement, fill: Rgba, round: [bool; 4]) ->
         .when(bl, |el| el.child(frame_corner(false, true)))
 }
 
+/// One tab in a strip over an island. The open one is cut from the island below
+/// (see `strip_fill`); the rest sit quietly on the frame until hovered.
+pub(crate) fn strip_tab(
+    id: impl Into<ElementId>,
+    strip: &'static str,
+    selected: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .when(selected, |el| {
+            el.h(px(32.))
+                .child(strip_cut(strip))
+                .text_color(rgb(c_text()))
+        })
+        .when(!selected, |el| {
+            el.h(px(28.))
+                .mb(px(3.))
+                .rounded_md()
+                .text_color(rgb(c_secondary()))
+                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+        })
+}
+
+/// The header of a list beside the rail: a large title over a quiet summary line,
+/// with room on the right for the list's add button.
+pub(crate) fn list_header(title: &'static str, summary: impl IntoElement) -> Div {
+    div()
+        .pt(px(16.))
+        .px(px(16.))
+        .flex()
+        .items_start()
+        .justify_between()
+        .child(
+            div()
+                .v_flex()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(19.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(summary),
+                ),
+        )
+}
+
+/// The round, filled add button in a `list_header`.
+pub(crate) fn add_button(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .size(px(30.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(c_text()))
+        .cursor_pointer()
+        .hover(|el| el.opacity(0.85))
+        .child(icon(IconName::Plus, 16., c_canvas()))
+}
+
 /// A strip of the frame's grey, such as the gutter between two islands.
 pub(crate) fn gutter() -> Div {
     div().flex_none().bg(rail_shade())
