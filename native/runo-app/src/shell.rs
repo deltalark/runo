@@ -9,12 +9,15 @@ use gpui_kit::component::tooltip::Tooltip;
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
-/// How far the open place's tab reaches out of its 34px rail item: 9px to the rail's
-/// edge on the right, a little past the item on the left, top and bottom.
-const TAB_LEFT: f32 = 4.;
-const TAB_PAD: f32 = 3.;
+/// Where the open place's tab sits on its 34px rail item: starting a little inside the
+/// item on the left, reaching 9px past it to the rail's edge on the right, and a little
+/// past it at the top and bottom.
+const TAB_INSET: f32 = 3.;
+const TAB_PAD: f32 = 4.;
 /// Radius of the curves where a tab or a selected row flows into the sheet beside it.
-const FUSE_R: f32 = 10.;
+const FUSE_R: f32 = 12.;
+/// Radius of a sheet's top corner where it meets the rail under the top bar.
+const SHEET_R: f32 = 14.;
 
 /// How long the shell's small transitions take: quick enough to feel immediate, long
 /// enough that a change reads as a change rather than a jump.
@@ -96,8 +99,7 @@ fn accent_rule(key: impl Into<SharedString>, height: f32) -> AnyElement {
 /// The open place's tab on the rail: a piece of what sits beside the rail, the same
 /// colour, that reaches out around the icon, with the rail's edge curving into it above
 /// and below, so the place and its list (or page) read as one sheet. It slides out of
-/// the sheet when the place opens, with a short accent rule on its lip. `sheet` is the
-/// fill of what it is cut from.
+/// the sheet when the place opens. `sheet` is the fill of what it is cut from.
 fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
     let reach = (RAIL_WIDTH - 34.) / 2.;
     let height = 34. + 2. * TAB_PAD;
@@ -105,7 +107,7 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         .absolute()
         .top(px(-TAB_PAD - FUSE_R))
         .bottom(px(-TAB_PAD - FUSE_R))
-        .left(px(-TAB_LEFT))
+        .left(px(TAB_INSET))
         .right(px(-reach))
         .child(
             div()
@@ -115,15 +117,14 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
                 .right_0()
                 .h(px(height))
                 .rounded_l(px(FUSE_R))
-                .bg(sheet)
-                .child(accent_rule(format!("rail-tab-rule-{key}"), 14.)),
+                .bg(sheet),
         )
         .child(inner_curve(sheet, true).top_0())
         .child(inner_curve(sheet, false).bottom_0())
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
-            move |el, d| el.left(px(-TAB_LEFT + 12. * (1. - d))).opacity(d),
+            move |el, d| el.left(px(TAB_INSET + 12. * (1. - d))).opacity(d),
         )
 }
 
@@ -159,13 +160,10 @@ fn rail_icon(glyph: IconName, on: bool) -> AnyElement {
 pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
     let key = key.into();
     let page = glass_fill(c_canvas());
-    // A step in from the row's top and bottom, so the join reads lighter than the row and
-    // its curves keep clear of the rows around it.
-    let inset = 2.;
     div()
         .absolute()
-        .top(px(inset))
-        .bottom(px(inset))
+        .top_0()
+        .bottom_0()
         .left_0()
         .right(px(-reach))
         .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
@@ -228,16 +226,36 @@ pub(crate) fn chosen_fill_of(key: impl Into<SharedString>, radius: f32, look: Di
         )
 }
 
-/// The edge between a list and the page beside it, as a hairline under the list's
-/// content instead of a border, so a selected row can reach across it into the page.
-pub(crate) fn list_edge() -> Div {
+/// The rounded top corner of a sheet beside the rail, where it meets the rail under the
+/// top bar: the corner of a square outside a quarter circle, in the rail's colour, laid
+/// over the sheet's top-left. Empty in glass mode.
+pub(crate) fn sheet_corner() -> Div {
+    let fill = Hsla::from(pane(c_rail()));
     div()
         .absolute()
         .top_0()
-        .bottom_0()
-        .right_0()
-        .w(px(1.))
-        .bg(divider())
+        .left_0()
+        .size(px(SHEET_R))
+        .when(!glass_on(), |el| {
+            el.child(
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, window, _| {
+                        let (r, k) = (SHEET_R, 0.5523);
+                        let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                        let mut f = PathBuilder::fill();
+                        f.move_to(p(0., 0.));
+                        f.line_to(p(r, 0.));
+                        f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
+                        f.close();
+                        if let Ok(path) = f.build() {
+                            window.paint_path(path, fill);
+                        }
+                    },
+                )
+                .size_full(),
+            )
+        })
 }
 
 /// Let a list's rows fade in one after another when the list opens, each a beat after

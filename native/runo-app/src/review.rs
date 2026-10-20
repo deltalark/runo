@@ -232,7 +232,6 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
-            .child(shell::list_edge())
             .child(
                 div()
                     .px_3()

@@ -3967,73 +3967,55 @@ impl RunoApp {
 
     // ---------- sidebar ----------
 
-    fn nav_item(
+    /// One choice in the sidebar's segmented row under its header: a place the list
+    /// opens, lit while it is open, with a count where it helps.
+    fn nav_segment(
         &self,
         id: &'static str,
-        name: IconName,
         label: &'static str,
-        count: usize,
+        count: Option<usize>,
         view: View,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected = self.view == view;
+        let on = self.view == view;
         div()
             .id(id)
-            .h(px(28.))
-            .px_2()
+            .relative()
+            .flex_1()
+            .h(px(26.))
             .flex()
             .items_center()
-            .gap_2()
-            .rounded_md()
+            .justify_center()
+            .gap(px(5.))
+            .rounded(px(7.))
             .cursor_pointer()
-            .text_size(px(13.))
-            .relative()
-            .text_color(rgb(if selected { c_text() } else { c_secondary() }))
-            .when(selected, |el| {
-                el.child(shell::chosen_fill(format!("nav-fill-{id}"), 6.))
+            .text_size(px(11.5))
+            .text_color(rgb(if on { c_text() } else { c_muted() }))
+            .when(on, |el| {
+                el.child(shell::chosen_fill(format!("seg-fill-{id}"), 7.))
             })
-            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                match view {
-                    View::Settings => this.open_settings(),
-                    View::History => this.open_history(cx),
-                    View::Notes => this.open_notes(window, cx),
-                    View::GitHub => this.load_github(),
-                    _ => this.view = view,
-                }
+            .when(!on, |el| el.hover(|el| el.text_color(rgb(c_text()))))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.view = view;
                 cx.notify();
             }))
-            .child(if selected {
-                shell::pop(icon(name, 15., c_text()), format!("nav-icon-{id}"))
-            } else {
-                icon(name, 15., c_muted()).into_any_element()
-            })
-            .child(div().flex_1().child(label))
-            .when(count > 0 && view != View::Inbox, |el| {
+            .child(label)
+            .when_some(count.filter(|n| *n > 0), |el, n| {
                 el.child(shell::pop(
                     div()
-                        .text_size(px(11.5))
-                        .text_color(rgb(c_muted()))
-                        .child(count.to_string()),
-                    format!("nav-count-{id}-{count}"),
-                ))
-            })
-            .when(count > 0 && view == View::Inbox, |el| {
-                el.child(shell::pop(
-                    div()
-                        .min_w(px(18.))
-                        .h(px(16.))
-                        .px_1()
+                        .min_w(px(16.))
+                        .h(px(15.))
+                        .px(px(4.))
                         .flex()
                         .items_center()
                         .justify_center()
                         .rounded_full()
                         .bg(rgb(c_blue()))
-                        .text_size(px(10.5))
+                        .text_size(px(10.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(0xffffff))
-                        .child(count.to_string()),
-                    format!("nav-badge-{id}-{count}"),
+                        .child(n.to_string()),
+                    format!("seg-count-{id}-{n}"),
                 ))
             })
     }
@@ -4096,6 +4078,58 @@ impl RunoApp {
         } else {
             8.
         };
+        let sheet_edge = if selected { c_canvas() } else { c_sheet() };
+        // The agent's mark on a tile in its colour, with the session's state as a small dot
+        // cut into the tile's corner.
+        let state_dot = if let Some(need) = self.need(session) {
+            div()
+                .size(px(7.))
+                .rounded_full()
+                .bg(rgb(match need {
+                    shell::Need::Blocked => c_amber(),
+                    shell::Need::Failed => c_red(),
+                    shell::Need::Finished => c_blue(),
+                }))
+                .into_any_element()
+        } else if working {
+            self.status_dot(Status::Working, ("dot", id as usize), 7.)
+        } else {
+            div()
+                .size(px(7.))
+                .rounded_full()
+                .bg(rgb(c_muted()))
+                .into_any_element()
+        };
+        let avatar = div()
+            .relative()
+            .size(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(8.))
+            .bg(rgba((provider.color << 8) | 0x24))
+            .child(self.provider_mark(provider, 13.))
+            .child(
+                div()
+                    .absolute()
+                    .right(px(-3.))
+                    .bottom(px(-3.))
+                    .size(px(11.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(sheet_edge))
+                    .child(state_dot),
+            );
+        let subtitle = match branch {
+            Some(branch) => branch,
+            None => match model {
+                Some(m) => format!("{} · {m}", provider.name),
+                None => provider.name.to_string(),
+            },
+        };
         div()
             .id(("session", id as usize))
             .on_mouse_down(
@@ -4105,11 +4139,12 @@ impl RunoApp {
             .relative()
             .group("session-row")
             .mx_1()
-            .px_2()
-            .py(px(6.))
-            .v_flex()
-            .gap(px(2.))
-            .rounded_md()
+            .px(px(8.))
+            .py(px(7.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .rounded(px(11.))
             .cursor_pointer()
             .when(selected, |el| {
                 el.child(shell::row_fuse(format!("session-fuse-{id}"), reach))
@@ -4120,56 +4155,60 @@ impl RunoApp {
                 this.select(id);
                 cx.notify();
             }))
+            .child(avatar)
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .gap(px(2.))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.))
-                            .font_weight(if unread || selected {
-                                FontWeight::MEDIUM
-                            } else {
-                                FontWeight::NORMAL
-                            })
-                            .text_color(rgb(if selected || unread {
-                                c_text()
-                            } else {
-                                c_secondary()
-                            }))
-                            .child(session.title.clone()),
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(13.))
+                                    .font_weight(if unread || selected {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(rgb(if selected || unread {
+                                        c_text()
+                                    } else {
+                                        c_secondary()
+                                    }))
+                                    .child(session.title.clone()),
+                            )
+                            .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted()))),
                     )
-                    .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted())))
-                    .child(if let Some(need) = self.need(session) {
+                    .child(
                         div()
-                            .size(px(7.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(rgb(match need {
-                                shell::Need::Blocked => c_amber(),
-                                shell::Need::Failed => c_red(),
-                                shell::Need::Finished => c_blue(),
-                            }))
-                            .into_any_element()
-                    } else if working {
-                        self.status_dot(Status::Working, ("dot", id as usize), 7.)
-                    } else {
-                        div().into_any_element()
-                    })
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(rgb(c_muted()))
+                            .child(subtitle),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .v_flex()
+                    .items_end()
+                    .text_size(px(10.5))
                     .child(
                         // The age and the hover actions share one slot, so the actions
                         // replace the age instead of landing on top of it.
                         div()
-                            .flex_none()
                             .relative()
                             .min_w(px(40.))
                             .flex()
                             .justify_end()
-                            .text_size(px(11.5))
                             .child(
                                 div()
                                     .text_color(rgb(if working { c_blue() } else { c_muted() }))
@@ -4179,8 +4218,7 @@ impl RunoApp {
                             .child(
                                 div()
                                     .absolute()
-                                    .top_0()
-                                    .bottom_0()
+                                    .top(px(-4.))
                                     .right_0()
                                     .flex()
                                     .items_center()
@@ -4189,7 +4227,7 @@ impl RunoApp {
                                     .group_hover("session-row", |el| el.opacity(1.))
                                     .child(self.row_action(
                                         ("pin", id as usize),
-                                        22.,
+                                        20.,
                                         if pinned {
                                             IconName::PinOff
                                         } else {
@@ -4204,7 +4242,7 @@ impl RunoApp {
                                     ))
                                     .child(self.row_action(
                                         ("archive", id as usize),
-                                        22.,
+                                        20.,
                                         IconName::Archive,
                                         "Archive",
                                         cx.listener(move |this, _, _, cx| {
@@ -4214,32 +4252,7 @@ impl RunoApp {
                                         }),
                                     )),
                             ),
-                    ),
-            )
-            .child(
-                // The agent and where it works share one quiet line under the title.
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .text_size(px(11.5))
-                    .text_color(rgb(c_muted()))
-                    .child(self.provider_mark(provider, 11.))
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w(px(120.))
-                            .truncate()
-                            .child(match model {
-                                Some(m) => format!("{} · {m}", provider.name),
-                                None => provider.name.to_string(),
-                            }),
                     )
-                    .when_some(branch, |el, branch| {
-                        el.child(icon(IconName::GitBranch, 11., c_muted()))
-                            .child(div().min_w_0().truncate().child(branch))
-                    })
-                    .child(div().flex_1())
                     .when_some(stats.filter(|s| s.0 > 0), |el, (_, a, r)| {
                         el.child(
                             div()
@@ -4255,6 +4268,13 @@ impl RunoApp {
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let width = self.sidebar_width;
+        let total = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.canvas.is_empty())
+            .count();
+        let running = self.counts().running;
         let filter = self.search.read(cx).value().to_lowercase();
         let mut projects = div().v_flex().pb_2();
         let mut first = true;
@@ -4267,8 +4287,8 @@ impl RunoApp {
                 continue;
             }
             let color = projects::color_of(project);
-            // Each project is one block: its header, then its sessions hung off a
-            // rail in the project's color. Space between blocks keeps them apart.
+            // Each project is one block: its header, then its sessions as cards under
+            // it. Space between blocks keeps them apart.
             let mut group = div().v_flex().mx_1().when(!first, |el| el.mt(px(10.)));
             first = false;
             group = group.child(
@@ -4306,31 +4326,35 @@ impl RunoApp {
                         c_muted(),
                     ))
                     .child(
+                        // The project's initial on a chip in its colour.
                         div()
-                            .size(px(20.))
+                            .size(px(16.))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(5.))
-                            .bg(match color {
-                                Some(c) => rgba((c << 8) | 0x2e),
-                                None => tint(c_subtle()),
-                            })
-                            .child(icon(
-                                projects::icon_of(project),
-                                12.,
-                                color.unwrap_or(c_secondary()),
-                            )),
+                            .rounded(px(4.))
+                            .bg(rgb(color.unwrap_or(0x55555f)))
+                            .text_size(px(9.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xffffff))
+                            .child(
+                                project
+                                    .name
+                                    .chars()
+                                    .next()
+                                    .map(|c| c.to_uppercase().to_string())
+                                    .unwrap_or_default(),
+                            ),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(13.))
+                            .text_size(px(12.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
+                            .text_color(rgb(c_secondary()))
                             .child(project.name.clone()),
                     )
                     .when(missing, |el| {
@@ -4371,13 +4395,11 @@ impl RunoApp {
                     .when(!sessions.is_empty(), |el| {
                         el.child(
                             div()
-                                .px(px(6.))
+                                .px(px(4.))
                                 .h(px(16.))
                                 .flex()
                                 .items_center()
-                                .rounded_full()
-                                .bg(tint(c_subtle()))
-                                .text_size(px(10.5))
+                                .text_size(px(11.))
                                 .text_color(rgb(c_muted()))
                                 .group_hover("project", |el| el.opacity(0.))
                                 .child(shell::pop(
@@ -4415,19 +4437,7 @@ impl RunoApp {
                     .relative(),
             );
             if open || !filter.is_empty() {
-                // Sessions hang off a rail under the chevron, in the project's color.
-                let mut rows = div()
-                    .v_flex()
-                    .gap(px(2.))
-                    .ml(px(14.))
-                    .mt(px(2.))
-                    .mb_1()
-                    .pl(px(2.))
-                    .border_l_2()
-                    .border_color(match color {
-                        Some(c) => rgba((c << 8) | 0x73),
-                        None => rgb(c_border()),
-                    });
+                let mut rows = div().v_flex().gap(px(2.)).mt(px(2.)).mb_1();
                 if sessions.is_empty() {
                     rows = rows.child(
                         div()
@@ -4464,43 +4474,78 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
-            .child(shell::list_edge())
+            .child(shell::sheet_corner())
             .child(
+                // The list's own header: what it holds and how much is running, with the
+                // new-session button beside it.
                 div()
-                    .p_2()
-                    .v_flex()
-                    .gap_1()
+                    .pt(px(16.))
+                    .px(px(16.))
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .child(
+                        div()
+                            .v_flex()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(19.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(c_text()))
+                                    .child("Sessions"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(4.))
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(c_muted()))
+                                    .child(format!("{} sessions", total))
+                                    .when(running > 0, |el| {
+                                        el.child("·").child(
+                                            div()
+                                                .text_color(rgb(c_blue()))
+                                                .child(format!("{running} running")),
+                                        )
+                                    }),
+                            ),
+                    )
                     .child(
                         div()
                             .id("new-session")
                             .relative()
                             .child(tour::anchor(&self.anchors, "new-session"))
-                            .h(px(32.))
-                            .px_2()
+                            .size(px(30.))
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(c_border()))
-                            .bg(rgb(c_raised()))
+                            .justify_center()
+                            .rounded_full()
+                            .bg(rgb(c_text()))
                             .cursor_pointer()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .hover(|el| el.bg(tint(c_subtle())))
+                            .hover(|el| el.opacity(0.85))
+                            .tooltip({
+                                let tip =
+                                    format!("New session  {}", keymap::label(cx, "new-session"));
+                                move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                }
+                            })
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.open_new_session();
                                 cx.notify();
                             }))
-                            .child(icon(IconName::SquarePen, 14., c_text()))
-                            .child(div().flex_1().child("New session"))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(c_muted()))
-                                    .child(keymap::label(cx, "new-session")),
-                            ),
-                    )
+                            .child(icon(IconName::Plus, 16., c_canvas())),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(14.))
+                    .pt(px(12.))
+                    .v_flex()
+                    .gap(px(8.))
                     .child(
                         div()
                             .h(px(28.))
@@ -4508,89 +4553,66 @@ impl RunoApp {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .rounded_md()
+                            .rounded(px(8.))
                             .bg(tint(c_subtle()))
                             .child(icon(IconName::Search, 13., c_muted()))
                             .child(
-                                Input::new(&self.search)
-                                    .appearance(false)
-                                    .h(px(26.))
-                                    .text_size(px(12.5)),
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.search)
+                                        .appearance(false)
+                                        .h(px(26.))
+                                        .text_size(px(12.5)),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .id("add-project")
+                                    .p_1()
+                                    .rounded_sm()
+                                    .cursor_pointer()
+                                    .hover(|el| el.bg(tint(c_active())))
+                                    .tooltip(|window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(
+                                            "Add a project folder",
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx)))
+                                    .child(icon(IconName::FolderPlus, 13., c_muted())),
                             ),
                     )
                     .child(
                         div()
-                            .mt_1()
-                            .v_flex()
                             .relative()
-                            .child(
-                                self.nav_item(
-                                    "all-sessions",
-                                    IconName::Layers,
-                                    "All sessions",
-                                    self.state
-                                        .sessions
-                                        .iter()
-                                        .filter(|s| s.canvas.is_empty())
-                                        .count(),
-                                    View::AllSessions,
-                                    cx,
-                                ),
-                            )
-                            .child(
-                                self.nav_item(
-                                    "worktrees",
-                                    IconName::GitBranch,
-                                    "Isolated",
-                                    self.state
-                                        .sessions
-                                        .iter()
-                                        .filter(|s| s.isolated && s.canvas.is_empty())
-                                        .count(),
-                                    View::Worktrees,
-                                    cx,
-                                ),
-                            )
-                            .child(self.nav_item(
+                            .p(px(3.))
+                            .flex()
+                            .gap(px(2.))
+                            .rounded(px(9.))
+                            .bg(rgb(c_rail()))
+                            .child(self.nav_segment(
+                                "all-sessions",
+                                "All",
+                                None,
+                                View::AllSessions,
+                                cx,
+                            ))
+                            .child(self.nav_segment(
+                                "worktrees",
+                                "Isolated",
+                                None,
+                                View::Worktrees,
+                                cx,
+                            ))
+                            .child(self.nav_segment(
                                 "needs-you",
-                                IconName::Inbox,
                                 "Needs you",
-                                self.counts().needs_you,
+                                Some(self.counts().needs_you),
                                 View::Inbox,
                                 cx,
                             )),
                     ),
             )
-            .child(
-                div()
-                    .mt_1()
-                    .px_3()
-                    .h(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(c_muted()))
-                            .child("PROJECTS"),
-                    )
-                    .child(
-                        div()
-                            .id("add-project")
-                            .p_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|el| el.bg(tint(c_subtle())))
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new("Add a project folder")
-                                    .build(window, cx)
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx)))
-                            .child(icon(IconName::FolderPlus, 14., c_muted())),
-                    ),
-            )
+            .child(div().h(px(8.)))
             .child(
                 div()
                     .flex_1()
