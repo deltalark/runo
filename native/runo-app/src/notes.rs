@@ -203,6 +203,7 @@ impl RunoApp {
             list = list.child(
                 div()
                     .id(("notes-project", i))
+                    .relative()
                     .px_2()
                     .py(px(7.))
                     .flex()
@@ -210,7 +211,10 @@ impl RunoApp {
                     .gap_2()
                     .rounded_lg()
                     .cursor_pointer()
-                    .when(on, |el| el.bg(tint(c_active())))
+                    .when(on, |el| {
+                        el.bg(tint(c_active()))
+                            .child(crate::shell::accent_bracket(format!("notes-mark-{pid}")))
+                    })
                     .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.notes_project = Some(pid);
@@ -328,10 +332,16 @@ impl RunoApp {
             .v_flex()
             .gap_4()
             .child(
-                Input::new(&self.notes_query)
-                    .bordered(true)
-                    .prefix(icon(IconName::Search, 13., c_muted()))
-                    .h(px(32.)),
+                div()
+                    .h(px(34.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(tint(c_subtle()))
+                    .child(icon(IconName::Search, 13., c_muted()))
+                    .child(Input::new(&self.notes_query).appearance(false).h(px(30.))),
             )
             .child(
                 div()
@@ -367,15 +377,7 @@ impl RunoApp {
         let (done, total) = tasks(&text);
         let mode = self.notes_mode;
 
-        let mut modes = div()
-            .flex()
-            .items_center()
-            .p(px(3.))
-            .gap(px(2.))
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(rgb(c_canvas()));
+        let mut modes = crate::shell::seg_track();
         for (j, (value, glyph, label)) in [
             (NotesMode::Write, IconName::Pencil, "Write"),
             (NotesMode::Split, IconName::Columns2, "Split"),
@@ -386,30 +388,12 @@ impl RunoApp {
         {
             let on = mode == value;
             modes = modes.child(
-                div()
-                    .id(("notes-mode", j))
-                    .h(px(26.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(12.5))
-                    .when(on, |el| {
-                        el.bg(tint(c_selected()))
-                            .text_color(rgb(c_blue()))
-                            .font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(!on, |el| {
-                        el.text_color(rgb(c_secondary()))
-                            .hover(|el| el.bg(tint(c_subtle())))
-                    })
+                crate::shell::seg_choice(("notes-mode", j), format!("notes-mode-{j}"), on)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.notes_mode = value;
                         cx.notify();
                     }))
-                    .child(icon(glyph, 12., if on { c_blue() } else { c_muted() }))
+                    .child(icon(glyph, 12., if on { c_text() } else { c_muted() }))
                     .child(label),
             );
         }
@@ -658,10 +642,8 @@ impl RunoApp {
             .child(
                 div()
                     .v_flex()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(rgb(c_border()))
-                    .bg(tint(c_raised()))
+                    .rounded(px(12.))
+                    .bg(tint(c_subtle()))
                     .overflow_hidden()
                     .when(mode != NotesMode::Preview, |el| {
                         el.child(

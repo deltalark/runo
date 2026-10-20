@@ -2381,18 +2381,14 @@ impl RunoApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut card = div()
-            .v_flex()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_subtle()))
-            .overflow_hidden();
-        let count = sec.rows.len();
+        let mut card = crate::shell::card().v_flex().overflow_hidden();
         for (i, r) in sec.rows.into_iter().enumerate() {
             *counter += 1;
             let control = self.control(*counter, r.ctl, window, cx);
             let open = r.open;
+            if i > 0 {
+                card = card.child(crate::shell::card_rule());
+            }
             card = card.child(
                 div()
                     .id(("setting-row", *counter))
@@ -2412,9 +2408,6 @@ impl RunoApp {
                     .items_center()
                     .justify_between()
                     .gap_8()
-                    .when(i + 1 < count, |el| {
-                        el.border_b_1().border_color(rgb(c_border()))
-                    })
                     .child(
                         div()
                             .flex_1()
@@ -2451,10 +2444,10 @@ impl RunoApp {
                     .px_1()
                     .child(
                         div()
-                            .text_base()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
-                            .child(sec.title),
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(c_muted()))
+                            .child(sec.title.to_uppercase()),
                     )
                     .when(!sec.desc.is_empty(), |el| {
                         el.child(
@@ -2496,13 +2489,12 @@ impl RunoApp {
             // Chosen the way a selected session is: a raised fill with the accent's
             // bracket at its edge, so every list in the app marks its choice alike.
             .when(selected, |el| {
-                el.bg(tint(c_selected()))
-                    .child(crate::shell::accent_bracket(format!(
-                        "snav-mark-{}",
-                        page.label()
-                    )))
-                    .text_color(rgb(c_text()))
-                    .font_weight(FontWeight::MEDIUM)
+                el.child(crate::shell::row_fuse(
+                    format!("snav-fuse-{}", page.label()),
+                    NAV_PAD,
+                ))
+                .text_color(rgb(c_text()))
+                .font_weight(FontWeight::MEDIUM)
             })
             .when(!selected, |el| {
                 el.text_color(rgb(c_secondary()))
@@ -2515,13 +2507,14 @@ impl RunoApp {
             }))
             .child(
                 div()
+                    .relative()
                     .w(px(20.))
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(lead),
             )
-            .child(page.label())
+            .child(div().relative().child(page.label()))
     }
 
     pub(crate) fn settings_view(
@@ -2534,19 +2527,47 @@ impl RunoApp {
         let query = self.settings_search.read(cx).value().trim().to_lowercase();
 
         // Navigation
+        // A sheet beside the page, curving into the frame at its top like the Sessions
+        // list; the open page's row fuses through its right edge into the page.
         let mut nav = div()
+            .relative()
             .w(px(252.))
             .flex_none()
             .h_full()
             .v_flex()
-            .p_3()
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sheet()));
+            .gap_3()
+            .pl(px(7.))
+            .py_3()
+            .rounded_tr(px(crate::shell::ISLAND_R))
+            .bg(pane(c_sheet()))
+            .child(crate::shell::frame_corner(true, false))
+            .child(
+                div()
+                    .relative()
+                    .ml(px(5.))
+                    .mr(px(NAV_PAD))
+                    .h(px(34.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(tint(c_subtle()))
+                    .child(icon(IconName::Search, 14., c_muted()))
+                    .child(
+                        Input::new(&self.settings_search)
+                            .appearance(false)
+                            .h(px(30.)),
+                    ),
+            );
         let mut groups = div()
             .id("settings-nav")
             .flex_1()
             .min_h_0()
+            // Room inside the scroll for the open row's bracket on the left and its
+            // fuse across to the page on the right.
+            .pl(px(5.))
+            .pr(px(NAV_PAD))
             .overflow_y_scroll()
             .v_flex()
             .gap_4();
@@ -2561,13 +2582,7 @@ impl RunoApp {
                     .child(title.to_uppercase()),
             );
             // Pages hang off their group like a file tree; agent pages hang off Providers.
-            let mut items = div()
-                .ml(px(14.))
-                .pl(px(6.))
-                .border_l_1()
-                .border_color(rgb(c_border()))
-                .v_flex()
-                .gap(px(2.));
+            let mut items = div().v_flex().gap(px(2.));
             let mut i = 0;
             while i < pages.len() {
                 let page = pages[i];
@@ -2624,30 +2639,26 @@ impl RunoApp {
             groups = groups.child(group.child(items));
         }
         nav = nav.child(groups).child(
-            div()
-                .pt_2()
-                .border_t_1()
-                .border_color(rgb(c_border()))
-                .child(
-                    div()
-                        .id("settings-back")
-                        .h(px(38.))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .text_sm()
-                        .text_color(rgb(c_secondary()))
-                        .hover(|el| el.bg(tint(c_subtle())))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.view = View::Session;
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::ArrowLeft, 16., c_secondary()))
-                        .child("Back to workspace"),
-                ),
+            div().relative().ml(px(5.)).mr(px(NAV_PAD)).child(
+                div()
+                    .id("settings-back")
+                    .h(px(38.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded_lg()
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(rgb(c_secondary()))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.view = View::Session;
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::ArrowLeft, 16., c_secondary()))
+                    .child("Back to workspace"),
+            ),
         );
 
         // Content
@@ -2738,82 +2749,28 @@ impl RunoApp {
             body = body.child(self.settings_card(sec, &mut counter, window, cx));
         }
 
-        let header = div()
-            .h(px(52.))
-            .flex_none()
-            .px_8()
-            .flex()
-            .items_center()
-            .justify_between()
-            .border_b_1()
-            .border_color(rgb(c_border()))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_sm()
-                    .child(div().text_color(rgb(c_muted())).child("Settings"))
-                    .child(icon(IconName::ChevronRight, 14., c_muted()))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(c_text()))
-                            .child(if query.is_empty() {
-                                self.settings_page.label().to_string()
-                            } else {
-                                "Search".to_string()
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(300.))
-                    .h(px(34.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(c_border()))
-                    .bg(tint(c_subtle()))
-                    .child(icon(IconName::Search, 14., c_muted()))
-                    .child(
-                        Input::new(&self.settings_search)
-                            .appearance(false)
-                            .h(px(30.)),
-                    ),
-            );
-
-        let main = div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .v_flex()
-            .child(header)
-            .child({
-                // Pages cross-fade inside Settings, but opening Settings shows it at once.
-                let still = self.settings_switching();
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(body)
-                    .animated(
-                        SharedString::from(format!(
-                            "settings-page-{}",
-                            if query.is_empty() {
-                                self.settings_page.label()
-                            } else {
-                                "search"
-                            }
-                        )),
-                        Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                        move |el, d| if still { el } else { el.opacity(d) },
-                    )
-            });
+        let main = div().flex_1().min_w_0().h_full().v_flex().child({
+            // Pages cross-fade inside Settings, but opening Settings shows it at once.
+            let still = self.settings_switching();
+            div()
+                .id("settings-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(body)
+                .animated(
+                    SharedString::from(format!(
+                        "settings-page-{}",
+                        if query.is_empty() {
+                            self.settings_page.label()
+                        } else {
+                            "search"
+                        }
+                    )),
+                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                    move |el, d| if still { el } else { el.opacity(d) },
+                )
+        });
         div()
             .size_full()
             .flex()
@@ -2845,6 +2802,9 @@ pub(crate) struct CleanupView {
     /// How the last removal went, and whether all of it worked.
     result: Option<(String, bool)>,
 }
+
+/// The settings list's right padding, which the open page's row reaches across.
+const NAV_PAD: f32 = 12.;
 
 fn plural(n: usize, one: &str) -> String {
     format!("{n} {one}{}", if n == 1 { "" } else { "s" })
