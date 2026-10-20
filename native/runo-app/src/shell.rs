@@ -10,15 +10,17 @@ use std::cell::Cell;
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
-/// Where the open place's tab sits on its 34px rail item: starting a little inside the
-/// item on the left, reaching 9px past it to the rail's edge on the right, and a little
-/// past it at the top and bottom.
-const TAB_INSET: f32 = 3.;
+/// Where the open place's tab sits on its 34px rail item: starting just outside the
+/// item on the left, 8px in from the rail's edge, reaching 9px past it to the rail's
+/// other edge on the right, and a little past it at the top and bottom.
+const TAB_INSET: f32 = -1.;
 const TAB_PAD: f32 = 4.;
 /// Radius of the curves where a tab or a selected row flows into the sheet beside it.
 const FUSE_R: f32 = 12.;
 /// Radius of a sheet's top corner where it meets the rail under the top bar.
 pub(crate) const SHEET_R: f32 = 14.;
+/// Radius of the rail's own corners where it turns in above and below the open tab.
+const RAIL_R: f32 = 14.;
 
 /// How long the shell's small transitions take: quick enough to feel immediate, long
 /// enough that a change reads as a change rather than a jump.
@@ -30,18 +32,18 @@ fn after(lead: f32) -> impl Fn(f32) -> f32 {
     move |t| ease_out_quint()(((t - lead) / (1. - lead)).clamp(0., 1.))
 }
 
-/// The curve where an edge turns into the sheet beside it: the corner of a `FUSE_R`
+/// The curve where an edge turns into the sheet beside it: the corner of an `r`
 /// square outside a quarter circle, filled with `fill`, so whatever is behind shows in
 /// the rest. Drawn as a path, not as a square painted over in a guessed colour, so no
 /// corner shows darker than what is around it. It sits beside its shape, never over it,
 /// so it matches in glass mode too.
-fn inner_curve(fill: Rgba, top: bool) -> Div {
+fn inner_curve(fill: Rgba, top: bool, r: f32) -> Div {
     let fill = Hsla::from(fill);
-    div().absolute().right_0().size(px(FUSE_R)).child(
+    div().absolute().right_0().size(px(r)).child(
         canvas(
             |_, _, _| (),
             move |b, _, window, _| {
-                let (r, k) = (FUSE_R, 0.5523);
+                let k = 0.5523;
                 let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
                 // The top curve turns round the square's top-left corner, the bottom
                 // one round its bottom-left.
@@ -177,7 +179,11 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
                 .h(px(height))
                 .rounded_l(px(FUSE_R))
                 .bg(sheet)
-                .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full()),
+                .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
+                // The sheet behind the rail's turns above and below: the rail leaves
+                // them out, so the tab fills them, the same layer as the rest of it.
+                .child(inner_curve(sheet, true, RAIL_R).top(px(-RAIL_R)))
+                .child(inner_curve(sheet, false, RAIL_R).bottom(px(-RAIL_R))),
         )
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
@@ -206,15 +212,15 @@ fn rail_fill() -> AnyElement {
             f.move_to(at(left, top));
             f.line_to(at(right, top));
             if let Some(t) = TAB_CUT.get() {
-                let (tx, ty, tb, r) = (t.origin.x, t.origin.y, t.bottom(), px(r));
-                f.line_to(at(right, ty - r));
-                turn(&mut f, at(right, ty - r), at(right, ty), at(right - r, ty));
+                let (tx, ty, tb, r, o) = (t.origin.x, t.origin.y, t.bottom(), px(r), px(RAIL_R));
+                f.line_to(at(right, ty - o));
+                turn(&mut f, at(right, ty - o), at(right, ty), at(right - o, ty));
                 f.line_to(at(tx + r, ty));
                 turn(&mut f, at(tx + r, ty), at(tx, ty), at(tx, ty + r));
                 f.line_to(at(tx, tb - r));
                 turn(&mut f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
-                f.line_to(at(right - r, tb));
-                turn(&mut f, at(right - r, tb), at(right, tb), at(right, tb + r));
+                f.line_to(at(right - o, tb));
+                turn(&mut f, at(right - o, tb), at(right, tb), at(right, tb + o));
             }
             f.line_to(at(right, bottom));
             f.line_to(at(left, bottom));
@@ -248,7 +254,7 @@ fn rail_tile(key: &'static str) -> AnyElement {
 fn rail_icon(glyph: IconName, on: bool) -> AnyElement {
     div()
         .relative()
-        .child(icon(glyph, 17., if on { c_text() } else { c_muted() }))
+        .child(icon(glyph, 18., if on { c_text() } else { c_muted() }))
         .into_any_element()
 }
 
@@ -268,8 +274,8 @@ pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
         .left_0()
         .right(px(-reach))
         .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
-        .child(inner_curve(page, true).top(px(-FUSE_R)))
-        .child(inner_curve(page, false).bottom(px(-FUSE_R)))
+        .child(inner_curve(page, true, FUSE_R).top(px(-FUSE_R)))
+        .child(inner_curve(page, false, FUSE_R).bottom(px(-FUSE_R)))
         .child(accent_bracket(format!("{key}-rule")))
         .animated(
             ElementId::Name(key),
