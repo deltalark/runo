@@ -1,34 +1,41 @@
 <div align="center">
 
-<img src="native/runo-app/assets/icon/png/runo-256.png" width="128" alt="Runo app icon" />
+<img src="native/runo-app/assets/icon/png/runo-256.png" width="132" alt="Runo app icon" />
 
 <h1>Runo</h1>
 
-<h3>Every coding agent, side by side, in one native app.</h3>
+<h3>Your whole team of coding agents, in one native app.</h3>
 
 <p>
-Claude Code, Codex, Gemini, OpenCode, Cursor and more, each in its own session and its own git worktree.<br />
-Live output, diffs, a real terminal, a browser and pull requests in one window.<br />
-Run them on your Mac, in a VM or on your own server, and move them between the three at any time.
+Run Claude Code, Codex, Gemini, OpenCode, Cursor and five more side by side, each in its own git worktree.<br />
+Hand one goal to several of them at once, have every turn proven by your own tests,<br />
+and review, design, diagram and ship it all without leaving the window.
 </p>
 
 <p>
 <a href="https://github.com/deltalark/runo/releases/latest"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
 &nbsp;
 <a href="#run-from-source"><img src="https://img.shields.io/badge/Build_from_source-b7410e?style=for-the-badge&logo=rust&logoColor=white" alt="Build from source" /></a>
+&nbsp;
+<a href="docs/guide"><img src="https://img.shields.io/badge/Read_the_guide-5b5bd6?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Read the guide" /></a>
 </p>
 
 <p>
+<a href="https://github.com/deltalark/runo/actions/workflows/ci.yml"><img src="https://github.com/deltalark/runo/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://github.com/deltalark/runo/releases"><img src="https://img.shields.io/github/v/release/deltalark/runo?include_prereleases&label=release&color=5b5bd6" alt="Latest release" /></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
 <img src="https://img.shields.io/badge/built%20with-pure%20Rust-b7410e?logo=rust&logoColor=white" alt="Pure Rust" />
 <img src="https://img.shields.io/badge/no-Electron-47848f?logo=electron&logoColor=white" alt="No Electron" />
+<img src="https://img.shields.io/badge/agents-10_supported-2ea44f" alt="10 agents supported" />
 <img src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple" alt="macOS" />
 <img src="https://img.shields.io/badge/status-early-orange" alt="Status: early" />
 </p>
 
 <p>
 <a href="#why-runo"><b>Why Runo</b></a> ·
+<a href="#whats-new"><b>What's new</b></a> ·
 <a href="#features"><b>Features</b></a> ·
+<a href="#design-and-architecture"><b>Design</b></a> ·
 <a href="#supported-agents"><b>Agents</b></a> ·
 <a href="#getting-started"><b>Get started</b></a> ·
 <a href="#connections-run-anywhere"><b>Run anywhere</b></a> ·
@@ -45,7 +52,7 @@ Run them on your Mac, in a VM or on your own server, and move them between the t
 
 ## Why Runo
 
-Coding agents are good at working on their own, but juggling several of them across terminal tabs gets messy fast. Runo gives each agent its own session and its own isolated copy of the code, then puts everything you need to steer and review them in one place.
+Coding agents are good at working on their own, but juggling several of them across terminal tabs gets messy fast, and reading every diff to find out whether the work is any good doesn't scale. Runo gives each agent its own session and its own isolated copy of the code, checks what it did, and puts everything you need to steer, review and ship in one place.
 
 <table>
 <tr>
@@ -63,16 +70,22 @@ Runo drives the agent CLIs you already have installed and signed in. It never se
 </td>
 <td width="33%" valign="top">
 
-### 🧩 Nothing hard-coded
-Models, effort levels and permission modes are read from each installed CLI, so new releases show up without a Runo update.
+### 🌿 Agents never collide
+Every session can get its own git worktree and branch, so parallel agents never overwrite each other's work.
 
 </td>
 </tr>
 <tr>
 <td width="33%" valign="top">
 
-### 🌿 Agents never collide
-Every session can get its own git worktree and branch, so parallel agents never overwrite each other's work.
+### ✅ Proven, not promised
+Your tests, lint and build run after every turn. Red goes back to the agent, and another vendor's agent can give a second opinion.
+
+</td>
+<td width="33%" valign="top">
+
+### 🚀 One goal, many agents
+A mission splits a goal into parts, runs them at once across vendors, and merges them into one branch you ship.
 
 </td>
 <td width="33%" valign="top">
@@ -81,10 +94,60 @@ Every session can get its own git worktree and branch, so parallel agents never 
 Start on your laptop, send the session to a VM or a build server to keep going while you sleep, and pull it back.
 
 </td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+### 🎨 Design and diagram
+A Figma-style canvas of real HTML screens and a draw.io-style architecture editor, both with AI built in.
+
+</td>
+<td width="33%" valign="top">
+
+### 🧩 Nothing hard-coded
+Models, effort levels and permission modes are read from each installed CLI, so new releases show up without a Runo update.
+
+</td>
 <td width="33%" valign="top">
 
 ### ✋ Always in control
-Approve permissions, plans and questions from any session, undo any turn, and cap spending and running agents.
+Approve permissions, plans and questions from any session or your phone, undo any turn, and cap spending, turns and tokens.
+
+</td>
+</tr>
+</table>
+
+## What's new
+
+> [!TIP]
+> **🚀 Missions** and **✅ Proof of done** just landed. Give Runo one goal and watch a team of agents plan it, build it in parallel, prove it with your own checks and merge it into a single branch ready to ship. See the [changelog](CHANGELOG.md) for everything else.
+
+### 🚀 Missions
+
+<img src="docs/images/missions.png" alt="The Missions page: a running mission with two waves, the first part merged with its check passed, the second part's agent writing code, and a live activity log on the right" width="920" />
+
+One goal, planned into parts that agents from different vendors work on at the same time. Open **Missions** (<kbd>⌘</kbd> <kbd>9</kbd>), describe the goal, and a planner agent reads the project and splits it into parts, each with its prompt, the parts it waits on, the files it expects to touch and an agent. Switch an agent, drop a part or plan again with feedback, then **Start mission**.
+
+- **A live board in waves.** Every part in a wave runs at once, each as its own session and worktree branched from the mission branch, so later waves build on earlier ones. Cards show each part's agent, its step through Work, Checks, Review and Merge, and what its agent is doing right now, beside an activity log of checks, fixes, reviews, conflicts and merges.
+- **Every part is checked and merged.** A part's checks run when its agent stops and failures go back for at least two rounds. Another vendor's agent can review it, then Runo commits it and merges it into the mission branch one part at a time, sending any conflict back to the part's agent.
+- **Only what's stuck waits.** A part that stays red shows **Needs you** with **Try again** and **Skip**, and only the parts that depend on it are held up.
+- **Ship the whole thing.** When every part is in, the checks run on the mission branch and its own agent fixes whatever broke between the parts. Then **Review and ship** opens the branch in Review for a pull request or a merge.
+
+<table>
+<tr>
+<td width="55%" valign="top">
+
+### ✅ Proof of done
+
+Each project lists its checks (tests, lint, typecheck, build), suggested from its `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml` or `Makefile`. They run after every turn that changes files, and a card under the reply shows the verdict with the end of any failing output.
+
+- **Fix it** sends the failures back to the agent, or let Runo do it on its own for 1, 2, 3 or 5 rounds. It stops when the same failure comes back.
+- **Second opinion** asks an agent from another vendor to review the turn's diff read-only. Its comments land as diff notes, ready for **Send notes**.
+
+</td>
+<td width="45%" valign="top">
+
+<img src="docs/images/proof-of-done.png" alt="A Claude Code turn with a green card under it: all 2 checks passed, Run again, Second opinion, and Codex left 1 note on the diff" />
 
 </td>
 </tr>
@@ -96,21 +159,21 @@ Approve permissions, plans and questions from any session, undo any turn, and ca
 
 <img src="docs/images/new-session.png" alt="The New session dialog with five projects, Claude Code, Codex, OpenCode and Gemini to pick from, and a choice between an isolated worktree and the project directory" width="920" />
 
-- **Projects and sessions.** Add any local folder and start sessions on it. The sidebar groups sessions under each project, on a rail in the project's color, with live status dots, unread markers and `+/-` line counts. Group them by status instead when you'd rather see what needs you.
-- **Isolated worktrees.** A session can run in its own branch and folder under `.runo-worktrees/`, or right in your checkout. A setup command runs in each new worktree, in a terminal tab where you can answer its prompts, before the agent starts, and git-ignored files listed in `.worktreeinclude` (such as `.env`) are copied in.
+- **Projects and sessions.** Add any local folder, or clone one from a URL, and start sessions on it. The sidebar groups sessions under each project, on a rail in the project's color, with live status dots, unread markers and `+/-` line counts. Group them by status instead when you'd rather see what needs you.
+- **Isolated worktrees.** A session can run in its own branch and folder under `.runo-worktrees/`, branched from the base you pick and named after the task (such as `runo/fix-login-redirect`), or right in your checkout. A setup command runs in each new worktree before the agent starts, and git-ignored files listed in `.worktreeinclude` (such as `.env`) are copied in. **Clean up** in Settings finds worktrees and branches no session uses any more.
 - **Race several agents.** Send one task to several agents at once, each in its own worktree, compare the results and keep the best one.
-- **Tabs.** Open sessions stay in tabs, so you can move between them in one click.
-- **Agent history.** Past Claude Code and Codex conversations on this machine are listed, and opening one resumes that exact conversation.
+- **Home, Inbox and tabs.** Home shows what every project is doing, the Inbox lists every agent waiting on a permission, plan or question with the answers inline, and open sessions stay in tabs you can drag into order.
+- **Find anything.** The Sessions page searches titles, branches, projects and past conversations, with filters for project, agent and status. **History** lists past Claude Code and Codex conversations on this machine, and opening one resumes that exact conversation.
 
 ### Talking to agents
 
 - **Live, structured output.** Each tool step (read, edit, run, search) streams in as it happens and folds into a tidy "Worked · N steps" summary.
-- **A composer that knows the CLI.** Mention files with `@`, attach images, and pick model, effort, permission mode and more from options detected from the agent itself. Type your next message while the agent works and it is queued.
+- **A composer that knows the CLI.** Mention files with `@`, attach images, and pick model, effort, permission mode and more from options detected from the agent itself. The `/` menu lists the agent's own commands, custom commands, skills and your playbooks. Type your next message while the agent works and it is queued.
 - **Approve from anywhere.** Permission requests, questions and plans from any session pop up in the corner, so you can answer without leaving what you're doing. Claude Code's permission requests arrive while the turn runs and it carries on as soon as you answer.
 - **Undo, Keep or Review each turn.** Runo checkpoints the worktree before every turn, so you can roll back a turn that went wrong with one click.
-- **Usage at a glance.** Tokens, cost and context use per turn and per session.
-- **Context control.** `/compact` shrinks a long conversation and `/clear` starts fresh, also from the session's right-click menu. Fork a session from any turn, or edit and resend a sent message.
-- **Limits.** Stop an agent that goes quiet, cap spending per session and per day (for agents that report a cost), cap turns per session and per day and tokens per day for any agent, and cap how many agents run at once (Settings → General).
+- **Context control.** `/compact` shrinks a long conversation and `/clear` starts fresh. Fork a session from any turn with the files as they were then, or edit and resend a sent message.
+- **Usage and limits.** Tokens, cost and context per turn and per session, with Claude Code's and Codex's plan usage in the status bar. Stop an agent that goes quiet, cap spending, turns and tokens per session and per day, and cap how many agents run at once.
+- **Fixes, not error messages.** A turn that fails because the agent is signed out, the model isn't available or the CLI is too old offers the fix right under it: sign in, retry with a model that works, or update the CLI.
 
 <table>
 <tr>
@@ -145,37 +208,52 @@ Every session has two views of the same conversation. **Chat** is Runo's own int
 
 ### Review and ship
 
-- **Review page.** Every session whose agent stopped with changed files, in one list. Pick one to see its changes and commit, push, open a pull request or merge.
-- **Changes.** Real `git` status and diffs for each session, with stage, discard, commit, push and **Create PR** buttons.
-- **Proof of done.** Each project's tests, lint and build run after every turn that changes files. A red result goes back to the agent with Fix it, or on its own for a few rounds, and Second opinion has another vendor's agent review the diff, leaving its comments as diff notes.
-- **Missions.** One goal, planned into parts that agents from different vendors work on at once, each in its own worktree. Every part is checked, optionally reviewed by another vendor's agent, and merged into one mission branch, with conflicts handed back to the agent; then the whole branch ships from Review.
+- **Review page.** Every session whose agent stopped with changed files, in one list (<kbd>⌘</kbd> <kbd>3</kbd>). Pick one to see its changes and commit, push, open a pull request or merge.
+- **Changes.** Real `git` status and diffs for each session, with stage, discard, commit, push and **Create PR** buttons. **Merge PR** uses a method the repository allows (merge, squash or rebase), and turns on auto-merge while checks are still running.
 - **Diff notes.** Click any diff line, leave a note, and send all notes back to the agent as one follow-up.
 - **Files.** Browse and edit the worktree, with syntax highlighting, rendered Markdown, images and CSV tables.
 - **Terminal.** A real interactive shell (PTY) in the session's folder, with several tabs per session, your saved commands as one-click buttons, and the agent's own command output.
 - **Browser.** A live, interactive page from a Chromium-based browser on your Mac (your default one when it's Chromium-based, or the one you pick in Settings), embedded in the session. Before a page is open it lists the dev servers running on your machine, and for a session on a connection the ones running there, which it forwards to your machine when you open them.
-- **GitHub.** Pull requests, issues and Actions runs for the project through the `gh` CLI, with one-click "review this PR" sessions.
+- **GitHub.** Pull requests, issues and Actions runs for the project through the `gh` CLI, with one-click "review this PR" sessions whose review you confirm and post, line comments included.
 
-### Design and Architecture
+## Design and Architecture
 
-Two canvases for the current project, each with an **Ask AI** bar that hands the change to an agent and keeps the conversation going.
+Two canvases for the current project, each with an **Ask AI** bar that hands the change to an agent, shows its work live and keeps the conversation going. A new project can start from either one, before any code exists.
 
 <table>
+<tr>
+<td width="50%"><img src="docs/images/design-editor.png" alt="The Design editor: layers on the left, two phone screens on the canvas with a Button component instance selected, and its variant properties, layout and auto layout on the right" /></td>
+<td width="50%"><img src="docs/images/design-code.png" alt="The Design editor's Code tab showing the selected screen written as SwiftUI, with CSS and React beside it" /></td>
+</tr>
 <tr>
 <td width="50%"><img src="docs/images/design.png" alt="The Design canvas with four phone screens side by side: Sign in, Dashboard, List and Detail" /></td>
 <td width="50%"><img src="docs/images/architecture.png" alt="The Architecture canvas with a C4 diagram of Runo: the developer, the native UI, the session manager, local state, git worktrees, coding agents, a remote server and GitHub" /></td>
 </tr>
 </table>
 
-- **Design** is a canvas of real HTML screens, one file each in `design/screens/`, drawn side by side to pan and zoom (with WebKit on macOS). Edit them like in Figma, link screens together and press **Play** for a clickable prototype that moves between screens the way iOS, Android or desktop apps do. Start from pictures, mockups or sketches, keep design rules in `docs/design.md`, and run **Checks** for contrast, text size and tap targets.
-- **Architecture** is a diagram canvas with C4, flowchart and infrastructure shapes, thousands of brand and technology logos, connectors that route around boxes, and animated flows you can play step by step. A **Code map** drafts the diagram from the project's own code, **Beautify** tidies a tangle in one click, and diagrams export to draw.io and Mermaid.
+### 🎨 Design: a real design tool, on real HTML
 
-A new project can start from either canvas, before any code exists.
+Every screen is a file in `design/screens/`, drawn side by side on a canvas you pan and zoom, so what you design is already code.
 
-### Playbooks and automations
+- **Edit like in Figma.** Frames, shapes, the pen tool, text and pictures; layers you can name, lock and find; multi-select, copy and paste, groups and auto layout; drag to move and resize with measurements; floating, sticky and pinned layers, gradients, blur and boolean shapes.
+- **A design system that scales.** Components with variant properties, instances and an Assets panel; reusable styles; variables with light and dark values; a theme for colour, font, radius and density; shared libraries across projects; design rules in `docs/design.md` that every AI change follows.
+- **Prototype and present.** Link screens and press **Play** for a clickable prototype that moves the way iOS, Android or desktop apps do, with smart animate and working switches, tabs and toggles. **Present** it and collect comments with @mentions.
+- **AI that edits like you do.** Ask for new screens, variants or changes from pictures, sketches or a sentence. The agent works through Design's own actions on one undo history, shows its changes as they happen, and an undone step can become a design rule.
+- **Checks and hand-off.** **Checks** flags low contrast, tiny text, small tap targets, missing alt text and off-theme colours, with **Fix with AI**. Export PNG, JPG or HTML, read any screen as CSS, React or SwiftUI, hand off a spec with tokens, map components to the app's code, and step through version history.
+
+### 🗺️ Architecture: diagrams that know your code
+
+- **A draw.io-style editor** with C4, flowchart and infrastructure shapes, people and devices drawn as what they are, thousands of brand and technology logos, connectors that route around boxes, layers, collapsible boundaries, a minimap and find.
+- **From the code.** The **Code map** drafts a diagram from the project's packages, imports and files. Every diagram is a view of one model, saved as TOML in `architecture/` and editable as text beside the canvas.
+- **Beautify** untangles a diagram in one click, trying several layouts and keeping the one with the fewest crossings.
+- **Motion and stories.** Connectors flow, carry packets or pulse, and a story plays a request step by step with captions. Export an animated SVG or a story player page.
+- **AI in the loop.** Ask for a change and see it as a diff on the canvas, green for new and red for removed, then Accept or Reject. Explain or expand any part, redraw a whiteboard photo, and run checks with **Fix with AI**. Import and export draw.io, Mermaid, SVG and PNG.
+
+## Playbooks and automations
 
 <img src="docs/images/playbooks.png" alt="The Playbooks page with two saved playbooks, Find bugs and Review my changes, and the templates to start from" width="920" />
 
-Save a task once and run it in any project: from the Playbooks page, from Quick open, by right-clicking a project, or as a slash command inside the agent. Give a playbook a schedule and Runo runs it on a timer while it is open. Templates cover finding bugs, scanning for vulnerabilities, updating docs, adding tests, reviewing changes and upgrading dependencies.
+Save a task once and run it in any project: from the Playbooks page, from Quick open, by right-clicking a project, or as a slash command inside the agent. Give a playbook a schedule (a time of day, chosen weekdays or a cron expression) and Runo runs it, even while it's closed. Templates cover finding bugs, scanning for vulnerabilities, updating docs, adding tests, reviewing changes and upgrading dependencies.
 
 <details>
 <summary><b>Sharing, inputs, permissions and schedules</b></summary>
@@ -190,7 +268,7 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 
 </details>
 
-### Memory and MCP
+## Memory and MCP
 
 - **Project notes.** Keep each project's commands, decisions and gotchas in Markdown, saved as you type, with Write, Split and Preview views, an outline and search across projects. Turn on **Share with agents** and every new session in that project starts with the notes.
 - **Session memory.** Runo ships a small MCP server that lets any agent read the session memory, search earlier sessions in the project and save notes, instead of having the whole history pasted into every prompt.
@@ -198,18 +276,30 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 - **Runo's own servers.** Add servers to Runo's own list in Settings → MCP and every agent's sessions get them. Cursor, Gemini CLI and Droid read them from their project config file, which Runo fills in for each turn, keeps out of git and tidies afterwards; Grok has no project-level MCP config, so it gets none.
 - **Hooks and skills.** See the Claude Code hooks and skills that apply to a project, open them in Runo's editor, and start a new skill.
 
-### Agent setup, built in
+## Made to feel at home
 
-- **Install and update agents from Runo.** See which agent CLIs are installed and their versions, install missing ones (cancel any time; an install stops after 15 minutes), sign in right after, and get a heads-up when an update is out. Runo updates the exact copy it runs and tells you plainly when it shouldn't.
-- **Per-agent settings.** Default model, executable path, extra arguments, environment variables and agent-specific options.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-### Made to feel at home
+### 💬 The Runo assistant
+The Runo mark in the corner answers questions about Runo itself. Press <kbd>⌘</kbd> <kbd>J</kbd>, ask how to do something, and it answers from the [built-in guide](docs/guide) with your default agent on a fast model, then offers to take you to the right place. It never changes anything, and **Guide only** answers without an agent at all. Turn it on in **Settings → General**.
 
-- **Quick open** with <kbd>⌘</kbd> <kbd>K</kbd> to jump to any session, file or command, and <kbd>⌘</kbd> <kbd>N</kbd> for a new session.
+</td>
+<td width="50%" valign="top">
+
+### 🧰 Agent setup, built in
+See which agent CLIs are installed, every copy on your machine and their versions. Install missing ones, sign in right after, test each model, and get a heads-up when an update is out. Runo updates the exact copy it runs, and each agent has its own default model, executable, arguments and environment.
+
+</td>
+</tr>
+</table>
+
+- **Quick open** with <kbd>⌘</kbd> <kbd>K</kbd> to jump to any session, file, project or command, and <kbd>⌘</kbd> <kbd>N</kbd> for a new session.
 - **Your own shortcuts.** In **Settings → Keybindings**, click a shortcut and press the new keys. Runo warns you when the keys are already taken, and you can reset one or all of them.
 - **Light and dark themes**, accent colors, colorblind-friendly diff colors, and an optional glass look.
-- **A one-minute tour** on first launch that you can replay any time.
-- **Right-click menus** everywhere: pin, rename, archive and more.
+- **It remembers.** Your layout, open tabs and panels come back after a restart, and local agent turns keep running when Runo closes or crashes.
+- **A one-minute tour** on first launch that you can replay any time, and **right-click menus** everywhere.
 
 ## Supported agents
 
@@ -353,11 +443,18 @@ Deleting a session deletes its VM or its copies on every connection it ran on, a
 
 ## On your phone
 
-The phone bridge serves a small API that a phone app can use to follow every session and answer it: allow or deny a permission request, approve a plan, answer an agent's questions, send a follow-up or stop a run. Turn it on in Settings → Phone, where each phone gets its own pairing code and can be removed on its own, or run `runo --phone`. It listens on your Tailscale address, or only on this computer without one, unless you choose to open it to your local network. See [docs/phone-bridge.md](docs/phone-bridge.md). The mobile app itself is coming next.
+The phone bridge serves a small, token-protected API that a phone app uses to follow every session and answer it: allow or deny a permission request, approve a plan, answer an agent's questions, send a follow-up or stop a run. Turn it on in **Settings → Phone**, where each phone gets its own pairing code and can be removed on its own, or run `runo --phone`. It listens on your Tailscale address, or only on this computer without one, unless you choose to open it to your local network. See [docs/phone-bridge.md](docs/phone-bridge.md). The mobile app itself is coming next.
+
+## Learn more
+
+- 📖 **[The guide](docs/guide)**: one short article per feature, the same one the Runo assistant answers from.
+- 🔌 **[Provider setup](docs/providers.md)**: installing and signing in to each agent.
+- 📱 **[Phone bridge](docs/phone-bridge.md)**: the API and how pairing works.
+- 📝 **[Changelog](CHANGELOG.md)**: everything that changed, as it lands.
 
 ## Status
 
-Runo is early and moving quickly. Expect rough edges, and please [open an issue](https://github.com/deltalark/runo/issues) when you hit one. See [CHANGELOG.md](CHANGELOG.md) for what's new.
+Runo is early and moving quickly. Expect rough edges, and please [open an issue](https://github.com/deltalark/runo/issues) when you hit one.
 
 ## Contributing
 
