@@ -2934,10 +2934,10 @@ impl RunoApp {
                     // jump in size as results come and go while typing.
                     .h(px(480.))
                     .v_flex()
-                    .rounded_xl()
+                    .rounded(px(shell::ISLAND_R))
                     .border_1()
                     .border_color(float_edge())
-                    .bg(float(c_canvas()))
+                    .bg(float(c_sheet()))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_click(|_, _, cx| cx.stop_propagation())
@@ -2951,6 +2951,30 @@ impl RunoApp {
                             .min_h_0()
                             .max_h(px(480.))
                             .placeholder("Jump to a session, project, file, setting or command…")
+                            .footer(|_, _, _| {
+                                let hint = |keys: &'static str, what: &'static str| {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .child(div().text_color(rgb(c_secondary())).child(keys))
+                                        .child(what)
+                                };
+                                div()
+                                    .h(px(34.))
+                                    .px(px(14.))
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(16.))
+                                    .border_t_1()
+                                    .border_color(rgb(c_border()))
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(c_muted()))
+                                    .child(hint("↑↓", "move"))
+                                    .child(hint("↵", "open"))
+                                    .child(hint("Esc", "close"))
+                            })
                             .on_query(move |query, _, cx| {
                                 let query = query.to_string();
                                 let _ = searcher.update(cx, |this, cx| {
