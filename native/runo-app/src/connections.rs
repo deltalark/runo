@@ -133,8 +133,12 @@ pub struct Connection {
     pub kind: Kind,
     /// Cove: the server's URL; empty for this machine's server.
     pub url: String,
-    /// Cove: the API key of a remote server (`cove key` on that server).
+    /// Cove: the API key of a remote server, from pairing (`cove pair` on that server)
+    /// or `cove key` there.
     pub api_key: String,
+    /// Cove: a pairing code typed in Settings, until it is traded for a key.
+    #[serde(skip)]
+    pub pair_code: String,
     /// Cove VM size and limits.
     pub cpus: u32,
     pub memory_mb: u64,
@@ -142,6 +146,9 @@ pub struct Connection {
     pub network: String,
     /// Stop an idle VM after this many minutes; 0 keeps it running.
     pub idle_stop: u32,
+    /// Pause an idle VM instead of stopping it: its memory and running programs are
+    /// kept, and it carries on as soon as it is used. Needs a Cove with auto-pause.
+    pub idle_pause: bool,
     /// SSH: a host from ~/.ssh/config, or user@host.
     pub host: String,
     /// SSH: 0 for the default port.
@@ -166,10 +173,12 @@ impl Default for Connection {
             kind: Kind::Cove,
             url: String::new(),
             api_key: String::new(),
+            pair_code: String::new(),
             cpus: 2,
             memory_mb: 4096,
             network: "full".into(),
             idle_stop: 0,
+            idle_pause: true,
             host: String::new(),
             port: 0,
             identity: String::new(),
@@ -339,6 +348,11 @@ impl Connection {
             self.idle_stop
         };
         if idle > 0 {
+            // A Cove too old to pause gets only the stop timer; a newer one checks the
+            // pause timer first, and a server too old for it still stops the VM.
+            if self.idle_pause && crate::cove::has_auto_pause() {
+                args.extend(["--auto-pause".into(), idle.to_string()]);
+            }
             args.extend(["--idle-stop".into(), idle.to_string()]);
         }
         args
@@ -677,6 +691,70 @@ pub fn name(id: u64) -> String {
     get(id)
         .map(|c| c.name)
         .unwrap_or_else(|| "A removed connection".into())
+}
+
+/// Trade a pairing code from `cove pair` on the server for an API key of Runo's own,
+/// named after this computer. The key is returned, not saved anywhere by Cove.
+pub fn pair(conn: &Connection, code: &str) -> Result<String, String> {
+    let bin = crate::cove::binary().ok_or("Cove is not installed on this machine.")?;
+    let url = conn.url.trim();
+    if url.is_empty() {
+        return Err("Pairing is for a Cove server elsewhere: fill in its URL first.".into());
+    }
+    let name = format!("Runo on {}", crate::cove::host_name());
+    let out = Command::new(bin)
+        .args([
+            "--json",
+            "login",
+            url,
+            code.trim(),
+            "--name",
+            &name,
+            "--no-save",
+        ])
+        .env_remove("COVE_URL")
+        .env_remove("COVE_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run cove: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let line = err
+            .lines()
+            .last()
+            .unwrap_or("")
+            .trim_start_matches("cove: ");
+        return Err(if line.contains("--no-save") {
+            "Update Cove on this machine to pair (cove login --no-save is new).".into()
+        } else if line.is_empty() {
+            "Pairing failed.".into()
+        } else {
+            line.to_string()
+        });
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| "Cove gave an answer Runo couldn't read.".to_string())?;
+    v["key"]
+        .as_str()
+        .filter(|k| !k.is_empty())
+        .map(String::from)
+        .ok_or_else(|| "The server sent no key.".into())
+}
+
+/// What the last pairing attempt per connection said (None while it runs).
+pub fn pair_result(id: u64) -> Option<TestResult> {
+    pairings().lock().ok()?.get(&id).cloned()
+}
+
+pub fn set_pair_result(id: u64, result: TestResult) {
+    if let Ok(mut p) = pairings().lock() {
+        p.insert(id, result);
+    }
+}
+
+fn pairings() -> &'static Mutex<std::collections::HashMap<u64, TestResult>> {
+    static P: OnceLock<Mutex<std::collections::HashMap<u64, TestResult>>> = OnceLock::new();
+    P.get_or_init(Default::default)
 }
 
 /// A test's outcome (None while it runs) and what it found.
@@ -4094,10 +4172,19 @@ mod tests {
         c.network = "off".into();
         c.idle_stop = 30;
         c.cpus = 4;
+        c.idle_pause = false;
         assert_eq!(
             c.cove_ensure_args("runo-1").join(" "),
             "exec runo-1 --create --cpus 4 --memory 4096 --network off --idle-stop 30"
         );
+        // Pausing adds the pause timer, when this machine's Cove has it.
+        c.idle_pause = true;
+        let args = c.cove_ensure_args("runo-1").join(" ");
+        if crate::cove::has_auto_pause() {
+            assert!(args.ends_with("--auto-pause 30 --idle-stop 30"), "{args}");
+        } else {
+            assert!(args.ends_with("--idle-stop 30"), "{args}");
+        }
     }
 
     #[test]
