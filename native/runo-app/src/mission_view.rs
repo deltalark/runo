@@ -118,17 +118,23 @@ impl RunoApp {
     pub(crate) fn missions_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut missions: Vec<&Mission> = self.state.missions.iter().collect();
         missions.sort_by_key(|m| std::cmp::Reverse(m.id));
-        let rows: Vec<AnyElement> = missions.iter().map(|m| self.mission_row(m, cx)).collect();
+        let rows: Vec<AnyElement> = missions
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                shell::cascade(self.mission_row(m, cx), format!("mission-in-{}", m.id), i)
+            })
+            .collect();
         let none = missions.is_empty();
         let on_form = self.mission_open.is_none();
         let side = div()
             .w(px(LIST_WIDTH))
             .flex_none()
             .h_full()
+            .relative()
             .v_flex()
-            .border_r_1()
-            .border_color(divider())
             .bg(pane(c_sidebar()))
+            .child(shell::list_edge())
             .child(
                 div()
                     .h(px(46.))
@@ -253,6 +259,7 @@ impl RunoApp {
         };
         div()
             .id(("mission-row", id as usize))
+            .relative()
             .mx_2()
             .p_2p5()
             .flex()
@@ -261,14 +268,11 @@ impl RunoApp {
             .rounded_xl()
             .cursor_pointer()
             .border_1()
+            .border_color(rgba(0))
             .when(on, |el| {
-                el.bg(rgb(c_raised()))
-                    .border_color(rgb(shade(tone, 0.45)))
-                    .shadow_sm()
+                el.child(shell::row_fuse(format!("mission-fuse-{id}"), 8.))
             })
-            .when(!on, |el| {
-                el.border_color(rgba(0)).hover(|el| el.bg(tint(c_subtle())))
-            })
+            .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.mission_open = Some(id);
                 cx.notify();

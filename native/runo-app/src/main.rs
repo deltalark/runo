@@ -4085,6 +4085,13 @@ impl RunoApp {
         // or worktree still shows.
         let branch = (!session.branch.is_empty() && session.branch != "local folder")
             .then(|| session.branch.clone());
+        // The selected row joins the open session beside the list. Rows sit 8px in from
+        // the list's edge under a project, 4px when grouped by status.
+        let reach = if cx.global::<AppSettings>().group_by_status {
+            4.
+        } else {
+            8.
+        };
         div()
             .id(("session", id as usize))
             .on_mouse_down(
@@ -4101,10 +4108,20 @@ impl RunoApp {
             .rounded_md()
             .cursor_pointer()
             .when(selected, |el| {
-                el.bg(match color {
-                    Some(c) => rgba((c << 8) | 0x24),
-                    None => tint(c_active()),
-                })
+                el.child(shell::row_fuse(format!("session-fuse-{id}"), reach))
+                    .when_some(color, |el, c| {
+                        // The project's colour stays on the row as a short mark.
+                        el.child(
+                            div()
+                                .absolute()
+                                .left(px(3.))
+                                .top(px(9.))
+                                .bottom(px(9.))
+                                .w(px(2.))
+                                .rounded_full()
+                                .bg(rgb(c)),
+                        )
+                    })
             })
             .when(!selected, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .when(self.cursor == Some(id), |el| el.bg(tint(c_selected())))
@@ -4448,9 +4465,8 @@ impl RunoApp {
             .h_full()
             .relative()
             .v_flex()
-            .border_r_1()
-            .border_color(divider())
             .bg(pane(c_sidebar()))
+            .child(shell::list_edge())
             .child(
                 div()
                     .p_2()

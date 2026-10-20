@@ -75,6 +75,7 @@ impl RunoApp {
             .unwrap_or_default();
         div()
             .id(("review-row", id as usize))
+            .relative()
             .mx_1()
             .px_2()
             .py(px(7.))
@@ -83,7 +84,9 @@ impl RunoApp {
             .gap_2()
             .rounded_md()
             .cursor_pointer()
-            .when(on, |el| el.bg(tint(c_active())))
+            .when(on, |el| {
+                el.child(shell::row_fuse(format!("review-fuse-{id}"), 4.))
+            })
             .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .on_mouse_down(
                 MouseButton::Right,
@@ -218,16 +221,17 @@ impl RunoApp {
         let rows: Vec<AnyElement> = list
             .iter()
             .filter_map(|id| self.state.session(*id))
-            .map(|s| self.review_row(s, cx))
+            .enumerate()
+            .map(|(i, s)| shell::cascade(self.review_row(s, cx), format!("review-in-{}", s.id), i))
             .collect();
         let side = div()
             .w(px(LIST_WIDTH))
             .flex_none()
             .h_full()
+            .relative()
             .v_flex()
-            .border_r_1()
-            .border_color(divider())
             .bg(pane(c_sidebar()))
+            .child(shell::list_edge())
             .child(
                 div()
                     .px_3()

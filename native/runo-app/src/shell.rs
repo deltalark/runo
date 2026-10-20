@@ -9,55 +9,174 @@ use gpui_kit::component::tooltip::Tooltip;
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
-/// The rail's mark on the open place: a glowing accent line on the window's edge, and a
-/// soft beam of the same light falling from it across the page. Children of a 34px rail
-/// item, which sits 9px in from the edge.
-fn light_beam() -> [AnyElement; 2] {
-    let edge = div()
-        .absolute()
-        .left(px(-9.))
-        .top(px(4.))
-        .w(px(3.))
-        .h(px(26.))
-        .rounded_full()
-        .bg(rgb(c_blue()))
-        .shadow(vec![BoxShadow {
-            color: hsla_of(c_blue(), 0.75),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(10.),
-            spread_radius: px(1.),
-            inset: false,
-        }]);
-    // Stacked bands, the tallest outermost, add up to a beam that is brightest in its
-    // middle and fades out up and down; each fades out to the right on its own.
-    let mut beam = div().absolute().left(px(-9.)).top_0().size_full();
-    for height in [96., 78., 62., 48., 34., 22.] {
-        beam = beam.child(
-            div()
-                .absolute()
-                .left_0()
-                .top(px((34. - height) / 2.))
-                .w(px(340.))
-                .h(px(height))
-                .rounded_full()
-                .bg(linear_gradient(
-                    90.,
-                    linear_color_stop(hsla_of(c_blue(), 0.03), 0.),
-                    linear_color_stop(hsla_of(c_blue(), 0.), 1.),
-                )),
-        );
-    }
-    [
-        deferred(beam).with_priority(0).into_any_element(),
-        edge.into_any_element(),
-    ]
+/// How far the open place's tab reaches out of its 34px rail item: 9px to the rail's
+/// edge on the right, a little past the item on the left, top and bottom.
+const TAB_LEFT: f32 = 4.;
+const TAB_PAD: f32 = 3.;
+/// Radius of the curves where a tab or a selected row flows into the sheet beside it.
+const FUSE_R: f32 = 10.;
+
+/// Ease out with a small overshoot, so a tab pours out, swells a touch and settles.
+fn ease_out_back(t: f32) -> f32 {
+    let (c1, c3) = (1.2, 2.2);
+    1. + c3 * (t - 1.).powi(3) + c1 * (t - 1.).powi(2)
 }
 
-/// A colour with its own alpha, for glows and gradients.
-fn hsla_of(color: u32, alpha: f32) -> Hsla {
-    let mut c: Hsla = rgb(color).into();
-    c.a = alpha;
-    c
+/// Hold still for the first `lead` of an animation, then ease out over the rest: lets a
+/// detail land after the motion it belongs to.
+fn after(lead: f32) -> impl Fn(f32) -> f32 {
+    move |t| ease_out_quint()(((t - lead) / (1. - lead)).clamp(0., 1.))
+}
+
+/// The curve where an edge turns into the sheet beside it: a square of `fill`, with a
+/// quarter of `edge` rounded into its `corner`. Empty in glass mode, where the layers
+/// are see-through and the two squares would not add up to the edge's colour.
+fn inner_curve(fill: Rgba, edge: Rgba, top: bool) -> Div {
+    let notch = div().size_full().bg(edge);
+    let notch = if top {
+        notch.rounded_br(px(FUSE_R))
+    } else {
+        notch.rounded_tr(px(FUSE_R))
+    };
+    div()
+        .absolute()
+        .right_0()
+        .size(px(FUSE_R))
+        .when(!glass_on(), |el| el.bg(fill).child(notch))
+}
+
+/// The open place's tab on the rail: a piece of the panel beside the rail, the same
+/// colour, that reaches out around the icon, with the rail's edge curving into it above
+/// and below, so the place and its list read as one sheet. It pours out of the panel
+/// when the place opens, and a small accent lands on its lip after it.
+fn rail_tab(key: &'static str) -> AnyElement {
+    let sheet = pane(c_sidebar());
+    let rail = pane(c_rail());
+    let reach = (RAIL_WIDTH - 34.) / 2.;
+    let height = 34. + 2. * TAB_PAD;
+    div()
+        .absolute()
+        .top(px(-TAB_PAD - FUSE_R))
+        .bottom(px(-TAB_PAD - FUSE_R))
+        .left(px(-TAB_LEFT))
+        .right(px(-reach))
+        .child(
+            div()
+                .absolute()
+                .top(px(FUSE_R))
+                .left_0()
+                .right_0()
+                .h(px(height))
+                .rounded_l(px(FUSE_R))
+                .bg(sheet),
+        )
+        .child(inner_curve(sheet, rail, true).top_0())
+        .child(inner_curve(sheet, rail, false).bottom_0())
+        .child(
+            div()
+                .absolute()
+                .top(px(FUSE_R + height / 2. - 8.))
+                .left(px(3.))
+                .w(px(3.))
+                .h(px(16.))
+                .rounded_full()
+                .bg(rgb(c_blue()))
+                .animated(
+                    SharedString::from(format!("rail-tab-lip-{key}")),
+                    Animation::new(Duration::from_millis(520)).with_easing(after(0.45)),
+                    move |el, d| {
+                        el.opacity(d)
+                            .h(px(16. * d))
+                            .top(px(FUSE_R + height / 2. - 8. * d))
+                    },
+                ),
+        )
+        .animated(
+            SharedString::from(format!("rail-tab-{key}")),
+            Animation::new(Duration::from_millis(340)).with_easing(ease_out_back),
+            move |el, d| el.left(px(-TAB_LEFT + (34. + TAB_LEFT) * (1. - d))),
+        )
+}
+
+/// The open place on a page with no list beside the rail: a lit tile under the icon,
+/// which fades up when the place opens.
+fn rail_tile(key: &'static str) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(8.))
+        .bg(tint(c_active()))
+        .animated(
+            SharedString::from(format!("rail-tile-{key}")),
+            Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()),
+            |el, d| el.opacity(d),
+        )
+}
+
+/// A rail icon. The open place's icon is lit, and slides in a step with its tab.
+fn rail_icon(glyph: IconName, on: bool, key: &'static str) -> AnyElement {
+    let el = div()
+        .relative()
+        .child(icon(glyph, 17., if on { c_text() } else { c_muted() }));
+    if !on {
+        return el.into_any_element();
+    }
+    el.animated(
+        SharedString::from(format!("rail-icon-{key}")),
+        Animation::new(Duration::from_millis(380)).with_easing(ease_out_back),
+        |el, d| el.left(px(5. * (1. - d))).opacity(0.5 + 0.5 * d),
+    )
+}
+
+/// A list's selected row joined to the page beside the list: a fill in the page's colour
+/// from the row out to the list's edge, with the list curving into it above and below,
+/// the same way the rail's tab joins the list. `reach` is how far the list's edge is past
+/// the row's right side. It sweeps in from the page when the row is picked. A child of
+/// the row, which must be `relative` and draw it first, under its content.
+pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
+    let page = glass_fill(c_canvas());
+    let sheet = pane(c_sidebar());
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right(px(-reach))
+        .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
+        .child(inner_curve(page, sheet, true).top(px(-FUSE_R)))
+        .child(inner_curve(page, sheet, false).bottom(px(-FUSE_R)))
+        .animated(
+            ElementId::Name(key.into()),
+            Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()),
+            |el, d| el.left(px(48. * (1. - d))).opacity(0.4 + 0.6 * d),
+        )
+}
+
+/// The edge between a list and the page beside it, as a hairline under the list's
+/// content instead of a border, so a selected row can reach across it into the page.
+pub(crate) fn list_edge() -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right_0()
+        .w(px(1.))
+        .bg(divider())
+}
+
+/// Let a list's rows arrive one after another when the list opens: row `i` waits a beat
+/// longer than the one above it, then rises into place.
+pub(crate) fn cascade(
+    el: impl IntoElement + 'static,
+    key: impl Into<SharedString>,
+    i: usize,
+) -> AnyElement {
+    let lead = (i.min(8) as f32 * 0.07).min(0.56);
+    div().relative().child(el).animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(260 + 30 * i.min(8) as u64)).with_easing(after(lead)),
+        |el, d| el.opacity(d).top(px(6. * (1. - d))),
+    )
 }
 
 /// The places on the mode rail.
@@ -608,14 +727,19 @@ impl RunoApp {
                 this.go(mode, window, cx);
                 cx.notify();
             }))
-            .when(on, |el| el.children(light_beam()))
-            .child(icon(
-                mode.glyph(),
-                17.,
-                if on { c_blue() } else { c_muted() },
-            ))
+            .when(on, |el| {
+                el.child(if self.has_panel(cx) {
+                    rail_tab(mode.label())
+                } else {
+                    rail_tile(mode.label())
+                })
+            })
+            .child(rail_icon(mode.glyph(), on, mode.label()))
             // A small dot cut into the icon's corner, ringed in the rail's own colour.
+            // It breathes while it has news: quickly when something needs you, slowly
+            // while agents work.
             .when_some(badge.filter(|_| !on), |el, color| {
+                let period = if color == c_amber() { 1100 } else { 1900 };
                 el.child(
                     div()
                         .absolute()
@@ -624,11 +748,34 @@ impl RunoApp {
                         .size(px(8.))
                         .rounded_full()
                         .border_2()
-                        .border_color(rgb(c_sidebar()))
-                        .bg(rgb(color)),
+                        .border_color(rgb(c_rail()))
+                        .bg(rgb(color))
+                        .animated(
+                            SharedString::from(format!("rail-badge-{}", mode.label())),
+                            Animation::new(Duration::from_millis(period))
+                                .repeat()
+                                .with_easing(pulsating_between(0.45, 1.)),
+                            |el, d| el.opacity(d),
+                        ),
                 )
             })
             .into_any_element()
+    }
+
+    /// Whether the open place has a list beside the rail for its tab to join: the
+    /// sessions sidebar, the missions and review lists, or Design's layers.
+    pub(crate) fn has_panel(&self, cx: &App) -> bool {
+        match self.mode() {
+            Mode::Sessions => self.show_sidebar,
+            Mode::Missions => true,
+            Mode::Git => self.view == View::Review,
+            Mode::Design => self
+                .design
+                .project
+                .and_then(|p| self.design.canvases.get(&p))
+                .is_some_and(|canvas| canvas.read(cx).layers_shown()),
+            _ => false,
+        }
     }
 
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -665,9 +812,7 @@ impl RunoApp {
             .pt(px(10.))
             .pb_2()
             .gap(px(18.))
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            .bg(pane(c_rail()))
             .child(work)
             .child(self.project_group(cx))
             .child(div().flex_1())
@@ -723,7 +868,7 @@ impl RunoApp {
                     .cursor_pointer()
                     .when(open, |el| el.bg(tint(c_active())))
                     .when(!(on || open), |el| el.hover(|el| el.bg(tint(c_subtle()))))
-                    .when(on, |el| el.children(light_beam()))
+                    .when(on, |el| el.child(rail_tile("more")))
                     .when(!open, |el| {
                         el.tooltip(|window, cx| {
                             Tooltip::new("Playbooks, History and Notes").build(window, cx)
@@ -736,11 +881,7 @@ impl RunoApp {
                         };
                         cx.notify();
                     }))
-                    .child(icon(
-                        IconName::Ellipsis,
-                        17.,
-                        if on { c_blue() } else { c_muted() },
-                    )),
+                    .child(rail_icon(IconName::Ellipsis, on, "more")),
             )
             .when(open, |el| {
                 el.child(

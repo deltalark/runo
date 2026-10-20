@@ -639,6 +639,11 @@ pub fn c_canvas() -> u32 {
 pub fn c_sidebar() -> u32 {
     pick(0xf7f7f8, 0x121214)
 }
+/// The mode rail: a step deeper than the side panels, so the open place's tab, cut from
+/// the panel's own sheet, stands out from it.
+pub fn c_rail() -> u32 {
+    pick(0xe6e6ea, 0x080809)
+}
 pub fn c_subtle() -> u32 {
     pick(0xf1f1f3, 0x222226)
 }
