@@ -8865,7 +8865,9 @@ impl Render for RunoApp {
         // The page is an island under the session tabs. Pages with their own list beside
         // the content paint the two layers themselves, so the list is as clear as the
         // sidebar.
-        let page_fill = if matches!(self.view, View::Review | View::GitHub | View::Settings) {
+        let page_fill = if matches!(self.view, View::Review | View::GitHub | View::Settings)
+            || (self.view == View::Architecture && self.arch_diagram_open())
+        {
             rgba(0)
         } else {
             glass_fill(c_canvas())

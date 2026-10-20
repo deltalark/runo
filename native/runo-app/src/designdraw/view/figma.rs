@@ -104,23 +104,8 @@ fn side_tab(
 ) -> Stateful<Div> {
     let assets = label == "Assets";
     let history = label == "History";
-    div()
-        .id(id)
-        .h(px(26.))
-        .px(px(8.))
-        .flex()
-        .items_center()
-        .rounded(px(5.))
-        .cursor_pointer()
-        .text_size(px(12.))
-        .font_weight(if on {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::NORMAL
-        })
-        .text_color(rgb(if on { c_text() } else { c_muted() }))
-        .when(on, |el| el.bg(tint(c_subtle())))
-        .hover(|el| el.text_color(rgb(c_text())))
+    crate::shell::seg_choice(id, format!("seg-fill-{id}"), on)
+        .flex_1()
         .on_click(cx.listener(move |this, _, _, cx| {
             this.assets = assets;
             this.history = history;
@@ -349,9 +334,8 @@ impl DesignCanvas {
                     .items_center()
                     .justify_between()
                     .child(
-                        div()
-                            .flex()
-                            .gap(px(2.))
+                        crate::shell::seg_track()
+                            .flex_1()
                             .child(side_tab(
                                 "design-left-layers",
                                 "Layers",
@@ -559,43 +543,41 @@ impl DesignCanvas {
                 })
         };
         if self.commenting {
-            return div()
-                .w(px(RIGHT_W))
-                .flex_none()
-                .h_full()
-                .v_flex()
-                .border_l_1()
-                .border_color(rgb(c_border()))
-                .bg(tint(c_canvas()))
-                .child(
-                    div()
-                        .h(px(36.))
-                        .flex_none()
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .border_b_1()
-                        .border_color(rgb(c_border()))
-                        .text_size(px(12.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(c_text()))
-                        .child("Comments")
-                        .child(
-                            mini("design-comments-done", IconName::Close, "Done (Esc)", false)
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_commenting(cx))),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("design-comments")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .pb_4()
-                        .child(self.comments_panel(cx)),
-                )
-                .into_any_element();
+            return inspector(
+                div()
+                    .size_full()
+                    .v_flex()
+                    .child(
+                        div()
+                            .h(px(36.))
+                            .flex_none()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(rgb(c_border()))
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
+                            .child("Comments")
+                            .child(
+                                mini("design-comments-done", IconName::Close, "Done (Esc)", false)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_commenting(cx)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("design-comments")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .pb_4()
+                            .child(self.comments_panel(cx)),
+                    ),
+            );
         }
         let body = match self.panel {
             Panel::Design => self.design_panel(cx),
@@ -605,56 +587,52 @@ impl DesignCanvas {
             Panel::Code => div().px_3().child(self.code_panel(cx)),
         };
         let issues: usize = self.findings().iter().map(|f| f.2.len()).sum();
-        div()
-            .w(px(RIGHT_W))
-            .flex_none()
-            .h_full()
-            .v_flex()
-            .border_l_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_canvas()))
-            .child(self.right_head(cx))
-            .child(
-                div()
-                    .h(px(36.))
-                    .flex_none()
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .gap(px(1.))
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
-                    .child(tab("design-tab-design", "Design", 0, Panel::Design, cx))
-                    .child(tab(
-                        "design-tab-proto",
-                        "Prototype",
-                        0,
-                        Panel::Prototype,
-                        cx,
-                    ))
-                    .child(tab("design-tab-theme", "Theme", 0, Panel::Theme, cx))
-                    .child(tab(
-                        "design-tab-checks",
-                        "Checks",
-                        issues,
-                        Panel::Checks,
-                        cx,
-                    ))
-                    .when(self.panel == Panel::Code, |el| {
-                        el.child(tab("design-tab-code", "Code", 0, Panel::Code, cx))
-                    })
-                    .child(self.zoom_button(cx)),
-            )
-            .child(
-                div()
-                    .id("design-side")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .pb_4()
-                    .child(body),
-            )
-            .into_any_element()
+        inspector(
+            div()
+                .size_full()
+                .v_flex()
+                .child(self.right_head(cx))
+                .child(
+                    div()
+                        .h(px(36.))
+                        .flex_none()
+                        .px_1()
+                        .flex()
+                        .items_center()
+                        .gap(px(1.))
+                        .border_b_1()
+                        .border_color(rgb(c_border()))
+                        .child(tab("design-tab-design", "Design", 0, Panel::Design, cx))
+                        .child(tab(
+                            "design-tab-proto",
+                            "Prototype",
+                            0,
+                            Panel::Prototype,
+                            cx,
+                        ))
+                        .child(tab("design-tab-theme", "Theme", 0, Panel::Theme, cx))
+                        .child(tab(
+                            "design-tab-checks",
+                            "Checks",
+                            issues,
+                            Panel::Checks,
+                            cx,
+                        ))
+                        .when(self.panel == Panel::Code, |el| {
+                            el.child(tab("design-tab-code", "Code", 0, Panel::Code, cx))
+                        })
+                        .child(self.zoom_button(cx)),
+                )
+                .child(
+                    div()
+                        .id("design-side")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .pb_4()
+                        .child(body),
+                ),
+        )
     }
 
     fn design_panel(&self, cx: &mut Context<Self>) -> Div {
@@ -2004,4 +1982,21 @@ impl DesignCanvas {
         .child(padding)
         .child(clip)
     }
+}
+
+/// The right panel as an island of its own, a gutter's width from the canvas.
+fn inspector(body: Div) -> AnyElement {
+    div()
+        .w(px(RIGHT_W + crate::shell::GUTTER))
+        .flex_none()
+        .h_full()
+        .flex()
+        .child(crate::shell::gutter().w(px(crate::shell::GUTTER)).h_full())
+        .child(
+            crate::shell::island(body, panel(c_sheet()), [true, true, false, true])
+                .flex_1()
+                .min_w_0()
+                .h_full(),
+        )
+        .into_any_element()
 }
