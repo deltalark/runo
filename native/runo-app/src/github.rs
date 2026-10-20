@@ -1430,39 +1430,11 @@ impl RunoApp {
 
 /// A row of connected choices, one of them on, like Home's project scope.
 pub(crate) fn segmented() -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .p(px(2.))
-        .gap(px(2.))
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(c_border()))
+    crate::shell::seg_track().flex_none()
 }
 
 pub(crate) fn segment(id: (&'static str, usize), label: &'static str, on: bool) -> Stateful<Div> {
-    div()
-        .id(id)
-        .h(px(26.))
-        .px_3()
-        .flex()
-        .items_center()
-        .rounded_md()
-        .cursor_pointer()
-        .text_size(px(12.5))
-        .relative()
-        .when(on, |el| {
-            el.child(crate::shell::chosen_fill(
-                format!("segment-{}-{}", id.0, id.1),
-                6.,
-            ))
-            .text_color(rgb(c_text()))
-        })
-        .when(!on, |el| {
-            el.text_color(rgb(c_secondary()))
-                .hover(|el| el.bg(tint(c_subtle())))
-        })
-        .child(label)
+    crate::shell::seg_choice(id, format!("segment-{}-{}", id.0, id.1), on).child(label)
 }
 
 #[cfg(test)]

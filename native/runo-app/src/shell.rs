@@ -5,6 +5,7 @@
 
 use super::*;
 use gpui_kit::component::tooltip::Tooltip;
+use std::cell::Cell;
 
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
@@ -17,7 +18,7 @@ const TAB_PAD: f32 = 4.;
 /// Radius of the curves where a tab or a selected row flows into the sheet beside it.
 const FUSE_R: f32 = 12.;
 /// Radius of a sheet's top corner where it meets the rail under the top bar.
-const SHEET_R: f32 = 14.;
+pub(crate) const SHEET_R: f32 = 14.;
 
 /// How long the shell's small transitions take: quick enough to feel immediate, long
 /// enough that a change reads as a change rather than a jump.
@@ -32,74 +33,132 @@ fn after(lead: f32) -> impl Fn(f32) -> f32 {
 /// The curve where an edge turns into the sheet beside it: the corner of a `FUSE_R`
 /// square outside a quarter circle, filled with `fill`, so whatever is behind shows in
 /// the rest. Drawn as a path, not as a square painted over in a guessed colour, so no
-/// corner shows darker than what is around it. Empty in glass mode.
+/// corner shows darker than what is around it. It sits beside its shape, never over it,
+/// so it matches in glass mode too.
 fn inner_curve(fill: Rgba, top: bool) -> Div {
     let fill = Hsla::from(fill);
+    div().absolute().right_0().size(px(FUSE_R)).child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let (r, k) = (FUSE_R, 0.5523);
+                let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                // The top curve turns round the square's top-left corner, the bottom
+                // one round its bottom-left.
+                let mut f = PathBuilder::fill();
+                if top {
+                    f.move_to(p(r, 0.));
+                    f.line_to(p(r, r));
+                    f.line_to(p(0., r));
+                    f.cubic_bezier_to(p(r, 0.), p(k * r, r), p(r, k * r));
+                } else {
+                    f.move_to(p(0., 0.));
+                    f.line_to(p(r, 0.));
+                    f.line_to(p(r, r));
+                    f.cubic_bezier_to(p(0., 0.), p(r, r - k * r), p(k * r, 0.));
+                }
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, fill);
+                }
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// The one touch of accent on a selected row: a thin bracket in the accent that hugs the
+/// row's left edge and wraps round its rounded corners, like "(". It draws in once the
+/// row has landed.
+pub(crate) fn accent_bracket(key: impl Into<SharedString>) -> AnyElement {
     div()
         .absolute()
-        .right_0()
-        .size(px(FUSE_R))
-        .when(!glass_on(), |el| {
-            el.child(
-                canvas(
-                    |_, _, _| (),
-                    move |b, _, window, _| {
-                        let (r, k) = (FUSE_R, 0.5523);
-                        let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
-                        // The top curve turns round the square's top-left corner, the bottom
-                        // one round its bottom-left.
-                        let mut f = PathBuilder::fill();
-                        if top {
-                            f.move_to(p(r, 0.));
-                            f.line_to(p(r, r));
-                            f.line_to(p(0., r));
-                            f.cubic_bezier_to(p(r, 0.), p(k * r, r), p(r, k * r));
-                        } else {
-                            f.move_to(p(0., 0.));
-                            f.line_to(p(r, 0.));
-                            f.line_to(p(r, r));
-                            f.cubic_bezier_to(p(0., 0.), p(r, r - k * r), p(k * r, 0.));
-                        }
-                        f.close();
-                        if let Ok(path) = f.build() {
-                            window.paint_path(path, fill);
-                        }
-                    },
-                )
-                .size_full(),
-            )
+        .top(px(1.))
+        .bottom(px(1.))
+        .left(px(-5.))
+        .w(px(FUSE_R + 2.))
+        .border_l(px(2.))
+        .rounded_l(px(FUSE_R + 2.))
+        .border_color(rgb(c_blue()))
+        .animated(
+            ElementId::Name(key.into()),
+            Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+            |el, d| el.opacity(d),
+        )
+        .into_any_element()
+}
+
+/// The track behind a row of connected choices, such as the sidebar's filter or a
+/// setting's options: a shallow well a step darker than what it sits on. Every
+/// segmented control uses it, so they all read the same.
+pub(crate) fn seg_track() -> Div {
+    div()
+        .flex()
+        .items_center()
+        .p(px(3.))
+        .gap(px(2.))
+        .rounded(px(9.))
+        .bg(rgba(if is_dark() { 0x00000047 } else { 0x0000000d }))
+}
+
+/// The raised pill under the chosen choice in a `seg_track`, which fades in when it is
+/// chosen. A child of the choice, which must be `relative` and add it first.
+pub(crate) fn seg_pill(key: impl Into<SharedString>) -> AnyElement {
+    chosen_fill_of(
+        key,
+        7.,
+        div()
+            // A touch more lift through glass, where the desktop behind thins it.
+            .bg(rgba(match (is_dark(), glass_on()) {
+                (true, false) => 0xffffff17,
+                (true, true) => 0xffffff21,
+                (false, false) => 0xffffffff,
+                (false, true) => 0xffffffd9,
+            }))
+            .shadow_sm(),
+    )
+}
+
+/// One choice in a `seg_track`: the chosen one on its pill in full text colour, the
+/// rest quieter until hovered.
+pub(crate) fn seg_choice(
+    id: impl Into<ElementId>,
+    key: impl Into<SharedString>,
+    on: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .h(px(26.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(5.))
+        .rounded(px(7.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .when(on, |el| el.child(seg_pill(key)).text_color(rgb(c_text())))
+        .when(!on, |el| {
+            el.text_color(rgb(c_secondary()))
+                .hover(|el| el.text_color(rgb(c_text())))
         })
 }
 
-/// The one touch of accent on a fused shape: a short rule on its left edge marking what
-/// is open or selected. It draws in from the middle once the shape has landed.
-fn accent_rule(key: impl Into<SharedString>, height: f32) -> AnyElement {
-    div()
-        .absolute()
-        .left(px(2.))
-        .top_0()
-        .bottom_0()
-        .flex()
-        .items_center()
-        .child(
-            div()
-                .w(px(2.))
-                .h(px(height))
-                .rounded_full()
-                .bg(rgb(c_blue()))
-                .animated(
-                    ElementId::Name(key.into()),
-                    Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
-                    move |el, d| el.h(px(height * d)).opacity(d),
-                ),
-        )
-        .into_any_element()
+thread_local! {
+    /// Where the open tab sits this frame, so the rail can leave a hole for it.
+    static TAB_CUT: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
 }
 
 /// The open place's tab on the rail: a piece of what sits beside the rail, the same
 /// colour, that reaches out around the icon, with the rail's edge curving into it above
 /// and below, so the place and its list (or page) read as one sheet. It slides out of
 /// the sheet when the place opens. `sheet` is the fill of what it is cut from.
+///
+/// The rail is painted around the tab, never under it (see `rail_fill`), so in glass
+/// mode the tab is the same see-through layer as its sheet instead of a second layer
+/// stacked on the rail's.
 fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
     let reach = (RAIL_WIDTH - 34.) / 2.;
     let height = 34. + 2. * TAB_PAD;
@@ -117,15 +176,57 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
                 .right_0()
                 .h(px(height))
                 .rounded_l(px(FUSE_R))
-                .bg(sheet),
+                .bg(sheet)
+                .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full()),
         )
-        .child(inner_curve(sheet, true).top_0())
-        .child(inner_curve(sheet, false).bottom_0())
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
             move |el, d| el.left(px(TAB_INSET + 12. * (1. - d))).opacity(d),
         )
+}
+
+/// The rail's own fill: its whole column less the open tab and the curves into it, so
+/// the tab shows whatever its sheet shows. Painted as one path, it looks the same in
+/// every glass style.
+fn rail_fill() -> AnyElement {
+    let fill = Hsla::from(rail_pane());
+    canvas(
+        |_, _, _| TAB_CUT.set(None),
+        move |b, _, window, _| {
+            let (r, k) = (FUSE_R, 0.5523);
+            let at = |x: Pixels, y: Pixels| point(x, y);
+            // A quarter turn from `from` to `to` round the square corner `c`.
+            let turn =
+                |f: &mut PathBuilder, from: Point<Pixels>, c: Point<Pixels>, to: Point<Pixels>| {
+                    f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
+                };
+            let (left, top, right, bottom) = (b.origin.x, b.origin.y, b.right(), b.bottom());
+            let mut f = PathBuilder::fill();
+            f.move_to(at(left, top));
+            f.line_to(at(right, top));
+            if let Some(t) = TAB_CUT.get() {
+                let (tx, ty, tb, r) = (t.origin.x, t.origin.y, t.bottom(), px(r));
+                f.line_to(at(right, ty - r));
+                turn(&mut f, at(right, ty - r), at(right, ty), at(right - r, ty));
+                f.line_to(at(tx + r, ty));
+                turn(&mut f, at(tx + r, ty), at(tx, ty), at(tx, ty + r));
+                f.line_to(at(tx, tb - r));
+                turn(&mut f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
+                f.line_to(at(right - r, tb));
+                turn(&mut f, at(right - r, tb), at(right, tb), at(right, tb + r));
+            }
+            f.line_to(at(right, bottom));
+            f.line_to(at(left, bottom));
+            f.close();
+            if let Ok(path) = f.build() {
+                window.paint_path(path, fill);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
 }
 
 /// The open place on a page with no list beside the rail, such as the More menu: a quiet
@@ -169,7 +270,7 @@ pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
         .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
         .child(inner_curve(page, true).top(px(-FUSE_R)))
         .child(inner_curve(page, false).bottom(px(-FUSE_R)))
-        .child(accent_rule(format!("{key}-rule"), 16.))
+        .child(accent_bracket(format!("{key}-rule")))
         .animated(
             ElementId::Name(key),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
@@ -204,14 +305,9 @@ pub(crate) fn live_dot(color: u32, size: f32, key: impl Into<SharedString>) -> A
         )
 }
 
-/// The fill under a chosen item, such as a segment, a nav row or a tab, that fades in
-/// when the item is chosen. A child of the item, which must be `relative` and add it
+/// The fill under a chosen item, such as a segment, that fades in when the item is
+/// chosen, with its own look. A child of the item, which must be `relative` and add it
 /// first, under its content.
-pub(crate) fn chosen_fill(key: impl Into<SharedString>, radius: f32) -> AnyElement {
-    chosen_fill_of(key, radius, div().bg(tint(c_active())))
-}
-
-/// `chosen_fill` with its own look, such as a raised card under a toggle's option.
 pub(crate) fn chosen_fill_of(key: impl Into<SharedString>, radius: f32, look: Div) -> AnyElement {
     look.absolute()
         .top_0()
@@ -230,32 +326,25 @@ pub(crate) fn chosen_fill_of(key: impl Into<SharedString>, radius: f32, look: Di
 /// top bar: the corner of a square outside a quarter circle, in the rail's colour, laid
 /// over the sheet's top-left. Empty in glass mode.
 pub(crate) fn sheet_corner() -> Div {
-    let fill = Hsla::from(pane(c_rail()));
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size(px(SHEET_R))
-        .when(!glass_on(), |el| {
-            el.child(
-                canvas(
-                    |_, _, _| (),
-                    move |b, _, window, _| {
-                        let (r, k) = (SHEET_R, 0.5523);
-                        let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
-                        let mut f = PathBuilder::fill();
-                        f.move_to(p(0., 0.));
-                        f.line_to(p(r, 0.));
-                        f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
-                        f.close();
-                        if let Ok(path) = f.build() {
-                            window.paint_path(path, fill);
-                        }
-                    },
-                )
-                .size_full(),
-            )
-        })
+    let fill = Hsla::from(rail_pane());
+    div().absolute().top_0().left_0().size(px(SHEET_R)).child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let (r, k) = (SHEET_R, 0.5523);
+                let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                let mut f = PathBuilder::fill();
+                f.move_to(p(0., 0.));
+                f.line_to(p(r, 0.));
+                f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, fill);
+                }
+            },
+        )
+        .size_full(),
+    )
 }
 
 /// Let a list's rows fade in one after another when the list opens, each a beat after
@@ -910,9 +999,10 @@ impl RunoApp {
             .pt(px(10.))
             .pb_2()
             .gap(px(18.))
-            .bg(pane(c_rail()))
-            // Keeps the open tab's curves inside the rail, under the top bar.
+            .relative()
+            // Keeps the open tab inside the rail, under the top bar.
             .overflow_hidden()
+            .child(rail_fill())
             .child(work)
             .child(self.project_group(cx))
             .child(div().flex_1())

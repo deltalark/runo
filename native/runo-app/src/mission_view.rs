@@ -134,6 +134,7 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
+            .rounded_tl(px(shell::SHEET_R))
             .child(shell::sheet_corner())
             .child(
                 div()

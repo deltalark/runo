@@ -3977,24 +3977,15 @@ impl RunoApp {
         view: View,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let on = self.view == view;
-        div()
-            .id(id)
-            .relative()
+        // The list under the filter always holds every session, so "All" stays lit
+        // unless one of the narrower places is open.
+        let on = match view {
+            View::AllSessions => !matches!(self.view, View::Worktrees | View::Inbox),
+            _ => self.view == view,
+        };
+        shell::seg_choice(id, format!("seg-fill-{id}"), on)
             .flex_1()
-            .h(px(26.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(5.))
-            .rounded(px(7.))
-            .cursor_pointer()
-            .text_size(px(11.5))
-            .text_color(rgb(if on { c_text() } else { c_muted() }))
-            .when(on, |el| {
-                el.child(shell::chosen_fill(format!("seg-fill-{id}"), 7.))
-            })
-            .when(!on, |el| el.hover(|el| el.text_color(rgb(c_text()))))
+            .px_0()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.view = view;
                 cx.notify();
@@ -4003,17 +3994,8 @@ impl RunoApp {
             .when_some(count.filter(|n| *n > 0), |el, n| {
                 el.child(shell::pop(
                     div()
-                        .min_w(px(16.))
-                        .h(px(15.))
-                        .px(px(4.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(rgb(c_blue()))
-                        .text_size(px(10.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(0xffffff))
+                        .text_size(px(10.5))
+                        .text_color(rgb(c_blue()))
                         .child(n.to_string()),
                     format!("seg-count-{id}-{n}"),
                 ))
@@ -4474,6 +4456,7 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
+            .rounded_tl(px(shell::SHEET_R))
             .child(shell::sheet_corner())
             .child(
                 // The list's own header: what it holds and how much is running, with the
@@ -4582,13 +4565,7 @@ impl RunoApp {
                             ),
                     )
                     .child(
-                        div()
-                            .relative()
-                            .p(px(3.))
-                            .flex()
-                            .gap(px(2.))
-                            .rounded(px(9.))
-                            .bg(rgb(c_rail()))
+                        shell::seg_track()
                             .child(self.nav_segment(
                                 "all-sessions",
                                 "All",
@@ -7398,7 +7375,7 @@ impl RunoApp {
             .font_weight(FontWeight::MEDIUM)
             .relative()
             .when(selected, |el| {
-                el.child(shell::chosen_fill(format!("rt-fill-{}", tab as u8), 6.))
+                el.child(shell::seg_pill(format!("rt-fill-{}", tab as u8)))
                     .text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
@@ -8535,22 +8512,25 @@ impl RunoApp {
                     .gap_1()
                     .border_b_1()
                     .border_color(rgb(c_border()))
-                    .child(self.right_tab_button(
-                        RightTab::Changes,
-                        IconName::GitCompare,
-                        if self.changes.is_empty() {
-                            "Changes".into()
-                        } else {
-                            format!("Changes  {}", self.changes.len())
-                        },
-                        cx,
-                    ))
-                    .child(self.right_tab_button(
-                        RightTab::Files,
-                        IconName::FileText,
-                        "Files".into(),
-                        cx,
-                    )),
+                    .child(
+                        shell::seg_track()
+                            .child(self.right_tab_button(
+                                RightTab::Changes,
+                                IconName::GitCompare,
+                                if self.changes.is_empty() {
+                                    "Changes".into()
+                                } else {
+                                    format!("Changes  {}", self.changes.len())
+                                },
+                                cx,
+                            ))
+                            .child(self.right_tab_button(
+                                RightTab::Files,
+                                IconName::FileText,
+                                "Files".into(),
+                                cx,
+                            )),
+                    ),
             )
             .child(fade(
                 div()

@@ -521,12 +521,8 @@ impl RunoApp {
                 .cursor_pointer()
                 .relative()
                 .when(active, |el| {
-                    el.child(crate::shell::chosen_fill_of(
-                        format!("{key}-fill"),
-                        6.,
-                        div().bg(rgb(c_canvas())).shadow_sm(),
-                    ))
-                    .text_color(rgb(c_text()))
+                    el.child(crate::shell::seg_pill(format!("{key}-fill")))
+                        .text_color(rgb(c_text()))
                 })
                 .when(!active, |el| {
                     el.text_color(rgb(c_muted()))
@@ -540,17 +536,10 @@ impl RunoApp {
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_cli_view(id, on, cx)))
         };
-        div()
+        crate::shell::seg_track()
             .id("view-toggle")
             .flex_none()
             .p(px(2.))
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .rounded_lg()
-            .bg(tint(c_subtle()))
-            .border_1()
-            .border_color(rgb(c_border()))
             .when(!supported, |el| el.opacity(0.5))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(match &blocker {

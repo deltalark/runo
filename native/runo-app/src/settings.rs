@@ -542,6 +542,18 @@ pub fn pane(color: u32) -> Rgba {
     }
 }
 
+/// The rail in glass mode: half way from the sidebar layer to solid, so the open tab,
+/// cut from the sidebar layer, stays a clear step lighter than the rail in every glass
+/// style, even over a bright desktop.
+pub fn rail_pane() -> Rgba {
+    if glass_on() {
+        let a = sidebar_alpha() as u16;
+        with_alpha(c_rail(), (a + (255 - a) / 2) as u8)
+    } else {
+        rgb(c_rail())
+    }
+}
+
 /// Side panels next to the content, such as changes, files and the terminal: between
 /// the sidebar and the content.
 pub fn panel(color: u32) -> Rgba {
