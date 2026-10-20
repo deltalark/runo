@@ -105,6 +105,77 @@ impl RunoApp {
         cx.notify();
     }
 
+    /// Trade the pairing code typed for a connection for a key of Runo's own, in the
+    /// background, and keep the key in the connection's settings.
+    pub(crate) fn pair_connection(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(conn) = connections::get(id) else {
+            return;
+        };
+        let code = cx
+            .global::<settings::AppSettings>()
+            .connections
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.pair_code.clone())
+            .unwrap_or_default();
+        if code.trim().is_empty() {
+            connections::set_pair_result(
+                id,
+                (
+                    Some(false),
+                    "Run cove pair on the server and type its code first.".into(),
+                ),
+            );
+            cx.notify();
+            return;
+        }
+        connections::set_pair_result(id, (None, "Pairing…".into()));
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(connections::pair(&conn, &code));
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let answer = match rx.try_recv() {
+                Ok(a) => Some(a),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(_) => Some(Err("Pairing stopped.".into())),
+            };
+            let Some(answer) = answer else {
+                let _ = this.update(cx, |_, cx| cx.notify());
+                continue;
+            };
+            let _ = this.update(cx, |this, cx| {
+                match answer {
+                    Ok(key) => {
+                        settings::update(cx, move |s| {
+                            if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                                c.api_key = key;
+                                c.pair_code.clear();
+                            }
+                        });
+                        this.save();
+                        connections::set_pair_result(
+                            id,
+                            (
+                                Some(true),
+                                "Paired: Runo has a key of its own for this server.".into(),
+                            ),
+                        );
+                        this.test_connection(id, cx);
+                    }
+                    Err(e) => connections::set_pair_result(id, (Some(false), e)),
+                }
+                cx.notify();
+            });
+            break;
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Move a session to another connection. Its files follow on the next turn, and its
     /// conversation too when the agent's can travel; otherwise the next message carries
     /// a handoff brief. It can't move while the agent is working.
