@@ -9,47 +9,77 @@ use gpui_kit::component::tooltip::Tooltip;
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
-/// The rail's mark on the open place: a glowing accent line on the window's edge, and a
-/// soft beam of the same light falling from it across the page. Children of a 34px rail
-/// item, which sits 9px in from the edge.
-fn light_beam() -> [AnyElement; 2] {
-    let edge = div()
+/// The rail's mark on the open place, a neon light: a bright accent tube on the window's
+/// edge with layers of glow around it, a lit tile around the icon, and a beam of the same
+/// light across the rail. Children of a 34px rail item, which sits 9px in from the edge;
+/// the rail clips them, so none of the light reaches the page beside it.
+fn light_beam() -> [AnyElement; 4] {
+    let glow = |alpha: f32, blur: f32, spread: f32, inset: bool| BoxShadow {
+        color: hsla_of(c_blue(), alpha),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(blur),
+        spread_radius: px(spread),
+        inset,
+    };
+    // Stacked bands, the tallest outermost, add up to a beam that is brightest in its
+    // middle and fades out up and down; each fades out toward the rail's far edge.
+    let mut beam = div()
         .absolute()
         .left(px(-9.))
-        .top(px(4.))
-        .w(px(3.))
-        .h(px(26.))
-        .rounded_full()
-        .bg(rgb(c_blue()))
-        .shadow(vec![BoxShadow {
-            color: hsla_of(c_blue(), 0.75),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(10.),
-            spread_radius: px(1.),
-            inset: false,
-        }]);
-    // Stacked bands, the tallest outermost, add up to a beam that is brightest in its
-    // middle and fades out up and down; each fades out to the right on its own.
-    let mut beam = div().absolute().left(px(-9.)).top_0().size_full();
-    for height in [96., 78., 62., 48., 34., 22.] {
+        .top_0()
+        .w(px(RAIL_WIDTH))
+        .h_full();
+    for height in [110., 88., 68., 50., 34., 20.] {
         beam = beam.child(
             div()
                 .absolute()
                 .left_0()
                 .top(px((34. - height) / 2.))
-                .w(px(340.))
+                .w(px(RAIL_WIDTH))
                 .h(px(height))
-                .rounded_full()
+                .rounded_r_full()
                 .bg(linear_gradient(
                     90.,
-                    linear_color_stop(hsla_of(c_blue(), 0.03), 0.),
+                    linear_color_stop(hsla_of(c_blue(), 0.1), 0.),
                     linear_color_stop(hsla_of(c_blue(), 0.), 1.),
                 )),
         );
     }
+    // A bloom behind the tile: a small lit core whose glow spreads across the rail.
+    let bloom = div()
+        .absolute()
+        .left(px(9.))
+        .top(px(9.))
+        .size(px(16.))
+        .rounded_full()
+        .bg(hsla_of(c_blue(), 0.35))
+        .shadow(vec![glow(0.55, 22., 8., false), glow(0.3, 40., 14., false)]);
+    let tile = div()
+        .absolute()
+        .inset_0()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(hsla_of(mix(c_blue(), 0xffffff, 0.7), 0.9))
+        .bg(hsla_of(c_blue(), 0.16))
+        .shadow(vec![glow(0.75, 14., 0., false), glow(0.55, 10., 0., true)]);
+    let tube = div()
+        .absolute()
+        .left(px(-8.))
+        .top(px(3.))
+        .w(px(3.))
+        .h(px(28.))
+        .rounded_full()
+        .bg(rgb(mix(c_blue(), 0xffffff, 0.45)))
+        .shadow(vec![
+            glow(1., 4., 1., false),
+            glow(0.8, 12., 2., false),
+            glow(0.5, 28., 4., false),
+        ]);
     [
-        deferred(beam).with_priority(0).into_any_element(),
-        edge.into_any_element(),
+        beam.into_any_element(),
+        bloom.into_any_element(),
+        tile.into_any_element(),
+        tube.into_any_element(),
     ]
 }
 
@@ -612,7 +642,11 @@ impl RunoApp {
             .child(icon(
                 mode.glyph(),
                 17.,
-                if on { c_blue() } else { c_muted() },
+                if on {
+                    mix(c_blue(), 0xffffff, 0.55)
+                } else {
+                    c_muted()
+                },
             ))
             // A small dot cut into the icon's corner, ringed in the rail's own colour.
             .when_some(badge.filter(|_| !on), |el, color| {
@@ -668,6 +702,8 @@ impl RunoApp {
             .border_r_1()
             .border_color(divider())
             .bg(pane(c_sidebar()))
+            // The open place's light stays on the rail.
+            .overflow_hidden()
             .child(work)
             .child(self.project_group(cx))
             .child(div().flex_1())
