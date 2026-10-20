@@ -865,6 +865,15 @@ impl DesignCanvas {
         cx.notify();
     }
 
+    /// How wide the layers panel beside the rail is, or 0 while it's put away.
+    pub(crate) fn layers_width(&self) -> f32 {
+        if self.layers_hidden {
+            0.
+        } else {
+            figma::LEFT_W
+        }
+    }
+
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.check_files(cx);
         self.refs = crate::design::load(&self.root);

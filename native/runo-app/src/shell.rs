@@ -10,10 +10,12 @@ use gpui_kit::component::tooltip::Tooltip;
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
 /// The rail's mark on the open place, a neon light: a bright accent tube on the window's
-/// edge with layers of glow around it, a lit tile around the icon, and a beam of the same
-/// light across the rail. Children of a 34px rail item, which sits 9px in from the edge;
-/// the rail clips them, so none of the light reaches the page beside it.
-fn light_beam() -> [AnyElement; 4] {
+/// edge with layers of glow around it, a lit tile around the icon, and a torch beam of
+/// the same light that shines out across the rail and the panel beside it. Children of a
+/// 34px rail item, which sits 9px in from the edge. `reach` is the width of that panel,
+/// 0 when there is none: the beam ends where the page starts, so it never lights the
+/// canvas. The rail clips the glows; the beam is drawn over the panel, so it is deferred.
+fn light_beam(reach: f32) -> [AnyElement; 4] {
     let glow = |alpha: f32, blur: f32, spread: f32, inset: bool| BoxShadow {
         color: hsla_of(c_blue(), alpha),
         offset: point(px(0.), px(0.)),
@@ -21,30 +23,40 @@ fn light_beam() -> [AnyElement; 4] {
         spread_radius: px(spread),
         inset,
     };
-    // Stacked bands, the tallest outermost, add up to a beam that is brightest in its
-    // middle and fades out up and down; each fades out toward the rail's far edge.
+    // Stacked bands add up to a cone: each one taller and starting further out than the
+    // last, all fading out by the far end, so the light is brightest at the tube and
+    // widens as it dims, like a torch's.
+    let width = RAIL_WIDTH + reach;
+    let fade = |alpha: f32| {
+        linear_gradient(
+            90.,
+            linear_color_stop(hsla_of(c_blue(), alpha), 0.),
+            linear_color_stop(hsla_of(c_blue(), 0.), 1.),
+        )
+    };
+    let band = |left: f32, height: f32, alpha: f32| {
+        div()
+            .absolute()
+            .left(px(left))
+            .top(px((34. - height) / 2.))
+            .w(px(width - left))
+            .h(px(height))
+            .rounded_full()
+            .bg(fade(alpha))
+    };
     let mut beam = div()
         .absolute()
         .left(px(-9.))
         .top_0()
-        .w(px(RAIL_WIDTH))
-        .h_full();
-    for height in [110., 88., 68., 50., 34., 20.] {
-        beam = beam.child(
-            div()
-                .absolute()
-                .left_0()
-                .top(px((34. - height) / 2.))
-                .w(px(RAIL_WIDTH))
-                .h(px(height))
-                .rounded_r_full()
-                .bg(linear_gradient(
-                    90.,
-                    linear_color_stop(hsla_of(c_blue(), 0.1), 0.),
-                    linear_color_stop(hsla_of(c_blue(), 0.), 1.),
-                )),
-        );
+        .w(px(width))
+        .h(px(34.));
+    for i in 0..14 {
+        let i = i as f32;
+        beam = beam.child(band(width * 0.045 * i, 24. + 5. * i, 0.05));
     }
+    // The hot core down the middle of the beam, in a softer halo.
+    beam = beam.child(band(0., 16., 0.16)).child(band(0., 6., 0.4));
+    // A bloom behind the tile: a small lit core whose glow spreads across the rail.
     // A bloom behind the tile: a small lit core whose glow spreads across the rail.
     let bloom = div()
         .absolute()
@@ -76,7 +88,7 @@ fn light_beam() -> [AnyElement; 4] {
             glow(0.5, 28., 4., false),
         ]);
     [
-        beam.into_any_element(),
+        deferred(beam).into_any_element(),
         bloom.into_any_element(),
         tile.into_any_element(),
         tube.into_any_element(),
@@ -638,7 +650,7 @@ impl RunoApp {
                 this.go(mode, window, cx);
                 cx.notify();
             }))
-            .when(on, |el| el.children(light_beam()))
+            .when(on, |el| el.children(light_beam(self.beam_reach(cx))))
             .child(icon(
                 mode.glyph(),
                 17.,
@@ -663,6 +675,22 @@ impl RunoApp {
                 )
             })
             .into_any_element()
+    }
+
+    /// How far the open place's light reaches past the rail: across the list beside it
+    /// on pages that have one, so it stops where the page itself starts.
+    fn beam_reach(&self, cx: &App) -> f32 {
+        match self.mode() {
+            Mode::Sessions if self.show_sidebar => self.sidebar_width,
+            Mode::Missions => mission_view::LIST_WIDTH,
+            Mode::Git if self.view == View::Review => review::LIST_WIDTH,
+            Mode::Design => self
+                .design
+                .project
+                .and_then(|p| self.design.canvases.get(&p))
+                .map_or(0., |canvas| canvas.read(cx).layers_width()),
+            _ => 0.,
+        }
     }
 
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -759,7 +787,7 @@ impl RunoApp {
                     .cursor_pointer()
                     .when(open, |el| el.bg(tint(c_active())))
                     .when(!(on || open), |el| el.hover(|el| el.bg(tint(c_subtle()))))
-                    .when(on, |el| el.children(light_beam()))
+                    .when(on, |el| el.children(light_beam(self.beam_reach(cx))))
                     .when(!open, |el| {
                         el.tooltip(|window, cx| {
                             Tooltip::new("Playbooks, History and Notes").build(window, cx)

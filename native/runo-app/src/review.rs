@@ -6,7 +6,7 @@
 use super::*;
 
 /// Width of the list of sessions waiting for review.
-const LIST_WIDTH: f32 = 280.;
+pub(crate) const LIST_WIDTH: f32 = 280.;
 
 impl RunoApp {
     /// Sessions with changed files whose agent has stopped, newest first.

@@ -5,7 +5,7 @@ use super::*;
 use crate::mission::{Mark, Mission, Part, PartState, Stage};
 
 /// Width of the list of missions.
-const LIST_WIDTH: f32 = 280.;
+pub(crate) const LIST_WIDTH: f32 = 280.;
 /// Width of the live feed beside the board.
 const FEED_WIDTH: f32 = 300.;
 /// Parallel parts offered on the form.
