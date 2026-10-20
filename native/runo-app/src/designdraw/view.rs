@@ -278,6 +278,8 @@ pub(crate) struct DesignCanvas {
     /// The screen the layers were read from, or are being read from.
     layers_of: Option<String>,
     layers_loading: bool,
+    /// The layers panel on the left is put away, leaving the canvas the room.
+    layers_hidden: bool,
     /// The next ask is about the selected layers.
     scoping: bool,
     /// Each screen's HTML before a change, for undo and redo.
@@ -599,6 +601,7 @@ impl DesignCanvas {
             layers: Vec::new(),
             layers_of: None,
             layers_loading: false,
+            layers_hidden: false,
             scoping: false,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -854,6 +857,12 @@ impl DesignCanvas {
 
     pub(crate) fn watching(&self) -> bool {
         self.watching
+    }
+
+    /// Put the layers panel away, or bring it back.
+    pub(crate) fn toggle_layers(&mut self, cx: &mut Context<Self>) {
+        self.layers_hidden = !self.layers_hidden;
+        cx.notify();
     }
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
@@ -5707,7 +5716,7 @@ impl DesignCanvas {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.layers_side(cx))
+                    .when(!self.layers_hidden, |el| el.child(self.layers_side(cx)))
                     .child(
                         div()
                             .flex_1()

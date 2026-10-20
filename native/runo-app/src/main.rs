@@ -203,6 +203,8 @@ enum RightTab {
 struct RunoApp {
     state: State,
     demo: bool,
+    /// Git opens on its GitHub tab, the one used last, rather than To ship.
+    git_github: bool,
     selected: Option<u64>,
     view: View,
     right_tab: RightTab,
@@ -1403,6 +1405,7 @@ impl RunoApp {
             view: View::Session,
             state,
             demo,
+            git_github: false,
             selected,
             right_tab: RightTab::Changes,
             browser_open: false,
@@ -2794,9 +2797,9 @@ impl RunoApp {
                 IconName::RotateCcwClock,
                 View::History,
             ),
-            ("Go to Review", IconName::GitCompare, View::Review),
+            ("Go to Git: To ship", IconName::GitCompare, View::Review),
             ("Go to Missions", IconName::Rocket, View::Missions),
-            ("Go to GitHub", IconName::GitPullRequest, View::GitHub),
+            ("Go to Git: GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
             ("Go to Design", IconName::PanelsTopLeft, View::Design),
@@ -6343,12 +6346,14 @@ impl RunoApp {
                     .p_8()
                     .v_flex()
                     .gap_4()
-                    .child(
-                        div()
-                            .text_size(px(20.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(title),
-                    )
+                    .when(!title.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(20.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(title),
+                        )
+                    })
                     .child(body),
             )
             .into_any_element()
@@ -8727,8 +8732,7 @@ impl Render for RunoApp {
             View::Notes => self.notes_view(cx),
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
-            View::GitHub => self.github_view(cx),
-            View::Review => self.review_view(cx),
+            View::GitHub | View::Review => self.git_view(cx),
             View::Missions => self.missions_view(cx),
             View::Editor => div()
                 .flex_1()
@@ -8873,12 +8877,15 @@ impl Render for RunoApp {
                 this.go(Mode::Playbooks, window, cx);
                 cx.notify();
             }))
+            // Both land in Git, each on its own tab.
             .on_action(cx.listener(|this, _: &GoReviews, window, cx| {
-                this.go(Mode::GitHub, window, cx);
+                this.git_github = true;
+                this.go(Mode::Git, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoReview, window, cx| {
-                this.go(Mode::Review, window, cx);
+                this.git_github = false;
+                this.go(Mode::Git, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoMissions, window, cx| {
@@ -8910,7 +8917,18 @@ impl Render for RunoApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
-                // The sidebar belongs to Sessions; elsewhere the shortcut opens Sessions with it.
+                // The sidebar belongs to Sessions, and Design's is its layers panel; elsewhere
+                // the shortcut opens Sessions with it.
+                if this.mode() == Mode::Design {
+                    if let Some(canvas) = this
+                        .design
+                        .project
+                        .and_then(|p| this.design.canvases.get(&p))
+                    {
+                        canvas.update(cx, |c, cx| c.toggle_layers(cx));
+                    }
+                    return;
+                }
                 if this.mode() != Mode::Sessions {
                     this.show_sidebar = true;
                     this.go(Mode::Sessions, window, cx);
@@ -9529,9 +9547,9 @@ fn app_menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
-            MenuItem::action("Review", GoReview),
+            MenuItem::action("Git: To ship", GoReview),
             MenuItem::action("Missions", GoMissions),
-            MenuItem::action("GitHub", GoReviews),
+            MenuItem::action("Git: GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
             MenuItem::action("History", GoHistory),
             MenuItem::action("Notes", GoNotes),

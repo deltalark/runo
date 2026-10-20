@@ -689,6 +689,7 @@ impl RunoApp {
     /// Show Reviews and fetch PRs, issues and runs for the chosen project.
     pub(crate) fn load_github(&mut self) {
         self.view = View::GitHub;
+        self.git_github = true;
         if self.demo {
             self.gh.prs = vec![GhItem {
                 number: 42,
@@ -1305,7 +1306,7 @@ impl RunoApp {
         };
         let blocked = self.gh.error.map(|block| self.gh_blocked(block, cx));
         self.page(
-            "GitHub",
+            "",
             div().v_flex().gap_3().child(chips).children(blocked).when(
                 self.gh.error.is_none(),
                 |el| {
