@@ -9,6 +9,16 @@ use gpui_kit::component::tooltip::Tooltip;
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
+/// The colour behind the rail's icons: the sidebar's when docked, a raised surface when
+/// it floats.
+fn rail_fill(cx: &App) -> u32 {
+    if cx.global::<AppSettings>().rail == "docked" {
+        c_sidebar()
+    } else {
+        c_raised()
+    }
+}
+
 /// The places on the mode rail.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
@@ -38,8 +48,11 @@ impl Mode {
         Mode::History,
     ];
 
-    /// How many of `MAIN` make the first group on the rail.
+    /// How many of `MAIN` stay out on the rail; the rest wait in its More menu.
     const WORK: usize = 4;
+
+    /// The places in the rail's More menu, used less than the ones out on the rail.
+    pub(crate) const MORE: [Mode; 3] = [Mode::Playbooks, Mode::History, Mode::Notes];
 
     /// The current project's own modes, grouped under its badge below the main ones; ⌘7
     /// and ⌘8.
@@ -570,22 +583,21 @@ impl RunoApp {
                         .size(px(8.))
                         .rounded_full()
                         .border_2()
-                        .border_color(rgb(c_sidebar()))
+                        .border_color(rgb(rail_fill(cx)))
                         .bg(rgb(color)),
                 )
             })
             .into_any_element()
     }
 
-    pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let counts = self.counts();
         // The groups part by space alone, so the rail reads as a few calm clusters.
         let group = || div().v_flex().items_center().gap(px(4.));
         let mut work = group().relative().child(tour::anchor(&self.anchors, "nav"));
-        let mut repo = group();
-        for (i, mode) in Mode::MAIN.into_iter().enumerate() {
+        for mode in &Mode::MAIN[..Mode::WORK] {
             // Amber: something there needs you. Blue: agents are working, or work waits
-            // to be reviewed.
+            // to be shipped.
             let badge = match mode {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
@@ -594,38 +606,154 @@ impl RunoApp {
                 Mode::Git if counts.review > 0 => Some(c_blue()),
                 _ => None,
             };
-            let item = self.rail_item(mode, badge, cx);
-            if i < Mode::WORK {
-                work = work.child(item);
-            } else {
-                repo = repo.child(item);
-            }
+            work = work.child(self.rail_item(*mode, badge, cx));
         }
+        let foot = group().child(self.rail_more(cx)).child(
+            div()
+                .relative()
+                .child(tour::anchor(&self.anchors, "settings"))
+                .child(self.rail_item(Mode::Settings, None, cx)),
+        );
         // The Inbox opens from the bell in the top bar, so the rail doesn't repeat it.
-        div()
+        let column = div()
             .w(px(RAIL_WIDTH))
             .flex_none()
             .h_full()
             .v_flex()
-            .items_center()
-            .pt(px(10.))
-            .pb_2()
-            .gap(px(18.))
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
-            .child(work)
-            .child(repo)
-            .child(self.project_group(cx))
-            .child(div().flex_1())
+            .items_center();
+        if cx.global::<AppSettings>().rail == "docked" {
+            return column
+                .pt(px(10.))
+                .pb_2()
+                .gap(px(18.))
+                .border_r_1()
+                .border_color(divider())
+                .bg(pane(c_sidebar()))
+                .child(work)
+                .child(self.project_group(cx))
+                .child(div().flex_1())
+                .child(foot)
+                .into_any_element();
+        }
+        // Floating: one capsule off the window's edge, holding every group, centred down
+        // the side so the page runs behind it.
+        column
+            .justify_center()
             .child(
-                group().child(self.rail_item(Mode::Notes, None, cx)).child(
-                    div()
-                        .relative()
-                        .child(tour::anchor(&self.anchors, "settings"))
-                        .child(self.rail_item(Mode::Settings, None, cx)),
-                ),
+                div()
+                    .v_flex()
+                    .items_center()
+                    .gap(px(14.))
+                    .py(px(8.))
+                    .w(px(44.))
+                    .rounded(px(18.))
+                    .border_1()
+                    .border_color(float_edge())
+                    .bg(float(c_raised()))
+                    .shadow_lg()
+                    .child(work)
+                    .child(self.project_group(cx))
+                    .child(div().w(px(18.)).h(px(1.)).bg(divider()))
+                    .child(foot),
             )
+            .into_any_element()
+    }
+
+    /// The ⋯ at the foot of the rail: Playbooks, History and Notes in a menu beside it.
+    /// It lights up while one of them is open.
+    fn rail_more(&self, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu.as_deref() == Some("rail-more");
+        let on = Mode::MORE.contains(&self.mode());
+        let mut list = div().v_flex().p_1();
+        for mode in Mode::MORE {
+            let here = self.mode() == mode;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("rail-more-{}", mode.label())))
+                    .h(px(30.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .when(here, |el| el.bg(tint(c_active())))
+                    .hover(|el| el.bg(tint(c_active())))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.go(mode, window, cx);
+                        cx.notify();
+                    }))
+                    .child(icon(mode.glyph(), 15., c_secondary()))
+                    .child(div().flex_1().child(mode.label()))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(c_muted()))
+                            .child(keymap::label(cx, mode.shortcut())),
+                    ),
+            );
+        }
+        div()
+            .relative()
+            .child(
+                div()
+                    .id("rail-more")
+                    .size(px(34.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .when(on || open, |el| el.bg(tint(c_active())))
+                    .when(!(on || open), |el| el.hover(|el| el.bg(tint(c_subtle()))))
+                    .when(!open, |el| {
+                        el.tooltip(|window, cx| {
+                            Tooltip::new("Playbooks, History and Notes").build(window, cx)
+                        })
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = match this.menu.as_deref() {
+                            Some("rail-more") => None,
+                            _ => Some("rail-more".into()),
+                        };
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        IconName::Ellipsis,
+                        17.,
+                        if on { c_text() } else { c_muted() },
+                    )),
+            )
+            .when(open, |el| {
+                el.child(
+                    div().absolute().left(px(46.)).bottom_0().child(
+                        deferred(
+                            anchored()
+                                .anchor(Anchor::BottomLeft)
+                                .snap_to_window_with_margin(px(8.))
+                                .child(
+                                    div()
+                                        .id("rail-more-menu")
+                                        .w(px(200.))
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(float_edge())
+                                        .bg(float(c_raised()))
+                                        .shadow_lg()
+                                        .occlude()
+                                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                            this.menu = None;
+                                            cx.notify();
+                                        }))
+                                        .child(list),
+                                ),
+                        )
+                        .with_priority(2),
+                    ),
+                )
+            })
+            .into_any_element()
     }
 
     /// Design and Architecture under the badge of the project they show, so they read as

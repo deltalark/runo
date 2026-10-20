@@ -104,6 +104,8 @@ pub struct AppSettings {
     pub default_view: String,
     /// How wide the conversation runs: "comfortable", "wide" or "full".
     pub content_width: String,
+    /// The mode rail: "floating", a capsule off the window's edge, or "docked" to it.
+    pub rail: String,
     /// Terminal text size in points.
     pub term_font_size: u32,
     /// Terminal font family; empty uses the theme's monospace font.
@@ -217,6 +219,7 @@ impl Default for AppSettings {
             whats_new_seen: false,
             default_view: "chat".into(),
             content_width: "full".into(),
+            rail: "floating".into(),
             term_font_size: 12,
             term_font: String::new(),
             term_scroll: "normal".into(),
