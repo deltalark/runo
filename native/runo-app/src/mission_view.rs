@@ -734,20 +734,7 @@ impl RunoApp {
                                 linear_color_stop(rgb(shade(c_blue(), 0.35)), 0.),
                                 linear_color_stop(rgb(shade(c_blue(), 0.08)), 1.),
                             ))
-                            // The rocket idles in flight: a slow drift up and to the right and back.
-                            .child(
-                                div()
-                                    .relative()
-                                    .child(icon(IconName::Rocket, 22., c_blue()))
-                                    .animated(
-                                        "mission-rocket",
-                                        Animation::new(Duration::from_millis(2800)).repeat(),
-                                        |el, t| {
-                                            let s = (t * std::f32::consts::TAU).sin();
-                                            el.left(px(1.5 * s)).top(px(-2. * s))
-                                        },
-                                    ),
-                            ),
+                            .child(icon(IconName::Rocket, 22., c_blue())),
                     )
                     .child(
                         div()

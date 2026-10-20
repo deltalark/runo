@@ -642,22 +642,12 @@ pub fn c_sidebar() -> u32 {
 /// The mode rail: the deepest layer, so the open place's tab, cut from the sheet beside
 /// it, stands out from it.
 pub fn c_rail() -> u32 {
-    pick(0xe2e2e8, 0x0a0a0c)
+    pick(0xe4e4e8, 0x0f0f11)
 }
 /// The sheet the rail's tab is cut from: the list beside the rail, raised a step above
 /// both the rail and the page, so the tab and the selected row's join to the page read.
 pub fn c_sheet() -> u32 {
-    pick(0xf2f2f5, 0x1f1f25)
-}
-/// The neon traced around the open place's tab and the selected row's join: the accent
-/// chosen in Settings, lifted toward white in dark mode so it glows.
-pub fn c_neon() -> u32 {
-    let accent = ACCENT.load(Ordering::Relaxed);
-    if is_dark() {
-        mix(accent, 0xffffff, 0.72)
-    } else {
-        accent
-    }
+    pick(0xf4f4f6, 0x1d1d21)
 }
 pub fn c_subtle() -> u32 {
     pick(0xf1f1f3, 0x222226)

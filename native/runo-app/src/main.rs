@@ -849,7 +849,6 @@ fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyE
                     .bg(tint(c_subtle()))
                     .border_1()
                     .border_color(rgb(c_border()))
-                    .relative()
                     .child(
                         icon(name, 20., c_secondary()).animated(
                             (id, 1usize),
@@ -858,12 +857,6 @@ fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyE
                                 .with_easing(pulsating_between(0.55, 1.)),
                             |el, t| el.opacity(t),
                         ),
-                    )
-                    // It floats, rising and settling gently, so an empty page still breathes.
-                    .animated(
-                        (id, 2usize),
-                        Animation::new(Duration::from_millis(3200)).repeat(),
-                        |el, t| el.top(px(-2.5 * (t * std::f32::consts::TAU).sin())),
                     ),
             )
             .child(
@@ -3921,7 +3914,7 @@ impl RunoApp {
             return div()
                 .id(id.clone())
                 .flex_none()
-                .child(shell::sonar(
+                .child(shell::live_dot(
                     Self::status_color(status),
                     size,
                     format!("pulse-{id}"),
@@ -4092,12 +4085,6 @@ impl RunoApp {
                 .unwrap_or_default(),
         };
         let stats = self.stats.get(&id).copied();
-        let color = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            .and_then(projects::color_of);
         // "local folder" is where most sessions run, so it only adds noise; a branch
         // or worktree still shows.
         let branch = (!session.branch.is_empty() && session.branch != "local folder")
@@ -4126,19 +4113,6 @@ impl RunoApp {
             .cursor_pointer()
             .when(selected, |el| {
                 el.child(shell::row_fuse(format!("session-fuse-{id}"), reach))
-                    .when_some(color, |el, c| {
-                        // The project's colour stays on the row as a short mark.
-                        el.child(
-                            div()
-                                .absolute()
-                                .left(px(3.))
-                                .top(px(9.))
-                                .bottom(px(9.))
-                                .w(px(2.))
-                                .rounded_full()
-                                .bg(rgb(c)),
-                        )
-                    })
             })
             .when(!selected, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .when(self.cursor == Some(id), |el| el.bg(tint(c_selected())))
