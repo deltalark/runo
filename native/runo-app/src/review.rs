@@ -16,10 +16,13 @@ impl RunoApp {
             .sessions
             .iter()
             .filter(|s| {
+                // A mission's parts ship with the mission, from its own session.
                 !s.archived
                     && s.canvas.is_empty()
                     && !self.is_running(s)
-                    && self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
+                    && (s.mission == 0 || self.mission_ready(s.id))
+                    && (self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
+                        || self.mission_ready(s.id))
             })
             .map(|s| s.id)
             .collect();
@@ -37,11 +40,21 @@ impl RunoApp {
                 self.select(first);
             }
         }
+        // A mission's work is all in commits: show everything since its base.
+        if !self.diff_base && self.selected.is_some_and(|id| self.mission_ready(id)) {
+            self.diff_base = true;
+            self.refresh();
+        }
         self.view = View::Review;
     }
 
     /// Show one session in Review.
     pub(crate) fn review(&mut self, id: u64) {
+        // A mission's work is all in commits: show everything since its base.
+        if self.mission_ready(id) {
+            self.diff_base = true;
+            self.selected_file = None;
+        }
         self.select(id);
         self.view = View::Review;
     }
@@ -50,6 +63,7 @@ impl RunoApp {
         let id = session.id;
         let on = self.selected == Some(id);
         let (files, added, removed) = self.stats.get(&id).copied().unwrap_or_default();
+        let mission = self.mission_ready(id);
         let project = self
             .state
             .projects
@@ -96,20 +110,23 @@ impl RunoApp {
                             .text_size(px(11.5))
                             .text_color(rgb(c_muted()))
                             .child(match files {
+                                _ if mission => format!("Mission branch  ·  {project}"),
                                 1 => format!("1 file  ·  {project}"),
                                 n => format!("{n} files  ·  {project}"),
                             }),
                     ),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .gap_1()
-                    .text_size(px(11.5))
-                    .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
-                    .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
-            )
+            .when(!mission, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap_1()
+                        .text_size(px(11.5))
+                        .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
+                        .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
+                )
+            })
             .into_any_element()
     }
 
