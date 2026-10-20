@@ -12,6 +12,8 @@ pub(crate) enum Unit {
     Percent,
     /// A colour: hex, a theme token by name, or any CSS colour.
     Color,
+    /// An angle in degrees.
+    Deg,
 }
 
 /// A field: its id, the style it shows, the styles it sets, and its unit.
@@ -22,7 +24,7 @@ pub(crate) struct Field {
     pub unit: Unit,
 }
 
-pub(crate) const FIELDS: [Field; 18] = [
+pub(crate) const FIELDS: [Field; 19] = [
     px("w", "width", &["width"]),
     px("h", "height", &["height"]),
     px("gap", "gap", &["gap"]),
@@ -51,6 +53,12 @@ pub(crate) const FIELDS: [Field; 18] = [
     px("y", "top", &["top"]),
     px("r", "right", &["right"]),
     px("b", "bottom", &["bottom"]),
+    Field {
+        id: "rotate",
+        reads: "rotate",
+        sets: &["rotate"],
+        unit: Unit::Deg,
+    },
 ];
 
 const fn px(id: &'static str, reads: &'static str, sets: &'static [&'static str]) -> Field {
@@ -123,6 +131,13 @@ pub(crate) fn display(f: &Field, el: &Element) -> String {
             Err(_) => "100%".into(),
         },
         Unit::Color => hex(v).unwrap_or_default(),
+        Unit::Deg => match v
+            .strip_suffix("deg")
+            .and_then(|n| n.trim().parse::<f32>().ok())
+        {
+            Some(n) => format!("{}°", number(n)),
+            None => "0°".into(),
+        },
     }
 }
 
@@ -198,6 +213,20 @@ pub(crate) fn parse(f: &Field, typed: &str) -> Option<String> {
         Unit::Percent => {
             let n: f32 = t.trim_end_matches('%').trim().parse().ok()?;
             Some(number((n / 100.).clamp(0., 1.)))
+        }
+        Unit::Deg => {
+            let n: f32 = t
+                .trim_end_matches(['°', ' '])
+                .trim_end_matches("deg")
+                .trim()
+                .parse()
+                .ok()?;
+            let n = n.rem_euclid(360.);
+            Some(if n == 0. {
+                String::new()
+            } else {
+                format!("{}deg", number(n))
+            })
         }
         Unit::Color => {
             let bare = lower.trim_start_matches("--");
@@ -328,6 +357,21 @@ mod tests {
         assert_eq!(p("fill", "FF0000"), Some("#ff0000".into()));
         assert_eq!(p("fill", "primary"), Some("var(--primary)".into()));
         assert_eq!(p("fill", "--muted"), Some("var(--muted)".into()));
+    }
+
+    #[test]
+    fn rotation_is_in_degrees() {
+        let p = |t| parse(field("rotate").unwrap(), t);
+        assert_eq!(p("45"), Some("45deg".into()));
+        assert_eq!(p("90°"), Some("90deg".into()));
+        assert_eq!(p("-90"), Some("270deg".into()));
+        assert_eq!(p("360"), Some(String::new()));
+        assert_eq!(p("0"), Some(String::new()));
+        assert_eq!(p("a lot"), None);
+        let show =
+            |computed: &str| display(field("rotate").unwrap(), &el(&[], &[("rotate", computed)]));
+        assert_eq!(show("none"), "0°");
+        assert_eq!(show("12.5deg"), "12.5°");
     }
 
     #[test]

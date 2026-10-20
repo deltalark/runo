@@ -65,6 +65,16 @@ pub(crate) struct Screen {
     /// Lines to line things up against, across or down the screen.
     #[serde(default, rename = "guide", skip_serializing_if = "Vec::is_empty")]
     pub guides: Vec<Guide>,
+    /// The page it's on; without one, the page named after its device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+}
+
+impl Screen {
+    /// The page the screen is on.
+    pub(crate) fn page(&self) -> &str {
+        self.page.as_deref().unwrap_or(self.device.label())
+    }
 }
 
 /// A layout grid: columns or rows with gutters between and margins at the sides, or a
@@ -123,6 +133,10 @@ pub(crate) struct Canvas {
     /// The platform the prototype moves like: "ios" (the default) or "android".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub platform: String,
+    /// Pages in the order they're listed, kept even while empty. Pages the screens are on
+    /// but that aren't named here follow, in the order their first screen comes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<String>,
 }
 
 impl Canvas {
@@ -132,6 +146,66 @@ impl Canvas {
 
     pub(crate) fn screen_mut(&mut self, id: &str) -> Option<&mut Screen> {
         self.screens.iter_mut().find(|s| s.id == id)
+    }
+
+    /// The pages, in order: the named ones, then any a screen is on.
+    pub(crate) fn page_list(&self) -> Vec<String> {
+        let mut out = self.pages.clone();
+        for s in &self.screens {
+            if !out.iter().any(|p| p == s.page()) {
+                out.push(s.page().to_string());
+            }
+        }
+        out
+    }
+
+    /// The page shown when `wanted` isn't one: the first.
+    pub(crate) fn page_or_first(&self, wanted: Option<&str>) -> Option<String> {
+        let pages = self.page_list();
+        wanted
+            .filter(|w| pages.iter().any(|p| p == w))
+            .map(str::to_string)
+            .or_else(|| pages.into_iter().next())
+    }
+
+    /// A page name no page uses yet.
+    pub(crate) fn new_page_name(&self) -> String {
+        let pages = self.page_list();
+        (pages.len() + 1..)
+            .map(|n| format!("Page {n}"))
+            .find(|n| !pages.contains(n))
+            .unwrap_or_else(|| "Page".into())
+    }
+
+    /// Rename a page, moving its screens with it.
+    pub(crate) fn rename_page(&mut self, from: &str, to: &str) {
+        let to = to.trim();
+        if to.is_empty() || from == to || self.page_list().iter().any(|p| p == to) {
+            return;
+        }
+        if !self.pages.iter().any(|p| p == from) {
+            self.pages = self.page_list();
+        }
+        for p in self.pages.iter_mut().filter(|p| *p == from) {
+            *p = to.to_string();
+        }
+        for s in self.screens.iter_mut().filter(|s| s.page() == from) {
+            s.page = Some(to.to_string());
+        }
+    }
+
+    /// Where a new screen goes on `page`: to the right of that page's screens.
+    pub(crate) fn next_spot_on(&self, page: &str) -> (f32, f32) {
+        let on: Vec<&Screen> = self.screens.iter().filter(|s| s.page() == page).collect();
+        let right = on
+            .iter()
+            .map(|s| s.x + s.device.size().0)
+            .fold(f32::NEG_INFINITY, f32::max);
+        if right.is_finite() {
+            (right + GAP, on.iter().map(|s| s.y).fold(f32::MAX, f32::min))
+        } else {
+            (0., 0.)
+        }
     }
 
     /// A file stem from `name` that no screen uses yet.
@@ -1155,6 +1229,32 @@ mod tests {
         assert_eq!(again.screens.len(), 1);
         assert_eq!(again.screens[0].x, 900.);
         assert!(folder(&root).join(TOKENS).exists());
+    }
+
+    #[test]
+    fn pages_come_from_devices_until_named() {
+        let mut canvas = Canvas::default();
+        assert!(canvas.page_list().is_empty());
+        for (id, device) in [("home", Device::Phone), ("site", Device::Desktop)] {
+            canvas.screens.push(Screen {
+                id: id.into(),
+                device,
+                ..Default::default()
+            });
+        }
+        assert_eq!(canvas.page_list(), ["Phone", "Desktop"]);
+        assert_eq!(canvas.page_or_first(Some("Nope")).as_deref(), Some("Phone"));
+        canvas.rename_page("Phone", "App");
+        assert_eq!(canvas.page_list(), ["App", "Desktop"]);
+        assert_eq!(canvas.screen("home").map(|s| s.page()), Some("App"));
+        // A name already in use is refused.
+        canvas.rename_page("App", "Desktop");
+        assert_eq!(canvas.page_list(), ["App", "Desktop"]);
+        assert_eq!(canvas.new_page_name(), "Page 3");
+        assert_eq!(canvas.next_spot_on("Empty"), (0., 0.));
+        let text = toml::to_string(&canvas).unwrap();
+        let back: Canvas = toml::from_str(&text).unwrap();
+        assert_eq!(back, canvas);
     }
 
     #[test]

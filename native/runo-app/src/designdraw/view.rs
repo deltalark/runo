@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 mod agents;
+mod chrome;
 mod codelinks;
 mod comments;
 mod components;
@@ -85,6 +86,9 @@ struct LinkLine {
     to: Pt,
     faint: bool,
 }
+
+/// The right panel's width, for what the app floats beside it.
+pub(crate) const RIGHT_PANEL_W: f32 = figma::RIGHT_W;
 
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 3.;
@@ -288,11 +292,23 @@ pub(crate) struct DesignCanvas {
     panel: Panel,
     tokens: String,
     dark: bool,
-    /// Links between screens drawn on the canvas and outlined in Play.
+    /// Links between screens drawn on the canvas in Design too, not only in Prototype, and
+    /// outlined in Play.
     hotspots: bool,
+    /// The page shown; `None` shows the first.
+    page: Option<String>,
+    /// The page whose name is being typed in place.
+    renaming_page: Option<String>,
+    f_page: Entity<InputState>,
     new_open: bool,
-    /// The right-click menu of a screen: where it opened on the canvas, and the screen.
-    menu: Option<(Pt, String)>,
+    /// The menu open from the chrome, or from a right click on the canvas.
+    flyout: Option<chrome::Flyout>,
+    /// The shape the shapes tool draws when picked without its menu.
+    last_shape: shapes::Shape,
+    /// The ask bar has the keyboard, so it shows its suggestions.
+    ask_focused: bool,
+    /// The project's branch, read when the canvas opens or reloads.
+    branch: String,
     new_device: Device,
     /// Clicking through the prototype: the screen shown and the way back.
     playing: Option<String>,
@@ -498,6 +514,7 @@ impl DesignCanvas {
             Err(e) => (Canvas::default(), Some(e)),
         };
         let tokens = std::fs::read_to_string(folder(&root).join(TOKENS)).unwrap_or_default();
+        let branch = crate::git::current_branch(&root.to_string_lossy());
         let library = super::library::load(&root);
         let mut subs = Vec::new();
         let f_text = cx.new(|cx| InputState::new(window, cx).placeholder("Text"));
@@ -526,6 +543,13 @@ impl DesignCanvas {
             }),
         );
         let f_name = cx.new(|cx| InputState::new(window, cx).placeholder("Screen name"));
+        let f_page = cx.new(|cx| InputState::new(window, cx).placeholder("Page name"));
+        subs.push(cx.subscribe_in(&f_page, window, |this, state, ev, _, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                let typed = state.read(cx).value().to_string();
+                this.finish_page_rename(typed, cx);
+            }
+        }));
         subs.push(
             cx.subscribe_in(&f_name, window, |this, state, ev, window, cx| {
                 if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -608,9 +632,15 @@ impl DesignCanvas {
             panel: Panel::Design,
             tokens,
             dark: false,
-            hotspots: true,
+            hotspots: false,
+            page: None,
+            renaming_page: None,
+            f_page,
             new_open: false,
-            menu: None,
+            flyout: None,
+            last_shape: shapes::Shape::Rect,
+            ask_focused: false,
+            branch,
             new_device: Device::Phone,
             playing: None,
             play_back: Vec::new(),
@@ -1867,58 +1897,75 @@ impl DesignCanvas {
                         ));
                     }
                 }
-                askbar::composer("design-ask-bar", any)
-                    .when(any, |el| el.child(chips))
+                // Put away, it's one line; it opens up with suggestions when it's used.
+                let compact = !self.ask_focused
+                    && empty
+                    && !self.refs_open
+                    && !self.pick.open
+                    && self.ask_new.is_none();
+                let refs_btn = icon_btn(
+                    "design-refs",
+                    IconName::ImagePlus,
+                    "Design from a picture: a mockup, screenshot or sketch",
+                    self.refs_open,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.refs.is_empty() {
+                        this.add_refs(cx);
+                    } else {
+                        this.refs_open = !this.refs_open;
+                        this.pick.open = false;
+                    }
+                    cx.notify();
+                }));
+                let tail = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1()
+                    .child(refs_btn)
+                    .child(self.pick.chip("design-ask", cx, |t: &mut Self| &mut t.pick))
+                    .child(
+                        askbar::send_button("design-ask-send", !empty)
+                            .on_click(cx.listener(|this, _, window, cx| this.send_ask(window, cx))),
+                    );
+                let (inline_chips, top_chips) = if compact && any {
+                    (
+                        Some(chips.flex_shrink_0().max_w(px(170.)).overflow_hidden()),
+                        None,
+                    )
+                } else {
+                    (None, any.then_some(chips))
+                };
+                let input_row = div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .min_h(px(32.))
+                    .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
+                    .when_some(inline_chips, |el, c| el.child(c))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .min_h(px(32.))
-                            .child(div().pl_1().child(icon(IconName::Sparkles, 14., c_blue())))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(Input::new(&self.f_ask).appearance(false)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(row)
-                            .child(
-                                icon_btn(
-                                    "design-refs",
-                                    IconName::ImagePlus,
-                                    "Design from a picture: a mockup, screenshot or sketch",
-                                    self.refs_open,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        if this.refs.is_empty() {
-                                            this.add_refs(cx);
-                                        } else {
-                                            this.refs_open = !this.refs_open;
-                                            this.pick.open = false;
-                                        }
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                            .child(self.pick.chip("design-ask", cx, |t: &mut Self| &mut t.pick))
-                            .child(askbar::send_button("design-ask-send", !empty).on_click(
-                                cx.listener(|this, _, window, cx| this.send_ask(window, cx)),
-                            )),
-                    )
+                            .flex_1()
+                            .min_w(px(160.))
+                            .child(Input::new(&self.f_ask).appearance(false)),
+                    );
+                if compact {
+                    askbar::composer("design-ask-bar", any)
+                        .w(px(560.))
+                        .child(input_row.child(tail))
+                } else {
+                    askbar::composer("design-ask-bar", any)
+                        .children(top_chips)
+                        .child(input_row)
+                        .child(div().flex().items_center().gap_1().child(row).child(tail))
+                }
             }
         };
         Some(
             div()
                 .absolute()
-                .bottom(px(10.))
+                .bottom(px(chrome::BAR_GAP + chrome::BAR_H + 8.))
                 .left_0()
                 .right_0()
                 .flex()
@@ -2121,7 +2168,7 @@ impl DesignCanvas {
     /// The screen under a point, and whether the point is on its name strip.
     fn screen_at(&self, w: Pt) -> Option<(String, bool)> {
         let strip = TITLE_H / self.zoom;
-        self.canvas.screens.iter().rev().find_map(|s| {
+        self.screens_here().rev().find_map(|s| {
             let (sw, sh) = self.size_of(s);
             let inside_x = w.0 >= s.x && w.0 <= s.x + sw;
             if inside_x && w.1 >= s.y && w.1 <= s.y + sh {
@@ -2136,11 +2183,11 @@ impl DesignCanvas {
 
     fn fit(&mut self) {
         let (vw, vh) = self.view_size();
-        if vw < 10. || self.canvas.screens.is_empty() {
+        if vw < 10. || self.screens_here().next().is_none() {
             return;
         }
         let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for s in &self.canvas.screens {
+        for s in self.screens_here() {
             let (w, h) = self.size_of(s);
             l = l.min(s.x);
             t = t.min(s.y - 40.);
@@ -2855,13 +2902,17 @@ impl DesignCanvas {
             self.say(format!("Couldn't add the screen: {e}"));
             return;
         }
-        let (x, y) = self.canvas.next_spot();
+        let page = self.page_for(self.new_device);
+        let (x, y) = self
+            .canvas
+            .next_spot_on(page.as_deref().unwrap_or(self.new_device.label()));
         self.canvas.screens.push(Screen {
             id: id.clone(),
             name: name.to_string(),
             device: self.new_device,
             x,
             y,
+            page,
             ..Default::default()
         });
         self.tokens = std::fs::read_to_string(folder(&self.root).join(TOKENS)).unwrap_or_default();
@@ -2908,6 +2959,7 @@ impl DesignCanvas {
             device: s.device,
             x: s.x + w + GAP,
             y: s.y,
+            page: s.page.clone(),
             ..Default::default()
         });
         self.save_canvas();
@@ -2967,7 +3019,10 @@ impl DesignCanvas {
             return;
         };
         if let Some(s) = self.canvas.screen_mut(&id) {
+            // It stays on its page.
+            let page = s.page().to_string();
             s.device = device;
+            s.page = (page != device.label()).then_some(page);
         }
         let file = screen_path(&self.root, &id);
         if let Ok(html) = std::fs::read_to_string(&file) {
@@ -3273,7 +3328,7 @@ impl DesignCanvas {
             return;
         }
         // The end of a link's arrow: drag it onto another screen to send the link there.
-        if self.hotspots && e.button == MouseButton::Left {
+        if self.links_shown() && e.button == MouseButton::Left {
             let hit = self.link_lines().into_iter().find(|l| {
                 let p = self.screen_pt(l.to);
                 (local.0 - p.0).abs() < 10. && (local.1 - p.1).abs() < 10.
@@ -3638,76 +3693,48 @@ impl DesignCanvas {
         cx.notify();
     }
 
-    /// Right-click a screen for what can be done to it.
+    /// Right-click a layer or a screen for what can be done to it.
     fn on_right(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         self.new_open = false;
         let local = self.local(e.position);
-        self.menu = self.screen_at(self.world(local)).map(|(id, _)| {
-            self.select_screen(Some(id.clone()));
-            (local, id)
+        let w = self.world(local);
+        let picked = self.element.iter().chain(&self.also).any(|el| {
+            self.screen.as_ref().is_some_and(|id| {
+                self.canvas.screen(id).is_some_and(|s| {
+                    let (x, y) = (w.0 - s.x, w.1 - s.y);
+                    x >= el.rect.x
+                        && x <= el.rect.x + el.rect.w
+                        && y >= el.rect.y
+                        && y <= el.rect.y + el.rect.h
+                })
+            })
         });
-        cx.notify();
-    }
-
-    fn screen_menu(&self, at: Pt, cx: &mut Context<Self>) -> AnyElement {
-        type Act = fn(&mut DesignCanvas, &mut Context<DesignCanvas>);
-        let items: [(&str, &str, Act); 3] = [
-            ("Duplicate", "⌘D", |this, cx| this.duplicate_screen(cx)),
-            ("Play from here", "", |this, cx| this.play(cx)),
-            ("Delete", "⌫", |this, cx| this.delete_screen(cx)),
-        ];
-        // Keep the whole menu on the canvas.
-        let (vw, vh) = self.view_size();
-        let tall = items.len() as f32 * 28. + 10.;
-        let left = at.0.min(vw - 208.).max(4.);
-        let top = at.1.min(vh - tall - 4.).max(4.);
-        let mut list = div()
-            .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(200.))
-            .p_1()
-            .v_flex()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(float(c_canvas()))
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.menu = None;
+        match self.screen_at(w) {
+            // On what's already picked: its menu, keeping the selection.
+            Some(_) if picked => {}
+            Some((id, false)) => {
+                let at = self.canvas.screen(&id).map(|s| (w.0 - s.x, w.1 - s.y));
+                self.select_screen(Some(id.clone()));
+                self.element = None;
+                self.also.clear();
+                if let Some(at) = at.filter(|_| self.box_at(w, None).is_some()) {
+                    self.pick(&id, at, false, cx);
+                }
+            }
+            Some((id, true)) => {
+                self.select_screen(Some(id));
+                self.element = None;
+                self.also.clear();
+            }
+            None => {
+                self.flyout = None;
                 cx.notify();
-            }));
-        for (i, (label, keys, act)) in items.into_iter().enumerate() {
-            list = list.child(
-                div()
-                    .id(("design-menu", i))
-                    .h(px(28.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(12.5))
-                    .text_color(rgb(if label == "Delete" { c_red() } else { c_text() }))
-                    .hover(|el| el.bg(tint(c_subtle())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.menu = None;
-                        act(this, cx);
-                        cx.notify();
-                    }))
-                    .child(div().flex_1().child(label))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(c_muted()))
-                            .child(keys),
-                    ),
-            );
+                return;
+            }
         }
-        list.into_any_element()
+        self.flyout = Some(chrome::Flyout::Selection(Some(local)));
+        cx.notify();
     }
 
     fn on_scroll(&mut self, e: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -3765,6 +3792,26 @@ impl DesignCanvas {
             }
             (true, true, false, "l") if self.element.is_some() => {
                 self.lock_selected(cx);
+                true
+            }
+            (true, true, false, "h") if self.element.is_some() => {
+                self.op("hide", &[], After::Same, cx);
+                true
+            }
+            (true, false, true, "enter") => {
+                self.play(cx);
+                true
+            }
+            (false, false, false, "/") => {
+                self.focus_ask(window, cx);
+                true
+            }
+            (true, false, false, "]") => {
+                self.nudge(1, cx);
+                true
+            }
+            (true, false, false, "[") => {
+                self.nudge(-1, cx);
                 true
             }
 
@@ -3917,8 +3964,8 @@ impl DesignCanvas {
             self.commenting = false;
         } else if self.new_open {
             self.new_open = false;
-        } else if self.menu.is_some() {
-            self.menu = None;
+        } else if self.flyout.is_some() {
+            self.flyout = None;
         } else if !self.focus.is_focused(window) {
             window.focus(&self.focus, cx);
         } else if !self.also.is_empty() {
@@ -3971,7 +4018,7 @@ impl DesignCanvas {
         let tall = near(local.1, y1, y1 - y0) && within(local.0, x0, x1);
         // The link handle sits at the middle of the right edge.
         let mid = (y0 + y1) / 2.;
-        if wide && !tall && (local.1 - mid).abs() < 10. {
+        if self.links_shown() && wide && !tall && (local.1 - mid).abs() < 10. {
             return None;
         }
         (wide || tall).then_some((wide, tall))
@@ -4033,6 +4080,9 @@ impl DesignCanvas {
     }
 
     fn link_handle(&self) -> Option<Pt> {
+        if !self.links_shown() {
+            return None;
+        }
         let el = self.element.as_ref()?;
         let s = self.canvas.screen(self.screen.as_ref()?)?;
         Some((
@@ -4143,22 +4193,33 @@ impl DesignCanvas {
                     ),
             )
             .on_click(cx.listener(|this, _, window, cx| this.start_describe(window, cx)));
+        // It opens from the frame tool, above the toolbar.
         div()
             .absolute()
-            .top(px(6.))
-            .left(px(8.))
-            .w(px(260.))
-            .p_1()
-            .v_flex()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(float(c_canvas()))
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(devices)
-            .child(describe)
-            .child(list)
+            .bottom(px(chrome::BAR_GAP + chrome::BAR_H + 6.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id("design-new-menu")
+                    .w(px(260.))
+                    .max_h(px((self.view_size().1 - 80.).max(200.)))
+                    .overflow_y_scroll()
+                    .p_1()
+                    .v_flex()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(float_edge())
+                    .bg(float(c_raised()))
+                    .shadow_lg()
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(devices)
+                    .child(describe)
+                    .child(list),
+            )
             .into_any_element()
     }
 
@@ -4168,6 +4229,9 @@ impl DesignCanvas {
         let z = self.zoom;
         let (vw, vh) = self.view_size();
         for (i, s) in self.canvas.screens.iter().enumerate() {
+            if !self.on_page(s) {
+                continue;
+            }
             let (w, h) = self.size_of(s);
             let (x, y) = self.screen_pt((s.x, s.y));
             if x > vw || y > vh || x + w * z < 0. || y + h * z < -TITLE_H {
@@ -4231,9 +4295,9 @@ impl DesignCanvas {
             out.push(body.into_any_element());
         }
         // What opens another screen, outlined where it sits.
-        if self.hotspots {
+        if self.links_shown() {
             let mut n = 0;
-            for s in &self.canvas.screens {
+            for s in self.screens_here() {
                 let Some(shot) = self.shots.get(&s.id) else {
                     continue;
                 };
@@ -4494,8 +4558,8 @@ impl DesignCanvas {
                     )
                     .into_any_element(),
             );
-            // The link handle: drag it onto another screen.
-            out.push(
+            // The link handle, in Prototype: drag it onto another screen.
+            out.extend(self.links_shown().then(|| {
                 div()
                     .absolute()
                     .left(px(x + w - 7.))
@@ -4506,8 +4570,8 @@ impl DesignCanvas {
                     .border_color(rgb(0xffffff))
                     .bg(rgb(c_blue()))
                     .cursor_pointer()
-                    .into_any_element(),
-            );
+                    .into_any_element()
+            }));
             if !self.inline_open && self.ai.is_none() {
                 out.push(
                     div()
@@ -4844,13 +4908,13 @@ impl DesignCanvas {
     fn link_lines(&self) -> Vec<LinkLine> {
         let mut out = Vec::new();
         let mut into: HashMap<(String, bool), usize> = HashMap::new();
-        for s in &self.canvas.screens {
+        for s in self.screens_here() {
             let Some(shot) = self.shots.get(&s.id) else {
                 continue;
             };
             let sw = self.size_of(s).0;
             for l in &shot.links {
-                let Some(t) = self.canvas.screen(&l.goto) else {
+                let Some(t) = self.canvas.screen(&l.goto).filter(|t| self.on_page(t)) else {
                     continue;
                 };
                 if t.id == s.id {
@@ -4890,7 +4954,7 @@ impl DesignCanvas {
 
     /// Arrows for the links between screens, and the one being dragged.
     fn paint_links(&self) -> (Vec<Arrow>, Option<Arrow>) {
-        if !self.hotspots {
+        if !self.links_shown() {
             return (Vec::new(), None);
         }
         let moving = match &self.drag {
@@ -5002,7 +5066,7 @@ impl DesignCanvas {
                         .h(px(l.rect.h * scale))
                         .cursor_pointer()
                         .rounded_md()
-                        .when(self.hotspots, |el| {
+                        .when(self.links_shown(), |el| {
                             el.border_1()
                                 .border_color(col(c_blue(), 0.7))
                                 .bg(col(c_blue(), 0.1))
@@ -5010,7 +5074,7 @@ impl DesignCanvas {
                         .hover(|el| el.bg(col(c_blue(), 0.2)))
                         .on_click(cx.listener(move |this, _, _, cx| this.play_go(&link, cx))),
                 );
-                if self.hotspots {
+                if self.links_shown() {
                     let corner = ((l.rect.x + l.rect.w) * scale, l.rect.y * scale);
                     for dot in hot_dot(("design-play-dot", i), corner, i) {
                         frame = frame.child(dot);
@@ -5187,14 +5251,10 @@ impl DesignCanvas {
             .as_ref()
             .filter(|(_, at)| at.elapsed() < Duration::from_secs(6))
             .map(|(t, _)| t.clone());
+        let here = self.screens_here().count();
         let status = format!(
-            "{} screen{} · {FOLDER}/{}",
-            self.canvas.screens.len(),
-            if self.canvas.screens.len() == 1 {
-                ""
-            } else {
-                "s"
-            },
+            "{here} screen{} · {FOLDER}/{}",
+            if here == 1 { "" } else { "s" },
             if self.drawing.is_empty() {
                 String::new()
             } else {
@@ -5304,7 +5364,7 @@ impl DesignCanvas {
             area = area.child(
                 div()
                     .absolute()
-                    .bottom(px(56.))
+                    .top(px(12.))
                     .left_0()
                     .right_0()
                     .flex()
@@ -5339,12 +5399,29 @@ impl DesignCanvas {
                     ),
             );
         }
+        if self.playing.is_none() {
+            area = area.child(self.bottom_bar(cx)).child(self.help_button(cx));
+        }
+        if self.layers_hidden {
+            area = area.child(
+                div().absolute().top(px(8.)).left(px(8.)).child(
+                    icon_btn(
+                        "design-layers-show",
+                        IconName::PanelLeftOpen,
+                        "Show layers (⌘\\)",
+                        false,
+                    )
+                    .bg(float(c_raised()))
+                    .border_1()
+                    .border_color(float_edge())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_layers(cx))),
+                ),
+            );
+        }
         if self.new_open {
             area = area.child(self.new_menu(cx));
         }
-        if let Some((at, _)) = &self.menu {
-            area = area.child(self.screen_menu(*at, cx));
-        }
+        area = area.children(self.selection_menu_on_canvas(cx));
         area = area.children(self.player(cx));
         if self.playing.is_some() {
             // Comments in Present go over the screen playing.
@@ -5428,7 +5505,7 @@ impl DesignCanvas {
             (IconName::Move, "Drag a screen by its name to move it"),
             (
                 IconName::Link,
-                "Drag an element's blue dot onto a screen to link them",
+                "In Prototype, drag an element's blue dot onto a screen to link them",
             ),
             (IconName::Play, "Press Play to click through"),
         ];
@@ -5697,6 +5774,7 @@ impl DesignCanvas {
             }
         }
         self.focus_comment(window, cx);
+        self.ask_focused = self.f_ask.read(cx).focus_handle(cx).is_focused(window);
         div()
             .size_full()
             .key_context("DesignCanvas")
@@ -5710,13 +5788,14 @@ impl DesignCanvas {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_up))
             .v_flex()
-            .child(self.fig_toolbar(cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .when(!self.layers_hidden, |el| el.child(self.layers_side(cx)))
+                    .when(!self.layers_hidden, |el| {
+                        el.child(self.layers_side(window, cx))
+                    })
                     .child(
                         div()
                             .flex_1()
