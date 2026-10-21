@@ -1425,6 +1425,146 @@ pub fn sync_state(dir: &str) -> Sync {
     }
 }
 
+/// Where a project folder stands: its branch and how it compares with the remote's copy.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct RepoState {
+    /// The checked-out branch, empty when HEAD is detached.
+    pub branch: String,
+    /// The remote branch it tracks, such as `origin/main`; empty when there is none.
+    pub upstream: String,
+    /// The remote to push to, empty when the repository has none.
+    pub remote: String,
+    /// The remote as a person would call it: "GitHub" for one there, else its name.
+    pub host: String,
+    /// Commits only here, and commits only on the remote branch.
+    pub ahead: usize,
+    pub behind: usize,
+    /// Local branches, the checked-out one included, most recently committed first.
+    pub branches: Vec<String>,
+}
+
+pub fn repo_state(dir: &str) -> RepoState {
+    let branch = match current_branch(dir) {
+        b if b == "HEAD" => String::new(),
+        b => b,
+    };
+    let upstream = git(
+        dir,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .map(|s| s.trim().to_string())
+    .unwrap_or_default();
+    let remote = remote_name(dir);
+    let host = match git(dir, &["remote", "get-url", &remote]) {
+        Ok(url) if url.contains("github.com") => "GitHub".to_string(),
+        _ => remote.clone(),
+    };
+    let (behind, ahead) = if upstream.is_empty() {
+        let ahead = if remote.is_empty() {
+            0
+        } else {
+            count(dir, &["rev-list", "--count", "HEAD", "--not", "--remotes"]).unwrap_or(0)
+        };
+        (0, ahead)
+    } else {
+        git(dir, &["rev-list", "--left-right", "--count", "@{u}...HEAD"])
+            .ok()
+            .and_then(|s| {
+                let mut n = s.split_whitespace().filter_map(|n| n.parse().ok());
+                Some((n.next()?, n.next()?))
+            })
+            .unwrap_or((0, 0))
+    };
+    let branches = git(
+        dir,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ],
+    )
+    .unwrap_or_default()
+    .lines()
+    .map(str::to_string)
+    .collect();
+    RepoState {
+        branch,
+        upstream,
+        remote,
+        host,
+        ahead,
+        behind,
+        branches,
+    }
+}
+
+/// Bring the remote's new commits into the checked-out branch, replaying local commits
+/// after them and keeping uncommitted work. On clashing lines nothing changes: the
+/// update is undone and the clashing files are returned.
+pub fn pull(dir: &str) -> Result<Update, String> {
+    fetch(dir)?;
+    if rev(dir, "@{u}").is_none() {
+        return Err(
+            "This branch is not on the remote yet, so there is nothing to bring in. Send it first."
+                .into(),
+        );
+    }
+    match update_from(dir, "@{u}", true)? {
+        Update::Conflicts(files) => {
+            abort_update(dir)?;
+            Ok(Update::Conflicts(files))
+        }
+        done => Ok(done),
+    }
+}
+
+/// Check out another local branch, or a remote one under its own name. Uncommitted work
+/// comes along when it does not clash with the other branch.
+pub fn switch(dir: &str, branch: &str) -> Result<(), String> {
+    git(dir, &["switch", branch]).map(|_| ())
+}
+
+/// Where a folder was before a git step, so the step can be taken back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UndoPoint {
+    pub dir: String,
+    /// The step, in words: "Brought in 3 commits".
+    pub label: String,
+    /// The branch checked out then, empty when HEAD was detached.
+    pub branch: String,
+    pub head: String,
+}
+
+/// Remember where `dir` is now. Its commit is kept under `refs/runo/undo` so git's
+/// clean-up never drops it while an undo can still reach it.
+pub fn undo_point(dir: &str, label: &str) -> Option<UndoPoint> {
+    let head = rev(dir, "HEAD")?;
+    let _ = git(dir, &["update-ref", "refs/runo/undo", &head]);
+    Some(UndoPoint {
+        dir: dir.to_string(),
+        label: label.to_string(),
+        branch: match current_branch(dir) {
+            b if b == "HEAD" => String::new(),
+            b => b,
+        },
+        head,
+    })
+}
+
+/// Go back to an undo point: its branch, at its commit. Uncommitted work is kept, and git
+/// refuses rather than overwrite any of it.
+pub fn undo(point: &UndoPoint) -> Result<(), String> {
+    let dir = point.dir.as_str();
+    if !point.branch.is_empty() && current_branch(dir) != point.branch {
+        switch(dir, &point.branch)?;
+    }
+    if rev(dir, "HEAD").as_deref() != Some(point.head.as_str()) {
+        git(dir, &["reset", "--keep", &point.head])?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LineKind {
     Hunk,
@@ -2110,6 +2250,85 @@ index 1..2 100644
         sh(&repo, &["add", "."]);
         sh(&repo, &["commit", "-qm", "local"]);
         assert_eq!(base_ref(dir, "main"), "main");
+        for p in [&repo, &remote, &other] {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+
+    #[test]
+    fn sync_switch_and_undo_a_project_folder() {
+        let (repo, remote) = with_origin("sync");
+        let dir = repo.to_str().unwrap();
+        let state = repo_state(dir);
+        assert_eq!(
+            (state.branch.as_str(), state.upstream.as_str()),
+            ("main", "origin/main")
+        );
+        assert_eq!((state.ahead, state.behind), (0, 0));
+        // Someone else pushes; this folder has a commit of its own and uncommitted work.
+        let other = repo.with_extension("sync-other");
+        let _ = std::fs::remove_dir_all(&other);
+        sh(
+            Path::new("."),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        sh(&other, &["config", "user.email", "t@t"]);
+        sh(&other, &["config", "user.name", "t"]);
+        std::fs::write(other.join("b.txt"), "b\n").unwrap();
+        sh(&other, &["add", "."]);
+        sh(&other, &["commit", "-qm", "theirs"]);
+        sh(&other, &["push", "-q", "origin", "main"]);
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "mine"]);
+        std::fs::write(repo.join("a.txt"), "1\n2\n3\n4\n").unwrap();
+        fetch(dir).unwrap();
+        let state = repo_state(dir);
+        assert_eq!((state.ahead, state.behind), (1, 1));
+        let before = undo_point(dir, "Brought in 1 commit").unwrap();
+        assert_eq!(pull(dir).unwrap(), Update::Updated);
+        assert!(repo.join("b.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "1\n2\n3\n4\n"
+        );
+        let state = repo_state(dir);
+        assert_eq!((state.ahead, state.behind), (1, 0));
+        // Undo takes the folder back and keeps the uncommitted edit.
+        undo(&before).unwrap();
+        assert!(!repo.join("b.txt").exists());
+        assert!(repo.join("c.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "1\n2\n3\n4\n"
+        );
+        // Clashing lines leave everything as it was.
+        sh(&repo, &["checkout", "-q", "a.txt"]);
+        std::fs::write(other.join("a.txt"), "theirs\n").unwrap();
+        sh(&other, &["commit", "-qam", "theirs again"]);
+        sh(&other, &["push", "-q", "origin", "main"]);
+        std::fs::write(repo.join("a.txt"), "mine\n").unwrap();
+        sh(&repo, &["commit", "-qam", "mine again"]);
+        let head = rev(dir, "HEAD");
+        assert_eq!(
+            pull(dir).unwrap(),
+            Update::Conflicts(vec!["a.txt".to_string()])
+        );
+        assert_eq!(in_progress(dir), None);
+        assert_eq!(rev(dir, "HEAD"), head);
+        // Switching branches, and undoing the switch.
+        sh(&repo, &["branch", "side"]);
+        assert_eq!(repo_state(dir).branches.len(), 2);
+        let point = undo_point(dir, "Switched to side").unwrap();
+        switch(dir, "side").unwrap();
+        assert_eq!(current_branch(dir), "side");
+        undo(&point).unwrap();
+        assert_eq!(current_branch(dir), "main");
         for p in [&repo, &remote, &other] {
             let _ = std::fs::remove_dir_all(p);
         }
