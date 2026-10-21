@@ -71,11 +71,262 @@ pub fn host_name() -> String {
         .unwrap_or_else(|| "this computer".into())
 }
 
+/// Cove's install script: the same one line for a Mac and for a server.
+pub const INSTALL_URL: &str =
+    "https://raw.githubusercontent.com/deltalark/cove/main/scripts/install.sh";
+
+/// What to run on a Linux server or VPS to install Cove there.
+pub fn server_install_command() -> String {
+    format!("curl -fsSL {INSTALL_URL} | sudo sh")
+}
+
+/// The search path for Cove's installer and server when Runo was started from the
+/// Dock, which gives apps almost no PATH: Homebrew (vfkit, zig) and cargo too.
+fn tool_path() -> String {
+    let mut dirs = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = Path::new(&home);
+        dirs.push(home.join(".cargo/bin").display().to_string());
+        dirs.push(home.join(".cove/bin").display().to_string());
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        dirs.push(path);
+    }
+    dirs.push("/usr/bin:/bin:/usr/sbin:/sbin".into());
+    dirs.join(":")
+}
+
+/// What setting Cove up on this machine is doing: None while it runs, then whether
+/// it worked, and a line to show.
+pub type SetupStatus = (Option<bool>, String);
+
+fn setup() -> &'static Mutex<Option<SetupStatus>> {
+    static S: OnceLock<Mutex<Option<SetupStatus>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+pub fn setup_status() -> Option<SetupStatus> {
+    setup().lock().ok()?.clone()
+}
+
+fn set_setup(status: SetupStatus) {
+    if let Ok(mut s) = setup().lock() {
+        *s = Some(status);
+    }
+}
+
+/// Whether an install or start is running now.
+pub fn setting_up() -> bool {
+    matches!(setup_status(), Some((None, _)))
+}
+
+/// A line of installer output without terminal colours, for showing in Settings.
+fn plain(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Skip an escape sequence: ESC [ ... letter.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if c != '\r' {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Install Cove on this machine with its install script, in the background. Its
+/// progress shows in [`setup_status`]; `done` runs when it ends.
+pub fn install(done: impl FnOnce() + Send + 'static) {
+    if setting_up() {
+        return;
+    }
+    set_setup((None, "Installing Cove…".into()));
+    std::thread::spawn(move || {
+        let result = run_installer();
+        refresh();
+        set_setup(result);
+        done();
+    });
+}
+
+fn run_installer() -> SetupStatus {
+    use std::io::BufRead;
+    let child = Command::new("/bin/sh")
+        .args(["-c", &format!("curl -fsSL {INSTALL_URL} | sh")])
+        .env("PATH", tool_path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (Some(false), format!("Couldn't run the installer: {e}")),
+    };
+    // Errors go to stderr; keep the last line of either to show.
+    let last = std::sync::Arc::new(Mutex::new(String::new()));
+    let err_last = last.clone();
+    let stderr = child.stderr.take();
+    let errors = std::thread::spawn(move || {
+        let Some(stderr) = stderr else {
+            return;
+        };
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let line = plain(&line);
+            if !line.is_empty() {
+                if let Ok(mut l) = err_last.lock() {
+                    *l = line;
+                }
+            }
+        }
+    });
+    if let Some(stdout) = child.stdout.take() {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let line = plain(&line);
+            if !line.is_empty() {
+                set_setup((
+                    None,
+                    format!("Installing Cove: {}", line.trim_start_matches("==> ")),
+                ));
+                if let Ok(mut l) = last.lock() {
+                    *l = line;
+                }
+            }
+        }
+    }
+    let _ = errors.join();
+    let ok = child.wait().is_ok_and(|s| s.success());
+    let last = last.lock().map(|l| l.clone()).unwrap_or_default();
+    if ok && binary().is_some() {
+        (
+            Some(true),
+            "Installed. Cove starts by itself when you log in.".into(),
+        )
+    } else if last.contains("rustup") || last.contains("needs Rust") {
+        (
+            Some(false),
+            "Cove has no release for this Mac yet, so it builds from source, which needs Rust: install it from rustup.rs, then Install again.".into(),
+        )
+    } else {
+        (Some(false), format!("The install didn't finish: {last}"))
+    }
+}
+
+/// Start this machine's Cove server: its launchd agent when the installer set one
+/// up, otherwise `cove serve` on its own.
+pub fn start(done: impl FnOnce() + Send + 'static) {
+    if setting_up() {
+        return;
+    }
+    set_setup((None, "Starting Cove…".into()));
+    std::thread::spawn(move || {
+        let result = start_server();
+        refresh();
+        set_setup(result);
+        done();
+    });
+}
+
+fn start_server() -> SetupStatus {
+    const LABEL: &str = "com.deltalark.cove";
+    let plist = std::env::var_os("HOME")
+        .map(|h| Path::new(&h).join(format!("Library/LaunchAgents/{LABEL}.plist")));
+    let uid = unsafe { libc::getuid() };
+    let started = if plist.as_ref().is_some_and(|p| p.is_file()) {
+        let target = format!("gui/{uid}/{LABEL}");
+        let kick = Command::new("launchctl")
+            .args(["kickstart", "-k", &target])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        kick || plist.is_some_and(|p| {
+            Command::new("launchctl")
+                .args(["bootstrap", &format!("gui/{uid}")])
+                .arg(&p)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+    } else if let Some(bin) = binary() {
+        use std::os::unix::process::CommandExt;
+        Command::new(bin)
+            .arg("serve")
+            .env("PATH", tool_path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .is_ok()
+    } else {
+        false
+    };
+    if !started {
+        return (
+            Some(false),
+            "Couldn't start Cove. Run cove serve in a terminal to see why.".into(),
+        );
+    }
+    // Give the server a moment to answer.
+    for _ in 0..20 {
+        if answers() {
+            return (Some(true), "Cove is running.".into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    (
+        Some(false),
+        "Cove started but doesn't answer yet. Run cove doctor in a terminal to see what's missing."
+            .into(),
+    )
+}
+
+/// Whether this machine's Cove server answers now (not cached).
+fn answers() -> bool {
+    binary().is_some_and(|bin| {
+        Command::new(bin)
+            .args(["--json", "ls"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+fn availability() -> &'static Mutex<(Option<Instant>, bool)> {
+    static STATE: OnceLock<Mutex<(Option<Instant>, bool)>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new((None, false)))
+}
+
+/// Ask again on the next [`available`] call, after installing or starting Cove.
+pub fn refresh() {
+    let ok = answers();
+    if let Ok(mut g) = availability().lock() {
+        *g = (Some(Instant::now()), ok);
+    }
+}
+
 /// Whether Cove is installed and its server answers. Cached and refreshed in the
 /// background, so it is cheap to call while rendering.
 pub fn available() -> bool {
-    static STATE: OnceLock<Mutex<(Option<Instant>, bool)>> = OnceLock::new();
-    let state = STATE.get_or_init(|| Mutex::new((None, false)));
+    let state = availability();
     let Ok(mut guard) = state.lock() else {
         return false;
     };
@@ -85,19 +336,9 @@ pub fn available() -> bool {
     if stale {
         guard.0 = Some(Instant::now());
         std::thread::spawn(|| {
-            let ok = binary().is_some_and(|bin| {
-                Command::new(bin)
-                    .args(["--json", "ls"])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success())
-            });
-            if let Some(state) = STATE.get() {
-                if let Ok(mut g) = state.lock() {
-                    g.1 = ok;
-                }
+            let ok = answers();
+            if let Ok(mut g) = availability().lock() {
+                g.1 = ok;
             }
         });
     }
@@ -381,6 +622,16 @@ fn git_common_dir(dir: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn installer_lines_lose_their_colours() {
+        assert_eq!(
+            plain("\u{1b}[1;34m==> Installing Cove\u{1b}[0m\r"),
+            "==> Installing Cove"
+        );
+        assert_eq!(plain("  plain  "), "plain");
+        assert!(server_install_command().ends_with("install.sh | sudo sh"));
+    }
+
     use super::*;
 
     fn sandbox() -> Sandbox {
