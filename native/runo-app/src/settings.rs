@@ -541,8 +541,10 @@ fn sidebar_alpha() -> u8 {
         // Light glass needs more body than it looks: a pale sheet over a bright, colourful
         // desktop takes on its colour, and grey text on it loses contrast fast.
         a if a >= 248 => (220, 232),
-        a if a >= 236 => (192, 212),
-        _ => (160, 188),
+        // Frosted and Clear keep enough body that text reads over a light or busy
+        // wallpaper, not only over a calm one; Clear stays the clearer of the two.
+        a if a >= 236 => (208, 222),
+        _ => (192, 208),
     };
     if is_dark() {
         dark
@@ -734,21 +736,26 @@ pub fn c_subtle() -> u32 {
 pub fn c_border() -> u32 {
     pick(0xe5e5e8, 0x3e4451)
 }
+/// Text is a step stronger in glass mode, at every level: the translucent layers let
+/// the desktop through under the text too, so its contrast depends on the wallpaper, and
+/// a light or busy one would otherwise wash it out.
 pub fn c_text() -> u32 {
-    pick(0x18181b, 0xdcdfe4)
+    if glass_on() {
+        pick(0x0f0f12, 0xf0f2f5)
+    } else {
+        pick(0x18181b, 0xdcdfe4)
+    }
 }
-/// Secondary and muted text are a step stronger in glass mode: the translucent layers
-/// let the desktop through under the text too, which would otherwise wash it out.
 pub fn c_secondary() -> u32 {
     if glass_on() {
-        pick(0x3d3d45, 0xbcc2cd)
+        pick(0x2c2c33, 0xd0d5dd)
     } else {
         pick(0x55555e, 0xabb2bf)
     }
 }
 pub fn c_muted() -> u32 {
     if glass_on() {
-        pick(0x6a6a74, 0x8c929e)
+        pick(0x4f4f58, 0xa8aeb9)
     } else {
         pick(0x8a8a94, 0x7f848e)
     }
