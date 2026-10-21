@@ -3,12 +3,21 @@
 
 use super::*;
 use crate::store::Queued;
+use gpui_kit::component::input;
 
 /// An entry of the composer's `/` menu.
 #[derive(Clone)]
 pub(crate) enum SlashPick {
     Playbook(u64),
     Command(agentcmds::Command),
+}
+
+/// An entry of the composer's `@` menu.
+#[derive(Clone)]
+pub(crate) enum MentionPick {
+    /// A Crew thread, in Crew's chat when the message starts with `@`.
+    Thread(u64),
+    File(String),
 }
 
 /// Most recent conversation, written into follow-ups for CLIs that cannot resume.
@@ -515,6 +524,7 @@ impl RunoApp {
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
         self.drafts.remove(&id);
         self.mention = None;
+        self.thread_mention = None;
         let images = self.attachments.remove(&id).unwrap_or_default();
         let text = if text.is_empty() {
             "Look at the attached image.".to_string()
@@ -881,6 +891,11 @@ impl RunoApp {
     pub(crate) fn update_mention(&mut self, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().to_string();
         self.mention = mention_query(&text);
+        self.thread_mention = self
+            .current()
+            .filter(|s| s.canvas == crew::CANVAS)
+            .and_then(|_| text.trim_start().strip_prefix('@'))
+            .map(str::to_lowercase);
         self.slash = slash_query(&text);
         if self.slash.is_some() {
             self.load_agent_commands();
@@ -1007,10 +1022,27 @@ impl RunoApp {
         });
     }
 
-    /// Files matching the `@query`, best first.
-    pub(crate) fn mention_matches(&self) -> Vec<String> {
+    /// Threads (in Crew's chat) and files matching the `@query`, best first.
+    pub(crate) fn mention_matches(&self) -> Vec<MentionPick> {
+        let mut out: Vec<MentionPick> = Vec::new();
+        if let (Some(q), Some(pid)) = (&self.thread_mention, self.current().map(|s| s.project_id)) {
+            out.extend(
+                self.crew_threads(pid, false)
+                    .iter()
+                    .filter(|t| {
+                        t.title.to_lowercase().contains(q.as_str())
+                            || format!("#{}", t.id).starts_with(q.as_str())
+                    })
+                    .take(5)
+                    .map(|t| MentionPick::Thread(t.id)),
+            );
+            // Past the first word it is a thread's name, not a file's.
+            if q.contains(char::is_whitespace) {
+                return out;
+            }
+        }
         let Some(query) = &self.mention else {
-            return Vec::new();
+            return out;
         };
         let q = query.to_lowercase();
         let mut hits: Vec<(usize, &String)> = self
@@ -1031,17 +1063,44 @@ impl RunoApp {
             })
             .collect();
         hits.sort_by_key(|(rank, f)| (*rank, f.len()));
-        hits.into_iter().take(8).map(|(_, f)| f.clone()).collect()
+        out.extend(
+            hits.into_iter()
+                .take(8)
+                .map(|(_, f)| MentionPick::File(f.clone())),
+        );
+        out
     }
 
-    pub(crate) fn pick_mention(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pick_mention(
+        &mut self,
+        pick: &MentionPick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let text = self.prompt.read(cx).value().to_string();
-        let new = complete_mention(&text, path);
+        let new = match pick {
+            // A thread's name only routes at the start of the message.
+            MentionPick::Thread(id) => match self.state.session(*id) {
+                Some(t) => format!("@{} ", t.title),
+                None => return,
+            },
+            MentionPick::File(path) => complete_mention(&text, path),
+        };
+        let end = new.encode_utf16().count() as u32;
         self.prompt.update(cx, |p, cx| {
             p.set_value(new, window, cx);
+            p.set_cursor_position(
+                input::Position {
+                    line: 0,
+                    character: end,
+                },
+                window,
+                cx,
+            );
             p.focus(window, cx);
         });
         self.mention = None;
+        self.thread_mention = None;
     }
 
     /// Write a commit message for the current changes with the session's agent.
@@ -1140,6 +1199,7 @@ impl RunoApp {
             }
             self.draft_for = self.selected;
             self.mention = None;
+            self.thread_mention = None;
             self.slash = None;
         }
         if let Some(message) = self.commit_suggestion.take() {
@@ -1849,10 +1909,38 @@ impl RunoApp {
                 .border_color(divider())
                 .bg(rgb(c_raised()))
                 .shadow_lg();
-            for (i, path) in matches.into_iter().enumerate() {
-                let (dir, name) = match path.rsplit_once('/') {
-                    Some((d, n)) => (d.to_string(), n.to_string()),
-                    None => (String::new(), path.clone()),
+            for (i, pick) in matches.into_iter().enumerate() {
+                let (lead, name, detail) = match &pick {
+                    MentionPick::Thread(id) => {
+                        let Some(t) = self.state.session(*id) else {
+                            continue;
+                        };
+                        let status = crate::crew_ui::thread_status(
+                            self.handles.contains_key(&Target::Session(*id)),
+                            t,
+                        );
+                        (
+                            div()
+                                .size(px(8.))
+                                .mx(px(2.))
+                                .rounded_full()
+                                .bg(rgb(crate::crew_view::status_tone(status)))
+                                .into_any_element(),
+                            t.title.clone(),
+                            "Thread".to_string(),
+                        )
+                    }
+                    MentionPick::File(path) => {
+                        let (dir, name) = match path.rsplit_once('/') {
+                            Some((d, n)) => (d.to_string(), n.to_string()),
+                            None => (String::new(), path.clone()),
+                        };
+                        (
+                            icon(IconName::File, 12., c_muted()).into_any_element(),
+                            name,
+                            dir,
+                        )
+                    }
                 };
                 list = list.child(
                     div()
@@ -1868,12 +1956,12 @@ impl RunoApp {
                         .hover(|el| el.bg(tint(c_active())))
                         .text_size(px(12.5))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.pick_mention(&path, window, cx);
+                            this.pick_mention(&pick, window, cx);
                             cx.notify();
                         }))
-                        .child(icon(IconName::File, 12., c_muted()))
-                        .child(name)
-                        .child(div().truncate().text_color(rgb(c_muted())).child(dir)),
+                        .child(lead)
+                        .child(div().truncate().child(name))
+                        .child(div().truncate().text_color(rgb(c_muted())).child(detail)),
                 );
             }
             col = col.child(list);
