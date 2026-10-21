@@ -2627,7 +2627,7 @@ impl RunoApp {
                             }))
                     })
                     .px_5()
-                    .py(px(14.))
+                    .py(px(11.))
                     .flex()
                     .when(stacked, |el| el.flex_col().items_stretch().gap_3())
                     .when(!stacked, |el| el.items_center().justify_between().gap_8())
@@ -2657,13 +2657,16 @@ impl RunoApp {
                     .child(div().flex_none().child(control)),
             );
         }
+        // Wide windows put the section's name beside its card, so no line holds only a title.
+        let wide = window.viewport_size().width > px(1100.);
         div()
-            .v_flex()
-            .gap(px(10.))
+            .when(wide, |el| el.flex().items_start().gap(px(28.)))
+            .when(!wide, |el| el.v_flex().gap(px(10.)))
             .child(
                 div()
+                    .when(wide, |el| el.w(px(220.)).flex_none().pt(px(12.)))
                     .v_flex()
-                    .gap(px(2.))
+                    .gap(px(3.))
                     .px_1()
                     .child(
                         div()
@@ -2676,7 +2679,7 @@ impl RunoApp {
                         el.child(div().text_xs().text_color(rgb(c_muted())).child(sec.desc))
                     }),
             )
-            .child(card)
+            .child(card.flex_1().min_w_0())
             .into_any_element()
     }
 
@@ -2861,13 +2864,13 @@ impl RunoApp {
         let overview = query.is_empty() && self.settings_page == SettingsPage::Overview;
         let mut body = div()
             .w_full()
-            .max_w(px(if overview { 1180. } else { 880. }))
+            .max_w(px(1480.))
             .mx_auto()
-            .px_8()
-            .pt(px(22.))
-            .pb_10()
+            .px(px(24.))
+            .pt(px(16.))
+            .pb_8()
             .v_flex()
-            .gap(px(26.));
+            .gap(px(20.));
         if overview {
             body = body.child(self.settings_overview(&st, &data, window, cx));
         } else {
@@ -2876,10 +2879,10 @@ impl RunoApp {
                 if query.is_empty() {
                     let lead = match self.settings_page.agent() {
                         Some(id) => self
-                            .provider_badge(agent::provider(id), 40.)
-                            .rounded(px(11.))
+                            .provider_badge(agent::provider(id), 28.)
+                            .rounded(px(8.))
                             .into_any_element(),
-                        None => tile(self.settings_page.icon(), 40.).into_any_element(),
+                        None => tile(self.settings_page.icon(), 28.).into_any_element(),
                     };
                     (
                         lead,
@@ -2915,7 +2918,7 @@ impl RunoApp {
                     }
                     let matches: usize = found.iter().map(|s| s.rows.len()).sum();
                     (
-                        tile(IconName::Search, 40.).into_any_element(),
+                        tile(IconName::Search, 28.).into_any_element(),
                         "Search results".into(),
                         format!(
                             "{} for “{query}”. Change them right here.",
@@ -2925,26 +2928,29 @@ impl RunoApp {
                     )
                 };
             body = body.child(
-                div().flex().items_center().gap(px(14.)).child(lead).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .v_flex()
-                        .gap(px(2.))
-                        .child(
-                            div()
-                                .text_size(px(24.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(c_text()))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(c_secondary()))
-                                .child(subtitle),
-                        ),
-                ),
+                // One line: the page's mark, its name and what it holds.
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(lead)
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(17.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .text_color(rgb(c_muted()))
+                            .child(subtitle),
+                    ),
             );
             if sections.is_empty() && !query.is_empty() {
                 body = body.child(
@@ -3225,13 +3231,14 @@ impl RunoApp {
                         ),
                     )
             };
+        let on_off = |on: bool, yes: &str, no: &str| if on { yes } else { no }.to_string();
         let share = |used: f64, of: f64| if of > 0. { (used / of) as f32 } else { 0. };
         let running = self.counts().running;
         let cap = settings::max_running();
         let safety = ov_card("ov-safety", IconName::ShieldCheck, "Safety", "Limits")
             .on_click(open_page(SettingsPage::Safety, cx))
             .flex_1()
-            .gap(px(16.))
+            .gap(px(14.))
             .child(
                 div()
                     .flex()
@@ -3247,12 +3254,7 @@ impl RunoApp {
                         day.turns.to_string(),
                         (limits.day_turns > 0).then(|| limits.day_turns.to_string()),
                         share(day.turns as f64, limits.day_turns as f64),
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(22.))
+                    ))
                     .child(meter(
                         "Tokens today",
                         crate::health::token_count(day.tokens),
@@ -3265,6 +3267,34 @@ impl RunoApp {
                         running.to_string(),
                         (cap > 0).then(|| cap.to_string()),
                         share(running as f64, cap as f64),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .child(fact(
+                        "Permission level",
+                        label_of(
+                            &[
+                                ("edit", "Auto edit"),
+                                ("plan", "Plan only"),
+                                ("full", "Full access"),
+                            ],
+                            &st.default_mode,
+                        ),
+                    ))
+                    .child(fact(
+                        "Playbooks",
+                        on_off(st.confirm_agent_playbooks, "Ask first", "Start right away"),
+                    ))
+                    .child(fact(
+                        "Deleting",
+                        on_off(st.confirm_delete, "Confirm first", "No popup"),
+                    ))
+                    .child(fact(
+                        "Worktree on delete",
+                        on_off(st.remove_worktree_on_delete, "Removed", "Kept"),
                     )),
             );
 
@@ -3329,6 +3359,78 @@ impl RunoApp {
             )))
             .child(ov_note("MCP servers · skills · hooks"));
 
+        // Every on/off setting outside the agents' own pages, to flip right here.
+        let mut grid = div().grid().grid_cols(3).gap_x(px(28.));
+        let mut n = 0usize;
+        for page in SettingsTab::ALL
+            .iter()
+            .filter(|t| **t != SettingsTab::Agents)
+            .flat_map(|t| t.pages().iter().copied())
+            .chain([SettingsPage::Chat])
+        {
+            for r in page_sections(page, st, data)
+                .into_iter()
+                .flat_map(|s| s.rows)
+            {
+                if !matches!(r.ctl, Ctl::Switch(..)) {
+                    continue;
+                }
+                let control = self.control(9100 + n, r.ctl, window, cx);
+                grid = grid.child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .py(px(9.))
+                        .when(n >= 3, |el| el.border_t_1().border_color(divider()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .v_flex()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(c_text()))
+                                        .truncate()
+                                        .child(r.title),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(c_muted()))
+                                        .child(page.label()),
+                                ),
+                        )
+                        .child(control),
+                );
+                n += 1;
+            }
+        }
+        let switches = div()
+            .v_flex()
+            .gap(px(4.))
+            .p(px(16.))
+            .rounded(px(14.))
+            .bg(tint(c_subtle()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon(IconName::ToggleRight, 15., c_muted()))
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
+                            .child("Quick switches"),
+                    ),
+            )
+            .child(grid);
+
         div()
             .v_flex()
             .gap(px(12.))
@@ -3336,7 +3438,7 @@ impl RunoApp {
                 div()
                     .flex()
                     .gap(px(12.))
-                    .child(div().w(relative(0.34)).flex().child(look))
+                    .child(div().w(relative(0.3)).flex().child(look))
                     .child(
                         div()
                             .flex_1()
@@ -3356,6 +3458,7 @@ impl RunoApp {
                     .child(keys)
                     .child(tools),
             )
+            .child(switches)
             .into_any_element()
     }
 }
