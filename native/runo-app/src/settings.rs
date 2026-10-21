@@ -625,7 +625,7 @@ pub fn divider() -> Rgba {
     if !glass_on() {
         rgb(c_border())
     } else if is_dark() {
-        rgba(0xffffff1a)
+        rgba(0xffffff21)
     } else {
         rgba(0x0000001a)
     }
@@ -713,48 +713,48 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
 
 // A neutral zinc scale: colour comes from the accent and status hues only.
 pub fn c_canvas() -> u32 {
-    pick(0xffffff, 0x18181b)
+    pick(0xffffff, 0x282c34)
 }
 pub fn c_sidebar() -> u32 {
-    pick(0xf7f7f8, 0x121214)
+    pick(0xf7f7f8, 0x21252b)
 }
 /// The mode rail: the deepest layer, so the open place's tab, cut from the sheet beside
 /// it, stands out from it.
 pub fn c_rail() -> u32 {
-    pick(0xe4e4e8, 0x0f0f11)
+    pick(0xe4e4e8, 0x1b1d23)
 }
 /// The sheet the rail's tab is cut from: the list beside the rail, raised a step above
 /// both the rail and the page, so the tab and the selected row's join to the page read.
 pub fn c_sheet() -> u32 {
-    pick(0xf4f4f6, 0x1d1d21)
+    pick(0xf4f4f6, 0x30353f)
 }
 pub fn c_subtle() -> u32 {
-    pick(0xf1f1f3, 0x222226)
+    pick(0xf1f1f3, 0x323842)
 }
 pub fn c_border() -> u32 {
-    pick(0xe5e5e8, 0x2a2a2f)
+    pick(0xe5e5e8, 0x3e4451)
 }
 pub fn c_text() -> u32 {
-    pick(0x18181b, 0xe9e9ec)
+    pick(0x18181b, 0xdcdfe4)
 }
 /// Secondary and muted text are a step stronger in glass mode: the translucent layers
 /// let the desktop through under the text too, which would otherwise wash it out.
 pub fn c_secondary() -> u32 {
     if glass_on() {
-        pick(0x3d3d45, 0xc4c4cc)
+        pick(0x3d3d45, 0xbcc2cd)
     } else {
-        pick(0x55555e, 0xa1a1aa)
+        pick(0x55555e, 0xabb2bf)
     }
 }
 pub fn c_muted() -> u32 {
     if glass_on() {
-        pick(0x6a6a74, 0x9c9ca6)
+        pick(0x6a6a74, 0x8c929e)
     } else {
-        pick(0x8a8a94, 0x7a7a84)
+        pick(0x8a8a94, 0x7f848e)
     }
 }
 pub fn c_term_bg() -> u32 {
-    pick(0xfafafa, 0x111113)
+    pick(0xfafafa, 0x21252b)
 }
 /// Behind an agent's CLI and other terminal screens: the terminal's own shade on a solid
 /// window, and in glass mode a shade over the glass, so the CLI is part of the window
@@ -768,11 +768,11 @@ pub fn term_fill() -> Rgba {
 }
 /// Neutral fill for the selected row, so selection does not compete with status colours.
 pub fn c_active() -> u32 {
-    pick(0xe9e9ec, 0x27272c)
+    pick(0xe9e9ec, 0x3a404b)
 }
 /// Raised surfaces such as the composer, menus and cards.
 pub fn c_raised() -> u32 {
-    pick(0xffffff, 0x1f1f23)
+    pick(0xffffff, 0x30353f)
 }
 pub fn c_blue() -> u32 {
     let accent = ACCENT.load(Ordering::Relaxed);
@@ -787,13 +787,13 @@ pub fn c_selected() -> u32 {
     c_active()
 }
 pub fn c_green() -> u32 {
-    pick(0x16a34a, 0x4ade80)
+    pick(0x16a34a, 0x98c379)
 }
 pub fn c_amber() -> u32 {
-    pick(0xf0a020, 0xf3b23f)
+    pick(0xf0a020, 0xe5c07b)
 }
 pub fn c_red() -> u32 {
-    pick(0xdc2626, 0xf87171)
+    pick(0xdc2626, 0xe06c75)
 }
 
 /// Text colour for added / removed lines, honouring the diff palette.
