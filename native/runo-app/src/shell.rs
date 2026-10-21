@@ -1024,6 +1024,10 @@ pub(crate) fn need_of(
     if s.archived || running {
         return None;
     }
+    // A Crew thread asking the person to decide something waits on them.
+    if s.crew.as_ref().is_some_and(|i| i.decision.is_some()) {
+        return Some(Need::Blocked);
+    }
     if let Some((index, _)) = alerts::waiting_on(s) {
         if !hidden.contains(&format!("s:{}:{index}", s.id)) {
             return Some(Need::Blocked);
@@ -3601,6 +3605,25 @@ mod tests {
         assert_eq!(need_of(&s, true, &hidden), None);
         let dismissed: std::collections::HashSet<String> = ["s:7:0".to_string()].into();
         assert_eq!(need_of(&s, false, &dismissed), None);
+        s.archived = true;
+        assert_eq!(need_of(&s, false, &hidden), None);
+    }
+
+    #[test]
+    fn a_crew_decision_needs_you_until_answered() {
+        let hidden = std::collections::HashSet::new();
+        let mut s = Session {
+            id: 8,
+            crew: Some(crate::crew::ThreadInfo::default()),
+            ..Session::default()
+        };
+        assert_eq!(need_of(&s, false, &hidden), None);
+        if let Some(info) = s.crew.as_mut() {
+            info.decision = Some(crate::crew::Decision::default());
+        }
+        assert_eq!(need_of(&s, false, &hidden), Some(Need::Blocked));
+        // Not while its agent is still working, and not once archived.
+        assert_eq!(need_of(&s, true, &hidden), None);
         s.archived = true;
         assert_eq!(need_of(&s, false, &hidden), None);
     }

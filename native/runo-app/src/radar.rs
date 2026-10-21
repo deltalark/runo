@@ -26,7 +26,7 @@ pub(crate) struct Hit {
 }
 
 /// "around line 40", "around lines 40 and 88", "around lines 4, 40 and 88".
-fn around(lines: &[usize]) -> String {
+pub(crate) fn around(lines: &[usize]) -> String {
     let list: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     match list.as_slice() {
         [] => String::new(),
@@ -36,7 +36,7 @@ fn around(lines: &[usize]) -> String {
 }
 
 /// "webhook.rs", "webhook.rs and retry.rs", "webhook.rs and 2 more files".
-fn file_names(files: &[git::Overlap]) -> String {
+pub(crate) fn file_names(files: &[git::Overlap]) -> String {
     let name = |f: &git::Overlap| f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
     match files {
         [] => String::new(),
@@ -237,7 +237,13 @@ impl RunoApp {
     }
 
     /// Ask a session's agent to bring the other line of work in now, while it's small.
-    fn radar_ask(&mut self, id: u64, other: &Side, files: &[git::Overlap], cx: &mut Context<Self>) {
+    pub(crate) fn radar_ask(
+        &mut self,
+        id: u64,
+        other: &Side,
+        files: &[git::Overlap],
+        cx: &mut Context<Self>,
+    ) {
         let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
         let what = if other.base {
             format!("the latest {}", other.branch)

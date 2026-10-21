@@ -27,6 +27,8 @@ pub(crate) struct HomeState {
     pub filter: Option<Bucket>,
     /// Whether Home was on screen at the last paint, so arriving there focuses the prompt.
     pub shown: bool,
+    /// The project Git's state was last read for from Home.
+    pub git_for: Option<u64>,
 }
 
 impl HomeState {
@@ -62,6 +64,7 @@ impl HomeState {
             hit: 0,
             filter: None,
             shown: false,
+            git_for: None,
         };
         (home, sub)
     }
@@ -86,6 +89,46 @@ enum Idea {
     Open(u64),
     Review(u64),
     Playbook(u64),
+    Git(GitStep),
+}
+
+/// What Home can do about what Git found in the top bar project's folder.
+#[derive(Clone, Copy)]
+enum GitStep {
+    /// Open the clash page for a merge or rebase that stopped on clashing lines.
+    SortOut,
+    /// Show the clash radar's first finding in Branches.
+    SeeClash,
+    /// Bring in the commits waiting on the remote, then show Git.
+    BringIn,
+}
+
+/// What Git has for Home: a merge or rebase stopped on clashing lines, clashes the radar
+/// sees coming, and commits waiting on the remote.
+pub(crate) struct GitNews {
+    /// "rebase" or "merge", and how many files still clash.
+    stopped: Option<(&'static str, usize)>,
+    hits: Vec<crate::radar::Hit>,
+    behind: usize,
+}
+
+impl GitNews {
+    fn clashes(&self) -> usize {
+        self.hits.len() + usize::from(self.stopped.is_some())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.clashes() == 0 && self.behind == 0
+    }
+}
+
+/// "1 update", "3 updates".
+fn updates(n: usize) -> String {
+    if n == 1 {
+        "1 update".into()
+    } else {
+        format!("{n} updates")
+    }
 }
 
 /// The starting tasks Home offers in every project.
@@ -321,6 +364,13 @@ impl RunoApp {
         if on && !self.home.shown {
             self.home.prompt.update(cx, |p, cx| p.focus(window, cx));
         }
+        // What Git has to say about the project's folder, read again for each project,
+        // the way the Git place reads it.
+        let pid = self.current_project().filter(|_| on);
+        if pid.is_some() && (!self.home.shown || self.home.git_for != pid) {
+            self.load_repo();
+        }
+        self.home.git_for = pid;
         self.home.shown = on;
     }
 
@@ -349,6 +399,7 @@ impl RunoApp {
             .map(|p| (p.id, p.path.clone()));
         let no_projects = self.state.projects.is_empty();
         let typed = !self.home.prompt.read(cx).value().trim().is_empty();
+        let git = self.home_git();
 
         let mut col_ = div()
             .w(px(760.))
@@ -369,9 +420,19 @@ impl RunoApp {
             if typed {
                 col_ = col_.child(self.home_results(cx));
             } else {
+                if let Some(banner) = git.as_ref().and_then(|g| self.home_git_banner(g, cx)) {
+                    col_ = col_.child(banner);
+                }
                 col_ = col_
-                    .child(self.home_ideas(n_needs, n_review, cx))
-                    .child(self.home_status(n_needs, n_running, n_review, counts.spend_today, cx))
+                    .child(self.home_ideas(n_needs, n_review, git.as_ref(), cx))
+                    .child(self.home_status(
+                        n_needs,
+                        n_running,
+                        n_review,
+                        counts.spend_today,
+                        git.as_ref(),
+                        cx,
+                    ))
                     .child(self.home_recent_view(cx));
             }
         }
@@ -973,8 +1034,43 @@ impl RunoApp {
 
     /// One-tap starts under the prompt: what's waiting first, then common tasks and the
     /// project's playbooks.
-    fn home_ideas(&self, n_needs: usize, n_review: usize, cx: &mut Context<Self>) -> AnyElement {
-        let mut ideas: Vec<(IconName, String, Idea, bool)> = Vec::new();
+    fn home_ideas(
+        &self,
+        n_needs: usize,
+        n_review: usize,
+        git: Option<&GitNews>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Each idea with the colour that marks it as waiting on the person, if it is.
+        let mut ideas: Vec<(IconName, String, Idea, Option<u32>)> = Vec::new();
+        if let Some(git) = git {
+            if git.stopped.is_some() {
+                ideas.push((
+                    IconName::TriangleAlert,
+                    "Sort out the clashing lines".into(),
+                    Idea::Git(GitStep::SortOut),
+                    Some(c_red()),
+                ));
+            } else if let Some(hit) = git.hits.first() {
+                ideas.push((
+                    IconName::TriangleAlert,
+                    format!(
+                        "Sort out the clash in {}",
+                        crate::radar::file_names(&hit.files)
+                    ),
+                    Idea::Git(GitStep::SeeClash),
+                    Some(c_red()),
+                ));
+            }
+            if git.behind > 0 && git.stopped.is_none() {
+                ideas.push((
+                    IconName::ArrowDown,
+                    format!("Bring in {}", updates(git.behind)),
+                    Idea::Git(GitStep::BringIn),
+                    Some(c_green()),
+                ));
+            }
+        }
         let first = |b: Bucket| {
             self.state
                 .sessions
@@ -989,7 +1085,7 @@ impl RunoApp {
             } else {
                 format!("Answer the {n_needs} agents that need you")
             };
-            ideas.push((IconName::Hand, label, Idea::Open(id), true));
+            ideas.push((IconName::Hand, label, Idea::Open(id), Some(c_green())));
         }
         if let Some(id) = first(Bucket::Review) {
             let label = if n_review == 1 {
@@ -997,10 +1093,15 @@ impl RunoApp {
             } else {
                 format!("Review the {n_review} changes waiting")
             };
-            ideas.push((IconName::GitCompare, label, Idea::Review(id), true));
+            ideas.push((
+                IconName::GitCompare,
+                label,
+                Idea::Review(id),
+                Some(c_green()),
+            ));
         }
         for (glyph, text) in IDEAS {
-            ideas.push((glyph, text.to_string(), Idea::Fill(text), false));
+            ideas.push((glyph, text.to_string(), Idea::Fill(text), None));
         }
         let here = self.current_project();
         for a in self
@@ -1014,7 +1115,7 @@ impl RunoApp {
                 IconName::Play,
                 format!("Run {}", a.name),
                 Idea::Playbook(a.id),
-                false,
+                None,
             ));
         }
         let mut row = div()
@@ -1035,14 +1136,18 @@ impl RunoApp {
                 .gap(px(7.))
                 .rounded_full()
                 .border_1()
-                .border_color(if hot { col(c_green(), 0.45) } else { divider() })
+                .border_color(hot.map_or(divider(), |c| col(c, 0.45)))
                 .text_size(px(12.5))
-                .text_color(rgb(if hot { c_text() } else { c_secondary() }))
+                .text_color(rgb(if hot.is_some() {
+                    c_text()
+                } else {
+                    c_secondary()
+                }))
                 .cursor_pointer()
                 .hover(|el| el.text_color(rgb(c_text())))
                 .active(|el| el.opacity(0.75));
             let chip = hover_wash(chip, id, tint(c_active()), 15.)
-                .child(icon(glyph, 13., if hot { c_green() } else { c_muted() }))
+                .child(icon(glyph, 13., hot.unwrap_or(c_muted())))
                 .child(label)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     match &idea {
@@ -1058,6 +1163,7 @@ impl RunoApp {
                             let here = this.current_project();
                             this.run_playbook(*id, here, cx);
                         }
+                        Idea::Git(step) => this.home_git_step(*step),
                     }
                     cx.notify();
                 }));
@@ -1073,8 +1179,32 @@ impl RunoApp {
         n_running: usize,
         n_review: usize,
         spend_today: f64,
+        git: Option<&GitNews>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let git_pill = |id: &'static str, text: String, color: u32, step: GitStep| {
+            div()
+                .id(id)
+                .h(px(28.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .rounded_full()
+                .cursor_pointer()
+                .text_size(px(12.5))
+                .text_color(rgb(c_secondary()))
+                .bg(col(color, if is_dark() { 0.18 } else { 0.11 }))
+                .hover(|el| el.text_color(rgb(c_text())))
+                .child(div().size(px(7.)).rounded_full().bg(rgb(color)))
+                .child(text)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.home_git_step(step);
+                    cx.notify();
+                }))
+        };
+        let clashes = git.map_or(0, GitNews::clashes);
+        let behind = git.filter(|g| g.stopped.is_none()).map_or(0, |g| g.behind);
         let pill = |bucket: Bucket, n: usize, label: &'static str, color: u32| {
             let on = self.home.filter == Some(bucket);
             let lit =
@@ -1142,6 +1272,31 @@ impl RunoApp {
             ))
             .child(pill(Bucket::Running, n_running, "running", c_blue()))
             .child(pill(Bucket::Review, n_review, "ready to review", c_green()))
+            .when(clashes > 0, |el| {
+                let step = if git.is_some_and(|g| g.stopped.is_some()) {
+                    GitStep::SortOut
+                } else {
+                    GitStep::SeeClash
+                };
+                el.child(git_pill(
+                    "home-pill-clash",
+                    if clashes == 1 {
+                        "1 clash ahead".into()
+                    } else {
+                        format!("{clashes} clashes ahead")
+                    },
+                    c_red(),
+                    step,
+                ))
+            })
+            .when(behind > 0, |el| {
+                el.child(git_pill(
+                    "home-pill-behind",
+                    format!("{} to bring in", updates(behind)),
+                    c_secondary(),
+                    GitStep::BringIn,
+                ))
+            })
             .child(
                 div()
                     .id("home-pill-spend")
@@ -1421,6 +1576,192 @@ impl RunoApp {
             )
             .child(action);
         card.into_any_element()
+    }
+
+    /// What Git found in the top bar project's folder, when Home shows one project.
+    fn home_git(&self) -> Option<GitNews> {
+        if self.home_all || self.demo {
+            return None;
+        }
+        let dir = self.git_place_dir()?;
+        let repo = self.git_repo.as_ref().filter(|r| r.dir == dir);
+        let pid = self.current_project();
+        // The radar's sessions belong to the project it last looked at.
+        let hits: Vec<crate::radar::Hit> = self
+            .git_radar
+            .iter()
+            .flatten()
+            .filter(|h| {
+                [&h.a, &h.b].iter().all(|side| {
+                    side.session.is_none_or(|id| {
+                        self.state
+                            .session(id)
+                            .is_some_and(|s| Some(s.project_id) == pid)
+                    })
+                })
+            })
+            .cloned()
+            .collect();
+        let news = GitNews {
+            stopped: repo
+                .and_then(|r| r.clash.as_ref())
+                .map(|c| (c.kind, c.files.len())),
+            hits,
+            behind: repo.map_or(0, |r| r.state.behind),
+        };
+        (!news.is_empty()).then_some(news)
+    }
+
+    /// Take one of Home's Git steps.
+    fn home_git_step(&mut self, step: GitStep) {
+        match step {
+            GitStep::SortOut => self.open_review(),
+            GitStep::SeeClash => {
+                self.open_branches();
+                self.git_radar_sel = self.git_radar.as_ref().filter(|h| !h.is_empty()).map(|_| 0);
+            }
+            GitStep::BringIn => {
+                self.git_sync(crate::gitplace::SyncStep::Pull);
+                self.open_review();
+            }
+        }
+    }
+
+    /// A banner for a clash: a merge or rebase stopped on clashing lines, or two lines of
+    /// work the radar sees changing the same lines, with what to do about it.
+    fn home_git_banner(&self, git: &GitNews, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (title, line, primary): (String, String, GitStep) = if let Some((kind, n)) = git.stopped
+        {
+            (
+                format!(
+                    "The {kind} stopped on clashing lines in {n} file{}",
+                    if n == 1 { "" } else { "s" }
+                ),
+                "Pick what to keep in each spot. Nothing is saved until you finish.".into(),
+                GitStep::SortOut,
+            )
+        } else {
+            let hit = git.hits.first()?;
+            let lines = hit
+                .files
+                .first()
+                .map(|f| crate::radar::around(&f.lines))
+                .unwrap_or_default();
+            let more = match git.hits.len() {
+                1 => String::new(),
+                2 => " 1 more clash is in Branches.".into(),
+                n => format!(" {} more clashes are in Branches.", n - 1),
+            };
+            (
+                format!(
+                    "{} and {} both change {} {lines}",
+                    hit.a.label,
+                    hit.b.label,
+                    crate::radar::file_names(&hit.files)
+                )
+                .trim_end()
+                .to_string(),
+                format!("Clash radar found it before anyone merged. Nothing is broken yet.{more}"),
+                GitStep::SeeClash,
+            )
+        };
+        // Whoever can bring the other's committed work in now, while it's small.
+        let ask = git
+            .stopped
+            .is_none()
+            .then(|| git.hits.first())
+            .flatten()
+            .and_then(|hit| {
+                [(&hit.a, &hit.b), (&hit.b, &hit.a)]
+                    .into_iter()
+                    .find_map(|(me, other)| {
+                        me.session
+                            .filter(|_| other.committed)
+                            .map(|id| (id, other.clone(), hit.files.clone()))
+                    })
+            });
+        let button = |id: &'static str, label: &'static str, strong: bool| {
+            div()
+                .id(id)
+                .flex_none()
+                .h(px(28.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(8.))
+                .text_size(px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .active(|el| el.opacity(0.75))
+                .when(strong, |el| {
+                    el.bg(rgb(c_text()))
+                        .text_color(rgb(c_canvas()))
+                        .hover(|el| el.opacity(0.9))
+                })
+                .when(!strong, |el| {
+                    el.border_1()
+                        .border_color(divider())
+                        .bg(rgb(c_raised()))
+                        .hover(|el| el.bg(tint(c_subtle())))
+                })
+                .child(label)
+        };
+        let banner = div()
+            .mt(px(18.))
+            .px(px(14.))
+            .py(px(11.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(col(c_red(), 0.45))
+            .bg(col(c_red(), if is_dark() { 0.1 } else { 0.06 }))
+            .child(icon(IconName::TriangleAlert, 15., c_red()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_muted()))
+                            .child(line),
+                    ),
+            )
+            .child(
+                button(
+                    "home-git-see",
+                    if git.stopped.is_some() {
+                        "Sort it out"
+                    } else {
+                        "See both"
+                    },
+                    ask.is_none(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.home_git_step(primary);
+                    cx.notify();
+                })),
+            )
+            .when_some(ask, |el, (id, other, files)| {
+                el.child(
+                    button("home-git-ask", "Ask the agent to line them up", true).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.radar_ask(id, &other, &files, cx);
+                            cx.notify();
+                        }),
+                    ),
+                )
+            });
+        Some(rise(banner, "home-git-banner", 320))
     }
 
     /// The warning when the project's folder has gone, with ways to fix it.
