@@ -134,21 +134,14 @@ impl RunoApp {
             shell::strip_tab(id, "git", on)
                 .child(label)
                 .when(count > 0, |el| {
-                    el.child(
-                        div()
-                            .px(px(5.))
-                            .rounded_full()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .when(alert, |el| {
-                                el.bg(rgba((c_amber() << 8) | 0x33))
-                                    .text_color(rgb(c_amber()))
-                            })
-                            .when(!alert, |el| {
-                                el.bg(tint(c_subtle())).text_color(rgb(c_secondary()))
-                            })
-                            .child(count.to_string()),
-                    )
+                    el.child(shell::count_badge(
+                        count,
+                        if alert {
+                            shell::Tone::Alert
+                        } else {
+                            shell::Tone::Quiet
+                        },
+                    ))
                 })
         };
         // The open tab is the colour of what sits under it: the waiting list for

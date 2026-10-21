@@ -4188,20 +4188,20 @@ impl RunoApp {
             View::AllSessions => !matches!(self.view, View::Worktrees | View::Inbox),
             _ => self.view == view,
         };
+        // Each choice is as wide as its label and count, and the spare room is shared,
+        // so a three-figure count widens "Needs you" instead of squeezing its neighbours.
         shell::seg_choice(id, format!("seg-fill-{id}"), on)
-            .flex_1()
-            .px_0()
+            .flex_auto()
+            .px(px(8.))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.view = view;
                 cx.notify();
             }))
             .child(label)
+            .gap(px(5.))
             .when_some(count.filter(|n| *n > 0), |el, n| {
                 el.child(shell::pop(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(rgb(c_blue()))
-                        .child(n.to_string()),
+                    shell::count_badge(n, shell::Tone::Accent),
                     format!("seg-count-{id}-{n}"),
                 ))
             })
@@ -4479,12 +4479,20 @@ impl RunoApp {
             }
             let color = projects::color_of(project);
             // Each project is one block: its header, then its sessions as cards under
-            // it. Space between blocks keeps them apart.
-            // A hairline between projects, so each group reads as one block.
-            let mut group = div().v_flex().mx_1().when(!first, |el| {
-                el.mt(px(8.))
-                    .child(div().mx_2().mb(px(8.)).h(px(1.)).bg(divider()))
-            });
+            // it. Borderless: each project sits on its own faint tonal card, so the groups
+            // part by shade and space rather than by a line between them.
+            let mut group = div()
+                .v_flex()
+                .mx_1()
+                .relative()
+                .when(!first, |el| el.mt(px(6.)))
+                .py(px(2.))
+                .rounded(px(10.))
+                .bg(if is_dark() {
+                    rgba(0xffffff09)
+                } else {
+                    rgba(0x0000000b)
+                });
             first = false;
             group = group.child(
                 div()
@@ -4588,20 +4596,12 @@ impl RunoApp {
                         })
                     })
                     .when(!sessions.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .px(px(4.))
-                                .h(px(16.))
-                                .flex()
-                                .items_center()
-                                .text_size(px(11.))
-                                .text_color(rgb(c_muted()))
-                                .group_hover("project", |el| el.opacity(0.))
-                                .child(shell::pop(
-                                    sessions.len().to_string(),
-                                    format!("project-count-{pid}-{}", sessions.len()),
-                                )),
-                        )
+                        el.child(div().group_hover("project", |el| el.opacity(0.)).child(
+                            shell::pop(
+                                shell::count_badge(sessions.len(), shell::Tone::Quiet),
+                                format!("project-count-{pid}-{}", sessions.len()),
+                            ),
+                        ))
                     })
                     .child(
                         div()
@@ -7529,7 +7529,8 @@ impl RunoApp {
         &self,
         tab: RightTab,
         name: IconName,
-        label: String,
+        label: &'static str,
+        count: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.right_tab == tab;
@@ -7565,6 +7566,9 @@ impl RunoApp {
                 icon(name, 13., c_muted()).into_any_element()
             })
             .child(label)
+            .when(count > 0, |el| {
+                el.child(shell::count_badge(count, shell::Tone::Quiet))
+            })
     }
 
     /// The selected file's diff, or every changed file one after another.
@@ -8735,17 +8739,15 @@ impl RunoApp {
                             .child(self.right_tab_button(
                                 RightTab::Changes,
                                 IconName::GitCompare,
-                                if self.changes.is_empty() {
-                                    "Changes".into()
-                                } else {
-                                    format!("Changes  {}", self.changes.len())
-                                },
+                                "Changes",
+                                self.changes.len(),
                                 cx,
                             ))
                             .child(self.right_tab_button(
                                 RightTab::Files,
                                 IconName::FileText,
-                                "Files".into(),
+                                "Files",
+                                0,
                                 cx,
                             ))
                             .when(
@@ -8754,7 +8756,8 @@ impl RunoApp {
                                     el.child(self.right_tab_button(
                                         RightTab::Threads,
                                         crew_view::CREW_ICON,
-                                        "Threads".into(),
+                                        "Threads",
+                                        0,
                                         cx,
                                     ))
                                 },
@@ -9711,7 +9714,9 @@ fn load_fonts(cx: &mut App) {
 
 const SIDEBAR_WIDTH: f32 = 264.;
 /// How narrow and wide the sidebar can be dragged.
-const SIDEBAR_MIN: f32 = 200.;
+/// Narrow enough to give the page room, wide enough for the All, Isolated and Needs you
+/// filter with a three-figure count beside Needs you.
+const SIDEBAR_MIN: f32 = 240.;
 const SIDEBAR_MAX: f32 = 400.;
 const PANEL_WIDTH: f32 = 460.;
 const PANEL_MIN: f32 = 320.;

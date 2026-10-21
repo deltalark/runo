@@ -1630,13 +1630,9 @@ impl RunoApp {
                 Some(p) => project_mark(p, 18.).into_any_element(),
                 None => icon(IconName::LayoutGrid, 15., c_muted()).into_any_element(),
             });
-        // A short rule above the badge marks where the project's own pages begin.
-        let mut group = div()
-            .v_flex()
-            .items_center()
-            .gap(px(4.))
-            .child(div().mb(px(12.)).w(px(18.)).h(px(1.)).bg(divider()))
-            .child(badge);
+        // The rail's gap between groups marks where the project's own pages begin; no
+        // rule, since the window is borderless.
+        let mut group = div().v_flex().items_center().gap(px(4.)).child(badge);
         for mode in Mode::PLAN {
             group = group.child(self.rail_item(mode, None, cx));
         }
@@ -3109,6 +3105,45 @@ fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
     }
 }
 
+/// How a count badge is tinted: the accent for counts that call for a look, amber for
+/// ones that need you, and quiet for plain tallies.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Tone {
+    Accent,
+    Alert,
+    Quiet,
+}
+
+/// A count as a small pill: room for one to three characters at a fixed height and a
+/// minimum width, so a 1 is a round dot and 128 widens it evenly instead of crowding the
+/// label beside it. Past 999 it reads "999+".
+pub(crate) fn count_badge(n: usize, tone: Tone) -> Div {
+    let text = if n > 999 {
+        "999+".to_string()
+    } else {
+        n.to_string()
+    };
+    let (fill, ink) = match tone {
+        Tone::Accent => (rgba((c_blue() << 8) | 0x2e), rgb(c_blue())),
+        Tone::Alert => (rgba((c_amber() << 8) | 0x33), rgb(c_amber())),
+        Tone::Quiet => (tint(c_active()), rgb(c_secondary())),
+    };
+    div()
+        .flex_none()
+        .h(px(16.))
+        .min_w(px(16.))
+        .px(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(fill)
+        .text_size(px(10.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(ink)
+        .child(text)
+}
+
 /// Fill of a tab that is not open, at rest and under the pointer: a wash of white over
 /// the frame, stronger on the light theme's grey frame than on the dark one. In glass
 /// mode the open tab is as see-through as its island, so the rest get only a faint wash,
@@ -3451,15 +3486,10 @@ impl RunoApp {
                         }))
                         .child(icon(IconName::MessagesSquare, 14., c_secondary()))
                         .child("Chats")
-                        .child(
-                            div()
-                                .px(px(5.))
-                                .rounded_full()
-                                .bg(tint(c_active()))
-                                .text_size(px(11.))
-                                .text_color(rgb(if busy { c_blue() } else { c_muted() }))
-                                .child(sessions.len().to_string()),
-                        ),
+                        .child(count_badge(
+                            sessions.len(),
+                            if busy { Tone::Accent } else { Tone::Quiet },
+                        )),
                 )
                 .when(open, |el| {
                     el.child(
