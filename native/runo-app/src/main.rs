@@ -571,6 +571,8 @@ struct RunoApp {
     pending_mentions: Vec<String>,
     /// The `@query` being typed in the composer.
     mention: Option<String>,
+    /// Whether that `@query` is all the prompt holds, where Crew's chat takes a thread's name.
+    mention_first: bool,
     /// The `/query` typed at the start of the prompt, which lists playbooks.
     slash: Option<String>,
     /// The agent's own commands for the `/` menu, read for one session when the menu opens.
@@ -1476,7 +1478,12 @@ impl RunoApp {
                         }
                     );
                     this.pick_slash(first, new_session, window, cx);
-                } else if let Some(first) = this.mention_matches().into_iter().next() {
+                } else if let Some(first) = this
+                    .thread_mentions()
+                    .into_iter()
+                    .chain(this.mention_matches())
+                    .next()
+                {
                     this.pick_mention(&first, window, cx);
                 } else {
                     this.send_message(window, cx);
@@ -1736,6 +1743,7 @@ impl RunoApp {
             close_armed: None,
             pending_mentions: Vec::new(),
             mention: None,
+            mention_first: false,
             slash: None,
             agent_commands: None,
             editing: None,

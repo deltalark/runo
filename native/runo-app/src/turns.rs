@@ -892,6 +892,10 @@ impl RunoApp {
     pub(crate) fn update_mention(&mut self, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().to_string();
         self.mention = mention_query(&text);
+        self.mention_first = self
+            .mention
+            .as_ref()
+            .is_some_and(|q| text.trim_start() == format!("@{q}"));
         self.slash = slash_query(&text);
         if self.slash.is_some() {
             self.load_agent_commands();
@@ -1016,6 +1020,24 @@ impl RunoApp {
             p.set_value("", window, cx);
             p.focus(window, cx);
         });
+    }
+
+    /// Crew's threads whose names match the `@query` that opens a message in Crew's chat,
+    /// which sends that thread the rest of the message.
+    pub(crate) fn thread_mentions(&self) -> Vec<String> {
+        let (Some(query), true) = (&self.mention, self.mention_first) else {
+            return Vec::new();
+        };
+        let Some(session) = self.current().filter(|s| s.canvas == crate::crew::CANVAS) else {
+            return Vec::new();
+        };
+        let q = query.to_lowercase();
+        self.crew_threads(session.project_id, true)
+            .into_iter()
+            .map(|t| t.title.clone())
+            .filter(|title| !title.is_empty() && title.to_lowercase().contains(&q))
+            .take(5)
+            .collect()
     }
 
     /// Files matching the `@query`, best first.
@@ -1665,6 +1687,7 @@ impl RunoApp {
     pub(crate) fn composer_extras(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let session = self.current()?;
         let id = session.id;
+        let threads = self.thread_mentions();
         let matches = self.mention_matches();
         let playbooks = self.slash_matches();
         let attached = self.attached();
@@ -1685,6 +1708,7 @@ impl RunoApp {
         };
         if session.queue.is_empty()
             && attached.is_empty()
+            && threads.is_empty()
             && matches.is_empty()
             && playbooks.is_empty()
             && !retry
@@ -1855,7 +1879,8 @@ impl RunoApp {
             }
             col = col.child(row);
         }
-        if !matches.is_empty() {
+        if !threads.is_empty() || !matches.is_empty() {
+            let files_first = threads.is_empty();
             let mut list = div()
                 .v_flex()
                 .p_1()
@@ -1864,6 +1889,28 @@ impl RunoApp {
                 .border_color(divider())
                 .bg(rgb(c_raised()))
                 .shadow_lg();
+            for (i, title) in threads.into_iter().enumerate() {
+                list = list.child(
+                    div()
+                        .id(("mention-thread", i))
+                        .h(px(26.))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(i == 0, |el| el.bg(tint(c_active())))
+                        .hover(|el| el.bg(tint(c_active())))
+                        .text_size(px(12.5))
+                        .child(icon(IconName::MessageSquare, 12., c_muted()))
+                        .child(div().truncate().child(title.clone()))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.pick_mention(&title, window, cx);
+                            cx.notify();
+                        })),
+                );
+            }
             for (i, path) in matches.into_iter().enumerate() {
                 let (dir, name) = match path.rsplit_once('/') {
                     Some((d, n)) => (d.to_string(), n.to_string()),
@@ -1879,7 +1926,7 @@ impl RunoApp {
                         .gap_2()
                         .rounded_md()
                         .cursor_pointer()
-                        .when(i == 0, |el| el.bg(tint(c_active())))
+                        .when(files_first && i == 0, |el| el.bg(tint(c_active())))
                         .hover(|el| el.bg(tint(c_active())))
                         .text_size(px(12.5))
                         .on_click(cx.listener(move |this, _, window, cx| {
