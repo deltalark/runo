@@ -3425,6 +3425,19 @@ impl RunoApp {
                 }
             }
         }
+        // In a Crew project, a session the person starts is one of Crew's threads too, so
+        // Crew sees it on its board. One asked from a canvas stays with the canvas.
+        if crew::is_crew(&project) {
+            for &id in &created {
+                if let Some(session) = self.state.session_mut(id).filter(|s| s.canvas.is_empty()) {
+                    session.crew = Some(crew::ThreadInfo {
+                        origin: crew::Origin::Person,
+                        brief: task.clone(),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
         self.new_task
             .update(cx, |t, cx| t.set_value("", window, cx));
         self.branch.update(cx, |b, cx| b.set_value("", window, cx));
@@ -6979,6 +6992,12 @@ impl RunoApp {
                 format!("{where_to}, synced to {} where the agent runs", c.name)
             }
             Some(c) if project.is_some() => format!("{where_to}, inside a VM on {}", c.name),
+            _ => where_to,
+        };
+        let where_to = match project {
+            Some(p) if crew::is_crew(p) => {
+                format!("{where_to}. Joins Crew's threads, so Crew sees it.")
+            }
             _ => where_to,
         };
         let provider = &agent::PROVIDERS[self.new_provider];
