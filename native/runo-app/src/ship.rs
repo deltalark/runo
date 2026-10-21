@@ -468,10 +468,6 @@ impl RunoApp {
                 if self.selected == Some(id) {
                     self.refresh();
                 }
-                // A mission's own worktree is the branch its parts start from.
-                if self.state.session(id).is_some_and(|s| s.mission != 0) {
-                    self.missions_tick_all(cx);
-                }
             }
             Err(error) => {
                 self.pending_start.remove(&id);

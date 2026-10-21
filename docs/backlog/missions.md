@@ -1,9 +1,11 @@
----
-title: Missions
-keywords: mission, missions, goal, plan, planner, parts, several agents, many agents, at once, parallel, split the work, board, mission branch, orchestrate, team of agents
-shortcuts: go-missions
-open: missions
----
+# Missions (backlog)
+
+Not in the app. Missions were built, then taken out before the first release so Runo ships uncluttered. This is the design to come back to. The full implementation (`mission.rs`, `mission_ui.rs`, `mission_view.rs` and its hooks in proof, review, ship and turns) is in the history at commit e9c53f2.
+
+When it returns, the plan is to make it part of Crew rather than its own page: Crew proposes a mission for a goal too big for one thread, its parts run as Crew threads, and the plan and progress show as a card in Crew's chat.
+
+## How it worked
+
 A mission is one goal that several agents work on at once. Runo plans it, runs each part in its own worktree, checks every part, and merges them into one branch you ship like any other.
 
 **Start one.** Open **Missions** on the rail ({go-missions}). Describe the goal, pick the project, the agents that may work on it (the first one writes the plan), how many parts run at once, and whether another vendor's agent reviews each part. **Plan mission** asks the planner to read the project and split the goal into parts. It only reads; nothing changes yet.

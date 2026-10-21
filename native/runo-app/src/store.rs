@@ -432,9 +432,6 @@ pub struct Session {
     /// Proof of done for the last turn: its checks and the second opinion on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<crate::proof::Proof>,
-    /// The mission this session works for: one of its parts, or its own session.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub mission: u64,
     /// What Crew keeps for this session when it is one of Crew's threads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crew: Option<crate::crew::ThreadInfo>,
@@ -569,9 +566,6 @@ pub struct State {
     /// limits; the last 31 days, like `spend`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub day_use: std::collections::BTreeMap<String, DayUse>,
-    /// Goals planned into parts that agents work on at once.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub missions: Vec<crate::mission::Mission>,
 }
 
 /// What agents did on one day, across every session.

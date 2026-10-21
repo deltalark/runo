@@ -12,7 +12,7 @@ pub(crate) struct Shortcut {
     pub default: &'static [&'static str],
 }
 
-pub(crate) const SHORTCUTS: [Shortcut; 26] = [
+pub(crate) const SHORTCUTS: [Shortcut; 25] = [
     Shortcut {
         id: "quick-open",
         title: "Quick open",
@@ -78,12 +78,6 @@ pub(crate) const SHORTCUTS: [Shortcut; 26] = [
         title: "Git: To ship",
         desc: "Go to Git's To ship tab: check and ship the work agents finished.",
         default: &["secondary-3"],
-    },
-    Shortcut {
-        id: "go-missions",
-        title: "Missions",
-        desc: "Go to Missions: one goal, planned into parts that several agents work on at once.",
-        default: &["secondary-9"],
     },
     Shortcut {
         id: "go-reviews",
@@ -207,7 +201,6 @@ fn binding_in(id: &str, keys: &str, context: &str) -> Option<KeyBinding> {
         "go-playbooks" => KeyBinding::new(keys, GoPlaybooks, context),
         "go-reviews" => KeyBinding::new(keys, GoReviews, context),
         "go-review" => KeyBinding::new(keys, GoReview, context),
-        "go-missions" => KeyBinding::new(keys, GoMissions, context),
         "go-history" => KeyBinding::new(keys, GoHistory, context),
         "go-notes" => KeyBinding::new(keys, GoNotes, context),
         "go-inbox" => KeyBinding::new(keys, GoInbox, context),
