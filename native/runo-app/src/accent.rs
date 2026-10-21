@@ -56,11 +56,12 @@ pub fn hover(key: &SharedString, area: Bounds<Pixels>, window: &mut Window) -> f
 }
 
 /// The bracket's colour, `hover` of the way to its hovered look: the accent, a step
-/// brighter while hovered.
+/// brighter while hovered. `mix(a, b, t)` takes `t` of `a`, so the white goes first: at
+/// rest none of it, hovered a quarter (a tenth on light).
 pub fn color(hover: f32) -> Hsla {
     rgb(mix(
-        c_blue(),
         0xffffff,
+        c_blue(),
         hover * if is_dark() { 0.25 } else { 0.1 },
     ))
     .into()

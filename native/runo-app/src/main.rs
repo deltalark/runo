@@ -4289,20 +4289,20 @@ impl RunoApp {
         };
         let avatar = div()
             .relative()
-            .size(px(28.))
+            .size(px(24.))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(8.))
+            .rounded(px(7.))
             .bg(rgba((provider.color << 8) | 0x24))
-            .child(self.provider_mark(provider, 13.))
+            .child(self.provider_mark(provider, 12.))
             .child(
                 div()
                     .absolute()
                     .right(px(-3.))
                     .bottom(px(-3.))
-                    .size(px(11.))
+                    .size(px(10.))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -4327,10 +4327,12 @@ impl RunoApp {
             .group("session-row")
             .mx_1()
             .px(px(8.))
-            .py(px(7.))
+            // Compact, so more sessions fit: a smaller mark, a tighter title and a
+            // lighter branch line.
+            .py(px(5.))
             .flex()
             .items_center()
-            .gap(px(10.))
+            .gap(px(9.))
             .rounded(px(11.))
             .cursor_pointer()
             .when(selected, |el| {
@@ -4348,7 +4350,7 @@ impl RunoApp {
                     .flex_1()
                     .min_w_0()
                     .v_flex()
-                    .gap(px(2.))
+                    .gap(px(1.))
                     .child(
                         div()
                             .flex()
@@ -4359,7 +4361,7 @@ impl RunoApp {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(13.))
+                                    .text_size(px(12.5))
                                     .font_weight(if unread || selected {
                                         FontWeight::MEDIUM
                                     } else {
@@ -4381,7 +4383,7 @@ impl RunoApp {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(11.))
+                            .text_size(px(10.5))
                             .text_color(rgb(c_muted()))
                             .child(subtitle),
                     ),
@@ -4391,7 +4393,7 @@ impl RunoApp {
                     .flex_none()
                     .v_flex()
                     .items_end()
-                    .text_size(px(10.5))
+                    .text_size(px(10.))
                     .child(
                         // The age and the hover actions share one slot, so the actions
                         // replace the age instead of landing on top of it.
