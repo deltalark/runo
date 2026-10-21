@@ -119,9 +119,27 @@ fn typed_text(content: &Value) -> Option<String> {
     if text.is_empty() || text.starts_with('<') {
         return None;
     }
-    let first = text.lines().next().unwrap_or(text);
-    Some(first.chars().take(90).collect())
+    // Runo puts its own context first (a Crew brief, a canvas, a handoff) and the ask under
+    // one of these headings; the ask is what names the conversation.
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .rposition(|l| TASK_HEADINGS.contains(&l.trim()))
+        .map_or(0, |at| at + 1);
+    let first = lines[start..]
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(&lines[0]);
+    Some(first.trim().chars().take(90).collect())
 }
+
+/// Headings Runo writes right before the person's own words in a prompt.
+const TASK_HEADINGS: [&str; 4] = [
+    "## Your next instruction",
+    "## Your task",
+    "## The task",
+    "## Task",
+];
 
 pub fn parse_claude(text: &str) -> Option<Past> {
     let (mut id, mut cwd, mut title) = (String::new(), String::new(), String::new());
@@ -500,6 +518,8 @@ mod tests {
             ),
             ("codex", "0199-uuid", "/work/api", "Add rate limiting")
         );
+        let wrapped = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"cwd\":\"/a\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"## You are a Crew thread\\nCrew started you.\\n\\n## Your task\\nFix the footer\\nmore\"}}";
+        assert_eq!(parse_codex(wrapped).unwrap().title, "Fix the footer");
         let from_event = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"cwd\":\"/a\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ship it\"}}";
         assert_eq!(parse_codex(from_event).unwrap().title, "Ship it");
     }
