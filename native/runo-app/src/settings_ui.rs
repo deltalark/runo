@@ -982,7 +982,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 ),
             ]));
             if !installed.is_empty() {
-                sections.push(section("Installed", "Pick an agent to change its model, flags and environment. Installed agents also have a page of their own in the row above.", installed));
+                sections.push(section("Installed", "Pick an agent to change its model, flags and environment. Installed agents also have a page of their own in the tabs above.", installed));
             }
             for p in agent::PROVIDERS.iter() {
                 sections.extend(copies_section(p.id, &format!("{} copies", p.name)));
@@ -2680,9 +2680,9 @@ impl RunoApp {
             });
         let card = card.flex_1().min_w_0();
         if wide {
+            // Stretched, so a card shorter than its tab still reaches past the notch.
             div()
                 .flex()
-                .items_start()
                 .child(
                     div()
                         .w(px(230.))
@@ -2739,9 +2739,9 @@ impl RunoApp {
             .into_any_element()
     }
 
-    /// The pages of the open tab, when it has more than one, as a row of quiet pills;
-    /// the Agents tab lists each installed agent after Providers.
-    fn settings_subnav(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The pages of the open tab as underlined tabs along the page's title line; the
+    /// Agents tab lists each installed agent after Providers.
+    fn settings_subnav(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let tab = SettingsTab::of(self.settings_page);
         let mut pages: Vec<SettingsPage> = tab.pages().to_vec();
         if tab == SettingsTab::Agents {
@@ -2751,53 +2751,27 @@ impl RunoApp {
                 .map(|p| SettingsPage::Agent(p.id));
             pages.splice(1..1, agents);
         }
-        if pages.len() < 2 {
-            return None;
-        }
-        let mut row = div().flex().flex_wrap().items_center().gap(px(4.));
-        for page in pages {
-            let on = self.settings_page == page;
-            let key = format!("ssub-{}", page.label());
-            let lead: AnyElement = match page.agent() {
-                Some(id) => self
-                    .provider_badge(agent::provider(id), 18.)
-                    .into_any_element(),
-                None => {
-                    icon(page.icon(), 13., if on { c_text() } else { c_muted() }).into_any_element()
-                }
-            };
-            row = row.child(
-                div()
-                    .id(SharedString::from(key.clone()))
-                    .relative()
-                    .h(px(28.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.))
-                    .rounded(px(8.))
-                    .cursor_pointer()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .when(on, |el| {
-                        el.bg(tint(c_active()))
-                            .text_color(rgb(c_text()))
-                            .child(crate::shell::accent_bracket(format!("{key}-rule"), 8.))
+        let many = pages.len() > 1;
+        pages
+            .into_iter()
+            .map(|page| {
+                let on = self.settings_page == page;
+                let lead = page.agent().map(|id| {
+                    self.provider_badge(agent::provider(id), 18.)
+                        .into_any_element()
+                });
+                page_tab(format!("ssub-{}", page.label()), lead, page.label(), on)
+                    .when(many, |el| {
+                        el.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.settings_page = page;
+                                this.settings_menu = None;
+                                cx.notify();
+                            }))
                     })
-                    .when(!on, |el| {
-                        el.text_color(rgb(c_secondary()))
-                            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settings_page = page;
-                        this.settings_menu = None;
-                        cx.notify();
-                    }))
-                    .child(lead)
-                    .child(page.label()),
-            );
-        }
-        Some(row.into_any_element())
+                    .into_any_element()
+            })
+            .collect()
     }
 
     pub(crate) fn settings_view(
@@ -2874,11 +2848,6 @@ impl RunoApp {
                             .build(window, cx)
                     }),
             );
-        let subnav = if query.is_empty() {
-            self.settings_subnav(cx)
-        } else {
-            None
-        };
 
         // Content
         let overview = query.is_empty() && self.settings_page == SettingsPage::Overview;
@@ -2897,15 +2866,8 @@ impl RunoApp {
             let mut counter = 0usize;
             let (lead, title, subtitle, sections): (AnyElement, String, String, Vec<Section>) =
                 if query.is_empty() {
-                    let lead = match self.settings_page.agent() {
-                        Some(id) => self
-                            .provider_badge(agent::provider(id), 28.)
-                            .rounded(px(8.))
-                            .into_any_element(),
-                        None => tile(self.settings_page.icon(), 28.).into_any_element(),
-                    };
                     (
-                        lead,
+                        tile(SettingsTab::of(self.settings_page).icon(), 28.).into_any_element(),
                         self.settings_page.label().into(),
                         self.settings_page.subtitle().into(),
                         page_sections(self.settings_page, &st, &data),
@@ -2947,29 +2909,37 @@ impl RunoApp {
                         found,
                     )
                 };
+            let tabs = if query.is_empty() {
+                self.settings_subnav(cx)
+            } else {
+                vec![page_tab("ssub-search".into(), None, title, true).into_any_element()]
+            };
             body = body.child(
-                // One line: the page's mark, its name and what it holds.
+                // One line over a rule: the page's mark, its pages as tabs, and what the
+                // open one holds.
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.))
-                    .child(lead)
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(17.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
-                            .child(title),
-                    )
+                    .gap(px(22.))
+                    .border_b_1()
+                    .border_color(divider())
+                    .child(div().pb(px(8.)).child(lead))
+                    .children(tabs)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .text_color(rgb(c_muted()))
-                            .child(subtitle),
+                            .pb(px(8.))
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(rgb(c_muted()))
+                                    .child(subtitle),
+                            ),
                     ),
             );
             if sections.is_empty() && !query.is_empty() {
@@ -3033,8 +3003,7 @@ impl RunoApp {
                     .pt(px(16.))
                     .v_flex()
                     .gap(px(12.))
-                    .child(header)
-                    .children(subnav),
+                    .child(header),
             )
             .child(scroll);
         div()
@@ -3481,6 +3450,40 @@ impl RunoApp {
             .child(switches)
             .into_any_element()
     }
+}
+
+/// A page's tab on the title line: its name, the open one underlined in the accent.
+fn page_tab(
+    key: String,
+    lead: Option<AnyElement>,
+    label: impl Into<SharedString>,
+    on: bool,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(key))
+        .relative()
+        .pb(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .text_size(px(15.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(if on { c_text() } else { c_muted() }))
+        .when(!on, |el| el.hover(|el| el.text_color(rgb(c_secondary()))))
+        .children(lead)
+        .child(label.into())
+        .when(on, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(-1.))
+                    .h(px(2.))
+                    .rounded_full()
+                    .bg(rgb(c_blue())),
+            )
+        })
 }
 
 const NOTCH_R: f32 = 12.;
