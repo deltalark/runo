@@ -351,7 +351,8 @@ impl RunoApp {
             .position(|p| !agent_id.is_empty() && p.id == agent_id && installed.contains(&p.id))
             .unwrap_or_else(|| self.crew_agent(cx));
         let is_git = git::is_repo(&project.path);
-        let isolated = isolated.unwrap_or(self.new_isolated) && is_git;
+        // Threads run side by side, so each gets its own worktree unless Crew says not to.
+        let isolated = isolated.unwrap_or(true) && is_git;
         let id = self.spawn_session_from(
             &project, provider, "", isolated, is_git, title, None, None, cx,
         )?;

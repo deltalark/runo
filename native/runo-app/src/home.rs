@@ -1791,7 +1791,7 @@ impl RunoApp {
             .cursor_pointer()
             .when(chosen, |el| {
                 el.bg(tint(c_active()))
-                    .child(accent_bracket(format!("home-card-bracket-{id}")))
+                    .child(accent_bracket(format!("home-card-bracket-{id}"), 12.))
             })
             .hover(|el| el.bg(tint(c_active())))
             .on_mouse_down(

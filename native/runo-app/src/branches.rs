@@ -188,6 +188,22 @@ impl RunoApp {
         });
     }
 
+    /// Send a branch to the remote, once the seatbelt has looked at it.
+    pub(crate) fn send_branch(&mut self, name: String) {
+        if !self.belt_clear(&name, explain::Fix::SendBranchAnyway(name.clone())) {
+            return;
+        }
+        let remote = self
+            .git_repo
+            .as_ref()
+            .map(|r| r.state.remote.clone())
+            .unwrap_or_default();
+        self.git_step("Sending…", move |dir| {
+            git::push_branch(dir, &remote, &name)?;
+            Ok(Some((format!("Sent {name}."), None)))
+        });
+    }
+
     /// Land a branch on the base the way the Merge dialog says.
     fn merge_branch(&mut self, form: MergeForm) {
         let Some(branches) = self.git_branches.as_ref() else {
@@ -1052,18 +1068,7 @@ impl RunoApp {
                                     push_after: false,
                                 });
                             }
-                            "send" => {
-                                let name = row.name.clone();
-                                let remote = this
-                                    .git_repo
-                                    .as_ref()
-                                    .map(|r| r.state.remote.clone())
-                                    .unwrap_or_default();
-                                this.git_step("Sending…", move |dir| {
-                                    git::push_branch(dir, &remote, &name)?;
-                                    Ok(Some((format!("Sent {name}."), None)))
-                                });
-                            }
+                            "send" => this.send_branch(row.name.clone()),
                             "switch" => this.git_switch(row.name.clone()),
                             "reviewable" => this.git_kit = Some(row.name.clone()),
                             "sync" => this.git_sync(gitplace::SyncStep::Push),

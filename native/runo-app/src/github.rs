@@ -1219,7 +1219,7 @@ impl RunoApp {
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(c_muted()))
                 .child(title)
-                .child(count.to_string())
+                .child(shell::count_badge(count, shell::Tone::Quiet))
         };
         let mut prs = div().v_flex();
         for (i, pr) in self.gh.prs.iter().enumerate() {

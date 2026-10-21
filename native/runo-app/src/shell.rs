@@ -69,64 +69,59 @@ fn inner_curve(fill: Rgba, top: bool, r: f32) -> Div {
     )
 }
 
-/// The one touch of accent on a selected row: a thin bracket in the accent that hugs the
-/// row's left edge and wraps round its rounded corners, like "(". It draws in once the
-/// row has landed. With a corner glow on in Settings it is painted with its glow round it
-/// (see `glow`), in the same shape.
-pub(crate) fn accent_bracket(key: impl Into<SharedString>) -> AnyElement {
-    let el = div()
+/// The one touch of accent on a selected row: a thin bracket in the accent inside the
+/// row's left edge that follows its rounded corners, like "(". `radius` is the row's own
+/// corner radius, so the bracket sits on the row's outline, the way an open tab's does.
+/// It draws in once the row has landed, and while the row is hovered it reaches a little
+/// way along the top and bottom edges and brightens (see `accent`). A child of the row,
+/// which must be `relative`.
+pub(crate) fn accent_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
+    let key: SharedString = key.into();
+    let hover_key = key.clone();
+    div()
         .absolute()
-        .top(px(1.))
-        .bottom(px(1.))
-        .left(px(-5.))
-        .w(px(FUSE_R + 2.));
-    let el = if glow::on() {
-        el.child(
+        .inset_0()
+        .child(
             canvas(
                 |_, _, _| (),
-                |b, _, window, cx| {
-                    let look = glow::look(window, cx);
+                move |b, _, window, _| {
+                    let hover = accent::hover(&hover_key, b, window);
                     let (x0, y0, y1) = (b.origin.x, b.origin.y, b.bottom());
-                    let r = px(FUSE_R + 2.).min((y1 - y0) / 2.);
+                    let r = px(radius).min((y1 - y0) / 2.);
+                    // Down the middle of a 2px edge inside the outline, round both
+                    // corners and on along the edges by `tail`.
+                    let (x, i, rc, tail) = (x0 + px(1.), px(1.), r - px(1.), px(6. * hover));
                     let at = |x: Pixels, y: Pixels| point(x, y);
-                    glow::paint_glow(window, look, |f| {
-                        // Down the middle of the 2px edge, round both corners.
-                        let (x, i, rc) = (x0 + px(1.), px(1.), r - px(1.));
-                        f.move_to(at(x + rc, y0 + i));
-                        turn(f, at(x + rc, y0 + i), at(x, y0 + i), at(x, y0 + i + rc));
-                        f.line_to(at(x, y1 - i - rc));
-                        turn(f, at(x, y1 - i - rc), at(x, y1 - i), at(x + rc, y1 - i));
-                    });
-                    // The bracket itself, thinning to nothing round its corners the way
-                    // a left border on a rounded box does.
-                    let w = px(2.);
-                    let mut f = PathBuilder::fill();
-                    f.move_to(at(x0 + r, y0));
-                    turn(&mut f, at(x0 + r, y0), at(x0, y0), at(x0, y0 + r));
-                    f.line_to(at(x0, y1 - r));
-                    turn(&mut f, at(x0, y1 - r), at(x0, y1), at(x0 + r, y1));
-                    turn(&mut f, at(x0 + r, y1), at(x0 + w, y1), at(x0 + w, y1 - r));
-                    f.line_to(at(x0 + w, y0 + r));
-                    turn(&mut f, at(x0 + w, y0 + r), at(x0 + w, y0), at(x0 + r, y0));
-                    f.close();
+                    let mut f = PathBuilder::stroke(px(2.));
+                    f.move_to(at(x + rc + tail, y0 + i));
+                    f.line_to(at(x + rc, y0 + i));
+                    turn(
+                        &mut f,
+                        at(x + rc, y0 + i),
+                        at(x, y0 + i),
+                        at(x, y0 + i + rc),
+                    );
+                    f.line_to(at(x, y1 - i - rc));
+                    turn(
+                        &mut f,
+                        at(x, y1 - i - rc),
+                        at(x, y1 - i),
+                        at(x + rc, y1 - i),
+                    );
+                    f.line_to(at(x + rc + tail, y1 - i));
                     if let Ok(path) = f.build() {
-                        window.paint_path(path, look.core);
+                        window.paint_path(path, accent::color(hover));
                     }
                 },
             )
             .size_full(),
         )
-    } else {
-        el.border_l(px(2.))
-            .rounded_l(px(FUSE_R + 2.))
-            .border_color(rgb(c_blue()))
-    };
-    el.animated(
-        ElementId::Name(key.into()),
-        Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
-        |el, d| el.opacity(d),
-    )
-    .into_any_element()
+        .animated(
+            ElementId::Name(key),
+            Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+            |el, d| el.opacity(d),
+        )
+        .into_any_element()
 }
 
 /// The track behind a row of connected choices, such as the sidebar's filter or a
@@ -214,18 +209,22 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         .right(px(-reach))
         .h(px(height))
         .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
-        // The accent bracket on the tab's leading corner, as on every open tab.
+        // The accent bracket on the tab's leading corner, as on every open tab: up the
+        // middle of a 2px edge inside the tab's outline and round its top corner,
+        // reaching further along both edges while the tab is hovered.
         .child({
-            let el = div().absolute().top_0().left_0().size(px(FUSE_R + 2.));
-            if glow::on() {
-                el.child(
+            let hover_key = SharedString::from(format!("rail-hover-{key}"));
+            div()
+                .absolute()
+                .inset_0()
+                .child(
                     canvas(
                         |_, _, _| (),
-                        |b, _, window, cx| {
-                            let look = glow::look(window, cx);
-                            // Up the middle of the 2px edge and round the top corner.
+                        move |b, _, window, _| {
+                            let hover = accent::hover(&hover_key, b, window);
                             let (x0, y0) = (b.origin.x + px(1.), b.origin.y + px(1.));
-                            let (end, rc) = (px(FUSE_R + 1.), px(FUSE_R - 1.));
+                            let end = px(FUSE_R + 1. + 6. * hover);
+                            let rc = px(FUSE_R - 1.);
                             let line = |f: &mut PathBuilder| {
                                 let at = |x: Pixels, y: Pixels| point(x, y);
                                 f.move_to(at(x0, y0 + end));
@@ -233,27 +232,20 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
                                 turn(f, at(x0, y0 + rc), at(x0, y0), at(x0 + rc, y0));
                                 f.line_to(at(x0 + end, y0));
                             };
-                            glow::paint_glow(window, look, line);
                             let mut f = PathBuilder::stroke(px(2.));
                             line(&mut f);
                             if let Ok(path) = f.build() {
-                                window.paint_path(path, look.core);
+                                window.paint_path(path, accent::color(hover));
                             }
                         },
                     )
                     .size_full(),
                 )
-            } else {
-                el.border_l(px(2.))
-                    .border_t(px(2.))
-                    .rounded_tl(px(FUSE_R))
-                    .border_color(rgb(c_blue()))
-            }
-            .animated(
-                SharedString::from(format!("rail-bracket-{key}")),
-                Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
-                |el, d| el.opacity(d),
-            )
+                .animated(
+                    SharedString::from(format!("rail-bracket-{key}")),
+                    Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+                    |el, d| el.opacity(d),
+                )
         })
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
@@ -384,7 +376,7 @@ pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
         .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
         .child(inner_curve(page, true, FUSE_R).top(px(-FUSE_R)))
         .child(inner_curve(page, false, FUSE_R).bottom(px(-FUSE_R)))
-        .child(accent_bracket(format!("{key}-rule")))
+        .child(accent_bracket(format!("{key}-rule"), FUSE_R))
         .animated(
             ElementId::Name(key),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
@@ -516,7 +508,7 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
         .child(
             canvas(
                 move |_, _, _| STRIP_CUTS.with_borrow_mut(|c| c.remove(strip)),
-                move |b, _, window, cx| {
+                move |b, _, window, _| {
                     let at = |x: Pixels, y: Pixels| point(x, y);
                     let (left, top, right, bottom) =
                         (b.origin.x, b.origin.y, b.right(), b.bottom());
@@ -557,8 +549,10 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     }
                     let Some(t) = cut else { return };
                     let (x0, y0) = (t.origin.x, t.origin.y.max(top));
-                    // The bracket: up the tab's left edge and round its top corner.
-                    let (i, reach) = (px(1.), px(9.));
+                    // The bracket: up the tab's left edge and round its top corner,
+                    // reaching further along both while the tab is hovered.
+                    let hover = accent::hover(&SharedString::from(strip), t, window);
+                    let (i, reach) = (px(1.), px(9. + 6. * hover));
                     let line = |f: &mut PathBuilder| {
                         f.move_to(at(x0 + i, y0 + tr + reach));
                         f.line_to(at(x0 + i, y0 + tr));
@@ -570,12 +564,10 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                         );
                         f.line_to(at(x0 + tr + reach, y0 + i));
                     };
-                    let look = glow::look(window, cx);
-                    glow::paint_glow(window, look, line);
                     let mut f = PathBuilder::stroke(px(2.));
                     line(&mut f);
                     if let Ok(path) = f.build() {
-                        window.paint_path(path, look.core);
+                        window.paint_path(path, accent::color(hover));
                     }
                 },
             )
@@ -1642,13 +1634,9 @@ impl RunoApp {
                 Some(p) => project_mark(p, 18.).into_any_element(),
                 None => icon(IconName::LayoutGrid, 15., c_muted()).into_any_element(),
             });
-        // A short rule above the badge marks where the project's own pages begin.
-        let mut group = div()
-            .v_flex()
-            .items_center()
-            .gap(px(4.))
-            .child(div().mb(px(12.)).w(px(18.)).h(px(1.)).bg(divider()))
-            .child(badge);
+        // The rail's gap between groups marks where the project's own pages begin; no
+        // rule, since the window is borderless.
+        let mut group = div().v_flex().items_center().gap(px(4.)).child(badge);
         for mode in Mode::PLAN {
             group = group.child(self.rail_item(mode, None, cx));
         }
@@ -3121,6 +3109,45 @@ fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
     }
 }
 
+/// How a count badge is tinted: the accent for counts that call for a look, amber for
+/// ones that need you, and quiet for plain tallies.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Tone {
+    Accent,
+    Alert,
+    Quiet,
+}
+
+/// A count as a small pill: room for one to three characters at a fixed height and a
+/// minimum width, so a 1 is a round dot and 128 widens it evenly instead of crowding the
+/// label beside it. Past 999 it reads "999+".
+pub(crate) fn count_badge(n: usize, tone: Tone) -> Div {
+    let text = if n > 999 {
+        "999+".to_string()
+    } else {
+        n.to_string()
+    };
+    let (fill, ink) = match tone {
+        Tone::Accent => (rgba((c_blue() << 8) | 0x2e), rgb(c_blue())),
+        Tone::Alert => (rgba((c_amber() << 8) | 0x33), rgb(c_amber())),
+        Tone::Quiet => (tint(c_active()), rgb(c_secondary())),
+    };
+    div()
+        .flex_none()
+        .h(px(16.))
+        .min_w(px(16.))
+        .px(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(fill)
+        .text_size(px(10.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(ink)
+        .child(text)
+}
+
 /// Fill of a tab that is not open, at rest and under the pointer: a wash of white over
 /// the frame, stronger on the light theme's grey frame than on the dark one. In glass
 /// mode the open tab is as see-through as its island, so the rest get only a faint wash,
@@ -3463,15 +3490,10 @@ impl RunoApp {
                         }))
                         .child(icon(IconName::MessagesSquare, 14., c_secondary()))
                         .child("Chats")
-                        .child(
-                            div()
-                                .px(px(5.))
-                                .rounded_full()
-                                .bg(tint(c_active()))
-                                .text_size(px(11.))
-                                .text_color(rgb(if busy { c_blue() } else { c_muted() }))
-                                .child(sessions.len().to_string()),
-                        ),
+                        .child(count_badge(
+                            sessions.len(),
+                            if busy { Tone::Accent } else { Tone::Quiet },
+                        )),
                 )
                 .when(open, |el| {
                     el.child(

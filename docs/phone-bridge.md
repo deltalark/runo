@@ -109,8 +109,8 @@ A session in the list:
 ```
 
 `status` is `idle`, `working`, `done`, `failed` or `stopped` (the person stopped the turn). `needs` is `null` or one of `approval`
-(a live permission request), `denied` (tools the last turn wasn't allowed), `questions`
-or `plan`.
+(a live permission request), `denied` (tools the last turn wasn't allowed), `questions`,
+`plan` or `decision` (a Crew thread's question, closed by any reply in the thread).
 
 A message in a session:
 

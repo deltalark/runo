@@ -20,6 +20,10 @@ pub(crate) enum Fix {
     MoveToBranch,
     /// Send after all, past the seatbelt.
     SendAnyway(SyncStep),
+    /// Send this branch after all, past the seatbelt.
+    SendBranchAnyway(String),
+    /// Send this branch's stack and open its pull requests after all.
+    OpenStackAnyway(String),
     /// Open Changes, to take something out.
     OpenChanges,
     /// Take the last commit back into the folder.
@@ -193,7 +197,7 @@ fn count(n: usize) -> String {
 }
 
 /// What the seatbelt says about a push, from what it found in the commits.
-pub(crate) fn seatbelt_stop(found: &[(String, usize, Snag)], step: SyncStep) -> Explained {
+pub(crate) fn seatbelt_stop(found: &[(String, usize, Snag)], anyway: Fix) -> Explained {
     let n = found.len();
     Explained {
         title: match n {
@@ -201,10 +205,14 @@ pub(crate) fn seatbelt_stop(found: &[(String, usize, Snag)], step: SyncStep) -> 
             n => format!("Wait: {n} things in these commits shouldn't go out"),
         },
         words: "Once it's on GitHub, it stays in the history even if you delete it later. Take it out first: undo the commit, leave the line out in Changes, and commit again.".into(),
-        fixes: vec![
-            ("Undo the last commit".into(), Fix::Uncommit),
-            ("Send anyway".into(), Fix::SendAnyway(step)),
-        ],
+        fixes: match anyway {
+            // Taking the last commit back only helps on the branch the folder is on.
+            Fix::SendAnyway(_) => vec![
+                ("Undo the last commit".into(), Fix::Uncommit),
+                ("Send anyway".into(), anyway),
+            ],
+            _ => vec![("Send anyway".into(), anyway)],
+        },
         stop: true,
     }
 }
@@ -273,6 +281,10 @@ impl RunoApp {
                 }
                 self.git_belt_pass = true;
                 self.git_sync(step);
+            }
+            Fix::SendBranchAnyway(_) | Fix::OpenStackAnyway(_) => {
+                self.git_belt_pass = true;
+                self.belt_resend(fix);
             }
             Fix::SetAside => {
                 let branch = self

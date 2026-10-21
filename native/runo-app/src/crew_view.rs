@@ -27,6 +27,31 @@ fn small(text: impl Into<SharedString>) -> Div {
 }
 
 impl RunoApp {
+    /// A thread's decision as one chip per answer, the recommended one filled, for the
+    /// corner cards and the Inbox.
+    pub(crate) fn decision_chips(
+        &self,
+        key: &'static str,
+        n: usize,
+        thread: u64,
+        d: &crew::Decision,
+        cx: &mut Context<Self>,
+    ) -> Vec<Stateful<Div>> {
+        d.options
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(i, o)| {
+                self.chip((key, n * 10 + i), o.label.clone(), i == d.recommended)
+                    .h(px(26.))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.answer_decision(thread, i, cx);
+                        cx.notify();
+                    }))
+            })
+            .collect()
+    }
+
     fn thread_working(&self, id: u64) -> bool {
         self.handles.contains_key(&Target::Session(id))
     }
