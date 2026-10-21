@@ -378,6 +378,48 @@ impl RunoApp {
         cx.notify();
     }
 
+    /// Copy this Mac's login for an agent to a Cove connection's server, in the background.
+    pub(crate) fn import_login_to(
+        &mut self,
+        conn: u64,
+        provider: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(c) = connections::get(conn) else {
+            return;
+        };
+        let name = agent::provider(provider).name;
+        let place = c.name.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(cove::import_login(&c, provider));
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let answer = match rx.try_recv() {
+                Ok(a) => a,
+                Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                Err(_) => Err("Copying the login stopped.".into()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                match answer {
+                    Ok(()) => {
+                        this.info = Some((
+                            format!("{place} uses this Mac's {name} login now, in every VM."),
+                            std::time::Instant::now(),
+                        ))
+                    }
+                    Err(e) => this.fail("fixes", format!("Couldn't copy the {name} login: {e}")),
+                }
+                cx.notify();
+            });
+            break;
+        })
+        .detach();
+    }
+
     /// Sign an agent out on a Cove connection's server and its VMs, in the background.
     pub(crate) fn sign_out_on_connection(
         &mut self,

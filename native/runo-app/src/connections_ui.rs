@@ -115,9 +115,89 @@ impl RunoApp {
             id,
             (
                 None,
-                "Fill in the server's URL above, run cove pair on the server, and type its code here.".into(),
+                "Type the server's SSH login above, such as ubuntu@203.0.113.7, and press Set up."
+                    .into(),
             ),
         );
+        cx.notify();
+    }
+
+    /// Set a Cove server up from its SSH login, in the background: install or update Cove
+    /// there, open the tunnel and pair. Settings shows each step.
+    pub(crate) fn set_up_cove_server(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(conn) = connections::get(id) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        crate::coveserver::set_up(conn, move || {
+            let _ = tx.send(());
+        });
+        self.watch_server_setup(id, rx, cx);
+    }
+
+    /// The server's sudo wants a password: do the root steps in a terminal window.
+    pub(crate) fn set_up_cove_in_terminal(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(conn) = connections::get(id) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        match crate::coveserver::set_up_in_terminal(conn, move || {
+            let _ = tx.send(());
+        }) {
+            Ok(()) => self.watch_server_setup(id, rx, cx),
+            Err(e) => {
+                self.fail("connection", format!("Couldn't open a terminal: {e}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Repaint while a server setup runs; once it is paired, keep the URL, tunnel port and
+    /// key on the connection, and check it.
+    fn watch_server_setup(
+        &mut self,
+        id: u64,
+        rx: std::sync::mpsc::Receiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            let finished = !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+            let _ = this.update(cx, |this, cx| {
+                if finished {
+                    if let Some(crate::coveserver::Step::Done { url, key, port }) =
+                        crate::coveserver::step(id)
+                    {
+                        settings::update(cx, move |s| {
+                            if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                                c.url = url;
+                                c.api_key = key;
+                                c.tunnel_port = port;
+                                c.pair_code.clear();
+                            }
+                        });
+                        this.save();
+                        crate::coveserver::clear_step(id);
+                        crate::cove::forget_logins();
+                        this.info = Some((
+                            format!(
+                                "{} is set up and paired. Sign the agents in under it in Settings.",
+                                connections::name(id)
+                            ),
+                            std::time::Instant::now(),
+                        ));
+                        this.test_connection(id, cx);
+                    }
+                }
+                cx.notify();
+            });
+            if finished {
+                break;
+            }
+        })
+        .detach();
         cx.notify();
     }
 

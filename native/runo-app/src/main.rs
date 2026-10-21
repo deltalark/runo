@@ -21,6 +21,7 @@ mod connections;
 mod connections_ui;
 mod copies;
 mod cove;
+mod coveserver;
 mod crew;
 mod crew_ui;
 mod crew_view;

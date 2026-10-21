@@ -149,6 +149,11 @@ pub struct Connection {
     /// Pause an idle VM instead of stopping it: its memory and running programs are
     /// kept, and it carries on as soon as it is used. Needs a Cove with auto-pause.
     pub idle_pause: bool,
+    /// Cove: the server's SSH login (user@host). Set, Runo installs and pairs Cove over
+    /// SSH and reaches it through a tunnel it keeps open itself.
+    pub ssh: String,
+    /// Cove over SSH: the local port of the tunnel; `url` points at it.
+    pub tunnel_port: u16,
     /// SSH: a host from ~/.ssh/config, or user@host.
     pub host: String,
     /// SSH: 0 for the default port.
@@ -179,6 +184,8 @@ impl Default for Connection {
             network: "full".into(),
             idle_stop: 0,
             idle_pause: true,
+            ssh: String::new(),
+            tunnel_port: 0,
             host: String::new(),
             port: 0,
             identity: String::new(),
@@ -221,7 +228,9 @@ impl Connection {
     pub fn summary(&self) -> String {
         match self.kind {
             Kind::Cove => {
-                let place = if self.remote() {
+                let place = if !self.ssh.trim().is_empty() {
+                    self.ssh.trim().to_string()
+                } else if self.remote() {
                     self.url.trim().to_string()
                 } else {
                     "Cove on this machine".into()
@@ -317,6 +326,7 @@ impl Connection {
     /// The `cove` command for this connection, pointed at its server.
     pub(crate) fn cove(&self) -> Result<Command, String> {
         let bin = crate::cove::binary().ok_or("Cove is not installed on this machine.")?;
+        crate::coveserver::ensure_tunnel(self)?;
         let mut c = Command::new(bin);
         if self.remote() {
             c.env("COVE_URL", self.url.trim());
@@ -498,6 +508,7 @@ impl Connection {
             }
             Kind::Cove => {
                 let bin = crate::cove::binary().ok_or("Cove is not installed on this machine.")?;
+                crate::coveserver::ensure_tunnel(self)?;
                 let mut env = Vec::new();
                 if self.remote() {
                     env.push(("COVE_URL".into(), self.url.trim().to_string()));

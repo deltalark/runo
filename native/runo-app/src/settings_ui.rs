@@ -1218,6 +1218,43 @@ fn conn_switch(
 
 /// One row per agent Cove can keep the login of: signed in on that server or not, with
 /// Sign in or Sign out. Agents not installed here show only once signed in there.
+/// Set up: install or update Cove on the server over SSH, open the tunnel and pair.
+fn server_setup_row(c: &Connection) -> Row {
+    use crate::coveserver::Step;
+    let id = c.id;
+    let paired = !c.api_key.trim().is_empty();
+    let set_up = |label: &str| {
+        Ctl::Button(
+            label.into(),
+            Rc::new(move |this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                this.set_up_cove_server(id, cx)
+            }),
+        )
+    };
+    match crate::coveserver::step(id) {
+        Some(Step::Running(text)) => row("Set up", &text, Ctl::Chip("Working…".into(), 1)),
+        Some(Step::NeedsPassword) => row(
+            "Set up",
+            "sudo on the server asks for a password. Continue opens a terminal window where you type it once; Runo does the rest and carries on here.",
+            Ctl::Button(
+                "Continue in Terminal".into(),
+                Rc::new(move |this, cx| this.set_up_cove_in_terminal(id, cx)),
+            ),
+        ),
+        Some(Step::Failed(e)) => row("Set up", &e, set_up("Try again")),
+        _ if paired => row(
+            "Set up",
+            "Set up and paired. Runo keeps the SSH tunnel open by itself. Set up again updates Cove there.",
+            set_up("Set up again"),
+        ),
+        _ => row(
+            "Set up",
+            "Checks the SSH login, installs Cove there (or updates it), opens a tunnel and pairs. Then sign the agents in below.",
+            set_up("Set up"),
+        ),
+    }
+}
+
 fn agent_login_rows(c: &Connection) -> Vec<Row> {
     let id = c.id;
     let known = crate::cove::logins(c);
@@ -1247,6 +1284,23 @@ fn agent_login_rows(c: &Connection) -> Vec<Row> {
                         "Sign out".into(),
                         Rc::new(move |this, cx| this.sign_out_on_connection(id, provider, cx)),
                     ),
+                ),
+                (Some(_), false) if crate::cove::has_local_login(provider) => row(
+                    &title,
+                    &format!(
+                        "Not signed in on this server. This Mac is signed in to {}: copy its login there, or sign in there with another account.",
+                        p.name
+                    ),
+                    Ctl::Buttons(vec![
+                        (
+                            "Sign in".into(),
+                            Rc::new(move |this, cx| this.sign_in_on_connection(id, provider, cx)),
+                        ),
+                        (
+                            "Use this Mac's login".into(),
+                            Rc::new(move |this, cx| this.import_login_to(id, provider, cx)),
+                        ),
+                    ]),
                 ),
                 (Some(_), false) => row(
                     &title,
@@ -1355,37 +1409,57 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
                 ));
             }
             _ => {
-                rows.push(conn_text(c, "Server", "Empty for Cove on this machine, which shares the session folder with the VM. A URL (http://my-vps:7457) uses a Cove server elsewhere; the session's files are synced to it.", "Cove on this machine", c.url.clone(), |c, v| c.url = v));
-                if c.remote() {
+                rows.push(conn_text(
+                    c,
+                    "SSH login",
+                    "A Linux server or VPS you can ssh into with a key, such as ubuntu@203.0.113.7. Runo installs Cove there, keeps a tunnel to it open and pairs by itself. Empty for Cove on this Mac.",
+                    "ubuntu@203.0.113.7",
+                    c.ssh.clone(),
+                    |c, v| c.ssh = v,
+                ));
+                if c.ssh.trim().is_empty() {
+                    rows.push(conn_text(c, "Server", "Empty for Cove on this machine, which shares the session folder with the VM. A URL (http://my-vps:7457) uses a Cove server elsewhere; the session's files are synced to it.", "Cove on this machine", c.url.clone(), |c, v| c.url = v));
+                    if c.remote() {
+                        rows.push(conn_text(
+                            c,
+                            "Pairing code",
+                            "Run cove pair on the server and type the code it prints. Runo gets a key of its own, which cove keys rm there revokes.",
+                            "ABCD-EFGH",
+                            c.pair_code.clone(),
+                            |c, v| c.pair_code = v,
+                        ));
+                        let paired = match connections::pair_result(id) {
+                            Some((_, text)) => text,
+                            None if c.api_key.trim().is_empty() => "Not paired yet.".into(),
+                            None => "Runo has a key for this server.".into(),
+                        };
+                        rows.push(row(
+                            "Pair",
+                            &paired,
+                            Ctl::Button(
+                                "Pair".into(),
+                                Rc::new(move |this, cx| this.pair_connection(id, cx)),
+                            ),
+                        ));
+                        rows.push(conn_text(
+                            c,
+                            "API key",
+                            "Filled in by pairing. Or run cove key on the server and paste it here.",
+                            "",
+                            c.api_key.clone(),
+                            |c, v| c.api_key = v,
+                        ));
+                    }
+                } else {
                     rows.push(conn_text(
                         c,
-                        "Pairing code",
-                        "Run cove pair on the server and type the code it prints. Runo gets a key of its own, which cove keys rm there revokes.",
-                        "ABCD-EFGH",
-                        c.pair_code.clone(),
-                        |c, v| c.pair_code = v,
+                        "Key file",
+                        "Empty uses your SSH agent and ~/.ssh/config.",
+                        "~/.ssh/id_ed25519",
+                        c.identity.clone(),
+                        |c, v| c.identity = v,
                     ));
-                    let paired = match connections::pair_result(id) {
-                        Some((_, text)) => text,
-                        None if c.api_key.trim().is_empty() => "Not paired yet.".into(),
-                        None => "Runo has a key for this server.".into(),
-                    };
-                    rows.push(row(
-                        "Pair",
-                        &paired,
-                        Ctl::Button(
-                            "Pair".into(),
-                            Rc::new(move |this, cx| this.pair_connection(id, cx)),
-                        ),
-                    ));
-                    rows.push(conn_text(
-                        c,
-                        "API key",
-                        "Filled in by pairing. Or run cove key on the server and paste it here.",
-                        "",
-                        c.api_key.clone(),
-                        |c, v| c.api_key = v,
-                    ));
+                    rows.push(server_setup_row(c));
                 }
                 rows.push(conn_choice(
                     c,
@@ -1505,7 +1579,7 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
     let install_line = crate::cove::server_install_command();
     cove_rows.push(row(
         "Run Cove on a server",
-        "For sessions that keep going while your Mac sleeps. 1. On a Linux server or VPS, run the install command. 2. Run cove pair there for a one-time code. 3. Add the server here with its URL and that code, and press Pair. Reach it through an SSH tunnel (ssh -L 7457:127.0.0.1:7457 your-server, then http://127.0.0.1:7457) unless you put HTTPS in front of it.",
+        "For sessions that keep going while your Mac sleeps. Add server, type its SSH login (such as ubuntu@203.0.113.7) and press Set up: Runo installs Cove there, keeps an SSH tunnel to it open, pairs, and then helps you sign the agents in. Nothing new is opened on the server.",
         Ctl::Buttons(vec![
             (
                 "Copy install command".into(),
