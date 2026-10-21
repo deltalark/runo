@@ -44,7 +44,7 @@ take it all the way to ship, without leaving one native app.
 
 <br />
 
-<img src="docs/images/main.png" alt="Runo with a Claude Code session open: projects with colored rails in the sidebar, the conversation in the middle, and the changes and a diff on the right" width="920" />
+<img src="docs/images/hero.gif" alt="Runo in motion: Crew on the home screen, a session with its diff ready to ship, the Git place with changes and the history graph, and an Architecture diagram" width="920" />
 
 </div>
 
