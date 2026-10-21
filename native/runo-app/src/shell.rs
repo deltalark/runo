@@ -3508,7 +3508,7 @@ fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
 /// the frame, stronger on the light theme's grey frame than on the dark one.
 pub(crate) fn tab_chip() -> (Rgba, Rgba) {
     if is_dark() {
-        (rgba(0xffffff0d), rgba(0xffffff1c))
+        (rgba(0xffffff14), rgba(0xffffff26))
     } else {
         (rgba(0xffffff80), rgba(0xffffffd0))
     }
