@@ -236,7 +236,7 @@ impl RunoApp {
         }
         let target = connections::get(to);
         // Remote copies are kept in step with git; a plain folder has no way there.
-        if target.as_ref().is_some_and(|c| c.remote()) && !self.demo && !git::is_repo(&s.dir) {
+        if target.as_ref().is_some_and(|c| c.remote()) && !git::is_repo(&s.dir) {
             self.fail("connection", format!(
                 "{} can't run this session: its folder isn't a git repository, and Runo syncs files to {} with git. Run `git init` in the project (or start a session in a repository), then move it.",
                 connections::name(to),
@@ -256,7 +256,7 @@ impl RunoApp {
         let to_name = connections::name(to);
         // The conversation stays behind: the next message gets a brief of it instead.
         let brief = (s.has_conversation() && !carries).then(|| {
-            let (files, commits) = if !self.demo && git::is_repo(&s.dir) {
+            let (files, commits) = if git::is_repo(&s.dir) {
                 (git::changes(&s.dir), git::recent_commits(&s.dir, 5))
             } else {
                 (Vec::new(), String::new())
@@ -489,9 +489,6 @@ impl RunoApp {
     /// them as running again: their output replays from the start and their work comes
     /// back when they end.
     pub(crate) fn resume_remote_turns(&mut self) {
-        if self.demo {
-            return;
-        }
         let ids: Vec<u64> = self
             .state
             .sessions

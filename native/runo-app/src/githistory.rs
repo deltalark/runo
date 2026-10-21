@@ -180,7 +180,7 @@ impl RunoApp {
 
     /// Read the commits again, with the filter as it is.
     pub(crate) fn load_history(&mut self) {
-        if self.demo || self.view != View::GitHistory {
+        if self.view != View::GitHistory {
             return;
         }
         let Some(dir) = self.git_place_dir() else {
@@ -424,11 +424,11 @@ impl RunoApp {
 
     /// The History page: the filter, the commit graph, and the picked commit beside it.
     pub(crate) fn git_history_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.git_time_on && !self.demo {
+        if self.git_time_on {
             return self.time_machine_view(cx);
         }
         let Some(data) = self.git_history.as_ref() else {
-            let text = if self.git_place_dir().is_none() || self.demo {
+            let text = if self.git_place_dir().is_none() {
                 "Pick a project in the top bar to see its history."
             } else {
                 "Reading history…"

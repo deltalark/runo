@@ -243,9 +243,6 @@ impl RunoApp {
     /// Run a quick command in its own tab of the current session. Running one again shows
     /// it while it is still going, and otherwise starts it over in the same tab.
     pub(crate) fn run_task(&mut self, name: String, command: String, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(session) = self.selected else {
             return;
         };
@@ -325,9 +322,6 @@ impl RunoApp {
 
     /// Send the end of a failed task's output to its session's agent.
     pub(crate) fn ask_fix(&mut self, shell: u64, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(task) = self.tasks.get(&shell) else {
             return;
         };

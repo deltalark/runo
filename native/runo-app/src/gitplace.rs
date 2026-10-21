@@ -68,9 +68,6 @@ impl RunoApp {
     /// Read the project folder's branch and remote state again, fetching first when the
     /// last fetch is old. Runs off the UI thread.
     pub(crate) fn load_repo(&mut self) {
-        if self.demo {
-            return;
-        }
         let Some(dir) = self.git_place_dir() else {
             self.git_repo = None;
             return;
@@ -117,7 +114,7 @@ impl RunoApp {
         busy: &str,
         work: impl FnOnce(&str) -> Result<Option<(String, Option<git::Undo>)>, String> + Send + 'static,
     ) {
-        if self.demo || self.git_working.is_some() {
+        if self.git_working.is_some() {
             return;
         }
         let Some(dir) = self.git_repo.as_ref().map(|r| r.dir.clone()) else {

@@ -1712,7 +1712,7 @@ impl RunoApp {
         );
         for project in &self.state.projects {
             let pid = project.id;
-            let missing = !self.demo && !std::path::Path::new(&project.path).is_dir();
+            let missing = !std::path::Path::new(&project.path).is_dir();
             let sessions = self
                 .state
                 .sessions
@@ -2828,11 +2828,11 @@ impl RunoApp {
         for project in &self.state.projects {
             let pid = project.id;
             let root = std::path::Path::new(&project.path);
-            let missing = !self.demo && !root.is_dir();
+            let missing = !root.is_dir();
             let summary = if missing {
                 "Folder missing".to_string()
             } else {
-                chooser_summary(mode, root, self.arch.maps.get(&pid), self.demo)
+                chooser_summary(mode, root, self.arch.maps.get(&pid))
             };
             let sessions = self
                 .state
@@ -2944,11 +2944,7 @@ fn chooser_summary(
     mode: Mode,
     root: &std::path::Path,
     map: Option<&architecture::ProjectMap>,
-    demo: bool,
 ) -> String {
-    if demo {
-        return "Sample project".into();
-    }
     if mode == Mode::Design {
         let refs = std::fs::read_dir(root.join(design::FOLDER))
             .into_iter()

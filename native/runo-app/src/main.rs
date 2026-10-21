@@ -102,28 +102,6 @@ use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 use store::{Message, Note, Project, Role, Session, State, Status, StepState};
 
-const DEMO_DIFF: &str = "@@ -42,13 +42,20 @@ impl NavItem {
-     impl NavItem {
--    pub fn new(label: &str, icon: Icon) -> Self {
--        Self {
--            label: label.to_string(),
--            icon,
--        }
--    }
-+    pub fn new(label: impl Into<String>, icon: Icon, active: bool) -> Self {
-+        Self {
-+            label: label.into(),
-+            icon,
-+            active,
-+        }
-+    }
- }
-
- pub struct Sidebar {
--    items: Vec<NavItem>,
-+    items: Vec<NavItem>,
- }";
-
 actions!(
     runo,
     [
@@ -219,7 +197,6 @@ enum RightTab {
 
 struct RunoApp {
     state: State,
-    demo: bool,
     /// The Git tab used last, which Git opens on: Review, Branches or GitHub.
     git_tab: View,
     /// The Branches tab's list, the branch picked in it and that branch's commits and files.
@@ -665,25 +642,6 @@ struct RunoApp {
     /// Saving, quiet agents, limits, slots, crash reports and Runo updates.
     health: health::Health,
     _subscriptions: Vec<Subscription>,
-}
-
-fn demo_changes() -> Vec<git::Change> {
-    [
-        ("src/sidebar/navigation.rs", 48, 12),
-        ("src/components/nav_item.rs", 32, 6),
-        ("src/components/icons.rs", 18, 4),
-        ("src/styles/navigation.css", 22, 8),
-    ]
-    .into_iter()
-    .map(|(path, added, removed)| git::Change {
-        path: path.into(),
-        status: "M".into(),
-        added,
-        removed,
-        unstaged: true,
-        ..Default::default()
-    })
-    .collect()
 }
 
 thread_local! {
@@ -1281,13 +1239,12 @@ impl RunoApp {
                     usage::refresh(true);
                 }
                 let alive = this.update(cx, |this, cx| {
-                    if check && !this.demo {
+                    if check {
                         this.maybe_check_updates();
                     }
                     // Every ~5s, look for dev servers so the header's Browser button
                     // appears once the app is being served, and goes when it stops.
                     if ticks % 100 == 50
-                        && !this.demo
                         && this.view == View::Session
                         && this.selected.is_some()
                         && cx.global::<AppSettings>().browser_enabled
@@ -1299,19 +1256,19 @@ impl RunoApp {
                             .selected
                             .is_some_and(|id| this.started.contains_key(&id));
                     let on_session = this.view == View::Session && this.selected.is_some();
-                    if pr_check && on_session && !this.demo {
+                    if pr_check && on_session {
                         if let Some(id) = this.selected {
                             this.load_pr_status(id);
                         }
                     }
-                    if tick && !this.demo {
+                    if tick {
                         let before = (this.file_conflict, this.pending_file.is_some());
                         this.watch_open_file();
                         if before != (this.file_conflict, this.pending_file.is_some()) {
                             cx.notify();
                         }
                     }
-                    if ((rescan && watching) || (idle_scan && on_session)) && !this.demo {
+                    if (rescan && watching) || (idle_scan && on_session) {
                         this.refresh();
                         cx.notify();
                     } else if repaint
@@ -1343,11 +1300,7 @@ impl RunoApp {
         })
         .detach();
 
-        let mut state = State::load();
-        let demo = state.projects.is_empty();
-        if demo {
-            state = State::demo();
-        }
+        let state = State::load();
         let selected = state.sessions.first().map(|s| s.id);
 
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter sessions"));
@@ -1485,18 +1438,7 @@ impl RunoApp {
             }
         });
 
-        let mut terminal = HashMap::new();
-        if demo {
-            terminal.insert(
-                11,
-                vec![
-                    "$ cargo check -p runo".to_string(),
-                    "    Finished dev profile in 0.97s".to_string(),
-                    "$ git status --short".to_string(),
-                    " M src/sidebar/navigation.rs".to_string(),
-                ],
-            );
-        }
+        let terminal = HashMap::new();
         let mut app = Self {
             expanded: state.projects.iter().map(|p| p.id).collect(),
             tabs: Vec::new(),
@@ -1522,7 +1464,6 @@ impl RunoApp {
             new_project: state.projects.first().map(|p| p.id),
             view: View::Session,
             state,
-            demo,
             git_tab: View::Review,
             git_branches: None,
             git_branch_sel: None,
@@ -1933,7 +1874,7 @@ impl RunoApp {
         ]);
         // Coming back to the window picks up git commands run elsewhere.
         let activation_sub = cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() && !this.demo {
+            if window.is_window_active() {
                 this.refresh();
                 cx.notify();
             }
@@ -2056,9 +1997,7 @@ impl RunoApp {
 
     /// Mark the state changed; it is saved within half a second, off the UI thread.
     fn save(&mut self) {
-        if !self.demo {
-            self.health.save_due = true;
-        }
+        self.health.save_due = true;
     }
 
     /// Show an error in the status bar and write it to the log, tagged with `area` and
@@ -2173,19 +2112,6 @@ impl RunoApp {
             self.files.clear();
             return;
         };
-        if self.demo {
-            self.dir_is_git = true;
-            self.changes = demo_changes();
-            self.files = self.changes.iter().map(|c| c.path.clone()).collect();
-            self.selected_file = Some(self.changes[0].path.clone());
-            self.diff = DEMO_DIFF.to_string();
-            self.sync = git::Sync {
-                remote: "origin".into(),
-                upstream: true,
-                ahead: 2,
-            };
-            return;
-        }
         let id = session.id;
         let racers: Vec<(u64, String)> = if session.race != 0 {
             self.state
@@ -2224,10 +2150,6 @@ impl RunoApp {
         let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
             return;
         };
-        if self.demo {
-            self.stats.insert(id, git::totals(&demo_changes()));
-            return;
-        }
         self.bg(
             move || git::is_repo(&dir).then(|| git::totals(&git::changes(&dir))),
             move |this, totals, _| {
@@ -2239,10 +2161,8 @@ impl RunoApp {
     }
 
     fn open_change(&mut self, path: &str) {
-        if !self.demo {
-            if let Some(dir) = self.current().map(|s| s.dir.clone()) {
-                self.diff = self.load_diff(&dir, path);
-            }
+        if let Some(dir) = self.current().map(|s| s.dir.clone()) {
+            self.diff = self.load_diff(&dir, path);
         }
         self.selected_file = Some(path.to_string());
     }
@@ -2726,14 +2646,6 @@ impl RunoApp {
         self.start_turn(id, prompt, images, opts);
     }
 
-    /// Demo projects are not real folders, so ask for a real repository instead.
-    fn demo_guard(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.demo {
-            self.pick_project(cx);
-        }
-        self.demo
-    }
-
     fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.submit_prompt(window, cx);
     }
@@ -2746,7 +2658,7 @@ impl RunoApp {
     pub(crate) fn open_settings(&mut self) {
         self.view = View::Settings;
         signin::refresh(false);
-        let dir = self.current().filter(|_| !self.demo).map(|s| s.dir.clone());
+        let dir = self.current().map(|s| s.dir.clone());
         self.discovered = Some(settings::discover(dir.as_deref()));
     }
 
@@ -3211,9 +3123,6 @@ impl RunoApp {
 
     /// Send every review note to the agent as one follow-up.
     fn send_notes(&mut self, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(id) = self.selected else { return };
         if self.handles.contains_key(&Target::Session(id)) {
             self.notice =
@@ -3272,9 +3181,6 @@ impl RunoApp {
 
     fn discard(&mut self, path: &str) {
         self.confirm_discard = None;
-        if self.demo {
-            return;
-        }
         let Some(dir) = self.current().map(|s| s.dir.clone()) else {
             return;
         };
@@ -3301,14 +3207,6 @@ impl RunoApp {
         let path_str = path.to_string_lossy().into_owned();
         if !path.is_dir() {
             return Err(format!("{path_str} is not a folder."));
-        }
-        if self.demo {
-            // Leave the sample workspace behind and start from the real state on disk.
-            self.demo = false;
-            self.state = State::load();
-            self.expanded.clear();
-            self.selected = None;
-            self.terminal.clear();
         }
         if self.state.projects.iter().any(|p| p.path == path_str) {
             return Err("That folder is already a project.".into());
@@ -3339,9 +3237,6 @@ impl RunoApp {
     }
 
     fn create_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let task = self.new_task.read(cx).value().trim().to_string();
         let Some(project) = self
             .new_project
@@ -3549,7 +3444,7 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
         // A repository with no commits has nothing to branch from: run in the folder itself.
-        let unborn = isolated && is_git && !self.demo && !git::has_commits(&project.path);
+        let unborn = isolated && is_git && !git::has_commits(&project.path);
         let isolated = isolated && !unborn;
         let id = self.state.next_id();
         let base = match base {
@@ -3631,7 +3526,7 @@ impl RunoApp {
                 }
             ),
         );
-        if isolated && is_git && !self.demo {
+        if isolated && is_git {
             self.make_worktree(id, project.path.clone(), branch, pr);
         }
         Ok(id)
@@ -3655,7 +3550,7 @@ impl RunoApp {
             .map(|p| p.setup.clone())
             .unwrap_or_default();
         let setup = cx.global::<AppSettings>().setup_for(&own);
-        if isolated && !setup.is_empty() && !self.demo {
+        if isolated && !setup.is_empty() {
             self.pending_start.insert(id, task);
             if self.run_setup_in(id, &setup, cx) {
                 self.info = Some((
@@ -3978,9 +3873,7 @@ impl RunoApp {
         self.pending_start.remove(&id);
         self.preparing.remove(&id);
         self.pr_status.remove(&id);
-        if !self.demo {
-            connections::cleanup_session(&session);
-        }
+        connections::cleanup_session(&session);
         // The worktree, the branch when nothing in it is unmerged, and Undo snapshots.
         self.remove_session_files(&session, false);
         self.terminal.remove(&id);
@@ -4474,7 +4367,7 @@ impl RunoApp {
         for project in &self.state.projects {
             let pid = project.id;
             let open = self.expanded.contains(&pid);
-            let missing = !self.demo && !std::path::Path::new(&project.path).is_dir();
+            let missing = !std::path::Path::new(&project.path).is_dir();
             let sessions = self.project_sessions(project, &filter);
             if !filter.is_empty() && sessions.is_empty() {
                 continue;
@@ -6577,7 +6470,7 @@ impl RunoApp {
         let id = self.confirm_delete?;
         let session = self.state.session(id)?;
         let running = self.handles.contains_key(&Target::Session(id));
-        let worktree = session.isolated && !self.demo && remove_worktree();
+        let worktree = session.isolated && remove_worktree();
         let backdrop = if is_dark() {
             hsla(0., 0., 0., 0.55)
         } else {
@@ -6955,7 +6848,7 @@ impl RunoApp {
         let project = self
             .new_project
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id));
-        let is_git = self.demo || project.is_some_and(|p| git::is_repo(&p.path));
+        let is_git = project.is_some_and(|p| git::is_repo(&p.path));
         let racing = self.racing() && is_git;
         let isolated = (self.new_isolated || racing) && is_git;
         let typed = git::sanitize_branch(&self.branch.read(cx).value());
@@ -7005,7 +6898,7 @@ impl RunoApp {
             Some(p) if is_git => format!("Runs on the current branch, directly in {}", p.path),
             Some(p) => format!("Runs directly in {}", p.path),
         };
-        let cove_ready = !self.demo && cove::available();
+        let cove_ready = cove::available();
         let conns = connections::all();
         let where_to = match connections::get(self.new_connection) {
             Some(c) if project.is_some() && c.remote() => {
@@ -7212,7 +7105,7 @@ impl RunoApp {
                                 .items_center()
                                 .gap_2()
                                 .child(div().flex_1().min_w_0().child(Input::new(&self.branch).bordered(true).h(px(36.))))
-                                .when(!self.demo, |el| el.child(self.base_picker(cx))),
+                                .child(self.base_picker(cx)),
                         )
                     })
                     .when(project.is_some() && (cove_ready || !conns.is_empty()), |el| {
@@ -7412,7 +7305,7 @@ impl RunoApp {
                                         "{project}  ·  Asked from {}",
                                         shell::canvas_title(view)
                                     )
-                                } else if worktrees_only && !self.demo {
+                                } else if worktrees_only {
                                     session.dir.clone()
                                 } else {
                                     format!("{project}  ·  {}", session.branch)
@@ -7634,9 +7527,6 @@ impl RunoApp {
 
     /// Re-read the diff after a view option changed.
     fn reload_diff(&mut self) {
-        if self.demo {
-            return;
-        }
         let Some(dir) = self.current().map(|s| s.dir.clone()) else {
             return;
         };
@@ -7922,9 +7812,7 @@ impl RunoApp {
                     .when(selected, |el| el.bg(tint(c_active())))
                     .when(!selected, |el| el.hover(|el| el.bg(tint(c_subtle()))))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.demo {
-                            this.selected_file = Some(path.clone());
-                        } else if let Some(dir) = this.current().map(|s| s.dir.clone()) {
+                        if let Some(dir) = this.current().map(|s| s.dir.clone()) {
                             this.diff = this.load_diff(&dir, &path);
                             this.selected_file = Some(path.clone());
                         }
@@ -9070,12 +8958,6 @@ impl Render for RunoApp {
             (notice.clone(), c_red(), Some(IconName::CircleAlert))
         } else if let Some((info, _)) = &self.info {
             (info.clone(), c_blue(), Some(IconName::Check))
-        } else if self.demo {
-            (
-                "Sample workspace. Add a project folder to start a real session.".to_string(),
-                c_muted(),
-                Some(IconName::Info),
-            )
         } else {
             (String::new(), c_muted(), None)
         };

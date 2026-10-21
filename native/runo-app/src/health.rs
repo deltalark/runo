@@ -174,10 +174,8 @@ impl RunoApp {
     /// Save now rather than on the next tick: the window is closing or Runo quitting.
     pub(crate) fn save_now(&mut self) {
         self.health.save_due = false;
-        if !self.demo {
-            self.store_layout();
-            self.state.save();
-        }
+        self.store_layout();
+        self.state.save();
     }
 
     /// Agents running on this machine or elsewhere, for the cap.
@@ -204,9 +202,6 @@ impl RunoApp {
     /// Why a new turn of `id` has to wait (a spending, turn or token limit, or no free
     /// slot), noting it so the turn starts once it can. None lets it start.
     pub(crate) fn hold_turn(&mut self, id: u64) -> Option<String> {
-        if self.demo {
-            return None;
-        }
         let session = self.state.session(id)?;
         if !self.health.allow_once.contains(&id) {
             if let Some(hold) = over_limit(&self.used(session), &settings::limits()) {
@@ -257,9 +252,6 @@ impl RunoApp {
     /// their output replays from the start and they end as usual.
     pub(crate) fn resume_local_turns(&mut self) {
         // The sample workspace's running session is a picture; there is nothing to follow.
-        if self.demo {
-            return;
-        }
         let Some(root) = crate::detach::root() else {
             return;
         };
@@ -330,9 +322,7 @@ impl RunoApp {
         if self.health.save_due {
             self.save_now();
         }
-        if !self.demo {
-            self.start_waiting(cx);
-        }
+        self.start_waiting(cx);
         if !self.health.crash_looked {
             self.health.crash_looked = true;
             self.health.crash = crate::applog::unseen_crash(&crate::applog::logs_dir());
@@ -859,7 +849,7 @@ mod tests {
 
     #[test]
     fn a_session_counts_its_turns_and_a_turn_its_tokens() {
-        let mut session = State::demo().sessions[0].clone();
+        let mut session = State::sample().sessions[0].clone();
         session.messages.clear();
         assert_eq!(session_turns(&session), 0);
         session.messages.push(Message::new(Role::User, "one"));
@@ -882,7 +872,7 @@ mod tests {
 
     #[test]
     fn a_session_costs_what_its_turns_reported() {
-        let mut session = State::demo().sessions[0].clone();
+        let mut session = State::sample().sessions[0].clone();
         session.messages.clear();
         let mut m = Message::new(Role::Agent, "a");
         m.usage.cost_cents = 12.5;

@@ -75,7 +75,7 @@ impl RunoApp {
 
     /// Read the branch list again, and the picked branch's commits and files.
     pub(crate) fn load_branches(&mut self) {
-        if self.demo || self.view != View::Branches {
+        if self.view != View::Branches {
             return;
         }
         let Some(dir) = self.git_place_dir() else {
@@ -548,7 +548,7 @@ impl RunoApp {
     /// The Branches page: the list beside the picked branch.
     pub(crate) fn branches_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(data) = self.git_branches.as_ref() else {
-            let text = if self.git_place_dir().is_none() || self.demo {
+            let text = if self.git_place_dir().is_none() {
                 "Pick a project in the top bar to see its branches."
             } else {
                 "Reading branches…"

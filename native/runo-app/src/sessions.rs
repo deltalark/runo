@@ -560,7 +560,7 @@ impl RunoApp {
     /// Load the branches of the New session form's project in the background, once per
     /// project, for the base branch menu.
     pub(crate) fn sync_new_branches(&mut self) {
-        if self.view != View::NewSession || self.demo {
+        if self.view != View::NewSession {
             return;
         }
         let Some(project) = self

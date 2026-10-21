@@ -393,7 +393,7 @@ impl RunoApp {
             return;
         }
         let from = agent::provider(&session.provider).name;
-        let (files, commits) = if !self.demo && git::is_repo(&session.dir) {
+        let (files, commits) = if git::is_repo(&session.dir) {
             (
                 git::changes(&session.dir),
                 git::recent_commits(&session.dir, 5),
@@ -410,7 +410,7 @@ impl RunoApp {
             commits: &commits,
             notes: &read_notes(&session.dir),
         });
-        let recap = if self.demo || !wants_recap(session) {
+        let recap = if !wants_recap(session) {
             None
         } else {
             agent::recap_command(
@@ -507,9 +507,6 @@ impl RunoApp {
     /// Write the session's memory file after a turn, so any agent can catch up from it
     /// instead of replaying the conversation.
     pub(crate) fn write_memory(&self, id: u64) {
-        if self.demo {
-            return;
-        }
         let Some(session) = self.state.session(id) else {
             return;
         };
@@ -558,7 +555,7 @@ impl RunoApp {
             return;
         }
         let from = session.provider.clone();
-        let (files, commits) = if !self.demo && git::is_repo(&session.dir) {
+        let (files, commits) = if git::is_repo(&session.dir) {
             (
                 git::changes(&session.dir),
                 git::recent_commits(&session.dir, 5),

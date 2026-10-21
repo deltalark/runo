@@ -16,7 +16,7 @@ impl RunoApp {
     /// Run the project's checks on the session's last turn. `auto` is set when a turn
     /// just finished, so failures may go back to the agent on their own.
     pub(crate) fn prove_turn(&mut self, id: u64, auto: bool, cx: &mut Context<Self>) {
-        if self.demo || self.proving.contains(&id) {
+        if self.proving.contains(&id) {
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -168,7 +168,7 @@ impl RunoApp {
     /// Ask an agent from another vendor to review the last turn's change, read-only.
     /// Its findings land as diff notes, ready for Send notes.
     pub(crate) fn second_opinion(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.reviewing.contains_key(&id) || self.demo_guard(cx) {
+        if self.reviewing.contains_key(&id) {
             return;
         }
         let Some(session) = self.state.session(id) else {

@@ -1014,7 +1014,7 @@ impl RunoApp {
         allow: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        if self.handles.contains_key(&Target::Session(id)) || self.demo_guard(cx) {
+        if self.handles.contains_key(&Target::Session(id)) {
             return;
         }
         let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) else {
@@ -1057,9 +1057,6 @@ impl RunoApp {
     /// Pick up the permission requests agents wait on, answering at once the tools the
     /// person always allowed for that session, and drop ones nobody waits for any more.
     pub(crate) fn poll_approvals(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         let base = approvals::folder();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1252,7 +1249,7 @@ impl RunoApp {
 
     /// The popups in the corner of the window.
     pub(crate) fn alerts_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.demo || self.view == View::Settings || self.tour.is_some() || self.assistant.open {
+        if self.view == View::Settings || self.tour.is_some() || self.assistant.open {
             return None;
         }
         let mut cards: Vec<AnyElement> = Vec::new();

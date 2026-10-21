@@ -49,9 +49,6 @@ pub(crate) fn file_names(files: &[git::Overlap]) -> String {
 impl RunoApp {
     /// Test-merge every pair of lines of work in the top bar project, off the UI thread.
     pub(crate) fn load_radar(&mut self) {
-        if self.demo {
-            return;
-        }
         let Some(dir) = self.git_place_dir() else {
             self.git_radar = None;
             return;

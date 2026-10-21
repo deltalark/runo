@@ -325,9 +325,6 @@ impl RunoApp {
     /// while Runo was closed (or asleep) runs once on launch and says what it covers,
     /// unless Settings turns catching up off.
     pub(crate) fn run_due_automations(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         self.import_headless_runs();
         let now = unix_now();
         let due: Vec<(u64, u64, u64)> = self
@@ -453,9 +450,6 @@ impl RunoApp {
 
     /// Start the playbooks agents asked for through Runo's MCP server.
     pub(crate) fn take_playbook_requests(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         let ask = cx.global::<AppSettings>().confirm_agent_playbooks;
         for request in store::take_requests(&store::inbox_dir()) {
             let Some(auto) = self
@@ -619,9 +613,6 @@ impl RunoApp {
         in_project: Option<u64>,
         cx: &mut Context<Self>,
     ) {
-        if self.demo_guard(cx) {
-            return;
-        }
         // Inputs to fill in, or limits the agent can't be held to, are shown first.
         let asks = self
             .state

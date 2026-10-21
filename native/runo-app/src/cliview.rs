@@ -179,7 +179,7 @@ impl RunoApp {
         } else {
             session.has_conversation() && !conversation.is_empty()
         };
-        if !resume && session.has_conversation() && !self.demo {
+        if !resume && session.has_conversation() {
             // Opening a fresh CLI would drop the context; refuse rather than lose it.
             if let Some(s) = self.state.session_mut(id) {
                 s.cli = false;
@@ -207,9 +207,7 @@ impl RunoApp {
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| {
-                !self.demo && memory_server() && crate::connections::mcp_reachable(sandbox.as_ref())
-            });
+            .filter(|_| memory_server() && crate::connections::mcp_reachable(sandbox.as_ref()));
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: if resume { "" } else { first_prompt },
@@ -337,7 +335,7 @@ impl RunoApp {
             run.shell.kill();
             self.import_cli_turns(id, &run);
             // Files the CLI changed show up in the Changes panel right away.
-            if self.selected == Some(id) && !self.demo {
+            if self.selected == Some(id) {
                 self.refresh();
             }
         }

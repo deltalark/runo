@@ -1089,14 +1089,15 @@ impl State {
     }
 }
 
+#[cfg(test)]
 impl State {
-    /// Sample workspace shown until the first real project is added.
-    pub fn demo() -> Self {
+    /// Five projects and seven sessions for tests.
+    pub fn sample() -> Self {
         // Each sample project gets its own color so the sidebar shows the project rails.
         let project = |id: u64, name: &str| Project {
             id,
             name: name.into(),
-            path: format!("/demo/{name}"),
+            path: format!("/sample/{name}"),
             color: ["blue", "violet", "teal", "orange", "pink"][(id as usize - 1) % 5].into(),
             ..Default::default()
         };
@@ -1197,7 +1198,7 @@ impl State {
             ],
             ..Default::default()
         };
-        // Show the inbox and pinning in the demo.
+        // One unread and one pinned session.
         state.sessions[1].unread = true;
         state.sessions[2].pinned = true;
         state
@@ -1242,7 +1243,7 @@ mod tests {
 
     #[test]
     fn picking_a_model_resets_its_effort_and_speed() {
-        let mut session = State::demo().sessions[0].clone();
+        let mut session = State::sample().sessions[0].clone();
         session.opts.insert("effort".into(), "high".into());
         session.opts.insert("tier".into(), "priority".into());
         session.opts.insert("mode".into(), "read-only".into());
@@ -1263,7 +1264,7 @@ mod tests {
     fn saves_and_loads_round_trip() {
         let dir = temp("roundtrip");
         let path = dir.join("state.json");
-        let mut state = State::demo();
+        let mut state = State::sample();
         state.sessions[1].agent_session = "abc".into();
         write_json(&path, &state);
         let loaded = State::load_from(&path);
@@ -1279,7 +1280,7 @@ mod tests {
     fn running_sessions_load_as_interrupted() {
         let dir = temp("interrupted");
         let path = dir.join("state.json");
-        write_json(&path, &State::demo());
+        write_json(&path, &State::sample());
         let loaded = State::load_from(&path);
         let session = loaded.session(11).unwrap();
         assert!(session.status == Status::Failed);
@@ -1297,7 +1298,7 @@ mod tests {
     fn turns_on_connections_stay_running_across_restarts() {
         let dir = temp("remote-turn");
         let path = dir.join("state.json");
-        let mut state = State::demo();
+        let mut state = State::sample();
         let session = state.session_mut(11).unwrap();
         session.connection = 3;
         session.remote_turn = true;
@@ -1345,7 +1346,7 @@ mod tests {
 
     #[test]
     fn switching_agents_starts_a_new_conversation() {
-        let mut state = State::demo();
+        let mut state = State::sample();
         let session = state.session_mut(12).unwrap();
         session.opts.insert("model".into(), "gpt".into());
         session.agent_session = "id".into();

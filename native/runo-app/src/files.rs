@@ -114,7 +114,7 @@ impl RunoApp {
         let Some(dir) = self.current().map(|s| s.dir.clone()) else {
             return;
         };
-        if query.is_empty() || self.demo {
+        if query.is_empty() {
             self.file_hits = None;
             return;
         }
