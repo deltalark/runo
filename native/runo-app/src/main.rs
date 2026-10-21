@@ -39,6 +39,7 @@ mod git;
 mod githistory;
 mod github;
 mod gitplace;
+mod glow;
 mod handoff;
 mod health;
 mod history;
@@ -4642,17 +4643,13 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
-            .rounded_bl(px(shell::ISLAND_R))
             // Beside the session tabs the sheet meets the frame, so it curves away there.
             .when(
                 self.mode() == Mode::Sessions && !self.tabs.is_empty(),
-                |el| {
-                    el.rounded_tr(px(shell::ISLAND_R))
-                        .child(shell::frame_corner(true, false))
-                },
+                |el| el.child(shell::frame_corner(true, false, pane(c_sheet()))),
             )
             .child(shell::sheet_corner())
-            .child(shell::frame_corner(false, true))
+            .child(shell::frame_corner(false, true, pane(c_sheet())))
             .child(
                 // The list's own header: what it holds and how much is running, with the
                 // new-session button beside it.
@@ -8188,13 +8185,19 @@ impl RunoApp {
             })
             .when(!self.changes.is_empty(), |el| {
                 el.child(
+                    // A well like the terminal's output, set in from the island's edges:
+                    // its own fill must stay clear of the island's rounded corners, which
+                    // blend the frame over the island's fill alone (see
+                    // `shell::frame_corner`).
                     div()
                         .mt_2()
+                        .mx(px(12.))
+                        .mb(px(12.))
                         .flex_1()
                         .min_h_0()
                         .v_flex()
-                        .border_t_1()
-                        .border_color(divider())
+                        .rounded(px(10.))
+                        .overflow_hidden()
                         .bg(inset(c_canvas()))
                         .child(
                             div()

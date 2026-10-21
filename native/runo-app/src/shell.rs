@@ -71,23 +71,62 @@ fn inner_curve(fill: Rgba, top: bool, r: f32) -> Div {
 
 /// The one touch of accent on a selected row: a thin bracket in the accent that hugs the
 /// row's left edge and wraps round its rounded corners, like "(". It draws in once the
-/// row has landed.
+/// row has landed. With a corner glow on in Settings it is painted with its glow round it
+/// (see `glow`), in the same shape.
 pub(crate) fn accent_bracket(key: impl Into<SharedString>) -> AnyElement {
-    div()
+    let el = div()
         .absolute()
         .top(px(1.))
         .bottom(px(1.))
         .left(px(-5.))
-        .w(px(FUSE_R + 2.))
-        .border_l(px(2.))
-        .rounded_l(px(FUSE_R + 2.))
-        .border_color(rgb(c_blue()))
-        .animated(
-            ElementId::Name(key.into()),
-            Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
-            |el, d| el.opacity(d),
+        .w(px(FUSE_R + 2.));
+    let el = if glow::on() {
+        el.child(
+            canvas(
+                |_, _, _| (),
+                |b, _, window, cx| {
+                    let look = glow::look(window, cx);
+                    let (x0, y0, y1) = (b.origin.x, b.origin.y, b.bottom());
+                    let r = px(FUSE_R + 2.).min((y1 - y0) / 2.);
+                    let at = |x: Pixels, y: Pixels| point(x, y);
+                    glow::paint_glow(window, look, |f| {
+                        // Down the middle of the 2px edge, round both corners.
+                        let (x, i, rc) = (x0 + px(1.), px(1.), r - px(1.));
+                        f.move_to(at(x + rc, y0 + i));
+                        turn(f, at(x + rc, y0 + i), at(x, y0 + i), at(x, y0 + i + rc));
+                        f.line_to(at(x, y1 - i - rc));
+                        turn(f, at(x, y1 - i - rc), at(x, y1 - i), at(x + rc, y1 - i));
+                    });
+                    // The bracket itself, thinning to nothing round its corners the way
+                    // a left border on a rounded box does.
+                    let w = px(2.);
+                    let mut f = PathBuilder::fill();
+                    f.move_to(at(x0 + r, y0));
+                    turn(&mut f, at(x0 + r, y0), at(x0, y0), at(x0, y0 + r));
+                    f.line_to(at(x0, y1 - r));
+                    turn(&mut f, at(x0, y1 - r), at(x0, y1), at(x0 + r, y1));
+                    turn(&mut f, at(x0 + r, y1), at(x0 + w, y1), at(x0 + w, y1 - r));
+                    f.line_to(at(x0 + w, y0 + r));
+                    turn(&mut f, at(x0 + w, y0 + r), at(x0 + w, y0), at(x0 + r, y0));
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, look.core);
+                    }
+                },
+            )
+            .size_full(),
         )
-        .into_any_element()
+    } else {
+        el.border_l(px(2.))
+            .rounded_l(px(FUSE_R + 2.))
+            .border_color(rgb(c_blue()))
+    };
+    el.animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+        |el, d| el.opacity(d),
+    )
+    .into_any_element()
 }
 
 /// The track behind a row of connected choices, such as the sidebar's filter or a
@@ -176,22 +215,46 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         .h(px(height))
         .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
         // The accent bracket on the tab's leading corner, as on every open tab.
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size(px(FUSE_R + 2.))
-                .border_l(px(2.))
-                .border_t(px(2.))
-                .rounded_tl(px(FUSE_R))
-                .border_color(rgb(c_blue()))
-                .animated(
-                    SharedString::from(format!("rail-bracket-{key}")),
-                    Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
-                    |el, d| el.opacity(d),
-                ),
-        )
+        .child({
+            let el = div().absolute().top_0().left_0().size(px(FUSE_R + 2.));
+            if glow::on() {
+                el.child(
+                    canvas(
+                        |_, _, _| (),
+                        |b, _, window, cx| {
+                            let look = glow::look(window, cx);
+                            // Up the middle of the 2px edge and round the top corner.
+                            let (x0, y0) = (b.origin.x + px(1.), b.origin.y + px(1.));
+                            let (end, rc) = (px(FUSE_R + 1.), px(FUSE_R - 1.));
+                            let line = |f: &mut PathBuilder| {
+                                let at = |x: Pixels, y: Pixels| point(x, y);
+                                f.move_to(at(x0, y0 + end));
+                                f.line_to(at(x0, y0 + rc));
+                                turn(f, at(x0, y0 + rc), at(x0, y0), at(x0 + rc, y0));
+                                f.line_to(at(x0 + end, y0));
+                            };
+                            glow::paint_glow(window, look, line);
+                            let mut f = PathBuilder::stroke(px(2.));
+                            line(&mut f);
+                            if let Ok(path) = f.build() {
+                                window.paint_path(path, look.core);
+                            }
+                        },
+                    )
+                    .size_full(),
+                )
+            } else {
+                el.border_l(px(2.))
+                    .border_t(px(2.))
+                    .rounded_tl(px(FUSE_R))
+                    .border_color(rgb(c_blue()))
+            }
+            .animated(
+                SharedString::from(format!("rail-bracket-{key}")),
+                Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+                |el, d| el.opacity(d),
+            )
+        })
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
@@ -209,7 +272,7 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
 /// page and the sheet laid in the hole too, so it is the very shade of the page.
 fn rail_fill(tab: Rgba) -> AnyElement {
     let base = pane(c_sheet());
-    let fill = Hsla::from(rail_shade());
+    let fill = Hsla::from(settings::over(settings::frame(), base));
     let lift = (tab != base).then(|| Hsla::from(settings::over(tab, base)));
     let shade = canvas(
         |_, _, _| TAB_CUT.set(None),
@@ -377,7 +440,7 @@ pub(crate) fn chosen_fill_of(key: impl Into<SharedString>, radius: f32, look: Di
 /// top bar: the corner of a square outside a quarter circle, in the rail's colour, laid
 /// over the sheet's top-left. Empty in glass mode.
 pub(crate) fn sheet_corner() -> Div {
-    let fill = Hsla::from(rail_shade());
+    let fill = Hsla::from(settings::over(settings::frame(), pane(c_sheet())));
     div().absolute().top_0().left_0().size(px(SHEET_R)).child(
         canvas(
             |_, _, _| (),
@@ -402,9 +465,6 @@ pub(crate) fn sheet_corner() -> Div {
 pub(crate) const GUTTER: f32 = 8.;
 /// Radius of an island's rounded corners.
 pub(crate) const ISLAND_R: f32 = 14.;
-/// How far the frame's curves reach past an island's or tab's rounded edge, so their
-/// antialiased rims overlap.
-const SEAM: f32 = 0.75;
 /// Radius of an open tab's top corners, and of the curves where it flows into its island.
 const STRIP_TAB_R: f32 = 9.;
 const STRIP_FLARE_R: f32 = 8.;
@@ -443,16 +503,20 @@ pub(crate) fn strip_cut(strip: &'static str) -> AnyElement {
 /// paths that never overlap, so the join looks the same in every glass style. A child
 /// of the strip, which must be `relative`, added first so it sits under the tabs.
 pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
-    let frame = Hsla::from(settings::frame());
+    // The island's fill under the whole strip, and the frame as the difference over it
+    // (see `settings::frame`): along the tab's curves the two blend into each other
+    // instead of overlapping, which darkens, or leaving a gap, which lets the desktop
+    // through.
+    let frame = Hsla::from(settings::over(settings::frame(), island));
     let island = Hsla::from(island);
-    let accent = Hsla::from(rgb(c_blue()));
     div()
         .absolute()
         .inset_0()
+        .bg(island)
         .child(
             canvas(
                 move |_, _, _| STRIP_CUTS.with_borrow_mut(|c| c.remove(strip)),
-                move |b, _, window, _| {
+                move |b, _, window, cx| {
                     let at = |x: Pixels, y: Pixels| point(x, y);
                     let (left, top, right, bottom) =
                         (b.origin.x, b.origin.y, b.right(), b.bottom());
@@ -466,9 +530,7 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     f.line_to(at(right, top));
                     f.line_to(at(right, bottom));
                     if let Some(t) = cut {
-                        let s = px(SEAM);
-                        let (x0, x1, y0) = (t.origin.x + s, t.right() - s, t.origin.y.max(top) + s);
-                        let (fr, tr) = (fr + s, tr - s);
+                        let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
                         f.line_to(at(x1 + fr, bottom));
                         turn(
                             &mut f,
@@ -490,60 +552,30 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     }
                     f.line_to(at(left, bottom));
                     f.close();
-                    let frame_path = f.build();
-                    let Some(t) = cut else {
-                        if let Ok(path) = frame_path {
-                            window.paint_path(path, frame);
-                        }
-                        return;
-                    };
-                    let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
-                    // The tab goes down first and the frame over it, its hole a little
-                    // inside the tab's outline: the two antialiased rims then overlap
-                    // instead of meeting, which would leave a light seam round the tab in
-                    // glass mode.
-                    let tab = |mut f: PathBuilder| {
-                        f.move_to(at(x0 - fr, bottom));
-                        turn(
-                            &mut f,
-                            at(x0 - fr, bottom),
-                            at(x0, bottom),
-                            at(x0, bottom - fr),
-                        );
-                        f.line_to(at(x0, y0 + tr));
-                        turn(&mut f, at(x0, y0 + tr), at(x0, y0), at(x0 + tr, y0));
-                        f.line_to(at(x1 - tr, y0));
-                        turn(&mut f, at(x1 - tr, y0), at(x1, y0), at(x1, y0 + tr));
-                        f.line_to(at(x1, bottom - fr));
-                        turn(
-                            &mut f,
-                            at(x1, bottom - fr),
-                            at(x1, bottom),
-                            at(x1 + fr, bottom),
-                        );
-                        f.close();
-                        f.build()
-                    };
-                    if let Ok(path) = tab(PathBuilder::fill()) {
-                        window.paint_path(path, island);
-                    }
-                    if let Ok(path) = frame_path {
+                    if let Ok(path) = f.build() {
                         window.paint_path(path, frame);
                     }
+                    let Some(t) = cut else { return };
+                    let (x0, y0) = (t.origin.x, t.origin.y.max(top));
                     // The bracket: up the tab's left edge and round its top corner.
                     let (i, reach) = (px(1.), px(9.));
+                    let line = |f: &mut PathBuilder| {
+                        f.move_to(at(x0 + i, y0 + tr + reach));
+                        f.line_to(at(x0 + i, y0 + tr));
+                        turn(
+                            f,
+                            at(x0 + i, y0 + tr),
+                            at(x0 + i, y0 + i),
+                            at(x0 + tr, y0 + i),
+                        );
+                        f.line_to(at(x0 + tr + reach, y0 + i));
+                    };
+                    let look = glow::look(window, cx);
+                    glow::paint_glow(window, look, line);
                     let mut f = PathBuilder::stroke(px(2.));
-                    f.move_to(at(x0 + i, y0 + tr + reach));
-                    f.line_to(at(x0 + i, y0 + tr));
-                    turn(
-                        &mut f,
-                        at(x0 + i, y0 + tr),
-                        at(x0 + i, y0 + i),
-                        at(x0 + tr, y0 + i),
-                    );
-                    f.line_to(at(x0 + tr + reach, y0 + i));
+                    line(&mut f);
                     if let Ok(path) = f.build() {
-                        window.paint_path(path, accent);
+                        window.paint_path(path, look.core);
                     }
                 },
             )
@@ -555,8 +587,11 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
 /// One rounded corner of an island: the corner of a square outside a quarter circle, in
 /// the frame's grey, so the island reads as rounded over whatever it holds. The island's
 /// own fill is rounded too, so the two never overlap in glass mode.
-pub(crate) fn frame_corner(top: bool, left: bool) -> AnyElement {
-    let fill = Hsla::from(settings::frame());
+pub(crate) fn frame_corner(top: bool, left: bool, under: Rgba) -> AnyElement {
+    // The frame as the difference over the island's own square fill (see
+    // `settings::frame`), so along the curve the two blend instead of overlapping or
+    // leaving a gap. The island must not round this corner itself.
+    let fill = Hsla::from(settings::over(settings::frame(), under));
     let r = ISLAND_R;
     div()
         .absolute()
@@ -574,17 +609,10 @@ pub(crate) fn frame_corner(top: bool, left: bool) -> AnyElement {
                         let y = if top { y } else { r - y };
                         point(b.origin.x + px(x), b.origin.y + px(y))
                     };
-                    // The curve runs a little inside the island's own rounded edge, so
-                    // the two antialiased rims overlap instead of meeting. Where they
-                    // only meet, both are part-clear along the curve and the desktop
-                    // shows through as a light seam in glass mode.
-                    let q = r - SEAM;
                     let mut f = PathBuilder::fill();
                     f.move_to(p(0., 0.));
                     f.line_to(p(r, 0.));
-                    f.line_to(p(r, r - q));
-                    f.cubic_bezier_to(p(r - q, r), p(r - k * q, r - q), p(r - q, r - k * q));
-                    f.line_to(p(0., r));
+                    f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
                     f.close();
                     if let Ok(path) = f.build() {
                         window.paint_path(path, fill);
@@ -597,25 +625,25 @@ pub(crate) fn frame_corner(top: bool, left: bool) -> AnyElement {
 }
 
 /// An island on the frame: `content` on a fill with the given corners rounded, as
-/// top-left, top-right, bottom-right and bottom-left. A transparent fill leaves the
-/// layers to the content, as on pages that paint their own list beside the page.
+/// top-left, top-right, bottom-right and bottom-left. The fill is square; each rounded
+/// corner is the frame painted over it (see `frame_corner`). A transparent fill leaves
+/// the layers and their corners to the content, as on pages that paint their own list
+/// beside the page.
 pub(crate) fn island(content: impl IntoElement, fill: Rgba, round: [bool; 4]) -> Div {
-    let r = px(ISLAND_R);
     let [tl, tr, br, bl] = round;
+    // A transparent fill leaves the corners to the content too, which knows what lies
+    // under each; see `frame_corner`.
+    let own = fill.a > 0.0;
     div()
         .relative()
         .flex()
         .flex_col()
         .bg(fill)
-        .when(tl, |el| el.rounded_tl(r))
-        .when(tr, |el| el.rounded_tr(r))
-        .when(br, |el| el.rounded_br(r))
-        .when(bl, |el| el.rounded_bl(r))
         .child(content)
-        .when(tl, |el| el.child(frame_corner(true, true)))
-        .when(tr, |el| el.child(frame_corner(true, false)))
-        .when(br, |el| el.child(frame_corner(false, false)))
-        .when(bl, |el| el.child(frame_corner(false, true)))
+        .when(own && tl, |el| el.child(frame_corner(true, true, fill)))
+        .when(own && tr, |el| el.child(frame_corner(true, false, fill)))
+        .when(own && br, |el| el.child(frame_corner(false, false, fill)))
+        .when(own && bl, |el| el.child(frame_corner(false, true, fill)))
 }
 
 /// One tab in a strip over an island. The open one is cut from the island below
@@ -3091,14 +3119,14 @@ fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
 
 /// Fill of a tab that is not open, at rest and under the pointer: a wash of white over
 /// the frame, stronger on the light theme's grey frame than on the dark one. In glass
-/// mode the open tab is as see-through as its island, so a resting wash would read as the
-/// open one: there the rest sit clear on the frame and only the pointer lifts them.
+/// mode the open tab is as see-through as its island, so the rest get only a faint wash,
+/// enough to read as tabs but well short of the open one, and the pointer lifts them.
 pub(crate) fn tab_chip() -> (Rgba, Rgba) {
     if settings::glass_on() {
         if is_dark() {
-            (rgba(0), rgba(0xffffff1a))
+            (rgba(0xffffff0d), rgba(0xffffff1f))
         } else {
-            (rgba(0), rgba(0xffffff59))
+            (rgba(0xffffff38), rgba(0xffffff66))
         }
     } else if is_dark() {
         (rgba(0xffffff14), rgba(0xffffff26))

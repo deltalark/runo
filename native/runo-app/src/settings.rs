@@ -88,6 +88,13 @@ pub struct AppSettings {
     pub glass: String,
     /// Cards, menus and dialogs are translucent too.
     pub glass_cards: bool,
+    /// How the accent corner on the open tab and the selected row moves: "static",
+    /// "neon" (a soft pulsing glow in the accent) or "rgb" (a glow cycling the rainbow).
+    pub corner_glow: String,
+    /// How fast the corner glow moves: "slow", "normal" or "fast".
+    pub corner_glow_speed: String,
+    /// How strong the corner glow is: "soft", "medium" or "bright".
+    pub corner_glow_intensity: String,
     /// Interface font: "bundled" (Runo's own, tuned for sharp small text) or "system".
     pub font: String,
     /// The status bar's Usage popover shows every limit window, not just the closest one.
@@ -211,6 +218,9 @@ impl Default for AppSettings {
             rail_pins: Vec::new(),
             glass: "off".into(),
             glass_cards: true,
+            corner_glow: "static".into(),
+            corner_glow_speed: "normal".into(),
+            corner_glow_intensity: "medium".into(),
             font: "bundled".into(),
             font_smoothing: false,
             memory_server: true,
@@ -319,6 +329,11 @@ impl AppSettings {
         ANIMATIONS.store(self.animations, Ordering::Relaxed);
         GLASS.store(glass_alpha(&self.glass), Ordering::Relaxed);
         GLASS_CARDS.store(self.glass_cards, Ordering::Relaxed);
+        crate::glow::configure(
+            &self.corner_glow,
+            &self.corner_glow_speed,
+            &self.corner_glow_intensity,
+        );
         MEMORY_SERVER.store(self.memory_server, Ordering::Relaxed);
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
@@ -589,9 +604,20 @@ pub fn stack(top: Rgba, under: Rgba) -> Rgba {
 /// open tab's sheet (see `shell::rail_fill`), so the rest of the frame is that same pair
 /// flattened into one fill: in glass mode every part of the frame is one material, with
 /// no lighter band where the rail meets the top bar or the tab strip.
+///
+/// It is also always a step more opaque than the content layer, the most solid island.
+/// Where the frame meets an island's rounded corner or an open tab, the frame is painted
+/// as the difference over the island's own square fill (see `over`), so the two never
+/// overlap or leave a gap along the antialiased curve; that only works while the frame
+/// is the more opaque of the two.
 pub fn frame() -> Rgba {
     if glass_on() {
-        stack(rail_shade(), pane(c_sheet()))
+        let f = stack(rail_shade(), pane(c_sheet()));
+        let floor = (GLASS.load(Ordering::Relaxed) as f32 + 8.0).min(255.0) / 255.0;
+        Rgba {
+            a: f.a.max(floor),
+            ..f
+        }
     } else {
         rgb(c_rail())
     }
