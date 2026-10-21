@@ -37,7 +37,6 @@ const SOURCES: &[(&str, &str)] = &[
         "proof-of-done",
         include_str!("../../../docs/guide/proof-of-done.md"),
     ),
-    ("missions", include_str!("../../../docs/guide/missions.md")),
     (
         "switch-agent",
         include_str!("../../../docs/guide/switch-agent.md"),
@@ -250,7 +249,6 @@ fn jump_for(open: &str) -> Option<Jump> {
         "inbox" => Jump::View(View::Inbox),
         "sessions" => Jump::View(View::AllSessions),
         "review" => Jump::View(View::Review),
-        "missions" => Jump::View(View::Missions),
         "github" => Jump::View(View::GitHub),
         "playbooks" => Jump::View(View::Automations),
         "history" => Jump::View(View::History),
@@ -275,7 +273,6 @@ fn open_label(open: &str) -> String {
         "github" => "Go to GitHub".into(),
         "history" => "Go to History".into(),
         "review" => "Go to Review".into(),
-        "missions" => "Go to Missions".into(),
         "inbox" => "Go to Inbox".into(),
         "sessions" => "Go to Sessions".into(),
         _ => "Go to Home".into(),
@@ -438,7 +435,6 @@ impl RunoApp {
             View::Review => "Review",
             View::Branches => "Git branches",
             View::GitHistory => "Git history",
-            View::Missions => "Missions",
             View::Design => "Design",
             View::Architecture => "Architecture",
         };
@@ -1148,10 +1144,6 @@ mod tests {
         assert_eq!(
             top("How do I make Runo run my tests after each turn?"),
             Some("proof-of-done")
-        );
-        assert_eq!(
-            top("Can several agents split up one big goal and work on it at once?"),
-            Some("missions")
         );
         assert!(search("zebra quantum lasagna").is_empty());
     }

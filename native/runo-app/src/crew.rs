@@ -67,8 +67,6 @@ pub enum Origin {
     Person,
     /// Crew, answering the person's message with this id.
     Crew { message: u64 },
-    /// A part of this mission.
-    Mission { mission: u64 },
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]

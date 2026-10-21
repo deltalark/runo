@@ -46,9 +46,6 @@ mod install;
 mod keymap;
 mod mcp;
 mod memory_mcp;
-mod mission;
-mod mission_ui;
-mod mission_view;
 mod modelcheck;
 mod models;
 mod notes;
@@ -145,7 +142,6 @@ actions!(
         GoPlaybooks,
         GoReviews,
         GoReview,
-        GoMissions,
         GoHistory,
         GoNotes,
         GoInbox,
@@ -190,8 +186,6 @@ enum View {
     Branches,
     /// The project folder's commits as a graph.
     GitHistory,
-    /// Goals planned into parts that several agents work on at once.
-    Missions,
 }
 
 /// What a quick-open entry does when chosen.
@@ -542,19 +536,6 @@ struct RunoApp {
     proving: std::collections::HashSet<u64>,
     /// Sessions waiting on a second opinion, with the agent giving it.
     reviewing: HashMap<u64, &'static str>,
-    /// The mission open on the Missions page; none shows the New mission form.
-    mission_open: Option<u64>,
-    mission_goal: Entity<TextareaState>,
-    mission_feedback: Entity<InputState>,
-    mission_form: mission_ui::MissionForm,
-    /// Sessions whose mission part should be looked at again, such as after a review.
-    mission_wake: Vec<u64>,
-    /// Missions left running at the last quit were picked up again.
-    missions_resumed: bool,
-    /// The mission whose Delete is waiting to be confirmed.
-    mission_deleting: Option<u64>,
-    /// The activity beside a mission's board is hidden.
-    mission_feed_hidden: bool,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
     /// Images that go with a new session's first prompt.
@@ -1736,23 +1717,6 @@ impl RunoApp {
             turn_files: HashMap::new(),
             proving: Default::default(),
             reviewing: HashMap::new(),
-            mission_open: None,
-            mission_goal: cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .placeholder(
-                        "Describe the goal, such as: Add a dark theme with a switch in Settings, and keep it after a restart",
-                    )
-                    .submit_on_enter(true)
-            }),
-            mission_feedback: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("What should change in the plan? Such as: merge the two UI parts")
-            }),
-            mission_form: Default::default(),
-            mission_wake: Vec::new(),
-            missions_resumed: false,
-            mission_deleting: None,
-            mission_feed_hidden: false,
             attachments: HashMap::new(),
             launch_images: HashMap::new(),
             new_context: None,
@@ -1943,28 +1907,6 @@ impl RunoApp {
                 }
             },
         );
-        // Enter on the plan's feedback plans again; the goal box plans like a prompt sends.
-        let replan_sub = cx.subscribe_in(
-            &app.mission_feedback,
-            window,
-            |this, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    if let Some(mid) = this.mission_open {
-                        this.replan(mid, window, cx);
-                    }
-                }
-            },
-        );
-        let goal_sub = cx.subscribe_in(&app.mission_goal, window, |this, _, event, window, cx| {
-            if let InputEvent::PressEnter { shift, secondary } = event {
-                let on_enter = cx.global::<AppSettings>().send_on_enter;
-                if *secondary || (on_enter && !*shift) {
-                    this.plan_mission(window, cx);
-                    cx.notify();
-                }
-            }
-        });
-        app._subscriptions.extend([replan_sub, goal_sub]);
         app._subscriptions.extend([
             branch_sub,
             task_sub,
@@ -2070,7 +2012,6 @@ impl RunoApp {
                     .update(cx, |this, cx| {
                         this.take_playbook_requests(cx);
                         this.take_phone_requests(cx);
-                        this.missions_tick_all(cx);
                     })
                     .is_err()
                 {
@@ -2693,10 +2634,7 @@ impl RunoApp {
                 }
             }
             Event::Output(key, result) => {
-                if !self.handle_mission_output(&key, &result) {
-                    self.handle_output(key, result);
-                }
-                self.mission_wakes(cx);
+                self.handle_output(key, result);
             }
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
@@ -2907,7 +2845,6 @@ impl RunoApp {
                 View::Review => self.open_review(),
                 View::Branches => self.open_branches(),
                 View::GitHistory => self.open_git_history(),
-                View::Missions => self.open_missions(cx),
                 _ => self.view = view,
             },
             Jump::Session(id) => self.open_session(id, window, cx),
@@ -2983,7 +2920,6 @@ impl RunoApp {
                 View::History,
             ),
             ("Go to Git: Changes", IconName::GitCompare, View::Review),
-            ("Go to Missions", IconName::Rocket, View::Missions),
             (
                 "Go to Git: History",
                 IconName::GitCommitHorizontal,
@@ -3690,9 +3626,10 @@ impl RunoApp {
         // playbook runs stay in Chat, where their limits hold.
         if cx.global::<AppSettings>().default_view == "cli"
             && agent::imports_cli_turns(&provider)
-            && self.state.session(id).is_some_and(|s| {
-                s.playbook == 0 && s.mission == 0 && cliview::cli_blocker(s).is_none()
-            })
+            && self
+                .state
+                .session(id)
+                .is_some_and(|s| s.playbook == 0 && cliview::cli_blocker(s).is_none())
         {
             // Context a session was started with goes ahead of the task here too.
             let mut task = task;
@@ -5678,40 +5615,6 @@ impl RunoApp {
                     }),
             )
             .child(div().flex_1())
-            // A mission's part or its own session: back to the mission's board.
-            .children(self.mission(session.mission).map(|m| {
-                let mid = m.id;
-                let lead = m.lead == session.id;
-                div()
-                    .id("hdr-mission")
-                    .h(px(26.))
-                    .px_2()
-                    .mr_2()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_subtle())))
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(if lead {
-                            "This session lands the mission. Back to its board."
-                        } else {
-                            "This session is one part of a mission. Back to its board."
-                        })
-                        .build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.mission_open = Some(mid);
-                        this.open_missions(cx);
-                        cx.notify();
-                    }))
-                    .child(icon(IconName::Rocket, 12., c_secondary()))
-                    .child("Mission board")
-            }))
             // Asked from a canvas: back to it, where its changes show.
             .children(shell::canvas_of(session).map(|view| {
                 let id = session.id;
@@ -9000,7 +8903,6 @@ impl Render for RunoApp {
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
             View::GitHub | View::Review | View::GitHistory | View::Branches => self.git_view(cx),
-            View::Missions => self.missions_view(cx),
             View::Editor => div()
                 .flex_1()
                 .min_w_0()
@@ -9204,10 +9106,6 @@ impl Render for RunoApp {
             .on_action(cx.listener(|this, _: &GoReview, window, cx| {
                 this.git_tab = View::Review;
                 this.go(Mode::Git, window, cx);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &GoMissions, window, cx| {
-                this.go(Mode::Missions, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoHistory, window, cx| {
@@ -9858,7 +9756,6 @@ fn app_menus() -> Vec<Menu> {
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
             MenuItem::action("Git: Changes", GoReview),
-            MenuItem::action("Missions", GoMissions),
             MenuItem::action("Git: GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
             MenuItem::action("History", GoHistory),

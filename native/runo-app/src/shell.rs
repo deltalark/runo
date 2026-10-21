@@ -836,7 +836,6 @@ pub(crate) enum Mode {
     Sessions,
     Design,
     Architecture,
-    Missions,
     /// What waits to ship and the project's GitHub, as two tabs of one place.
     Git,
     Playbooks,
@@ -849,17 +848,16 @@ pub(crate) enum Mode {
 impl Mode {
     /// The modes at the top of the rail, in order. The first `WORK` are the day's work;
     /// the rest, what's been kept, sit apart.
-    pub(crate) const MAIN: [Mode; 6] = [
+    pub(crate) const MAIN: [Mode; 5] = [
         Mode::Home,
         Mode::Sessions,
-        Mode::Missions,
         Mode::Git,
         Mode::Playbooks,
         Mode::History,
     ];
 
     /// How many of `MAIN` stay out on the rail; the rest wait in its More menu.
-    const WORK: usize = 4;
+    const WORK: usize = 3;
 
     /// The places in the rail's More menu, used less than the ones out on the rail.
     pub(crate) const MORE: [Mode; 3] = [Mode::Playbooks, Mode::History, Mode::Notes];
@@ -883,7 +881,6 @@ impl Mode {
             Mode::Sessions => "Sessions",
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
-            Mode::Missions => "Missions",
             Mode::Git => "Git",
             Mode::Playbooks => "Playbooks",
             Mode::History => "History",
@@ -900,7 +897,6 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
-            Mode::Missions => "go-missions",
             // Git's Changes tab; `go-reviews` opens its GitHub tab.
             Mode::Git => "go-review",
             Mode::Playbooks => "go-playbooks",
@@ -917,7 +913,6 @@ impl Mode {
             Mode::Sessions => IconName::CodeXml,
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
-            Mode::Missions => IconName::Rocket,
             Mode::Git => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
             Mode::History => IconName::RotateCcwClock,
@@ -934,7 +929,6 @@ impl Mode {
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
-            View::Missions => Mode::Missions,
             View::Review | View::GitHistory | View::Branches | View::GitHub => Mode::Git,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
@@ -1112,7 +1106,6 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
-            Mode::Missions => self.open_missions(cx),
             Mode::Git => match self.git_tab {
                 View::GitHub => self.load_github(),
                 View::Branches => self.open_branches(),
@@ -1405,11 +1398,10 @@ impl RunoApp {
     }
 
     /// Whether the open place has a list beside the rail for its tab to join: the
-    /// sessions sidebar, the missions and review lists, or Design's layers.
+    /// sessions sidebar, the review list, Settings' pages, or Design's layers.
     pub(crate) fn has_panel(&self, cx: &App) -> bool {
         match self.mode() {
             Mode::Sessions => self.show_sidebar,
-            Mode::Missions | Mode::Settings => true,
             Mode::Git => matches!(self.view, View::Review | View::GitHistory | View::Branches),
             Mode::Design => self
                 .design
@@ -1443,7 +1435,6 @@ impl RunoApp {
             let badge = match mode {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
-                Mode::Missions => self.missions_badge(),
                 Mode::Git if self.gh.needs_you() > 0 => Some(c_amber()),
                 Mode::Git if counts.review > 0 => Some(c_blue()),
                 _ => None,
@@ -3496,7 +3487,6 @@ mod tests {
         // Each place on the rail opens a view that lights that same place up again.
         for (view, mode) in [
             (View::Review, Mode::Git),
-            (View::Missions, Mode::Missions),
             (View::GitHub, Mode::Git),
             (View::Branches, Mode::Git),
             (View::GitHistory, Mode::Git),
