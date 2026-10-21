@@ -207,7 +207,7 @@ impl RunoApp {
             let mut below = base.clone();
             for (i, part) in parts.iter().enumerate() {
                 let name = format!("{branch}-part-{}", i + 1);
-                git::push_branch(dir, &remote, &name)?;
+                git::push_branch_over(dir, &remote, &name)?;
                 let body = format!(
                     "{}\n\nPart {} of {n} of {branch}, stacked: each builds on the one before, so review and merge them in order.",
                     part.why,

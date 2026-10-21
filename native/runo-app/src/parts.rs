@@ -5,6 +5,7 @@
 use super::*;
 use branches::git_term;
 use git::{FileParts, Undo};
+use seatbelt::Snag;
 use std::collections::HashSet;
 
 /// Marks a whole-only file (binary, deleted) as left out of the next commit.
@@ -63,6 +64,10 @@ fn parts(n: usize) -> String {
         n => format!("{n} parts"),
     }
 }
+
+/// Something the seatbelt found in what's ticked: the file, the line (or `WHOLE` for the
+/// file itself), its number in the new file, and what it is.
+type Found = (String, (usize, usize), usize, Snag);
 
 /// Where a file's path splits into its name and its folder.
 fn split_path(path: &str) -> (String, String) {
@@ -264,6 +269,147 @@ impl RunoApp {
         })
     }
 
+    /// What the seatbelt finds in what the next commit would take.
+    fn folder_snags(&self, folder: &Folder) -> Vec<Found> {
+        let mut out = Vec::new();
+        for file in &folder.files {
+            let path = &file.change.path;
+            if self.file_ticked(file) == Ticked::None || file.change.status == "D" {
+                continue;
+            }
+            if seatbelt::secret_file(path) {
+                out.push((path.clone(), WHOLE, 0, Snag::SecretFile));
+            }
+            let size = std::fs::metadata(std::path::Path::new(&folder.dir).join(path))
+                .map_or(0, |m| m.len());
+            if size > seatbelt::HUGE {
+                out.push((path.clone(), WHOLE, 0, Snag::Huge(size)));
+            }
+            if file.whole_only() {
+                continue;
+            }
+            for (p, part) in file.parts.iter().enumerate() {
+                for (l, line) in part.lines.iter().enumerate() {
+                    if line.kind != '+' || !self.line_in(path, p, l) {
+                        continue;
+                    }
+                    if let Some(snag) = seatbelt::scan_line(path, &line.text) {
+                        out.push((path.clone(), (p, l), line.new, snag));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The seatbelt's card over the commit button: each thing found, with a way to keep
+    /// it out of the commit.
+    fn seatbelt_card(&self, found: &[Found], cx: &mut Context<Self>) -> AnyElement {
+        let mut rows = div().v_flex().gap(px(4.));
+        for (i, (path, at, line_no, snag)) in found.iter().take(12).enumerate() {
+            let whole = *at == WHOLE;
+            // New files only: one git already tracks needs taking out of history too.
+            let untracked = self
+                .folder_file(path)
+                .is_some_and(|f| matches!(f.change.status.as_str(), "A" | "?" | "??"));
+            let (leave, ignore, key) = (path.clone(), path.clone(), *at);
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .child(icon(
+                        if snag.serious() {
+                            IconName::ShieldAlert
+                        } else {
+                            IconName::TriangleAlert
+                        },
+                        12.,
+                        c_amber(),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .child(div().truncate().child(snag.words()))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family("JetBrains Mono")
+                                    .text_size(px(11.))
+                                    .text_color(rgb(c_muted()))
+                                    .child(match line_no {
+                                        0 => path.clone(),
+                                        n => format!("{path}:{n}"),
+                                    }),
+                            ),
+                    )
+                    .child(
+                        self.button(
+                            ("belt-leave", i),
+                            if whole { "Leave the file out" } else { "Leave the line out" },
+                            false,
+                        )
+                        .h(px(26.))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if key == WHOLE {
+                                this.flip_file(&leave);
+                            } else {
+                                this.git_left_out.entry(leave.clone()).or_default().insert(key);
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .when(whole && untracked, |el| {
+                        el.child(
+                            self.button(("belt-ignore", i), "Ignore it", false)
+                                .h(px(26.))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let path = ignore.clone();
+                                    this.git_step("Ignoring…", move |dir| {
+                                        git::ignore_path(dir, &path)?;
+                                        Ok(Some((
+                                            format!("Added {path} to .gitignore. git won't offer it again."),
+                                            None,
+                                        )))
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            );
+        }
+        div()
+            .mt_2()
+            .p_3()
+            .v_flex()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgba((c_amber() << 8) | 0x66))
+            .bg(rgba((c_amber() << 8) | 0x14))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(icon(IconName::ShieldCheck, 13., c_amber()))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(match found.len() {
+                                1 => "Seatbelt: 1 thing to check before committing".to_string(),
+                                n => format!("Seatbelt: {n} things to check before committing"),
+                            }),
+                    ),
+            )
+            .child(rows)
+            .into_any_element()
+    }
+
     /// Commit what is ticked, or add it to the last commit.
     fn commit_folder(&mut self, amend: bool, cx: &mut Context<Self>) {
         let Some(folder) = self.git_folder.clone() else {
@@ -447,6 +593,8 @@ impl RunoApp {
             .unwrap_or_default();
         let (picked, total) = self.picked_parts();
         let everything = picked == total;
+        let found = self.folder_snags(folder);
+        let belt = !found.is_empty();
         let commit_label = if picked == 0 {
             "Tick what to commit".to_string()
         } else if everything {
@@ -456,6 +604,11 @@ impl RunoApp {
             }
         } else {
             format!("Commit {picked} of {}", parts(total))
+        };
+        let commit_label = if belt && picked > 0 {
+            "Commit anyway".to_string()
+        } else {
+            commit_label
         };
         let (added, removed) = folder.files.iter().fold((0, 0), |a, f| {
             (a.0 + f.change.added, a.1 + f.change.removed)
@@ -628,6 +781,7 @@ impl RunoApp {
                                         ),
                                 ),
                         )
+                        .when(belt, |el| el.child(self.seatbelt_card(&found, cx)))
                         .child(
                             div()
                                 .mt_2()
@@ -645,7 +799,7 @@ impl RunoApp {
                                         .gap_2()
                                         .rounded_md()
                                         .cursor_pointer()
-                                        .bg(rgb(c_blue()))
+                                        .bg(rgb(if belt { c_amber() } else { c_blue() }))
                                         .text_color(rgb(0xffffff))
                                         .text_size(px(13.))
                                         .font_weight(FontWeight::SEMIBOLD)

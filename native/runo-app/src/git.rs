@@ -2391,6 +2391,88 @@ pub fn push_branch(dir: &str, remote: &str, branch: &str) -> Result<(), String> 
         .map_err(|e| auth_hint(&e))
 }
 
+/// Add a new file to the folder's .gitignore, so git stops offering it, and take it
+/// out of the index if it was added there.
+pub fn ignore_path(dir: &str, path: &str) -> Result<(), String> {
+    let file = Path::new(dir).join(".gitignore");
+    let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+    let line = format!("/{path}");
+    if text.lines().any(|l| l.trim() == line) {
+        return Ok(());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&line);
+    text.push('\n');
+    std::fs::write(&file, text).map_err(|e| e.to_string())?;
+    git(
+        dir,
+        &["rm", "-q", "--cached", "--ignore-unmatch", "--", path],
+    )
+    .map(|_| ())
+}
+
+/// Take the last commit off the branch, keeping its changes in the folder. Undo puts it
+/// back.
+pub fn uncommit(dir: &str) -> Result<Undo, String> {
+    let head = rev(dir, "HEAD").ok_or("This folder has no commits yet.")?;
+    rev(dir, "HEAD~1")
+        .ok_or("That's the first commit, so there's nothing before it to go back to.")?;
+    git(dir, &["reset", "-q", "--soft", "HEAD~1"])?;
+    git(dir, &["reset", "-q"])?;
+    keep_for_undo(dir, &head);
+    // Its changes are still in the folder, so pointing the branch back is enough.
+    Ok(Undo::Uncommit { head })
+}
+
+/// Every line the commits a push would send add, as one patch: from the tracked remote
+/// branch, or from what no remote branch has yet. Merges are left out; their sides are
+/// in it already.
+pub fn outgoing_patch(dir: &str) -> String {
+    let range: Vec<&str> = if rev(dir, "@{u}").is_some() {
+        vec!["@{u}..HEAD"]
+    } else {
+        vec!["HEAD", "--not", "--remotes"]
+    };
+    let mut args = vec![
+        "log",
+        "-p",
+        "--no-merges",
+        "--format=",
+        "--no-color",
+        "--no-ext-diff",
+    ];
+    args.extend(range);
+    git(dir, &args).unwrap_or_default()
+}
+
+/// Put the commits the checked-out branch has that its remote copy doesn't on a new
+/// branch `name`, and switch to it, leaving the branch as the remote has it.
+/// Uncommitted work comes along.
+pub fn move_to_new_branch(dir: &str, name: &str) -> Result<Undo, String> {
+    let branch = current_branch(dir);
+    let head = rev(dir, "HEAD").ok_or("This folder has no commits yet.")?;
+    let upstream = rev(dir, "@{u}")
+        .ok_or("This branch isn't on the remote yet, so there is nothing to move off it.")?;
+    git(dir, &["switch", "-c", name])?;
+    git(dir, &["branch", "-f", &branch, &upstream])?;
+    keep_for_undo(dir, &head);
+    Ok(Undo::Steps(vec![
+        Undo::Branches(vec![(branch.clone(), Some(head.clone()))]),
+        Undo::Folder { branch, head },
+        Undo::Branches(vec![(name.to_string(), None)]),
+    ]))
+}
+
+/// Send a branch the remote has an older copy of, made again here (a stack part made
+/// over), only if the remote's copy is still the one this folder last saw.
+pub fn push_branch_over(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
+    git(dir, &["push", "--force-with-lease", remote, branch])
+        .map(|_| ())
+        .map_err(|e| auth_hint(&e))
+}
+
 /// What a branch changes against `base`, commit subjects first, cut at `max` bytes, for
 /// an agent to read.
 pub fn branch_patch(dir: &str, branch: &str, base: &str, max: usize) -> String {
@@ -4187,6 +4269,49 @@ index 1..2 100644
         assert!(std::fs::read_to_string(repo.join("f.txt"))
             .unwrap()
             .contains("added two"));
+    }
+
+    #[test]
+    fn seatbelt_steps_take_back_and_move_commits() {
+        let (repo, _remote) = with_origin("seatbelt");
+        let dir = repo.to_str().unwrap();
+        let point = |undo: Undo| UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo,
+        };
+        std::fs::write(repo.join("k.js"), "const t = 1;\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "key"]);
+        let sent = rev(dir, "@{u}").unwrap();
+        let head = rev(dir, "HEAD").unwrap();
+        assert!(outgoing_patch(dir).contains("+const t = 1;"));
+
+        // Taking the commit back keeps the file; Undo puts the commit back.
+        let undo = uncommit(dir).unwrap();
+        assert_eq!(rev(dir, "HEAD").unwrap(), sent);
+        assert!(repo.join("k.js").exists());
+        super::undo(&point(undo)).unwrap();
+        assert_eq!(rev(dir, "HEAD").unwrap(), head);
+
+        // Moving the commit to a branch leaves main as the remote has it.
+        let undo = move_to_new_branch(dir, "my-key").unwrap();
+        assert_eq!(current_branch(dir), "my-key");
+        assert_eq!(rev(dir, "main").unwrap(), sent);
+        assert_eq!(rev(dir, "my-key").unwrap(), head);
+        super::undo(&point(undo)).unwrap();
+        assert_eq!(current_branch(dir), "main");
+        assert_eq!(rev(dir, "main").unwrap(), head);
+        assert!(!has_branch(dir, "my-key"));
+
+        // Ignoring a new file adds it to .gitignore once.
+        std::fs::write(repo.join(".env"), "A=1\n").unwrap();
+        ignore_path(dir, ".env").unwrap();
+        ignore_path(dir, ".env").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
+            "/.env\n"
+        );
     }
 
     #[test]

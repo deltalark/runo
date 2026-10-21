@@ -294,6 +294,7 @@ impl RunoApp {
                     .flex()
                     .child(body.size_full())
                     .children(self.merge_dialog(cx))
+                    .children(self.git_banner_view(cx))
                     .children(self.git_toast_view(cx)),
             )
             .into_any_element()

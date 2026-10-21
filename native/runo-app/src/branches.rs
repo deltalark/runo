@@ -292,6 +292,11 @@ impl RunoApp {
         }
     }
 
+    /// Open the name box for a new branch where the folder is.
+    pub(crate) fn start_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_naming(Naming::New, window, cx);
+    }
+
     fn start_naming(&mut self, naming: Naming, window: &mut Window, cx: &mut Context<Self>) {
         let value = match &naming {
             Naming::New => String::new(),
