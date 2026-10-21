@@ -72,6 +72,7 @@ mod signin;
 mod store;
 mod stream;
 mod terminal;
+mod timemachine;
 mod tour;
 mod turns;
 mod updater;
@@ -259,6 +260,13 @@ struct RunoApp {
     git_kit: Option<String>,
     git_guides: HashMap<String, Option<String>>,
     git_splits: HashMap<String, Option<Vec<reviewable::SplitPart>>>,
+    /// Time machine: shown in place of History's commits, the folder's moments, the
+    /// picked one against now, and the moment waiting for a second click to go back to.
+    git_time_on: bool,
+    git_time: Option<(String, Vec<git::Moment>)>,
+    git_moment_sel: Option<usize>,
+    git_moment_files: Option<timemachine::Against>,
+    git_travel: Option<usize>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1545,6 +1553,11 @@ impl RunoApp {
             git_kit: None,
             git_guides: HashMap::new(),
             git_splits: HashMap::new(),
+            git_time_on: false,
+            git_time: None,
+            git_moment_sel: None,
+            git_moment_files: None,
+            git_travel: None,
             git_repo: None,
             git_undo: None,
             git_working: None,
