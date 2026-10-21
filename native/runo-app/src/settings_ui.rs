@@ -2603,7 +2603,7 @@ impl RunoApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut card = crate::shell::card().v_flex().overflow_hidden();
+        let mut card = div().v_flex();
         for (i, r) in sec.rows.into_iter().enumerate() {
             *counter += 1;
             // A picker of previews is too wide to sit beside its title, so it goes under.
@@ -2657,30 +2657,49 @@ impl RunoApp {
                     .child(div().flex_none().child(control)),
             );
         }
-        // Wide windows put the section's name beside its card, so no line holds only a title.
+        // Wide windows give the section's name a column of its own inside the card,
+        // joined to its rows by a rule, so no line holds only a title.
         let wide = window.viewport_size().width > px(1100.);
-        div()
-            .when(wide, |el| el.flex().items_start().gap(px(28.)))
-            .when(!wide, |el| el.v_flex().gap(px(10.)))
+        let label = div()
+            .v_flex()
+            .gap(px(3.))
+            .when(wide, |el| {
+                el.w(px(230.))
+                    .flex_none()
+                    .px(px(20.))
+                    .py(px(14.))
+                    .border_r_1()
+                    .border_color(divider())
+                    .rounded_l(px(12.))
+                    .bg(tint(c_subtle()))
+            })
+            .when(!wide, |el| el.px_1())
             .child(
                 div()
-                    .when(wide, |el| el.w(px(220.)).flex_none().pt(px(12.)))
-                    .v_flex()
-                    .gap(px(3.))
-                    .px_1()
-                    .child(
-                        div()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
-                            .child(sec.title),
-                    )
-                    .when(!sec.desc.is_empty(), |el| {
-                        el.child(div().text_xs().text_color(rgb(c_muted())).child(sec.desc))
-                    }),
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(c_text()))
+                    .child(sec.title),
             )
-            .child(card.flex_1().min_w_0())
-            .into_any_element()
+            .when(!sec.desc.is_empty(), |el| {
+                el.child(div().text_xs().text_color(rgb(c_muted())).child(sec.desc))
+            });
+        let card = card.flex_1().min_w_0();
+        if wide {
+            crate::shell::card()
+                .flex()
+                .overflow_hidden()
+                .child(label)
+                .child(card)
+                .into_any_element()
+        } else {
+            div()
+                .v_flex()
+                .gap(px(10.))
+                .child(label)
+                .child(crate::shell::card().overflow_hidden().child(card))
+                .into_any_element()
+        }
     }
 
     /// One tab across the top of Settings, chosen on a raised pill with the accent's
