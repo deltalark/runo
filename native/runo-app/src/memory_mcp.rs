@@ -193,6 +193,10 @@ fn thread_tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "A name for your task in 2 to 5 plain words, such as \"Settings spacing pass\". Give it with your first checklist."
+                    },
                     "steps": {
                         "type": "array",
                         "items": {
@@ -284,7 +288,12 @@ fn thread_call(
             if steps.is_empty() {
                 return failure("The checklist has no steps.");
             }
-            EventKind::Checklist { steps }
+            let title = args["title"]
+                .as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
+            EventKind::Checklist { steps, title }
         }
         "report" => {
             let summary = args["summary"].as_str().unwrap_or("").trim();
@@ -822,7 +831,7 @@ mod tests {
         let taken = take_events(&events, &mut Seen::default());
         assert_eq!(taken.len(), 4);
         assert!(taken.iter().all(|e| e.thread == 7));
-        let EventKind::Checklist { steps } = &taken[0].kind else {
+        let EventKind::Checklist { steps, .. } = &taken[0].kind else {
             panic!("first event is not the checklist");
         };
         assert_eq!(steps[1].mark, Mark::Doing);

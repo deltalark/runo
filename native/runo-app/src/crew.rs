@@ -148,9 +148,12 @@ pub struct Event {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventKind {
-    /// The whole checklist, replacing the last one.
+    /// The whole checklist, replacing the last one, and a short name for the task when
+    /// the thread gives one.
     Checklist {
         steps: Vec<Step>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     Report {
         summary: String,
@@ -316,9 +319,22 @@ pub fn check_decision(decision: Decision) -> Result<Decision, String> {
 
 /// Apply what a thread reported to what the app keeps for it. Returns whether anything
 /// changed; a message for Crew changes nothing here.
+/// The name a thread gave its task, for a thread the person started: those are named
+/// after their prompt until then. Crew's threads keep the titles Crew gave them.
+pub fn self_title(info: &ThreadInfo, kind: &EventKind) -> Option<String> {
+    let EventKind::Checklist {
+        title: Some(title), ..
+    } = kind
+    else {
+        return None;
+    };
+    let title = title.trim().trim_matches(['"', '.']).trim();
+    (info.origin == Origin::Person && !title.is_empty()).then(|| title_from(title))
+}
+
 pub fn apply(info: &mut ThreadInfo, kind: &EventKind, at: u64) -> bool {
     match kind {
-        EventKind::Checklist { steps } => {
+        EventKind::Checklist { steps, .. } => {
             let steps = clean_steps(steps.clone());
             if info.checklist == steps {
                 return false;
@@ -455,6 +471,13 @@ impl TagFilter {
 pub fn block_event(block: &Tagged) -> Option<EventKind> {
     match block.kind.as_str() {
         "checklist" => {
+            let title = block.body.lines().find_map(|l| {
+                let l = l.trim();
+                l.strip_prefix("title:")
+                    .or_else(|| l.strip_prefix("Title:"))
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+            });
             let steps = block
                 .body
                 .lines()
@@ -475,7 +498,7 @@ pub fn block_event(block: &Tagged) -> Option<EventKind> {
                 })
                 .collect::<Vec<_>>();
             let steps = clean_steps(steps);
-            (!steps.is_empty()).then_some(EventKind::Checklist { steps })
+            (!steps.is_empty()).then_some(EventKind::Checklist { steps, title })
         }
         "report" => {
             let (links, text): (Vec<&str>, Vec<&str>) = block.body.lines().partition(|l| {
@@ -835,7 +858,8 @@ pub fn plain(text: &str) -> String {
         .replace('`', "")
 }
 
-/// What a finished thread came to, for its row: the first sentence of its last report.
+/// What a finished thread came to, for its row: the first sentence of its last report,
+/// without asides in brackets, cut at a word if it runs long.
 pub fn outcome(info: &ThreadInfo) -> Option<String> {
     let text = plain(&info.reports.last()?.summary);
     let end = text
@@ -843,8 +867,41 @@ pub fn outcome(info: &ThreadInfo) -> Option<String> {
         .map(|(at, _)| at)
         .find(|&at| text[at + 1..].starts_with(' ') || at + 1 == text.len())
         .map_or(text.len(), |at| at + 1);
-    let first = text[..end].trim();
-    (!first.is_empty()).then(|| first.trim_end_matches('.').to_string())
+    let first = without_asides(&text[..end]);
+    let first = first.trim().trim_end_matches('.');
+    if first.is_empty() {
+        return None;
+    }
+    if first.chars().count() <= OUTCOME_LEN {
+        return Some(first.to_string());
+    }
+    let cut: String = first.chars().take(OUTCOME_LEN).collect();
+    let cut = cut.rfind(' ').map_or(cut.as_str(), |at| &cut[..at]);
+    Some(format!("{}…", cut.trim_end_matches([',', ':', ';'])))
+}
+
+/// The number of the pull request a link points at: ".../pull/12" → 12.
+pub fn pr_number(link: &str) -> Option<u64> {
+    let (_, rest) = link.split_once("/pull/")?;
+    rest.split(['/', '#', '?']).next()?.parse().ok()
+}
+
+/// How long an outcome line runs before it is cut.
+const OUTCOME_LEN: usize = 80;
+
+/// Text without its bracketed asides: "Read cove.md (12 lines) and" → "Read cove.md and".
+fn without_asides(text: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// One line about a thread for Crew's board, which starts with `#id ` so changes can be
@@ -927,9 +984,9 @@ Each message may open with a Threads section: what changed in this project's thr
 /// Told to a thread with its first prompt: how it reports back.
 pub fn thread_rules(tools: bool) -> String {
     let how = if tools {
-        "Use Runo's tools: set_checklist with your plan (update it as steps start and finish), report when you finish or find something the person should know (open with a short sentence on the outcome, such as \"Fixed the export crash.\" or \"No changes needed.\", then a few sentences, with links), ask_decision when a choice changes what the person gets or can't be undone, and message_crew to ask Crew for something another thread has."
+        "Use Runo's tools: set_checklist with your plan and, the first time, a 2 to 5 word title for the task (update it as steps start and finish), report when you finish or find something the person should know (open with a short sentence on the outcome, such as \"Fixed the export crash.\" or \"No changes needed.\", then a few sentences, with links), ask_decision when a choice changes what the person gets or can't be undone, and message_crew to ask Crew for something another thread has."
     } else {
-        "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with one step per line (- [x] done, - [~] doing, - [ ] to do), ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
+        "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with a first line such as \"title: Settings spacing pass\" naming the task in 2 to 5 words, then one step per line (- [x] done, - [~] doing, - [ ] to do), ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
     };
     format!(
         "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\n## Your task\n"
@@ -968,6 +1025,41 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(outcome(&info).as_deref(), Some("No typos found"));
+        info.reports[0].summary = "I read docs/guide/cove.md (12 lines: front matter plus three numbered steps) and found no typos. Nothing changed.".into();
+        assert_eq!(
+            outcome(&info).as_deref(),
+            Some("I read docs/guide/cove.md and found no typos")
+        );
+    }
+
+    #[test]
+    fn pr_numbers_come_from_links() {
+        assert_eq!(pr_number("https://github.com/a/b/pull/148"), Some(148));
+        assert_eq!(pr_number("https://github.com/a/b/pull/7/files"), Some(7));
+        assert_eq!(pr_number("docs/guide/git.md"), None);
+    }
+
+    #[test]
+    fn person_threads_take_the_name_they_give() {
+        let kind = EventKind::Checklist {
+            steps: vec![],
+            title: Some("Settings spacing pass".into()),
+        };
+        let mut info = ThreadInfo::default();
+        assert_eq!(
+            self_title(&info, &kind).as_deref(),
+            Some("Settings spacing pass")
+        );
+        info.origin = Origin::Crew { message: 1 };
+        assert_eq!(self_title(&info, &kind), None);
+        let block = Tagged {
+            kind: "checklist".into(),
+            body: "title: Cove check\n- [ ] Run it".into(),
+        };
+        let Some(EventKind::Checklist { title, .. }) = block_event(&block) else {
+            panic!("a checklist");
+        };
+        assert_eq!(title.as_deref(), Some("Cove check"));
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -1061,20 +1153,32 @@ mod tests {
         assert!(apply(
             &mut info,
             &EventKind::Checklist {
-                steps: steps.clone()
+                steps: steps.clone(),
+                title: None,
             },
             1
         ));
         assert_eq!(info.checklist.len(), 1);
         assert_eq!(info.checklist[0].text, "Measure");
-        assert!(!apply(&mut info, &EventKind::Checklist { steps }, 2));
+        assert!(!apply(
+            &mut info,
+            &EventKind::Checklist { steps, title: None },
+            2
+        ));
         let long: Vec<Step> = (0..40)
             .map(|i| Step {
                 text: format!("step {i}"),
                 mark: Mark::Todo,
             })
             .collect();
-        apply(&mut info, &EventKind::Checklist { steps: long }, 3);
+        apply(
+            &mut info,
+            &EventKind::Checklist {
+                steps: long,
+                title: None,
+            },
+            3,
+        );
         assert_eq!(info.checklist.len(), MAX_STEPS);
 
         for i in 0..MAX_REPORTS + 3 {
@@ -1141,7 +1245,7 @@ mod tests {
         assert_eq!(shown, "Working on it.\nDone for now.\n");
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].kind, "checklist");
-        let Some(EventKind::Checklist { steps }) = block_event(&blocks[0]) else {
+        let Some(EventKind::Checklist { steps, .. }) = block_event(&blocks[0]) else {
             panic!("no checklist");
         };
         let marks: Vec<Mark> = steps.iter().map(|s| s.mark).collect();

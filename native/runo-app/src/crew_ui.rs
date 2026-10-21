@@ -674,12 +674,19 @@ impl RunoApp {
     fn thread_turn_ended(&mut self, id: u64, blocks: Vec<crew::Tagged>, ok: bool, stopped: bool) {
         let at = crate::workspace::unix_now();
         let mut reported = None;
-        if let Some(info) = self.state.session_mut(id).and_then(|s| s.crew.as_mut()) {
+        if let Some(s) = self.state.session_mut(id).filter(|s| s.crew.is_some()) {
+            let info = s.crew.as_mut().expect("a thread");
+            let mut name = None;
             for block in &blocks {
                 if let Some(kind) = crew::block_event(block) {
+                    name = crew::self_title(info, &kind).or(name);
                     crew::apply(info, &kind, at);
                 }
             }
+            if let Some(name) = name {
+                s.title = name;
+            }
+            let info = s.crew.as_mut().expect("a thread");
             if info.decision.is_none() {
                 info.attention = ok.then_some(crew::Attention::Review);
             }
@@ -726,11 +733,15 @@ impl RunoApp {
             let Some(s) = self.state.session_mut(event.thread) else {
                 continue;
             };
-            let (pid, title) = (s.project_id, s.title.clone());
             let Some(info) = s.crew.as_mut() else {
                 continue;
             };
+            let name = crew::self_title(info, &event.kind);
             let changed = crew::apply(info, &event.kind, event.at);
+            if let Some(name) = name {
+                s.title = name;
+            }
+            let (pid, title) = (s.project_id, s.title.clone());
             let chat = self.crew_chat(pid).map(|c| c.id);
             match (&event.kind, chat) {
                 (crew::EventKind::Message { text }, Some(chat)) => {

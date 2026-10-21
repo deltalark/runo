@@ -276,6 +276,8 @@ struct RunoApp {
     right_tab: RightTab,
     /// The Threads tab's finished threads are folded away.
     threads_done_shut: bool,
+    /// The Threads tab lists every finished thread, not only the latest few.
+    threads_done_all: bool,
     /// Projects whose finished Crew threads are unfolded in the sidebar.
     sidebar_done_open: HashSet<u64>,
     /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
@@ -1524,6 +1526,7 @@ impl RunoApp {
             selected,
             right_tab: RightTab::Changes,
             threads_done_shut: false,
+            threads_done_all: false,
             sidebar_done_open: HashSet::new(),
             browser_open: false,
             browser_main: false,
@@ -5618,6 +5621,9 @@ impl RunoApp {
             list = list.child(strip);
         }
         for (i, message) in session.messages.iter().enumerate() {
+            if self.crew_news_repeats(session, i) {
+                continue;
+            }
             if let Some(card) = self.crew_card(session.id, i, message, cx) {
                 list = list.child(card);
                 continue;
