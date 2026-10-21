@@ -90,6 +90,13 @@ pub struct AppSettings {
     pub glass: String,
     /// Cards, menus and dialogs are translucent too.
     pub glass_cards: bool,
+    /// How the accent corner on the open tab and the selected row moves: "static",
+    /// "neon" (a soft pulsing glow in the accent) or "rgb" (a glow cycling the rainbow).
+    pub corner_glow: String,
+    /// How fast the corner glow moves: "slow", "normal" or "fast".
+    pub corner_glow_speed: String,
+    /// How strong the corner glow is: "soft", "medium" or "bright".
+    pub corner_glow_intensity: String,
     /// Interface font: "bundled" (Runo's own, tuned for sharp small text) or "system".
     pub font: String,
     /// The status bar's Usage popover shows every limit window, not just the closest one.
@@ -213,6 +220,9 @@ impl Default for AppSettings {
             rail_pins: Vec::new(),
             glass: "off".into(),
             glass_cards: true,
+            corner_glow: "static".into(),
+            corner_glow_speed: "normal".into(),
+            corner_glow_intensity: "medium".into(),
             font: "bundled".into(),
             font_smoothing: false,
             memory_server: true,
@@ -321,6 +331,11 @@ impl AppSettings {
         ANIMATIONS.store(self.animations, Ordering::Relaxed);
         GLASS.store(glass_alpha(&self.glass), Ordering::Relaxed);
         GLASS_CARDS.store(self.glass_cards, Ordering::Relaxed);
+        crate::glow::configure(
+            &self.corner_glow,
+            &self.corner_glow_speed,
+            &self.corner_glow_intensity,
+        );
         MEMORY_SERVER.store(self.memory_server, Ordering::Relaxed);
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
