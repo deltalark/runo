@@ -24,7 +24,7 @@ pub(crate) struct Repo {
 }
 
 /// Which half of a sync to run.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncStep {
     /// Bring the remote's commits in, then send this folder's up.
     Both,
@@ -157,7 +157,7 @@ impl RunoApp {
                     Ok(None) => {
                         this.git_toast = Some(("Already up to date.".into(), Instant::now()));
                     }
-                    Err(error) => this.fail("git", error),
+                    Err(error) => this.git_failed(error),
                 }
                 // Sessions on this folder, and the branch list, see the change too.
                 this.refresh();
@@ -171,8 +171,52 @@ impl RunoApp {
         );
     }
 
-    /// Bring the remote's commits in, send this folder's up, or both.
+    /// Bring the remote's commits in, send this folder's up, or both, after the seatbelt
+    /// has looked at what would be sent.
     pub(crate) fn git_sync(&mut self, step: SyncStep) {
+        let pass = std::mem::take(&mut self.git_belt_pass);
+        let Some(repo) = self.git_repo.as_ref() else {
+            return;
+        };
+        let state = repo.state.clone();
+        let dir = repo.dir.clone();
+        if step == SyncStep::Pull || pass || state.remote.is_empty() || state.branch.is_empty() {
+            return self.git_sync_now(step);
+        }
+        let main = state.branch == self.git_default_branch()
+            && state.host == "GitHub"
+            && !self.git_main_ok.contains(&dir);
+        self.git_banner = None;
+        self.menu = None;
+        self.bg(
+            move || {
+                let found = seatbelt::scan_patch(&git::outgoing_patch(&dir));
+                (found, git::sync_state(&dir).ahead)
+            },
+            move |this, (found, ahead), cx| {
+                let serious: Vec<_> = found.into_iter().filter(|(_, _, s)| s.serious()).collect();
+                if !serious.is_empty() {
+                    this.git_banner = Some(explain::Banner {
+                        explained: explain::seatbelt_stop(&serious, step),
+                        raw: String::new(),
+                        found: serious,
+                    });
+                } else if main && ahead > 0 {
+                    this.git_banner = Some(explain::Banner {
+                        explained: explain::main_stop(&state.branch, ahead, step),
+                        raw: String::new(),
+                        found: Vec::new(),
+                    });
+                } else {
+                    this.git_sync_now(step);
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Sync, with no seatbelt.
+    fn git_sync_now(&mut self, step: SyncStep) {
         let Some(repo) = self.git_repo.as_ref() else {
             return;
         };

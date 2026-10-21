@@ -25,6 +25,7 @@ mod design;
 mod designdraw;
 mod desktop_notify;
 mod detach;
+mod explain;
 mod files;
 mod fileview;
 mod fixes;
@@ -62,6 +63,7 @@ mod radar;
 mod review;
 mod reviewable;
 mod schedule;
+mod seatbelt;
 mod sessions;
 mod settings;
 mod settings_ui;
@@ -93,7 +95,7 @@ use gpui_kit::*;
 use settings::*;
 use settings_ui::{McpForm, SettingsPage};
 use shell::Mode;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 use store::{Message, Note, Project, Role, Session, State, Status, StepState};
@@ -267,6 +269,15 @@ struct RunoApp {
     git_moment_sel: Option<usize>,
     git_moment_files: Option<timemachine::Against>,
     git_travel: Option<usize>,
+    /// Explain: the card at the top of the Git place, whether git's own words are open
+    /// on it, and the puzzling state the person closed the card for.
+    git_banner: Option<explain::Banner>,
+    git_raw_open: bool,
+    git_state_seen: Option<String>,
+    /// Seatbelt: let the next push past it, and the folders already told about sending
+    /// straight to main.
+    git_belt_pass: bool,
+    git_main_ok: HashSet<String>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1558,6 +1569,11 @@ impl RunoApp {
             git_moment_sel: None,
             git_moment_files: None,
             git_travel: None,
+            git_banner: None,
+            git_raw_open: false,
+            git_state_seen: None,
+            git_belt_pass: false,
+            git_main_ok: HashSet::new(),
             git_repo: None,
             git_undo: None,
             git_working: None,
