@@ -151,13 +151,16 @@ impl RunoApp {
             s.title = "Crew".into();
             s.limits = vec!["read".into()];
             s.branch = git::current_branch(&project.path);
-            s.messages.push(Message::new(
+            // A note, not the red card that system messages get for errors.
+            let mut welcome = Message::new(
                 Role::System,
                 format!(
                     "Crew runs {} for you on {name}. Ask it anything about the project, or describe work: it answers what it can and starts threads for the rest. It reads the code but never changes it.",
                     project.name
                 ),
-            ));
+            );
+            welcome.meta = "note".into();
+            s.messages.push(welcome);
         }
         crate::applog::info(
             "crew",
