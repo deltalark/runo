@@ -1,3 +1,4 @@
+mod accent;
 mod agent;
 mod agent_pick;
 mod agentcmds;
@@ -39,7 +40,6 @@ mod git;
 mod githistory;
 mod github;
 mod gitplace;
-mod glow;
 mod handoff;
 mod health;
 mod history;
