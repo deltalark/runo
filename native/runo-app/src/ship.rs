@@ -92,6 +92,9 @@ pub(crate) struct ScanRequest {
     pub whole: bool,
     pub all: bool,
     pub racers: Vec<(u64, String)>,
+    /// For a session sharing its folder, the files its agent changed: the sidebar's
+    /// count is only these. See `Session::touched`.
+    pub touched: Option<HashSet<String>>,
 }
 
 /// Read a session folder's git state. Slow on big repositories, so call it off the UI thread.
@@ -105,7 +108,10 @@ pub(crate) fn scan(req: ScanRequest) -> Scan {
     let uncommitted_changes = git::changes(&req.dir);
     let mut out = Scan {
         is_git: true,
-        uncommitted: git::totals(&uncommitted_changes),
+        uncommitted: git::totals(&crate::store::only_touched(
+            uncommitted_changes.clone(),
+            req.touched.as_ref(),
+        )),
         files: git::tracked_files(&req.dir),
         sync: git::sync_state(&req.dir),
         against: "HEAD".into(),
@@ -2336,6 +2342,7 @@ mod tests {
             whole: false,
             all: true,
             racers: vec![(5, dir.clone())],
+            touched: None,
         };
         let scan_now = scan(request(false));
         assert!(scan_now.is_git);

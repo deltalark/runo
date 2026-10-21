@@ -2138,6 +2138,7 @@ impl RunoApp {
         };
         let request = ship::ScanRequest {
             dir: session.dir.clone(),
+            touched: session.touched(),
             base: session.base.clone(),
             since_base: self.diff_base,
             selected_file: self.selected_file.clone(),
@@ -2160,11 +2161,16 @@ impl RunoApp {
 
     /// Files changed and lines added/removed in a session's folder, for its sidebar card.
     fn measure(&mut self, id: u64) {
-        let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
+        let Some((dir, touched)) = self.state.session(id).map(|s| (s.dir.clone(), s.touched()))
+        else {
             return;
         };
         self.bg(
-            move || git::is_repo(&dir).then(|| git::totals(&git::changes(&dir))),
+            move || {
+                git::is_repo(&dir).then(|| {
+                    git::totals(&store::only_touched(git::changes(&dir), touched.as_ref()))
+                })
+            },
             move |this, totals, _| {
                 if let Some(totals) = totals {
                     this.stats.insert(id, totals);
@@ -4944,13 +4950,23 @@ impl RunoApp {
             )
     }
 
-    fn changes_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (added, removed) = self
-            .changes
+    /// The folder's changes to the files an agent reply's turn changed. The rest of what
+    /// is uncommitted there (earlier turns, the person, other sessions, Runo's Design and
+    /// Architecture files) isn't this turn's to show.
+    fn turn_changes(&self, message: &Message) -> Vec<&git::Change> {
+        self.changes
+            .iter()
+            .filter(|c| message.changed.contains(&c.path))
+            .collect()
+    }
+
+    fn changes_card(&self, message: &Message, cx: &mut Context<Self>) -> impl IntoElement {
+        let changes = self.turn_changes(message);
+        let (added, removed) = changes
             .iter()
             .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
         let mut rows = div().v_flex();
-        for (i, change) in self.changes.iter().take(4).enumerate() {
+        for (i, change) in changes.iter().take(4).enumerate() {
             let path = change.path.clone();
             let (dir, name) = match change.path.rsplit_once('/') {
                 Some((d, n)) => (format!("{d}/"), n.to_string()),
@@ -5004,7 +5020,7 @@ impl RunoApp {
                     ),
             );
         }
-        let more = self.changes.len().saturating_sub(4);
+        let more = changes.len().saturating_sub(4);
         div()
             .id("changes-card")
             .mt_1()
@@ -5035,8 +5051,8 @@ impl RunoApp {
                             .font_weight(FontWeight::MEDIUM)
                             .child(format!(
                                 "{} file{} changed",
-                                self.changes.len(),
-                                if self.changes.len() == 1 { "" } else { "s" }
+                                changes.len(),
+                                if changes.len() == 1 { "" } else { "s" }
                             )),
                     )
                     .child(
@@ -5079,7 +5095,7 @@ impl RunoApp {
                 SharedString::from(format!(
                     "card-{}-{}",
                     self.selected.unwrap_or(0),
-                    self.changes.len()
+                    changes.len()
                 )),
                 Animation::new(Duration::from_millis(400)).with_easing(ease_out_quint()),
                 |el, d| el.opacity(d),
@@ -5372,7 +5388,7 @@ impl RunoApp {
                 })
                 .when(show_changes && !working, |el| {
                     el.child(rise(
-                        div().child(self.changes_card(cx)),
+                        div().child(self.changes_card(message, cx)),
                         ("changes-rise", index),
                         300,
                     ))
@@ -5622,7 +5638,7 @@ impl RunoApp {
                 list = list.child(card);
                 continue;
             }
-            let show = Some(i) == last_agent && !self.changes.is_empty();
+            let show = Some(i) == last_agent && !self.turn_changes(message).is_empty();
             list = list.child(
                 div()
                     .on_mouse_down(
@@ -7975,6 +7991,16 @@ impl RunoApp {
                 .child("Select a session to see its changes.")
                 .into_any_element();
         }
+        // A session sharing its folder sees all of the folder's uncommitted files, since a
+        // commit takes them too; say how many its agent didn't write.
+        let others = match self.current().and_then(|s| s.touched()) {
+            Some(touched) if !self.diff_base => self
+                .changes
+                .iter()
+                .filter(|c| !touched.contains(&c.path))
+                .count(),
+            _ => 0,
+        };
         if !self.dir_is_git {
             return div().p_4().v_flex().gap_2()
                 .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Changes"))
@@ -8274,6 +8300,19 @@ impl RunoApp {
                         })),
                     ),
             )
+            .when(others > 0, |el| {
+                el.child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(match others {
+                            1 => "1 of these wasn't changed by this session's agent. It was already uncommitted in the folder, or another session or Runo wrote it.".to_string(),
+                            n => format!("{n} of these weren't changed by this session's agent. They were already uncommitted in the folder, or another session or Runo wrote them."),
+                        }),
+                )
+            })
             .child(if self.changes.is_empty() {
                 div()
                     .flex_1()
