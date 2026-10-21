@@ -495,12 +495,7 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     }
                     let Some(t) = cut else { return };
                     let (x0, y0) = (t.origin.x, t.origin.y.max(top));
-                    // The bracket: up the tab's left edge and round its top corner. Glass
-                    // styles leave it off: there the open tab is the one shaped from its
-                    // island, and a lone outline on a borderless window looks out of place.
-                    if settings::glass_on() {
-                        return;
-                    }
+                    // The bracket: up the tab's left edge and round its top corner.
                     let (i, reach) = (px(1.), px(9.));
                     let mut f = PathBuilder::stroke(px(2.));
                     f.move_to(at(x0 + i, y0 + tr + reach));

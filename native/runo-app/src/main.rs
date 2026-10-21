@@ -8092,13 +8092,19 @@ impl RunoApp {
             })
             .when(!self.changes.is_empty(), |el| {
                 el.child(
+                    // A well like the terminal's output, set in from the island's edges:
+                    // its own fill must stay clear of the island's rounded corners, which
+                    // blend the frame over the island's fill alone (see
+                    // `shell::frame_corner`).
                     div()
                         .mt_2()
+                        .mx(px(12.))
+                        .mb(px(12.))
                         .flex_1()
                         .min_h_0()
                         .v_flex()
-                        .border_t_1()
-                        .border_color(divider())
+                        .rounded(px(10.))
+                        .overflow_hidden()
                         .bg(inset(c_canvas()))
                         .child(
                             div()
