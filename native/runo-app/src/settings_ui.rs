@@ -2657,21 +2657,15 @@ impl RunoApp {
                     .child(div().flex_none().child(control)),
             );
         }
-        // Wide windows give the section's name a column of its own inside the card,
-        // joined to its rows by a rule, so no line holds only a title.
+        // Wide windows put the section's name on a tab notched into the card's top left,
+        // so no line holds only a title.
         let wide = window.viewport_size().width > px(1100.);
+        let fill = tint(c_subtle());
         let label = div()
             .v_flex()
             .gap(px(3.))
             .when(wide, |el| {
-                el.w(px(230.))
-                    .flex_none()
-                    .px(px(20.))
-                    .py(px(14.))
-                    .border_r_1()
-                    .border_color(divider())
-                    .rounded_l(px(12.))
-                    .bg(tint(c_subtle()))
+                el.px(px(20.)).py(px(14.)).rounded_l(px(NOTCH_R)).bg(fill)
             })
             .when(!wide, |el| el.px_1())
             .child(
@@ -2686,11 +2680,18 @@ impl RunoApp {
             });
         let card = card.flex_1().min_w_0();
         if wide {
-            crate::shell::card()
+            div()
                 .flex()
-                .overflow_hidden()
-                .child(label)
-                .child(card)
+                .items_start()
+                .child(
+                    div()
+                        .w(px(230.))
+                        .flex_none()
+                        .v_flex()
+                        .child(label)
+                        .child(div().flex().justify_end().child(notch(fill))),
+                )
+                .child(card.rounded_tr(px(NOTCH_R)).rounded_b(px(NOTCH_R)).bg(fill))
                 .into_any_element()
         } else {
             div()
@@ -3480,6 +3481,32 @@ impl RunoApp {
             .child(switches)
             .into_any_element()
     }
+}
+
+const NOTCH_R: f32 = 12.;
+
+/// The inward curve under a section's tab, where the tab meets its card: a square in the
+/// card's fill with a quarter circle cut from its bottom left.
+fn notch(fill: Rgba) -> Div {
+    let r = NOTCH_R;
+    div().size(px(r)).flex_none().child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let k = 0.5523;
+                let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                let mut f = PathBuilder::fill();
+                f.move_to(p(r, 0.));
+                f.line_to(p(r, r));
+                f.cubic_bezier_to(p(0., 0.), p(r, r - k * r), p(k * r, 0.));
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, Hsla::from(fill));
+                }
+            },
+        )
+        .size_full(),
+    )
 }
 
 /// Open a page of Settings when clicked.
