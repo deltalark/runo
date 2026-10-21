@@ -29,6 +29,7 @@ mod fixes;
 mod gemini;
 mod git;
 mod github;
+mod glow;
 mod handoff;
 mod health;
 mod history;

@@ -740,12 +740,21 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("Interface", "System follows your OS appearance.", vec![
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
+                row("Corner glow", "The accent corner on the open tab and the selected row. Neon pulses softly in the accent like a neon bulb. RGB cycles through the rainbow. Holds still while Animations is off or the system asks for reduced motion.", Ctl::Segment(options(&[("static", "Static"), ("neon", "Neon"), ("rgb", "RGB")]), st.corner_glow.clone(), Rc::new(|s, v| s.corner_glow = v))),
+            ]
+            .into_iter()
+            .chain((st.corner_glow != "static").then(|| [
+                row("Glow speed", "How fast Neon pulses or RGB goes round the colors.", Ctl::Segment(options(&[("slow", "Slow"), ("normal", "Normal"), ("fast", "Fast")]), st.corner_glow_speed.clone(), Rc::new(|s, v| s.corner_glow_speed = v))),
+                row("Glow intensity", "How far the glow spreads and how bright it is.", Ctl::Segment(options(&[("soft", "Soft"), ("medium", "Medium"), ("bright", "Bright")]), st.corner_glow_intensity.clone(), Rc::new(|s, v| s.corner_glow_intensity = v))),
+            ]).into_iter().flatten())
+            .chain([
                 row("Glass", "A translucent window over a blurred desktop, like macOS glass. Clear shows the most of what is behind.", Ctl::Segment(options(&[("off", "Off"), ("subtle", "Subtle"), ("frosted", "Frosted"), ("clear", "Clear")]), st.glass.clone(), Rc::new(|s, v| s.glass = v))),
                 row("Interface font", "Runo's own font is tuned for sharp text at small sizes. System uses your operating system's font.", Ctl::Segment(options(&[("bundled", "Runo"), ("system", "System")]), st.font.clone(), Rc::new(|s, v| s.font = v))),
                 row("Font smoothing", "Thickens text strokes, like older macOS. Off keeps text crisp and light. Applies after you restart Runo.", Ctl::Switch(st.font_smoothing, Rc::new(|s, v| s.font_smoothing = v))),
                 row("Glass menus and dialogs", "Popups, menus and dialogs are translucent with a light rim too.", Ctl::Switch(st.glass_cards, Rc::new(|s, v| s.glass_cards = v))),
                 row("Diff colors", "Colorblind uses blue and orange instead of green and red. High contrast uses stronger tints.", Ctl::Segment(options(&[("default", "Default"), ("colorblind", "Colorblind"), ("contrast", "High contrast")]), st.diff_colors.clone(), Rc::new(|s, v| s.diff_colors = v))),
-            ]),
+            ])
+            .collect()),
             section("Conversation", "How replies, errors and code use the space in a session.", vec![
                 row("Content width", "Full uses the whole width of the window so long output needs less scrolling. Comfortable keeps lines short for reading.", Ctl::Segment(options(&[("comfortable", "Comfortable"), ("wide", "Wide"), ("full", "Full")]), st.content_width.clone(), Rc::new(|s, v| s.content_width = v))),
             ]),
