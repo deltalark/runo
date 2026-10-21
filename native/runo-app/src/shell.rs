@@ -145,6 +145,7 @@ pub(crate) fn seg_choice(
         .when(!on, |el| {
             el.text_color(rgb(c_secondary()))
                 .hover(|el| el.text_color(rgb(c_text())))
+                .active(|el| el.opacity(0.7))
         })
 }
 
@@ -194,7 +195,7 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
-            move |el, d| el.left(px(TAB_INSET + 12. * (1. - d))),
+            move |el, d| el.left(px(TAB_INSET + 6. * (1. - d))),
         )
 }
 
@@ -291,7 +292,7 @@ pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
         .animated(
             ElementId::Name(key),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
-            |el, d| el.left(px(12. * (1. - d))).opacity(d),
+            |el, d| el.left(px(6. * (1. - d))).opacity(d),
         )
 }
 
@@ -567,8 +568,9 @@ pub(crate) fn strip_tab(
     strip: &'static str,
     selected: bool,
 ) -> Stateful<Div> {
-    div()
-        .id(id)
+    let id = id.into();
+    let tab = div()
+        .id(id.clone())
         .relative()
         .px(px(12.))
         .flex()
@@ -576,19 +578,20 @@ pub(crate) fn strip_tab(
         .gap(px(6.))
         .cursor_pointer()
         .text_size(px(12.5))
-        .font_weight(FontWeight::MEDIUM)
-        .when(selected, |el| {
-            el.h(px(32.))
-                .child(strip_cut(strip))
-                .text_color(rgb(c_text()))
-        })
-        .when(!selected, |el| {
-            el.h(px(28.))
-                .mb(px(3.))
-                .rounded_md()
-                .text_color(rgb(c_secondary()))
-                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
-        })
+        .font_weight(FontWeight::MEDIUM);
+    if selected {
+        tab.h(px(32.))
+            .child(strip_cut(strip))
+            .text_color(rgb(c_text()))
+    } else {
+        hover_wash(tab, id, tint(c_subtle()), 6.)
+            .h(px(28.))
+            .mb(px(3.))
+            .rounded_md()
+            .text_color(rgb(c_secondary()))
+            .hover(|el| el.text_color(rgb(c_text())))
+            .active(|el| el.opacity(0.75))
+    }
 }
 
 /// The header of a list beside the rail: a large title over a quiet summary line,
@@ -636,6 +639,7 @@ pub(crate) fn add_button(id: impl Into<ElementId>) -> Stateful<Div> {
         .bg(rgb(c_text()))
         .cursor_pointer()
         .hover(|el| el.opacity(0.85))
+        .active(|el| el.opacity(0.7))
         .child(icon(IconName::Plus, 16., c_canvas()))
 }
 
@@ -668,6 +672,67 @@ pub(crate) fn cascade(
         Animation::new(Duration::from_millis(QUICK + 20 * i.min(8) as u64))
             .with_easing(after(lead)),
         |el, d| el.opacity(d),
+    )
+}
+
+thread_local! {
+    /// Whether the pointer was over each hover-washed element when it last painted, and
+    /// since when, keyed by id.
+    static HOVERS: std::cell::RefCell<HashMap<ElementId, (bool, std::time::Instant)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// How long a hover wash takes to ease in or out.
+const HOVER_MS: f32 = 120.;
+
+/// Give an element a hover fill that eases in and out instead of snapping: `color`
+/// washes up under its content while the pointer is over it. Call it before adding the
+/// element's content, so the wash sits beneath it, and keep `on_hover` free for it. The
+/// element must be `relative`.
+///
+/// Whether the pointer is over it is read from the pointer itself as the wash paints,
+/// so an element that went away while hovered never comes back lit.
+pub(crate) fn hover_wash(
+    el: Stateful<Div>,
+    id: impl Into<ElementId>,
+    color: Rgba,
+    radius: f32,
+) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let color = Hsla::from(color);
+    el.on_hover(|_, window, _| window.refresh()).child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let over = b.contains(&window.mouse_position());
+                let now = std::time::Instant::now();
+                let since = HOVERS.with_borrow_mut(|h| {
+                    // First seen: already settled, so nothing fades on arrival.
+                    let seen = h
+                        .entry(id.clone())
+                        .or_insert((over, now - Duration::from_secs(1)));
+                    if seen.0 != over {
+                        *seen = (over, now);
+                    }
+                    seen.1.elapsed().as_secs_f32() * 1000.
+                });
+                let t = if anim_on() {
+                    (since / HOVER_MS).min(1.)
+                } else {
+                    1.
+                };
+                if t < 1. {
+                    window.request_animation_frame();
+                }
+                let t = 1. - (1. - t).powi(3);
+                let strength = if over { t } else { 1. - t };
+                if strength > 0. && color.a > 0. {
+                    window.paint_quad(fill(b, color.opacity(strength)).corner_radii(px(radius)));
+                }
+            },
+        )
+        .absolute()
+        .inset_0(),
     )
 }
 
@@ -1208,8 +1273,9 @@ impl RunoApp {
             keys if keys.is_empty() => name,
             keys => format!("{name}  {keys}"),
         };
-        div()
-            .id(SharedString::from(format!("rail-{}", mode.label())))
+        let id = SharedString::from(format!("rail-{}", mode.label()));
+        let item = div()
+            .id(id.clone())
             .relative()
             .size(px(34.))
             .flex()
@@ -1217,7 +1283,10 @@ impl RunoApp {
             .justify_center()
             .rounded(px(8.))
             .cursor_pointer()
-            .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
+            .active(|el| el.opacity(0.7));
+        // The open place shows its tab instead, so its wash stays clear.
+        let wash = if on { rgba(0) } else { tint(c_subtle()) };
+        hover_wash(item, id, wash, 8.)
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.go(mode, window, cx);
