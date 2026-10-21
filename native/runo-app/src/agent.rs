@@ -383,6 +383,26 @@ fn mcp_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
     out
 }
 
+/// Runo's own tools an agent may call without being asked: memory and reading
+/// playbooks, and a thread's reports back. Starting a playbook as a new session asks.
+fn unasked_tools(spec: &RunSpec) -> Vec<&'static str> {
+    if spec.memory.is_none() {
+        return Vec::new();
+    }
+    let mut tools = vec![
+        "read_memory",
+        "search_history",
+        "save_note",
+        "list_playbooks",
+        "get_playbook",
+        "list_connections",
+    ];
+    if spec.thread != 0 {
+        tools.extend(crate::memory_mcp::THREAD_TOOLS);
+    }
+    tools
+}
+
 /// MCP servers for a CLI that reads them from a project file. That file is in the
 /// session folder, which a run elsewhere sees too, so only servers reached by URL go
 /// along there.
@@ -463,6 +483,13 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 for over in server.codex_overrides(&name) {
                     args.extend([s("-c"), over]);
                 }
+            }
+            // `exec` can't ask, so a tool call that would ask is cancelled instead.
+            for tool in unasked_tools(spec) {
+                args.extend([
+                    s("-c"),
+                    format!("mcp_servers.{MEMORY_SERVER}.tools.{tool}.approval_mode=\"approve\""),
+                ]);
             }
             args.extend(split_args(&opts.extra_args));
             if spec.resume {
@@ -705,25 +732,8 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 .into_iter()
                 .map(|(name, server)| (name, server.claude_json()))
                 .collect();
-            if spec.memory.is_some() {
-                // Memory and reading playbooks need no approval; starting a playbook as a
-                // new session asks first.
-                for tool in [
-                    "read_memory",
-                    "search_history",
-                    "save_note",
-                    "list_playbooks",
-                    "get_playbook",
-                    "list_connections",
-                ] {
-                    allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
-                }
-                // A thread reports back without asking.
-                if spec.thread != 0 {
-                    for tool in crate::memory_mcp::THREAD_TOOLS {
-                        allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
-                    }
-                }
+            for tool in unasked_tools(spec) {
+                allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
             }
             if !servers.is_empty() {
                 let config = serde_json::json!({ "mcpServers": servers });
@@ -2314,6 +2324,16 @@ mod arg_tests {
             .any(|a| a.contains("permission-prompt")));
         let codex = provider_args(&spec("codex"));
         assert!(codex.contains(&"mcp_servers.runo.command=\"/bin/runo\"".to_string()));
+        assert!(codex
+            .contains(&"mcp_servers.runo.tools.read_memory.approval_mode=\"approve\"".to_string()));
+        let mut thread = spec("codex");
+        thread.thread = 7;
+        let thread = provider_args(&thread);
+        for tool in crate::memory_mcp::THREAD_TOOLS {
+            assert!(thread.contains(&format!(
+                "mcp_servers.runo.tools.{tool}.approval_mode=\"approve\""
+            )));
+        }
         let amp = provider_args(&spec("amp"));
         let config = &amp[amp.iter().position(|a| a == "--mcp-config").unwrap() + 1];
         let config: serde_json::Value = serde_json::from_str(config).unwrap();
