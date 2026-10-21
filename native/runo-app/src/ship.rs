@@ -38,6 +38,8 @@ pub(crate) enum Confirm {
     AutoMergePr(u64),
     /// Post the review the session's agent wrote to its pull request.
     PostReview(u64),
+    /// Push the session's branch although the seatbelt found something in it.
+    PushAnyway(u64),
 }
 
 /// The Create pull request form.
@@ -47,6 +49,9 @@ pub(crate) struct PrForm {
     pub needs_branch: bool,
     pub running: bool,
     pub error: Option<String>,
+    /// The seatbelt has looked at what the pull request would send, or was told to let
+    /// it through.
+    pub belt_ok: bool,
 }
 
 /// A turn asked for while the session's worktree is still being made.
@@ -223,6 +228,14 @@ pub(crate) fn prepare_worktree(
         Err(error) => log.push(format!("Could not copy .worktreeinclude files: {error}")),
     }
     Ok((dir, branch, log))
+}
+
+/// What the seatbelt would stop in the commits `dir` hasn't sent yet.
+fn belt_stops(dir: &str) -> Vec<(String, usize, seatbelt::Snag)> {
+    seatbelt::scan_patch(&git::outgoing_patch(dir))
+        .into_iter()
+        .filter(|(_, _, s)| s.serious())
+        .collect()
 }
 
 /// Push the branch, then open a pull request or find the one already open. Returns its
@@ -587,9 +600,16 @@ impl RunoApp {
         !base.is_empty() && session.branch == *base && !session.isolated
     }
 
-    /// Push the session branch to its remote.
+    /// Push the open session's branch to its remote.
     pub(crate) fn push(&mut self) {
-        let Some(session) = self.current().filter(|_| !self.demo) else {
+        if let Some(id) = self.current().map(|s| s.id) {
+            self.push_session(id);
+        }
+    }
+
+    /// Push a session's branch, once the seatbelt has looked at the commits it sends.
+    fn push_session(&mut self, id: u64) {
+        let Some(session) = self.state.session(id).filter(|_| !self.demo) else {
             return;
         };
         if self.on_base_branch(session) {
@@ -599,10 +619,27 @@ impl RunoApp {
             ));
             return;
         }
-        let (id, dir) = (session.id, session.dir.clone());
+        let dir = session.dir.clone();
         let remote = self.sync.remote.clone();
         if remote.is_empty() {
             self.fail("git", "This repository has no remote to push to.".into());
+            return;
+        }
+        if self.belt_pass.take() != Some(id) {
+            let scan = dir.clone();
+            self.bg(
+                move || belt_stops(&scan),
+                move |this, serious, cx| {
+                    if serious.is_empty() {
+                        this.belt_pass = Some(id);
+                        this.push_session(id);
+                    } else {
+                        this.belt_found = serious;
+                        this.confirm_git = Some(Confirm::PushAnyway(id));
+                    }
+                    cx.notify();
+                },
+            );
             return;
         }
         if !self.begin(id, "Pushing.") {
@@ -681,6 +718,7 @@ impl RunoApp {
             needs_branch,
             running: false,
             error: None,
+            belt_ok: false,
         });
         self.right_tab = RightTab::Changes;
         self.show_panel = true;
@@ -711,6 +749,28 @@ impl RunoApp {
         let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
             return;
         };
+        if !form.belt_ok {
+            self.bg(
+                move || belt_stops(&dir),
+                move |this, serious, cx| {
+                    let Some(form) = this.pr_form.as_mut().filter(|f| f.session == id) else {
+                        return;
+                    };
+                    form.belt_ok = true;
+                    if serious.is_empty() {
+                        this.submit_pr(cx);
+                    } else {
+                        form.running = false;
+                        form.error = Some(format!(
+                            "Wait: {} Once it's on GitHub it stays in the history. Take it out and commit again, or press Create PR again to send it anyway.",
+                            seatbelt::summary(&serious)
+                        ));
+                    }
+                    cx.notify();
+                },
+            );
+            return;
+        }
         self.bg(
             move || {
                 let result = open_pr(&dir, new_branch.as_deref(), &title, &body, &base);
@@ -1373,6 +1433,10 @@ impl RunoApp {
             Confirm::MergePr(id) => self.merge_pr(id, false),
             Confirm::AutoMergePr(id) => self.merge_pr(id, true),
             Confirm::PostReview(id) => self.post_review(id),
+            Confirm::PushAnyway(id) => {
+                self.belt_pass = Some(id);
+                self.push_session(id);
+            }
         }
     }
 
@@ -1447,6 +1511,14 @@ impl RunoApp {
                     "Turn on auto-merge",
                 )
             }
+            Confirm::PushAnyway(p) if p == id => (
+                "Push it anyway?".to_string(),
+                format!(
+                    "{} Once it's on the remote it stays in the history, even if you delete it later. Undo the commit and leave it out, or push it anyway.",
+                    seatbelt::summary(&self.belt_found)
+                ),
+                "Push anyway",
+            ),
             Confirm::PostReview(p) if p == id => {
                 let pr = self.pr_status.get(&id)?;
                 let draft = pr.draft_review.as_ref()?;

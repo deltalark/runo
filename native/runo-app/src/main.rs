@@ -283,6 +283,10 @@ struct RunoApp {
     /// straight to main.
     git_belt_pass: bool,
     git_main_ok: HashSet<String>,
+    /// What the seatbelt found in a session's commits before a push, and the session
+    /// whose next push goes past it.
+    belt_found: Vec<(String, usize, seatbelt::Snag)>,
+    belt_pass: Option<u64>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1564,6 +1568,8 @@ impl RunoApp {
             git_state_seen: None,
             git_belt_pass: false,
             git_main_ok: HashSet::new(),
+            belt_found: Vec::new(),
+            belt_pass: None,
             git_repo: None,
             git_undo: None,
             git_working: None,
