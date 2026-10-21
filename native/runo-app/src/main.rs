@@ -571,6 +571,8 @@ struct RunoApp {
     pending_mentions: Vec<String>,
     /// The `@query` being typed in the composer.
     mention: Option<String>,
+    /// In Crew's chat, what follows an `@` that starts the prompt: a thread's name.
+    thread_mention: Option<String>,
     /// The `/query` typed at the start of the prompt, which lists playbooks.
     slash: Option<String>,
     /// The agent's own commands for the `/` menu, read for one session when the menu opens.
@@ -1736,6 +1738,7 @@ impl RunoApp {
             close_armed: None,
             pending_mentions: Vec::new(),
             mention: None,
+            thread_mention: None,
             slash: None,
             agent_commands: None,
             editing: None,
