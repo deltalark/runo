@@ -203,9 +203,43 @@ pub fn scan_patch(patch: &str) -> Vec<(String, usize, Snag)> {
     out
 }
 
+/// The serious snags in `found`, in one sentence for a card: "Looks like a GitHub token
+/// (src/config.rs:12), and 2 more."
+pub fn summary(found: &[(String, usize, Snag)]) -> String {
+    let Some((path, line, snag)) = found.first() else {
+        return String::new();
+    };
+    let at = match line {
+        0 => path.clone(),
+        l => format!("{path}:{l}"),
+    };
+    match found.len() {
+        1 => format!("{} ({at}).", snag.words()),
+        n => format!("{} ({at}), and {} more.", snag.words(), n - 1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{scan_line, scan_patch, secret_file, Snag};
+    use super::{scan_line, scan_patch, secret_file, summary, Snag};
+
+    #[test]
+    fn sums_up_what_it_found() {
+        assert_eq!(summary(&[]), "");
+        let one = vec![(".env".to_string(), 0, Snag::SecretFile)];
+        assert_eq!(
+            summary(&one),
+            "A file that usually holds passwords or keys (.env)."
+        );
+        let two = vec![
+            ("a.rs".to_string(), 3, Snag::Marker),
+            (".env".to_string(), 0, Snag::SecretFile),
+        ];
+        assert_eq!(
+            summary(&two),
+            "A clash marker that was never sorted out (a.rs:3), and 1 more."
+        );
+    }
 
     #[test]
     fn finds_what_people_regret_sending() {
