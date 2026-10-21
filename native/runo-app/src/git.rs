@@ -2386,6 +2386,124 @@ pub fn push_branch(dir: &str, remote: &str, branch: &str) -> Result<(), String> 
         .map_err(|e| auth_hint(&e))
 }
 
+/// What a branch changes against `base`, commit subjects first, cut at `max` bytes, for
+/// an agent to read.
+pub fn branch_patch(dir: &str, branch: &str, base: &str, max: usize) -> String {
+    let range = format!("{base}...{branch}");
+    let subjects = git(
+        dir,
+        &[
+            "log",
+            "--reverse",
+            "--format=- %s",
+            &format!("{base}..{branch}"),
+        ],
+    )
+    .unwrap_or_default();
+    let stat = git(dir, &["diff", "--stat", &range]).unwrap_or_default();
+    let mut diff = git(dir, &["diff", "--no-color", &range]).unwrap_or_default();
+    if diff.len() > max {
+        let mut cut = max;
+        while !diff.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        diff.truncate(cut);
+        diff.push_str("\n… (cut short)");
+    }
+    format!("Commits:\n{subjects}\nFiles:\n{stat}\n{diff}")
+}
+
+/// Split a branch's work into a stack of new branches, one per part, each built on the
+/// one before and holding its part's files as they are at `tip`. The last branch has
+/// every file the parts name. Nothing checked out is touched. Returns the new names.
+pub fn stack_parts(
+    dir: &str,
+    base: &str,
+    tip: &str,
+    prefix: &str,
+    parts: &[(String, Vec<String>)],
+) -> Result<Vec<String>, String> {
+    let git_dir = git(dir, &["rev-parse", "--absolute-git-dir"])?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let index = format!("{}/runo-split-{nanos}", git_dir.trim());
+    let env = [("GIT_INDEX_FILE", index.as_str())];
+    let start = git(dir, &["merge-base", base, tip])?.trim().to_string();
+    let mut parent = start.clone();
+    let mut names = Vec::new();
+    let result = (|| {
+        git_with(dir, &["read-tree", &start], &env, None)?;
+        for (i, (title, files)) in parts.iter().enumerate() {
+            for path in files {
+                let entry = git(dir, &["ls-tree", tip, "--", path])?;
+                match entry.split_once('\t') {
+                    Some((meta, _)) => {
+                        let f: Vec<&str> = meta.split_whitespace().collect();
+                        let info = format!("{},{},{path}", f[0], f[2]);
+                        git_with(
+                            dir,
+                            &["update-index", "--add", "--cacheinfo", &info],
+                            &env,
+                            None,
+                        )?;
+                    }
+                    // Gone at the tip: this part deletes it.
+                    None => {
+                        git_with(
+                            dir,
+                            &["update-index", "--force-remove", "--", path],
+                            &env,
+                            None,
+                        )?;
+                    }
+                }
+            }
+            let tree = git_with(dir, &["write-tree"], &env, None)?;
+            let commit = git(
+                dir,
+                &["commit-tree", tree.trim(), "-p", &parent, "-m", title],
+            )?;
+            let name = format!("{prefix}-part-{}", i + 1);
+            git(dir, &["branch", "-f", &name, commit.trim()])?;
+            names.push(name);
+            parent = commit.trim().to_string();
+        }
+        Ok::<(), String>(())
+    })();
+    let _ = std::fs::remove_file(&index);
+    result.map(|_| names)
+}
+
+/// Open a pull request for `branch` onto `base` with the GitHub CLI, returning its link.
+pub fn open_pull_request(
+    dir: &str,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body,
+        ])
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("The GitHub CLI (gh) is needed for pull requests: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(text
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("https://"))
+        .unwrap_or(text.trim())
+        .to_string())
+}
+
 pub fn rename_branch(dir: &str, from: &str, to: &str) -> Result<(), String> {
     git(dir, &["branch", "-m", from, to]).map(|_| ())
 }
@@ -3670,6 +3788,48 @@ index 1..2 100644
         for p in [&repo, &remote, &other] {
             let _ = std::fs::remove_dir_all(p);
         }
+    }
+
+    #[test]
+    fn a_branch_splits_into_a_stack() {
+        let (repo, _remote) = with_origin("split");
+        let dir = repo.to_str().unwrap();
+        new_branch(dir, "big", "main").unwrap();
+        switch(dir, "big").unwrap();
+        std::fs::write(repo.join("one.txt"), "1\n").unwrap();
+        std::fs::write(repo.join("two.txt"), "2\n").unwrap();
+        std::fs::write(repo.join("three.txt"), "3\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "everything"]);
+        switch(dir, "main").unwrap();
+        assert!(branch_patch(dir, "big", "main", 10_000).contains("- everything"));
+        let names = stack_parts(
+            dir,
+            "main",
+            "big",
+            "big",
+            &[
+                ("First".into(), vec!["one.txt".into()]),
+                ("Rest".into(), vec!["two.txt".into(), "three.txt".into()]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(names, vec!["big-part-1", "big-part-2"]);
+        let files = |b: &str| git(dir, &["ls-tree", "--name-only", b]).unwrap();
+        assert!(
+            files("big-part-1").contains("one.txt") && !files("big-part-1").contains("two.txt")
+        );
+        // The top of the stack is the whole branch, built on the part below it.
+        assert!(git(dir, &["diff", "--quiet", "big", "big-part-2"]).is_ok());
+        assert!(is_ancestor(dir, "big-part-1", "big-part-2"));
+        assert_eq!(
+            git(dir, &["log", "-1", "--format=%s", "big-part-1"])
+                .unwrap()
+                .trim(),
+            "First"
+        );
+        assert_eq!(current_branch(dir), "main");
+        assert!(changes(dir).is_empty());
     }
 
     #[test]

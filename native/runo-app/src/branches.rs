@@ -147,6 +147,7 @@ impl RunoApp {
 
     fn pick_branch(&mut self, name: String) {
         self.git_radar_sel = None;
+        self.git_kit = None;
         self.git_branch_sel = Some(name);
         self.git_naming = None;
         self.load_branches();
@@ -732,6 +733,9 @@ impl RunoApp {
         else {
             return div().into_any_element();
         };
+        if self.git_kit.as_ref() == Some(&row.name) {
+            return self.kit_page(&row, cx);
+        }
         let base = data.base.clone();
         let is_base = row.name == base;
         let session = self
@@ -950,6 +954,25 @@ impl RunoApp {
                 false,
             ));
         }
+        if can_merge {
+            let lines: usize = self
+                .git_branch_detail
+                .as_ref()
+                .filter(|d| d.name == row.name)
+                .map_or(0, |d| d.files.iter().map(|f| f.added + f.removed).sum());
+            tiles.push((
+                "reviewable",
+                IconName::ScanSearch,
+                "Make it reviewable".into(),
+                if lines > 400 {
+                    format!("{lines} lines is a lot for one review. Split it and write a guide.")
+                } else {
+                    "A reviewer's guide, and a split if it's big.".into()
+                },
+                "",
+                false,
+            ));
+        }
         if session.is_some() {
             tiles.push((
                 "session",
@@ -1037,6 +1060,7 @@ impl RunoApp {
                                 });
                             }
                             "switch" => this.git_switch(row.name.clone()),
+                            "reviewable" => this.git_kit = Some(row.name.clone()),
                             "sync" => this.git_sync(gitplace::SyncStep::Push),
                             "pr" | "session" => {
                                 if let Some(id) = session_id {
