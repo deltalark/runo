@@ -95,6 +95,13 @@ const SOURCES: &[(&str, &str)] = &[
         "keybindings",
         include_str!("../../../docs/guide/keybindings.md"),
     ),
+    ("crew", include_str!("../../../docs/guide/crew.md")),
+    ("git", include_str!("../../../docs/guide/git.md")),
+    (
+        "git-safety",
+        include_str!("../../../docs/guide/git-safety.md"),
+    ),
+    ("cove", include_str!("../../../docs/guide/cove.md")),
     ("tour", include_str!("../../../docs/guide/tour.md")),
     ("usage", include_str!("../../../docs/guide/usage.md")),
     ("phone", include_str!("../../../docs/guide/phone.md")),
@@ -249,6 +256,8 @@ fn jump_for(open: &str) -> Option<Jump> {
         "inbox" => Jump::View(View::Inbox),
         "sessions" => Jump::View(View::AllSessions),
         "review" => Jump::View(View::Review),
+        "git-history" => Jump::View(View::GitHistory),
+        "branches" => Jump::View(View::Branches),
         "github" => Jump::View(View::GitHub),
         "playbooks" => Jump::View(View::Automations),
         "history" => Jump::View(View::History),
@@ -272,7 +281,9 @@ fn open_label(open: &str) -> String {
         "playbooks" => "Go to Playbooks".into(),
         "github" => "Go to GitHub".into(),
         "history" => "Go to History".into(),
-        "review" => "Go to Review".into(),
+        "review" => "Go to Git".into(),
+        "git-history" => "Go to Git: History".into(),
+        "branches" => "Go to Git: Branches".into(),
         "inbox" => "Go to Inbox".into(),
         "sessions" => "Go to Sessions".into(),
         _ => "Go to Home".into(),
@@ -1065,6 +1076,19 @@ mod tests {
             files, built,
             "docs/guide and SOURCES list different articles"
         );
+    }
+
+    #[test]
+    fn every_open_leads_somewhere() {
+        for a in guide() {
+            if let Some(open) = &a.open {
+                assert!(
+                    jump_for(open).is_some(),
+                    "{} opens {open}, which leads nowhere",
+                    a.id
+                );
+            }
+        }
     }
 
     #[test]

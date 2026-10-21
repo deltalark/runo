@@ -354,7 +354,6 @@ impl AppSettings {
         crate::pty::set_scrollback(self.term_history as usize);
     }
 
-    /// The widest the conversation column gets, or None to fill the window.
     /// Whether the place with this label is pinned out on the rail.
     pub fn pinned(&self, label: &str) -> bool {
         self.rail_pins.iter().any(|p| p == label)
@@ -368,6 +367,7 @@ impl AppSettings {
         }
     }
 
+    /// The widest the conversation column gets, or None to fill the window.
     pub fn content_max_width(&self) -> Option<f32> {
         match self.content_width.as_str() {
             "comfortable" => Some(780.),
