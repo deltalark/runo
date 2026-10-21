@@ -314,6 +314,8 @@ struct RunoApp {
     remove_copy: Option<fixes::RemoveCopy>,
     /// Terminal tabs signing an agent in: shell id → agent.
     sign_ins: HashMap<u64, &'static str>,
+    /// Of those, the ones signing in on a Cove server: shell → session.
+    server_sign_ins: HashMap<u64, u64>,
     /// The session whose failed turn shows the model list.
     fix_models: Option<u64>,
     project_form: Option<projects::ProjectForm>,
@@ -1583,6 +1585,7 @@ impl RunoApp {
             install_confirm: None,
             remove_copy: None,
             sign_ins: HashMap::new(),
+            server_sign_ins: HashMap::new(),
             fix_models: None,
             project_form: None,
             project_name,
@@ -2516,7 +2519,18 @@ impl RunoApp {
                         .collect::<Vec<_>>()
                         .join("\n");
                     let sign_in = if (silent || !ok || signed_out || reported) && !stopped {
-                        agent::sign_in_hint(&session.provider, &errors)
+                        agent::sign_in_hint(&session.provider, &errors).map(|hint| {
+                            // On a Cove server, signing in happens there, once.
+                            match connections::get(session.connection) {
+                                Some(c)
+                                    if c.kind == connections::Kind::Cove
+                                        && cove::keeps_login(&session.provider) =>
+                                {
+                                    cove::sign_in_help(&session.provider, &c.name)
+                                }
+                                _ => hint,
+                            }
+                        })
                     } else {
                         None
                     };
