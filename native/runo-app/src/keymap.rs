@@ -75,8 +75,8 @@ pub(crate) const SHORTCUTS: [Shortcut; 26] = [
     },
     Shortcut {
         id: "go-review",
-        title: "Git: To ship",
-        desc: "Go to Git's To ship tab: check and ship the work agents finished.",
+        title: "Git: Changes",
+        desc: "Go to Git's Changes tab: check and ship the work agents finished.",
         default: &["secondary-3"],
     },
     Shortcut {

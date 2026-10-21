@@ -690,6 +690,7 @@ impl RunoApp {
     pub(crate) fn load_github(&mut self) {
         self.view = View::GitHub;
         self.git_github = true;
+        self.load_repo();
         if self.demo {
             self.gh.prs = vec![GhItem {
                 number: 42,

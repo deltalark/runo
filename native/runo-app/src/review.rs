@@ -47,6 +47,7 @@ impl RunoApp {
         }
         self.view = View::Review;
         self.git_github = false;
+        self.load_repo();
     }
 
     /// Show one session in Review.
@@ -59,6 +60,7 @@ impl RunoApp {
         self.select(id);
         self.view = View::Review;
         self.git_github = false;
+        self.load_repo();
     }
 
     fn review_row(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
@@ -137,7 +139,8 @@ impl RunoApp {
     }
 
     /// Git: what waits to ship and the project's GitHub, as two tabs on the frame, the
-    /// open one cut from the page below it.
+    /// open one cut from the page below it, with the project folder's branch, Sync and
+    /// Undo at the strip's right end.
     pub(crate) fn git_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let github = self.view == View::GitHub;
         let tab = |id: &'static str, label: &'static str, count: usize, alert: bool, on: bool| {
@@ -161,8 +164,8 @@ impl RunoApp {
                     )
                 })
         };
-        // The open tab is the colour of what sits under it: the waiting list for To
-        // ship, the page for GitHub.
+        // The open tab is the colour of what sits under it: the waiting list for
+        // Changes, the page for GitHub.
         let under = if github {
             glass_fill(c_canvas())
         } else {
@@ -211,7 +214,7 @@ impl RunoApp {
                     .child(
                         tab(
                             "git-ship",
-                            "To ship",
+                            "Changes",
                             self.review_list().len(),
                             false,
                             !github,
@@ -230,9 +233,19 @@ impl RunoApp {
                                 cx.notify();
                             }),
                         ),
-                    ),
+                    )
+                    .child(div().flex_1())
+                    .child(self.git_controls(cx)),
             )
-            .child(body.flex_1().min_h_0())
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .flex()
+                    .child(body.size_full())
+                    .children(self.git_toast_view(cx)),
+            )
             .into_any_element()
     }
 

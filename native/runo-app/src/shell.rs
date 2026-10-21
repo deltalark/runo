@@ -901,7 +901,7 @@ impl Mode {
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
             Mode::Missions => "go-missions",
-            // Git's To ship tab; `go-reviews` opens its GitHub tab.
+            // Git's Changes tab; `go-reviews` opens its GitHub tab.
             Mode::Git => "go-review",
             Mode::Playbooks => "go-playbooks",
             Mode::History => "go-history",
@@ -1821,6 +1821,7 @@ impl RunoApp {
             .max();
         match (self.mode(), latest) {
             (Mode::Git, _) if self.view == View::GitHub => self.load_github(),
+            (Mode::Git, _) => self.load_repo(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
                 self.view = View::Home;

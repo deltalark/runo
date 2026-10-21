@@ -29,6 +29,7 @@ mod fixes;
 mod gemini;
 mod git;
 mod github;
+mod gitplace;
 mod handoff;
 mod health;
 mod history;
@@ -203,8 +204,16 @@ enum RightTab {
 struct RunoApp {
     state: State,
     demo: bool,
-    /// Git opens on its GitHub tab, the one used last, rather than To ship.
+    /// Git opens on its GitHub tab, the one used last, rather than Changes.
     git_github: bool,
+    /// The top bar project's folder as Git sees it, with when the remote was last fetched.
+    git_repo: Option<gitplace::Repo>,
+    /// The last git step taken from the Git place, which Undo takes back for a while.
+    git_undo: Option<(git::UndoPoint, std::time::Instant)>,
+    /// A git step running for the project folder, in words.
+    git_working: Option<String>,
+    /// What the last git step did, shown at the foot of the Git place for a moment.
+    git_toast: Option<(String, std::time::Instant)>,
     selected: Option<u64>,
     view: View,
     right_tab: RightTab,
@@ -1237,7 +1246,10 @@ impl RunoApp {
                         this.refresh();
                         cx.notify();
                     } else if repaint
-                        || (tick && (!this.started.is_empty() || this.info.is_some()))
+                        || (tick
+                            && (!this.started.is_empty()
+                                || this.info.is_some()
+                                || this.git_toast.is_some()))
                         || (ticks.is_multiple_of(5)
                             && this.update_runs.values().any(|r| r.failed.is_none()))
                     {
@@ -1437,6 +1449,10 @@ impl RunoApp {
             state,
             demo,
             git_github: false,
+            git_repo: None,
+            git_undo: None,
+            git_working: None,
+            git_toast: None,
             selected,
             right_tab: RightTab::Changes,
             browser_open: false,
@@ -2828,7 +2844,7 @@ impl RunoApp {
                 IconName::RotateCcwClock,
                 View::History,
             ),
-            ("Go to Git: To ship", IconName::GitCompare, View::Review),
+            ("Go to Git: Changes", IconName::GitCompare, View::Review),
             ("Go to Missions", IconName::Rocket, View::Missions),
             ("Go to Git: GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
@@ -8903,6 +8919,13 @@ impl Render for RunoApp {
         {
             self.info = None;
         }
+        if self
+            .git_toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > gitplace::TOAST_FOR)
+        {
+            self.git_toast = None;
+        }
         self.log_notice();
         let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
             (notice.clone(), c_red(), Some(IconName::CircleAlert))
@@ -9680,7 +9703,7 @@ fn app_menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
-            MenuItem::action("Git: To ship", GoReview),
+            MenuItem::action("Git: Changes", GoReview),
             MenuItem::action("Missions", GoMissions),
             MenuItem::action("Git: GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
