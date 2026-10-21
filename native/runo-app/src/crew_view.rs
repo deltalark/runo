@@ -9,7 +9,7 @@ use crate::crew_ui::thread_status;
 /// Crew's mark wherever it shows.
 pub(crate) const CREW_ICON: IconName = IconName::Workflow;
 
-fn status_tone(status: &str) -> u32 {
+pub(crate) fn status_tone(status: &str) -> u32 {
     match status {
         "working" => c_blue(),
         "needs you" => c_amber(),

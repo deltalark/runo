@@ -1,9 +1,13 @@
 //! Home: one prompt to start work from, which also searches sessions, projects, playbooks
 //! and past conversations as you type; ideas to start from; what's waiting, in a line;
-//! and the sessions to pick up again.
+//! and the sessions to pick up again. In a Crew project the prompt goes to Crew, and
+//! Home shows what Crew last said, the decisions its threads wait on, and the threads.
 
 use crate::agent_pick::AgentPick;
 use crate::archdraw::view::{col, tip};
+use crate::crew::{self, Chip, Mark, Route};
+use crate::crew_ui::thread_status;
+use crate::crew_view::{status_tone, CREW_ICON};
 use crate::sessions::HitsFor;
 use crate::shell::{accent_bracket, cascade, hover_wash, live_dot, pop, seg_choice, seg_track};
 use crate::shell::{Bucket, Need};
@@ -13,6 +17,10 @@ use gpui_kit::component::input;
 
 /// How many sessions "Pick up where you left off" shows.
 const RECENT: usize = 6;
+
+/// The prompt's placeholder, and in a Crew project.
+const DIRECT_HINT: &str = "Describe a task to start, or search sessions and history…";
+const CREW_HINT: &str = "Ask Crew anything, or describe work for it to hand out…";
 
 /// Home's prompt and what goes with it.
 pub(crate) struct HomeState {
@@ -29,13 +37,15 @@ pub(crate) struct HomeState {
     pub shown: bool,
     /// The project Git's state was last read for from Home.
     pub git_for: Option<u64>,
+    /// The prompt's placeholder, which says whether it goes to Crew.
+    pub hint: &'static str,
 }
 
 impl HomeState {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<RunoApp>) -> (Self, Subscription) {
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Describe a task to start, or search sessions and history…")
+                .placeholder(DIRECT_HINT)
                 .submit_on_enter(true)
         });
         let sub = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| match event {
@@ -65,6 +75,7 @@ impl HomeState {
             filter: None,
             shown: false,
             git_for: None,
+            hint: DIRECT_HINT,
         };
         (home, sub)
     }
@@ -80,6 +91,10 @@ pub(crate) enum HomeHit {
     Said(u64, String),
     Project(u64),
     Playbook(u64),
+    /// In a Crew project: send what was typed to Crew, routed by this chip.
+    Crew(Chip),
+    /// In a Crew project, after an @: name this thread in the prompt to send it there.
+    Thread(u64),
 }
 
 /// A one-tap start on Home.
@@ -130,6 +145,20 @@ fn updates(n: usize) -> String {
         format!("{n} updates")
     }
 }
+
+/// The starting tasks Home offers in a Crew project, for Crew to hand out.
+const CREW_IDEAS: [(IconName, &str); 4] = [
+    (
+        IconName::FlaskConical,
+        "Have Crew run the tests and fix what fails",
+    ),
+    (IconName::ShieldAlert, "Ask Crew where the risky code is"),
+    (
+        IconName::Bug,
+        "Have Crew find and fix bugs in the recent changes",
+    ),
+    (IconName::BookOpen, "Have Crew bring the README up to date"),
+];
 
 /// The starting tasks Home offers in every project.
 const IDEAS: [(IconName, &str); 4] = [
@@ -207,7 +236,9 @@ const EMBER: u32 = 0xd97757;
 impl RunoApp {
     /// Sessions for "Pick up where you left off": what needs you, then what runs, then
     /// what waits for review, then the latest, in Home's scope and narrowed by its pill.
+    /// In a Crew project, its open threads in the same order.
     pub(crate) fn home_recent(&self) -> Vec<&Session> {
+        let crew = self.home_crew();
         let rank = |b: Option<Bucket>| match b {
             Some(Bucket::NeedsYou) => 0,
             Some(Bucket::Running) => 1,
@@ -219,6 +250,11 @@ impl RunoApp {
             .sessions
             .iter()
             .filter(|s| self.on_home(s) && !s.archived && s.canvas.is_empty())
+            .filter(|s| {
+                crew.is_none_or(|pid| {
+                    s.project_id == pid && s.crew.as_ref().is_some_and(|i| !i.resolved)
+                })
+            })
             .filter(|s| self.home.filter.is_none_or(|f| self.bucket(s) == Some(f)))
             .collect();
         list.sort_by_key(|s| (rank(self.bucket(s)), std::cmp::Reverse(s.id)));
@@ -235,7 +271,10 @@ impl RunoApp {
         }
         let needle = query.to_lowercase();
         let has = |s: &str| s.to_lowercase().contains(&needle);
-        let mut out = vec![HomeHit::Start];
+        let mut out = match self.home_crew() {
+            Some(pid) => self.home_crew_hits(pid, &query),
+            None => vec![HomeHit::Start],
+        };
         let mut sessions: Vec<&Session> = self
             .state
             .sessions
@@ -282,13 +321,15 @@ impl RunoApp {
         let Some(hit) = hits.get(self.home.hit).or(hits.first()).cloned() else {
             return;
         };
-        if hit == HomeHit::Start {
-            self.home_start(window, cx);
-            return;
+        match hit {
+            HomeHit::Start => return self.home_start(window, cx),
+            HomeHit::Crew(chip) => return self.home_crew_send(chip, window, cx),
+            HomeHit::Thread(id) => return self.home_name_thread(id, window, cx),
+            _ => {}
         }
         self.home_clear(window, cx);
         match hit {
-            HomeHit::Start => {}
+            HomeHit::Start | HomeHit::Crew(_) | HomeHit::Thread(_) => {}
             HomeHit::Session(id) | HomeHit::Said(id, _) => self.open_session(id, window, cx),
             HomeHit::Project(pid) => self.switch_project(pid, window, cx),
             HomeHit::Playbook(id) => {
@@ -309,6 +350,10 @@ impl RunoApp {
     /// Start a session in the top bar's project with what's in the prompt, on the agent,
     /// branch and folder picked under it, and open it.
     pub(crate) fn home_start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pid) = self.home_crew() {
+            let chip = self.crew.chips.get(&pid).copied().unwrap_or_default();
+            return self.home_crew_send(chip, window, cx);
+        }
         let task = self.home.prompt.read(cx).value().trim().to_string();
         if task.is_empty() {
             return;
@@ -343,6 +388,101 @@ impl RunoApp {
         cx.notify();
     }
 
+    /// The project Home shows when it works through Crew.
+    pub(crate) fn home_crew(&self) -> Option<u64> {
+        self.current_project()
+            .filter(|pid| !self.home_all && self.crew_mode(*pid))
+    }
+
+    /// The first rows under the prompt in a Crew project: where the message goes, or
+    /// after an @, the threads it can go to.
+    fn home_crew_hits(&self, pid: u64, query: &str) -> Vec<HomeHit> {
+        let chip = self.crew.chips.get(&pid).copied().unwrap_or_default();
+        // A message that names a thread goes there whatever the chip says.
+        if matches!(self.home_route(pid, query, chip), Route::Thread { .. }) {
+            return vec![HomeHit::Crew(chip)];
+        }
+        let mut out = Vec::new();
+        if let Some(rest) = query.strip_prefix('@') {
+            let rest = rest.trim().to_lowercase();
+            out.extend(
+                self.crew_threads(pid, false)
+                    .iter()
+                    .filter(|t| t.title.to_lowercase().contains(&rest))
+                    .take(5)
+                    .map(|t| HomeHit::Thread(t.id)),
+            );
+        }
+        // The chip's own way first, so Enter does what the chip says.
+        out.push(HomeHit::Crew(chip));
+        out.extend(
+            Chip::ALL
+                .into_iter()
+                .filter(|c| *c != chip)
+                .map(HomeHit::Crew),
+        );
+        out
+    }
+
+    /// Where `text` goes from Crew's chat in project `pid`, as Crew's own composer decides.
+    fn home_route(&self, pid: u64, text: &str, chip: Chip) -> Route {
+        let threads: Vec<(u64, String)> = self
+            .crew_threads(pid, true)
+            .iter()
+            .map(|t| (t.id, t.title.clone()))
+            .collect();
+        crew::route(text, chip, &threads)
+    }
+
+    /// Send what's in the prompt to the project's Crew chat and open it. `chip` routes this
+    /// message; the routing chip itself stays as it was unless it was the one used.
+    fn home_crew_send(&mut self, chip: Chip, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.home.prompt.read(cx).value().trim().to_string();
+        if text.is_empty() || self.demo_guard(cx) {
+            return;
+        }
+        let Some(pid) = self.home_crew() else { return };
+        let Some(chat) = self.open_crew(pid, cx) else {
+            return;
+        };
+        let chips = &mut self.crew.chips;
+        let before = chips.get(&pid).copied().unwrap_or_default();
+        chips.insert(pid, chip);
+        if !self.crew_route_submit(chat, &text, &[], cx) {
+            self.send_or_queue(chat, text, cx);
+        }
+        // Starting a thread puts the chip back on Auto, as in Crew's own composer.
+        if chip != before {
+            self.crew.chips.insert(pid, before);
+        }
+        self.home_clear(window, cx);
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Put an @thread at the front of the prompt, so what follows goes to that thread.
+    fn home_name_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(title) = self.state.session(id).map(|s| s.title.clone()) else {
+            return;
+        };
+        let named = format!("@{title} ");
+        let end = named.encode_utf16().count() as u32;
+        self.home.prompt.update(cx, |p, cx| {
+            p.set_value(named, window, cx);
+            p.set_cursor_position(
+                input::Position {
+                    line: 0,
+                    character: end,
+                },
+                window,
+                cx,
+            );
+            p.focus(window, cx);
+        });
+        self.home.hit = 0;
+        cx.notify();
+    }
+
     /// Move the picked row under the prompt; returns whether there were rows to move in.
     fn home_move(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
         let n = self.home_hits(cx).len();
@@ -372,6 +512,17 @@ impl RunoApp {
         }
         self.home.git_for = pid;
         self.home.shown = on;
+        let placeholder = if self.home_crew().is_some() {
+            CREW_HINT
+        } else {
+            DIRECT_HINT
+        };
+        if self.home.hint != placeholder {
+            self.home.hint = placeholder;
+            self.home
+                .prompt
+                .update(cx, |p, cx| p.set_placeholder(placeholder, window, cx));
+        }
     }
 
     /// Home: a big prompt to start from, ideas, a line of what's waiting, and recent work.
@@ -420,8 +571,17 @@ impl RunoApp {
             if typed {
                 col_ = col_.child(self.home_results(cx));
             } else {
+                if let Some(line) = self
+                    .home_crew()
+                    .and_then(|pid| self.home_crew_said(pid, cx))
+                {
+                    col_ = col_.child(line);
+                }
                 if let Some(banner) = git.as_ref().and_then(|g| self.home_git_banner(g, cx)) {
                     col_ = col_.child(banner);
+                }
+                if let Some(decisions) = self.home_decisions(cx) {
+                    col_ = col_.child(decisions);
                 }
                 col_ = col_
                     .child(self.home_ideas(n_needs, n_review, git.as_ref(), cx))
@@ -460,6 +620,10 @@ impl RunoApp {
         no_projects: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Crew or Direct for the project on show, beside its name.
+        let mode = project
+            .filter(|_| !self.home_all && !self.demo)
+            .map(|p| div().w(px(140.)).child(self.crew_mode_switch(p.id, cx)));
         let scope = |label: &'static str, all: bool| {
             let id = if all { "home-all" } else { "home-one" };
             seg_choice(id, format!("seg-fill-{id}"), self.home_all == all)
@@ -474,6 +638,8 @@ impl RunoApp {
         let accent = c_blue();
         let ask: &'static str = if no_projects {
             "Let's get you building."
+        } else if self.home_crew().is_some() {
+            "What should Crew take on?"
         } else {
             "What should we build?"
         };
@@ -511,6 +677,7 @@ impl RunoApp {
                         )
                     })
                     .child(div().flex_1())
+                    .when_some(mode, |el, mode| el.child(mode))
                     .when(self.state.projects.len() > 1, |el| {
                         el.child(
                             seg_track()
@@ -637,6 +804,29 @@ impl RunoApp {
                         )
                     }),
             );
+        // In a Crew project, where the message goes instead of which agent starts.
+        let crew_pid = self.home_crew();
+        let crew_chip = crew_pid.map(|pid| self.crew.chips.get(&pid).copied().unwrap_or_default());
+        let to_thread = crew_pid.zip(crew_chip).is_some_and(|(pid, chip)| {
+            let text = self.home.prompt.read(cx).value().trim().to_string();
+            matches!(self.home_route(pid, &text, chip), Route::Thread { .. })
+        });
+        let route_track = crew_pid.zip(crew_chip).map(|(pid, current)| {
+            let mut track = seg_track();
+            for (i, chip) in Chip::ALL.into_iter().enumerate() {
+                let on = chip == current;
+                track = track.child(
+                    seg_choice(("home-chip", i), format!("home-chip-{pid}-{on}-{i}"), on)
+                        .child(chip.label())
+                        .tooltip(tip(chip.detail()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.crew.chips.insert(pid, chip);
+                            cx.notify();
+                        })),
+                );
+            }
+            track
+        });
         let isolated = self.home.isolated && is_git;
         let folder_chip = prompt_chip("home-isolated-chip", false)
             .child(icon(
@@ -682,7 +872,12 @@ impl RunoApp {
             .when(!typed, |el| {
                 el.bg(tint(c_active())).text_color(rgb(c_muted()))
             })
-            .child("Start")
+            .child(match crew_chip {
+                None => "Start",
+                Some(_) if to_thread => "Send",
+                Some(Chip::Thread) => "Start thread",
+                Some(_) => "Send to Crew",
+            })
             .child(div().text_size(px(11.)).opacity(0.7).child(
                 if cx.global::<AppSettings>().send_on_enter {
                     "↵"
@@ -738,8 +933,10 @@ impl RunoApp {
                     .items_center()
                     .gap(px(6.))
                     .child(project_chip)
-                    .child(agent_chip)
-                    .child(folder_chip)
+                    .when_some(route_track, |el, track| el.child(track))
+                    .when(crew_pid.is_none(), |el| {
+                        el.child(agent_chip).child(folder_chip)
+                    })
                     .child(div().flex_1())
                     .child(start),
             );
@@ -837,7 +1034,8 @@ impl RunoApp {
         let mut last_group = "";
         for (i, hit) in hits.iter().enumerate() {
             let group = match hit {
-                HomeHit::Start => "",
+                HomeHit::Start | HomeHit::Crew(_) => "",
+                HomeHit::Thread(_) => "Send to a thread",
                 HomeHit::Session(_) => "Sessions",
                 HomeHit::Project(_) => "Projects",
                 HomeHit::Playbook(_) => "Playbooks",
@@ -895,6 +1093,74 @@ impl RunoApp {
                             } else {
                                 "⌘↵"
                             })),
+                        )
+                    }
+                    HomeHit::Crew(chip) => {
+                        let first = i == 0;
+                        let pid = self.home_crew().unwrap_or_default();
+                        let (doing, body, meta) = match self.home_route(pid, &query, *chip) {
+                            Route::Thread { id, text } => (
+                                format!(
+                                    "Send to {}:",
+                                    self.state.session(id).map_or("", |t| t.title.as_str())
+                                ),
+                                text,
+                                "Straight to the thread, without Crew".to_string(),
+                            ),
+                            _ => (
+                                match chip {
+                                    Chip::Auto => "Ask Crew:",
+                                    Chip::Answer => "Only answer:",
+                                    Chip::Thread => "Start a thread without Crew:",
+                                }
+                                .to_string(),
+                                query.clone(),
+                                chip.detail().to_string(),
+                            ),
+                        };
+                        (
+                            icon(CREW_ICON, 14., c_blue()).into_any_element(),
+                            div()
+                                .flex()
+                                .min_w_0()
+                                .gap_1()
+                                .child(div().flex_none().child(doing))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(body),
+                                )
+                                .into_any_element(),
+                            meta,
+                            first.then(|| {
+                                key_hint(if cx.global::<AppSettings>().send_on_enter {
+                                    "↵"
+                                } else {
+                                    "⌘↵"
+                                })
+                            }),
+                        )
+                    }
+                    HomeHit::Thread(id) => {
+                        let Some(t) = self.state.session(*id) else {
+                            continue;
+                        };
+                        let status =
+                            thread_status(self.handles.contains_key(&Target::Session(*id)), t);
+                        (
+                            div()
+                                .size(px(8.))
+                                .rounded_full()
+                                .bg(rgb(status_tone(status)))
+                                .into_any_element(),
+                            div()
+                                .truncate()
+                                .child(format!("@{}", t.title))
+                                .into_any_element(),
+                            format!("Thread  ·  {status}"),
+                            None,
                         )
                     }
                     HomeHit::Session(id) | HomeHit::Said(id, _) => {
@@ -1079,8 +1345,15 @@ impl RunoApp {
                 .map(|s| s.id)
                 .max()
         };
+        let crew_on = self.home_crew().is_some();
         if let Some(id) = first(Bucket::NeedsYou) {
-            let label = if n_needs == 1 {
+            let asks = self
+                .state
+                .session(id)
+                .is_some_and(|s| s.crew.as_ref().is_some_and(|i| i.decision.is_some()));
+            let label = if n_needs == 1 && asks {
+                "Answer the question waiting".to_string()
+            } else if n_needs == 1 {
                 "Answer the agent that needs you".to_string()
             } else {
                 format!("Answer the {n_needs} agents that need you")
@@ -1088,7 +1361,11 @@ impl RunoApp {
             ideas.push((IconName::Hand, label, Idea::Open(id), Some(c_green())));
         }
         if let Some(id) = first(Bucket::Review) {
-            let label = if n_review == 1 {
+            let label = if crew_on && n_review == 1 {
+                "Review the thread that finished".to_string()
+            } else if crew_on {
+                format!("Review the {n_review} threads that finished")
+            } else if n_review == 1 {
                 "Review the change waiting".to_string()
             } else {
                 format!("Review the {n_review} changes waiting")
@@ -1100,7 +1377,7 @@ impl RunoApp {
                 Some(c_green()),
             ));
         }
-        for (glyph, text) in IDEAS {
+        for (glyph, text) in if crew_on { CREW_IDEAS } else { IDEAS } {
             ideas.push((glyph, text.to_string(), Idea::Fill(text), None));
         }
         let here = self.current_project();
@@ -1330,6 +1607,7 @@ impl RunoApp {
     /// "Pick up where you left off": recent sessions as cards, two to a row, with links to
     /// the history, timeline, notes and isolated sessions beside the heading.
     fn home_recent_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let crew_pid = self.home_crew();
         let links: [(&'static str, IconName, &'static str, View); 4] = [
             (
                 "home-history",
@@ -1365,6 +1643,7 @@ impl RunoApp {
                     .text_color(rgb(c_muted()))
                     .child(match self.home.filter {
                         Some(b) => b.label().to_uppercase(),
+                        None if crew_pid.is_some() => "CREW'S THREADS".into(),
                         None => "PICK UP WHERE YOU LEFT OFF".into(),
                     }),
             );
@@ -1403,11 +1682,12 @@ impl RunoApp {
         let recent = self.home_recent();
         let mut grid = div().flex().flex_wrap().gap_2();
         for (i, s) in recent.iter().enumerate() {
-            grid = grid.child(cascade(
-                self.home_card(s, cx),
-                format!("home-card-{}", s.id),
-                i + 4,
-            ));
+            let card = if crew_pid.is_some() {
+                self.home_thread_card(s, cx)
+            } else {
+                self.home_card(s, cx)
+            };
+            grid = grid.child(cascade(card, format!("home-card-{}", s.id), i + 4));
         }
         let empty = recent.is_empty();
         div()
@@ -1425,6 +1705,8 @@ impl RunoApp {
                         .text_color(rgb(c_muted()))
                         .child(if self.home.filter.is_some() {
                             "Nothing here right now."
+                        } else if crew_pid.is_some() {
+                            "Threads Crew starts show up here."
                         } else {
                             "Sessions you start show up here."
                         }),
@@ -1765,6 +2047,308 @@ impl RunoApp {
     }
 
     /// The warning when the project's folder has gone, with ways to fix it.
+    /// Crew's latest reply in one line under the prompt, or that it's working on one.
+    fn home_crew_said(&self, pid: u64, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let chat = self.crew_chat(pid)?;
+        let working = self.handles.contains_key(&Target::Session(chat.id));
+        let said = chat
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Agent && !m.text.trim().is_empty());
+        if said.is_none() && !working {
+            return None;
+        }
+        let line = said
+            .and_then(|m| m.text.lines().map(str::trim).find(|l| !l.is_empty()))
+            .unwrap_or_default()
+            .trim_start_matches(['#', '*', '-', ' '])
+            .to_string();
+        let when = said.map(|m| m.time.clone()).unwrap_or_default();
+        let open = div()
+            .id("home-crew-open")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .text_color(rgb(c_blue()))
+            .hover(|el| el.opacity(0.8))
+            .child("Open Crew")
+            .child(icon(IconName::ArrowRight, 12., c_blue()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_crew(pid, cx);
+                cx.notify();
+            }));
+        Some(
+            div()
+                .mt(px(14.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_size(px(12.5))
+                .text_color(rgb(c_secondary()))
+                .child(if working {
+                    live_dot(c_blue(), 7., "home-crew-live")
+                } else {
+                    icon(CREW_ICON, 13., c_blue()).into_any_element()
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c_text()))
+                        .child(if working { "Crew is on it" } else { "Crew" }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(if line.is_empty() { String::new() } else { line }),
+                )
+                .when(!working && !when.is_empty(), |el| {
+                    el.child(div().flex_none().text_color(rgb(c_muted())).child(when))
+                })
+                .child(open)
+                .animated(
+                    "home-crew-said",
+                    Animation::new(Duration::from_millis(QUICK_HOME)).with_easing(ease_out_quint()),
+                    |el, d| el.opacity(d),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The questions Crew's threads wait on, each with its answers to tap, the
+    /// recommended one first. An answer goes to the thread, as answering there does.
+    fn home_decisions(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let mut asking: Vec<&Session> = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| self.on_home(s) && !s.archived)
+            .filter(|s| s.crew.as_ref().is_some_and(|i| i.decision.is_some()))
+            .collect();
+        if asking.is_empty() {
+            return None;
+        }
+        asking.sort_by_key(|s| std::cmp::Reverse(s.id));
+        let mut list = div().mt(px(18.)).v_flex().gap_2();
+        for (n, s) in asking.iter().take(3).enumerate() {
+            let thread = s.id;
+            let Some(d) = s.crew.as_ref().and_then(|i| i.decision.clone()) else {
+                continue;
+            };
+            let mut order: Vec<usize> = (0..d.options.len()).collect();
+            order.sort_by_key(|i| *i != d.recommended);
+            let mut answers = div().flex().flex_wrap().gap(px(6.));
+            for i in order {
+                let o = &d.options[i];
+                let recommended = i == d.recommended;
+                let button = self
+                    .button(
+                        SharedString::from(format!("home-answer-{thread}-{i}")),
+                        o.label.clone(),
+                        recommended,
+                    )
+                    .when(!o.consequence.is_empty(), |el| {
+                        let says = o.consequence.clone();
+                        el.tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(says.clone())
+                                .build(window, cx)
+                        })
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.answer_decision(thread, i, cx);
+                        cx.notify();
+                    }));
+                answers = answers.child(button);
+            }
+            let card = div()
+                .id(("home-decision", thread as usize))
+                .px(px(14.))
+                .py(px(12.))
+                .v_flex()
+                .gap(px(8.))
+                .rounded(px(14.))
+                .border_1()
+                .border_color(col(c_amber(), 0.5))
+                .bg(col(c_amber(), if is_dark() { 0.08 } else { 0.05 }))
+                .child(
+                    div()
+                        .id(("home-decision-from", thread as usize))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .cursor_pointer()
+                        .hover(|el| el.text_color(rgb(c_text())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select(thread);
+                            cx.notify();
+                        }))
+                        .child(icon(IconName::Hand, 13., c_amber()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("{} asks", s.title)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(d.question.clone()),
+                )
+                .child(answers);
+            list = list.child(cascade(card, format!("home-decision-{thread}"), n + 1));
+        }
+        if asking.len() > 3 {
+            list = list.child(
+                div()
+                    .px(px(6.))
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .child(format!("{} more threads wait on you.", asking.len() - 3)),
+            );
+        }
+        Some(list.into_any_element())
+    }
+
+    /// A Crew thread on Home: where it stands, how far its checklist got and its last word.
+    fn home_thread_card(&self, s: &Session, cx: &mut Context<Self>) -> AnyElement {
+        let id = s.id;
+        let provider = agent::provider(&s.provider);
+        let working = self.handles.contains_key(&Target::Session(id));
+        let status = thread_status(working, s);
+        let tone = status_tone(status);
+        let info = s.crew.clone().unwrap_or_default();
+        let steps = info.checklist.len();
+        let done = info
+            .checklist
+            .iter()
+            .filter(|st| st.mark == Mark::Done)
+            .count();
+        let last = info
+            .decision
+            .as_ref()
+            .map(|d| d.question.clone())
+            .or_else(|| info.reports.last().map(|r| r.summary.clone()))
+            .or_else(|| {
+                info.checklist
+                    .iter()
+                    .find(|st| st.mark == Mark::Doing)
+                    .map(|st| st.text.clone())
+            })
+            .unwrap_or_else(|| info.brief.lines().next().unwrap_or_default().to_string());
+        let chosen = self.cursor == Some(id);
+        let progress = (steps > 0).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(4.))
+                        .rounded_full()
+                        .bg(tint(c_active()))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(done as f32 / steps as f32))
+                                .rounded_full()
+                                .bg(rgb(tone)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(format!("{done} of {steps} steps")),
+                )
+        });
+        div()
+            .id(("home-thread", id as usize))
+            .relative()
+            // Two to a row, with the gap between them.
+            .w(px(352.))
+            .flex_grow(1.)
+            .px(px(12.))
+            .py(px(10.))
+            .v_flex()
+            .gap(px(7.))
+            .rounded(px(12.))
+            .bg(tint(c_subtle()))
+            .cursor_pointer()
+            .when(chosen, |el| {
+                el.bg(tint(c_active()))
+                    .child(accent_bracket(format!("home-thread-bracket-{id}")))
+            })
+            .hover(|el| el.bg(tint(c_active())))
+            .on_mouse_down(
+                MouseButton::Right,
+                self.on_context(ctxmenu::CtxTarget::Session(id), cx),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select(id);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(if working {
+                        live_dot(tone, 7., format!("home-thread-live-{id}"))
+                    } else {
+                        div()
+                            .size(px(7.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(tone))
+                            .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(s.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(provider.color))
+                            .child(provider.mark),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(tone))
+                            .child(status),
+                    ),
+            )
+            .children(progress)
+            .when(!last.is_empty(), |el| {
+                el.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .line_clamp(2)
+                        .child(last),
+                )
+            })
+            .into_any_element()
+    }
+
     fn home_missing(&self, pid: u64, path: String, cx: &mut Context<Self>) -> AnyElement {
         div()
             .mb(px(18.))
