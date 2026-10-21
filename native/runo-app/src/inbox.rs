@@ -414,5 +414,5 @@ fn section(label: &'static str, count: usize) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(c_muted()))
         .child(label.to_uppercase())
-        .child(count.to_string())
+        .child(shell::count_badge(count, shell::Tone::Quiet))
 }

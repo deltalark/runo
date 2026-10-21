@@ -175,12 +175,7 @@ impl RunoApp {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_secondary()))
                     .child(name)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(c_muted()))
-                            .child(members.len().to_string()),
-                    ),
+                    .child(shell::count_badge(members.len(), shell::Tone::Quiet)),
             );
             for s in members {
                 col = col.child(self.session_row(s, cx));
