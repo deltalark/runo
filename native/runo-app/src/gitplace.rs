@@ -57,7 +57,7 @@ fn commits(n: usize) -> String {
 
 impl RunoApp {
     /// The top bar project's folder, when it is a git repository.
-    fn git_place_dir(&self) -> Option<String> {
+    pub(crate) fn git_place_dir(&self) -> Option<String> {
         let pid = self.current_project()?;
         let project = self.state.projects.iter().find(|p| p.id == pid)?;
         (!project.path.is_empty()).then(|| project.path.clone())
@@ -105,13 +105,13 @@ impl RunoApp {
         );
     }
 
-    /// Take a step that moves the project folder: remember where it was, run `work`, and
-    /// say what happened. `work` returns the note to show and whether Undo can take the
-    /// step back, or None when nothing changed.
-    fn git_step(
+    /// Take a git step in the project folder off the UI thread and say what happened.
+    /// `work` returns the note to show and how Undo takes the step back, if it can, or
+    /// None when nothing changed.
+    pub(crate) fn git_step(
         &mut self,
         busy: &str,
-        work: impl FnOnce(&str) -> Result<Option<(String, bool)>, String> + Send + 'static,
+        work: impl FnOnce(&str) -> Result<Option<(String, Option<git::Undo>)>, String> + Send + 'static,
     ) {
         if self.demo || self.git_working.is_some() {
             return;
@@ -123,20 +123,23 @@ impl RunoApp {
         self.menu = None;
         self.bg(
             move || {
-                let point = git::undo_point(&dir, "");
                 let result = work(&dir);
                 let state = git::repo_state(&dir);
-                (result, point, state)
+                (result, dir, state)
             },
-            |this, (result, point, state), cx| {
+            |this, (result, dir, state), cx| {
                 this.git_working = None;
                 if let Some(repo) = this.git_repo.as_mut() {
                     repo.state = state;
                 }
                 match result {
-                    Ok(Some((note, undoable))) => {
-                        if let Some(mut point) = point.filter(|_| undoable) {
-                            point.label = note.clone();
+                    Ok(Some((note, undo))) => {
+                        if let Some(undo) = undo {
+                            let point = git::UndoPoint {
+                                dir,
+                                label: note.clone(),
+                                undo,
+                            };
                             this.git_undo = Some((point, Instant::now()));
                         }
                         this.git_toast = Some((note, Instant::now()));
@@ -146,8 +149,9 @@ impl RunoApp {
                     }
                     Err(error) => this.fail("git", error),
                 }
-                // Sessions on this folder see the change too.
+                // Sessions on this folder, and the branch list, see the change too.
                 this.refresh();
+                this.load_branches();
                 cx.notify();
             },
         );
@@ -181,6 +185,7 @@ impl RunoApp {
         self.git_step(
             busy,
             move |dir| {
+                let before = git::folder_point(dir);
                 let mut notes: Vec<String> = Vec::new();
                 // Once commits are sent, taking the folder back would not take them back.
                 let mut sent = false;
@@ -214,7 +219,8 @@ impl RunoApp {
                         });
                     }
                 }
-                Ok((!notes.is_empty()).then(|| (sentence(&notes.join(", then ")), !sent)))
+                Ok((!notes.is_empty())
+                    .then(|| (sentence(&notes.join(", then ")), before.filter(|_| !sent))))
             },
         );
         if let Some(repo) = self.git_repo.as_mut() {
@@ -225,8 +231,9 @@ impl RunoApp {
     /// Check out another branch in the project folder.
     pub(crate) fn git_switch(&mut self, branch: String) {
         self.git_step("Switching…", move |dir| {
+            let before = git::folder_point(dir);
             git::switch(dir, &branch).map_err(|e| format!("Could not switch to {branch}: {e}"))?;
-            Ok(Some((format!("Switched to {branch}."), true)))
+            Ok(Some((format!("Switched to {branch}."), before)))
         });
     }
 
@@ -249,7 +256,7 @@ impl RunoApp {
             git::undo(&point).map_err(|e| format!("Could not undo: {e}"))?;
             Ok(Some((
                 format!("Undone: {}", lower_first(point.label.trim_end_matches('.'))),
-                false,
+                None,
             )))
         });
     }

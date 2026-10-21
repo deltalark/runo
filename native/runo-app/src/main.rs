@@ -8,6 +8,7 @@ mod archdraw;
 mod architecture;
 mod askbar;
 mod assistant;
+mod branches;
 mod browser;
 mod browser_engine;
 mod caps;
@@ -177,6 +178,8 @@ enum View {
     Editor,
     /// Changes waiting to be reviewed and shipped, one session at a time.
     Review,
+    /// The project folder's branches and work set aside.
+    Branches,
     /// Goals planned into parts that several agents work on at once.
     Missions,
 }
@@ -208,8 +211,17 @@ enum RightTab {
 struct RunoApp {
     state: State,
     demo: bool,
-    /// Git opens on its GitHub tab, the one used last, rather than Changes.
-    git_github: bool,
+    /// The Git tab used last, which Git opens on: Review, Branches or GitHub.
+    git_tab: View,
+    /// The Branches tab's list, the branch picked in it and that branch's commits and files.
+    git_branches: Option<branches::Branches>,
+    git_branch_sel: Option<String>,
+    git_branch_detail: Option<branches::BranchDetail>,
+    /// The Merge dialog, while open.
+    git_merge: Option<branches::MergeForm>,
+    /// The Branches tab's name box, while open, and the box itself.
+    git_naming: Option<branches::Naming>,
+    git_name: Entity<InputState>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1345,6 +1357,10 @@ impl RunoApp {
                 cx.notify();
             }
         });
+        let git_name = cx.new(|cx| InputState::new(window, cx).placeholder("Branch name"));
+        let git_name_sub = cx.subscribe_in(&git_name, window, |this, _, event, _, cx| {
+            this.on_git_name(event, cx);
+        });
         let commit_msg = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let commit_sub = cx.subscribe_in(&commit_msg, window, |this, _, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -1455,7 +1471,13 @@ impl RunoApp {
             view: View::Session,
             state,
             demo,
-            git_github: false,
+            git_tab: View::Review,
+            git_branches: None,
+            git_branch_sel: None,
+            git_branch_detail: None,
+            git_merge: None,
+            git_naming: None,
+            git_name: git_name.clone(),
             git_repo: None,
             git_undo: None,
             git_working: None,
@@ -1716,6 +1738,7 @@ impl RunoApp {
                 prompt_sub,
                 settings_search_sub,
                 commit_sub,
+                git_name_sub,
                 rename_sub,
                 note_sub,
             ],
@@ -2778,6 +2801,7 @@ impl RunoApp {
                 View::Notes => self.open_notes(window, cx),
                 View::GitHub => self.load_github(),
                 View::Review => self.open_review(),
+                View::Branches => self.open_branches(),
                 View::Missions => self.open_missions(cx),
                 _ => self.view = view,
             },
@@ -2855,6 +2879,7 @@ impl RunoApp {
             ),
             ("Go to Git: Changes", IconName::GitCompare, View::Review),
             ("Go to Missions", IconName::Rocket, View::Missions),
+            ("Go to Git: Branches", IconName::GitBranch, View::Branches),
             ("Go to Git: GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
@@ -8864,7 +8889,7 @@ impl Render for RunoApp {
             View::Notes => self.notes_view(cx),
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
-            View::GitHub | View::Review => self.git_view(cx),
+            View::GitHub | View::Review | View::Branches => self.git_view(cx),
             View::Missions => self.missions_view(cx),
             View::Editor => div()
                 .flex_1()
@@ -8966,8 +8991,10 @@ impl Render for RunoApp {
         // The page is an island under the session tabs. Pages with their own list beside
         // the content paint the two layers themselves, so the list is as clear as the
         // sidebar.
-        let page_fill = if matches!(self.view, View::Review | View::GitHub | View::Settings)
-            || (self.view == View::Architecture && self.arch_diagram_open())
+        let page_fill = if matches!(
+            self.view,
+            View::Review | View::Branches | View::GitHub | View::Settings
+        ) || (self.view == View::Architecture && self.arch_diagram_open())
             || (self.view == View::Design && self.design_canvas_open())
         {
             rgba(0)
@@ -9060,12 +9087,12 @@ impl Render for RunoApp {
             }))
             // Both land in Git, each on its own tab.
             .on_action(cx.listener(|this, _: &GoReviews, window, cx| {
-                this.git_github = true;
+                this.git_tab = View::GitHub;
                 this.go(Mode::Git, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoReview, window, cx| {
-                this.git_github = false;
+                this.git_tab = View::Review;
                 this.go(Mode::Git, window, cx);
                 cx.notify();
             }))
