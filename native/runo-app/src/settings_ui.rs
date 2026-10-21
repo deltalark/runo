@@ -1402,28 +1402,72 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
     }
 
     let installed = crate::cove::binary().is_some();
+    let setup = crate::cove::setup_status();
+    let busy = crate::cove::setting_up();
+    // While installing or starting, and after a failure, say what happened.
+    let said = |default: &str| match &setup {
+        Some((None, text)) | Some((Some(false), text)) => text.clone(),
+        _ => default.to_string(),
+    };
     let mut cove_rows = vec![if !installed {
         row(
             "Cove",
-            "Not installed. Cove gives each session its own Linux VM on this machine or your server.",
-            Ctl::Button(
-                "Get Cove".into(),
-                Rc::new(|_, cx| cx.open_url("https://github.com/deltalark/cove#install")),
-            ),
+            &said("Not installed. Cove gives each session its own Linux VM, on this Mac or on your server. Install sets it up here in one step (vfkit and the guest agent included) and starts it at login."),
+            if busy {
+                Ctl::Chip("Installing…".into(), 1)
+            } else {
+                Ctl::Buttons(vec![
+                    (
+                        "Learn more".into(),
+                        Rc::new(|_, cx| cx.open_url("https://github.com/deltalark/cove#readme")),
+                    ),
+                    (
+                        "Install".into(),
+                        Rc::new(|this, cx| this.set_up_cove(false, cx)),
+                    ),
+                ])
+            },
         )
     } else if crate::cove::available() {
         row(
             "Cove",
-            "Installed, and its server is running.",
+            &match &setup {
+                Some((Some(true), text)) => text.clone(),
+                _ => "Installed, and its server is running.".into(),
+            },
             Ctl::Chip("Ready".into(), 2),
         )
     } else {
         row(
             "Cove",
-            "Installed, but its server isn't running. Start it with cove serve.",
-            Ctl::Chip("Not running".into(), 1),
+            &said("Installed, but its server isn't running."),
+            if busy {
+                Ctl::Chip("Starting…".into(), 1)
+            } else {
+                Ctl::Button(
+                    "Start".into(),
+                    Rc::new(|this, cx| this.set_up_cove(true, cx)),
+                )
+            },
         )
     }];
+    let install_line = crate::cove::server_install_command();
+    cove_rows.push(row(
+        "Run Cove on a server",
+        "For sessions that keep going while your Mac sleeps. 1. On a Linux server or VPS, run the install command. 2. Run cove pair there for a one-time code. 3. Add the server here with its URL and that code, and press Pair. Reach it through an SSH tunnel (ssh -L 7457:127.0.0.1:7457 your-server, then http://127.0.0.1:7457) unless you put HTTPS in front of it.",
+        Ctl::Buttons(vec![
+            (
+                "Copy install command".into(),
+                Rc::new(move |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(install_line.clone()))
+                }),
+            ),
+            (
+                "Add server".into(),
+                Rc::new(|this, cx| this.add_cove_server(cx)),
+            ),
+        ]),
+    ));
     cove_rows.push(switch_row(
         "Let agents use Cove",
         "Gives agents on this machine Cove's own tools (cove mcp), so they can make scratch VMs, run commands, move files and share ports on their own.",

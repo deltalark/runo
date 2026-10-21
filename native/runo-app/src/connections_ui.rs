@@ -82,6 +82,45 @@ impl RunoApp {
         self.save();
     }
 
+    /// Install Cove on this machine, or start its server, in the background, and
+    /// repaint as it goes.
+    pub(crate) fn set_up_cove(&mut self, start_only: bool, cx: &mut Context<Self>) {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let done = move || {
+            let _ = tx.send(());
+        };
+        if start_only {
+            crate::cove::start(done);
+        } else {
+            crate::cove::install(done);
+        }
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            let finished = !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+            let _ = this.update(cx, |_, cx| cx.notify());
+            if finished {
+                break;
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Add a Cove connection for a server and say what to do next.
+    pub(crate) fn add_cove_server(&mut self, cx: &mut Context<Self>) {
+        let id = self.add_connection(Kind::Cove, cx);
+        connections::set_pair_result(
+            id,
+            (
+                None,
+                "Fill in the server's URL above, run cove pair on the server, and type its code here.".into(),
+            ),
+        );
+        cx.notify();
+    }
+
     /// Check a connection in the background and repaint when the answer is in.
     pub(crate) fn test_connection(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(conn) = connections::get(id) else {
