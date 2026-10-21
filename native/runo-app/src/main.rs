@@ -25,6 +25,7 @@ mod crew;
 mod crew_ui;
 mod crew_view;
 mod ctxmenu;
+mod dark_themes;
 mod design;
 mod designdraw;
 mod desktop_notify;
@@ -362,6 +363,8 @@ struct RunoApp {
     settings_menu: Option<String>,
     discovered: Option<Discovered>,
     applied_dark: Option<bool>,
+    /// The trial dark palette the component library was last tinted with.
+    applied_palette: Option<&'static str>,
     applied_font: Option<&'static str>,
     applied_glass: Option<bool>,
     applied_enter: Option<bool>,
@@ -1621,6 +1624,7 @@ impl RunoApp {
             settings_menu: None,
             discovered: None,
             applied_dark: None,
+            applied_palette: None,
             applied_font: None,
             applied_glass: None,
             applied_enter: None,
@@ -8932,6 +8936,11 @@ impl Render for RunoApp {
                 WindowBackgroundAppearance::Opaque
             });
         }
+        let palette = crate::dark_themes::current();
+        if self.applied_palette != Some(palette.id) {
+            self.applied_palette = Some(palette.id);
+            self.applied_dark = None;
+        }
         if self.applied_dark != Some(dark) {
             self.applied_dark = Some(dark);
             gpui_kit::component::Theme::change(
@@ -8945,6 +8954,21 @@ impl Render for RunoApp {
             );
             if glass {
                 gpui_kit::component::Theme::update(cx, |theme| theme.muted = code_wash().into());
+            }
+            // Inputs, menus and editors follow a trial dark palette too.
+            if dark && palette.id != "runo" {
+                gpui_kit::component::Theme::update(cx, |theme| {
+                    theme.background = rgb(palette.canvas).into();
+                    theme.foreground = rgb(palette.text).into();
+                    theme.border = rgb(palette.border).into();
+                    theme.input = rgb(palette.border).into();
+                    theme.popover = rgb(palette.raised).into();
+                    theme.popover_foreground = rgb(palette.text).into();
+                    theme.muted_foreground = rgb(palette.muted).into();
+                    if !glass {
+                        theme.muted = rgb(palette.sheet).into();
+                    }
+                });
             }
             // A theme switch reloads the theme file's fonts; set the UI font again.
             self.applied_font = None;

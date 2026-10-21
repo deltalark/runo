@@ -62,6 +62,8 @@ impl AgentOptions {
 pub struct AppSettings {
     pub agents: HashMap<String, AgentOptions>,
     pub theme: String,
+    /// Which dark palette dark mode uses, while several are on trial (see `dark_themes`).
+    pub dark_palette: String,
     pub accent: String,
     pub diff_colors: String,
     pub animations: bool,
@@ -192,6 +194,7 @@ impl Default for AppSettings {
             agents: HashMap::new(),
             usage_detailed: false,
             theme: "dark".into(),
+            dark_palette: "runo".into(),
             accent: "indigo".into(),
             diff_colors: "default".into(),
             animations: true,
@@ -308,6 +311,7 @@ impl AppSettings {
             .map(|a| a.2)
             .unwrap_or(ACCENTS[0].2);
         ACCENT.store(accent, Ordering::Relaxed);
+        crate::dark_themes::set(&self.dark_palette);
         DIFF.store(
             match self.diff_colors.as_str() {
                 "colorblind" => 1,
@@ -706,6 +710,10 @@ pub fn float_edge() -> Rgba {
     }
 }
 
+fn dark() -> &'static crate::dark_themes::Palette {
+    crate::dark_themes::current()
+}
+
 fn pick(light: u32, dark: u32) -> u32 {
     if is_dark() {
         dark
@@ -724,53 +732,53 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
 
 // A neutral zinc scale: colour comes from the accent and status hues only.
 pub fn c_canvas() -> u32 {
-    pick(0xffffff, 0x282c34)
+    pick(0xffffff, dark().canvas)
 }
 pub fn c_sidebar() -> u32 {
-    pick(0xf7f7f8, 0x21252b)
+    pick(0xf7f7f8, dark().sidebar)
 }
 /// The mode rail: the deepest layer, so the open place's tab, cut from the sheet beside
 /// it, stands out from it.
 pub fn c_rail() -> u32 {
-    pick(0xe4e4e8, 0x1b1d23)
+    pick(0xe4e4e8, dark().rail)
 }
 /// The sheet the rail's tab is cut from: the list beside the rail, raised a step above
 /// both the rail and the page, so the tab and the selected row's join to the page read.
 pub fn c_sheet() -> u32 {
-    pick(0xf4f4f6, 0x30353f)
+    pick(0xf4f4f6, dark().sheet)
 }
 pub fn c_subtle() -> u32 {
-    pick(0xf1f1f3, 0x323842)
+    pick(0xf1f1f3, dark().subtle)
 }
 pub fn c_border() -> u32 {
-    pick(0xe5e5e8, 0x3e4451)
+    pick(0xe5e5e8, dark().border)
 }
 /// Text is a step stronger in glass mode, at every level: the translucent layers let
 /// the desktop through under the text too, so its contrast depends on the wallpaper, and
 /// a light or busy one would otherwise wash it out.
 pub fn c_text() -> u32 {
     if glass_on() {
-        pick(0x0f0f12, 0xf0f2f5)
+        pick(0x0f0f12, dark().glass_text())
     } else {
-        pick(0x18181b, 0xdcdfe4)
+        pick(0x18181b, dark().text)
     }
 }
 pub fn c_secondary() -> u32 {
     if glass_on() {
-        pick(0x2c2c33, 0xd0d5dd)
+        pick(0x2c2c33, dark().glass_secondary())
     } else {
-        pick(0x55555e, 0xabb2bf)
+        pick(0x55555e, dark().secondary)
     }
 }
 pub fn c_muted() -> u32 {
     if glass_on() {
-        pick(0x4f4f58, 0xa8aeb9)
+        pick(0x4f4f58, dark().glass_muted())
     } else {
-        pick(0x8a8a94, 0x7f848e)
+        pick(0x8a8a94, dark().muted)
     }
 }
 pub fn c_term_bg() -> u32 {
-    pick(0xfafafa, 0x21252b)
+    pick(0xfafafa, dark().term_bg)
 }
 /// Behind an agent's CLI and other terminal screens: the terminal's own shade on a solid
 /// window, and in glass mode a shade over the glass, so the CLI is part of the window
@@ -784,16 +792,20 @@ pub fn term_fill() -> Rgba {
 }
 /// Neutral fill for the selected row, so selection does not compete with status colours.
 pub fn c_active() -> u32 {
-    pick(0xe9e9ec, 0x3a404b)
+    pick(0xe9e9ec, dark().active)
 }
 /// Raised surfaces such as the composer, menus and cards.
 pub fn c_raised() -> u32 {
-    pick(0xffffff, 0x30353f)
+    pick(0xffffff, dark().raised)
 }
 pub fn c_blue() -> u32 {
     let accent = ACCENT.load(Ordering::Relaxed);
     if is_dark() {
-        mix(accent, 0xffffff, 0.8)
+        // A trial palette brings its own accent unless another accent was picked.
+        match dark().accent {
+            Some(own) if accent == ACCENTS[0].2 => own,
+            _ => mix(accent, 0xffffff, 0.8),
+        }
     } else {
         accent
     }
@@ -803,13 +815,13 @@ pub fn c_selected() -> u32 {
     c_active()
 }
 pub fn c_green() -> u32 {
-    pick(0x16a34a, 0x98c379)
+    pick(0x16a34a, dark().green)
 }
 pub fn c_amber() -> u32 {
-    pick(0xf0a020, 0xe5c07b)
+    pick(0xf0a020, dark().amber)
 }
 pub fn c_red() -> u32 {
-    pick(0xdc2626, 0xe06c75)
+    pick(0xdc2626, dark().red)
 }
 
 /// Text colour for added / removed lines, honouring the diff palette.

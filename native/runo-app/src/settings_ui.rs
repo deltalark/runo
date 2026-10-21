@@ -739,6 +739,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::Appearance => vec![
             section("Interface", "System follows your OS appearance.", vec![
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
+                row("Dark palette", "Trial: editor themes mapped onto Runo's dark colors. Uses the theme's own accent while Accent color is Indigo.", Ctl::Dropdown(crate::dark_themes::PALETTES.iter().map(|p| (p.id.to_string(), p.name.to_string())).collect(), st.dark_palette.clone(), Rc::new(|s, v| s.dark_palette = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
                 row("Glass", "A translucent window over a blurred desktop, like macOS glass. Clear shows the most of what is behind.", Ctl::Segment(options(&[("off", "Off"), ("subtle", "Subtle"), ("frosted", "Frosted"), ("clear", "Clear")]), st.glass.clone(), Rc::new(|s, v| s.glass = v))),
                 row("Interface font", "Runo's own font is tuned for sharp text at small sizes. System uses your operating system's font.", Ctl::Segment(options(&[("bundled", "Runo"), ("system", "System")]), st.font.clone(), Rc::new(|s, v| s.font = v))),

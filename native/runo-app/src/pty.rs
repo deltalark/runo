@@ -702,16 +702,18 @@ pub fn key_bytes(
 
 /// xterm's 256-colour palette, with the first 16 tuned to the app's theme.
 pub fn palette(i: u8, dark: bool) -> u32 {
-    const DARK: [u32; 16] = [
-        0x1e1e22, 0xf87171, 0x4ade80, 0xfacc15, 0x60a5fa, 0xc084fc, 0x22d3ee, 0xd4d4d8, 0x71717a,
-        0xfca5a5, 0x86efac, 0xfde047, 0x93c5fd, 0xd8b4fe, 0x67e8f9, 0xfafafa,
-    ];
     const LIGHT: [u32; 16] = [
         0x18181b, 0xdc2626, 0x16a34a, 0xca8a04, 0x2563eb, 0x9333ea, 0x0891b2, 0x52525b, 0x71717a,
         0xef4444, 0x22c55e, 0xeab308, 0x3b82f6, 0xa855f7, 0x06b6d4, 0x27272a,
     ];
     match i {
-        0..=15 => (if dark { DARK } else { LIGHT })[i as usize],
+        0..=15 => {
+            (if dark {
+                crate::dark_themes::current().ansi
+            } else {
+                LIGHT
+            })[i as usize]
+        }
         16..=231 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v as u32 };
