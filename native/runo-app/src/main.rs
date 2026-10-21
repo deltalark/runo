@@ -9029,6 +9029,21 @@ impl Render for RunoApp {
             if glass {
                 gpui_kit::component::Theme::update(cx, |theme| theme.muted = code_wash().into());
             }
+            // Inputs, menus and editors take Runo's dark palette too.
+            if dark {
+                gpui_kit::component::Theme::update(cx, |theme| {
+                    theme.background = rgb(c_canvas()).into();
+                    theme.foreground = rgb(c_text()).into();
+                    theme.border = rgb(c_border()).into();
+                    theme.input = rgb(c_border()).into();
+                    theme.popover = rgb(c_raised()).into();
+                    theme.popover_foreground = rgb(c_text()).into();
+                    theme.muted_foreground = rgb(c_muted()).into();
+                    if !glass {
+                        theme.muted = rgb(c_sheet()).into();
+                    }
+                });
+            }
             // A theme switch reloads the theme file's fonts; set the UI font again.
             self.applied_font = None;
         }
