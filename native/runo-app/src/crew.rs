@@ -790,6 +790,63 @@ pub fn title_from(text: &str) -> String {
     }
 }
 
+/// A thread's title as shown. Titles used to be the prompt's first 48 characters, cut
+/// mid-word; those are cut back to the last whole word.
+pub fn shown_title(title: &str) -> String {
+    let title = title.trim();
+    if title.chars().count() != 48 {
+        return title.to_string();
+    }
+    match title.rfind(' ') {
+        Some(at) if at > 20 => format!("{}…", title[..at].trim_end_matches([',', ':', ';'])),
+        _ => title.to_string(),
+    }
+}
+
+/// Markdown as plain text on one line: links keep their text, and code marks, emphasis,
+/// headings and list bullets go.
+pub fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some(mid) = rest[open..].find("](").map(|m| open + m) else {
+            break;
+        };
+        let Some(close) = rest[mid..].find(')').map(|c| mid + c) else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..mid]);
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    out.lines()
+        .map(|l| l.trim().trim_start_matches(['#', '>']).trim_start())
+        .map(|l| {
+            l.strip_prefix("- ")
+                .or_else(|| l.strip_prefix("* "))
+                .unwrap_or(l)
+        })
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+}
+
+/// What a finished thread came to, for its row: the first sentence of its last report.
+pub fn outcome(info: &ThreadInfo) -> Option<String> {
+    let text = plain(&info.reports.last()?.summary);
+    let end = text
+        .match_indices(['.', '!', '?'])
+        .map(|(at, _)| at)
+        .find(|&at| text[at + 1..].starts_with(' ') || at + 1 == text.len())
+        .map_or(text.len(), |at| at + 1);
+    let first = text[..end].trim();
+    (!first.is_empty()).then(|| first.trim_end_matches('.').to_string())
+}
+
 /// One line about a thread for Crew's board, which starts with `#id ` so changes can be
 /// told apart: "#12 Cove setup [working] 3/5 steps. Last report: …".
 pub fn board_line(id: u64, title: &str, status: &str, info: &ThreadInfo) -> String {
@@ -870,9 +927,9 @@ Each message may open with a Threads section: what changed in this project's thr
 /// Told to a thread with its first prompt: how it reports back.
 pub fn thread_rules(tools: bool) -> String {
     let how = if tools {
-        "Use Runo's tools: set_checklist with your plan (update it as steps start and finish), report when you finish or find something the person should know (a few sentences, with links), ask_decision when a choice changes what the person gets or can't be undone, and message_crew to ask Crew for something another thread has."
+        "Use Runo's tools: set_checklist with your plan (update it as steps start and finish), report when you finish or find something the person should know (open with a short sentence on the outcome, such as \"Fixed the export crash.\" or \"No changes needed.\", then a few sentences, with links), ask_decision when a choice changes what the person gets or can't be undone, and message_crew to ask Crew for something another thread has."
     } else {
-        "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with one step per line (- [x] done, - [~] doing, - [ ] to do), ```runo-report with a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
+        "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with one step per line (- [x] done, - [~] doing, - [ ] to do), ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
     };
     format!(
         "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\n## Your task\n"
@@ -882,6 +939,36 @@ pub fn thread_rules(tools: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_titles_are_cut_back_to_a_word() {
+        assert_eq!(
+            shown_title("In native/runo-app/src/settings_ui.rs, on the Se"),
+            "In native/runo-app/src/settings_ui.rs, on the…"
+        );
+        assert_eq!(shown_title("Typos in git guide"), "Typos in git guide");
+    }
+
+    #[test]
+    fn plain_drops_markdown() {
+        assert_eq!(
+            plain(
+                "Created [cove-check.txt](/root/x/cove-check.txt) with `uname -a`.\n\n- **Done**"
+            ),
+            "Created cove-check.txt with uname -a. Done"
+        );
+    }
+
+    #[test]
+    fn outcome_is_the_reports_first_sentence() {
+        let mut info = ThreadInfo::default();
+        assert_eq!(outcome(&info), None);
+        info.reports.push(Report {
+            summary: "No typos found. I read docs/guide/git.md (14 lines).".into(),
+            ..Default::default()
+        });
+        assert_eq!(outcome(&info).as_deref(), Some("No typos found"));
+    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("runo-crew-{name}-{}", std::process::id()));
