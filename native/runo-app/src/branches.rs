@@ -42,6 +42,10 @@ pub(crate) struct MergeForm {
 pub(crate) enum Naming {
     New,
     Rename(String),
+    /// A branch starting at this commit, from History.
+    BranchAt(String),
+    /// A release name for this commit, from History.
+    Tag(String),
 }
 
 /// "The commit", "Both commits", "All 3 commits".
@@ -256,6 +260,25 @@ impl RunoApp {
                 });
                 self.git_branch_sel = Some(picked);
             }
+            Naming::BranchAt(sha) => {
+                self.git_step("Starting…", move |dir| {
+                    let undo = git::branches_point(dir, &[&name]);
+                    git::new_branch(dir, &name, &sha)?;
+                    Ok(Some((
+                        format!("Started {name} from {}.", &sha[..7.min(sha.len())]),
+                        Some(undo),
+                    )))
+                });
+            }
+            Naming::Tag(sha) => {
+                self.git_step("Marking…", move |dir| {
+                    git::tag(dir, &name, &sha)?;
+                    Ok(Some((
+                        format!("Marked {} as {name}.", &sha[..7.min(sha.len())]),
+                        Some(Undo::Untag(name.clone())),
+                    )))
+                });
+            }
         }
     }
 
@@ -263,9 +286,11 @@ impl RunoApp {
         let value = match &naming {
             Naming::New => String::new(),
             Naming::Rename(from) => from.clone(),
+            Naming::BranchAt(_) | Naming::Tag(_) => String::new(),
         };
         self.git_naming = Some(naming);
         self.git_name.update(cx, |input, cx| {
+            input.set_placeholder("Branch name", window, cx);
             input.set_value(value, window, cx);
             input.focus(window, cx);
         });

@@ -935,7 +935,7 @@ impl Mode {
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
             View::Missions => Mode::Missions,
-            View::Review | View::Branches | View::GitHub => Mode::Git,
+            View::Review | View::GitHistory | View::Branches | View::GitHub => Mode::Git,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
             View::Notes => Mode::Notes,
@@ -1116,6 +1116,7 @@ impl RunoApp {
             Mode::Git => match self.git_tab {
                 View::GitHub => self.load_github(),
                 View::Branches => self.open_branches(),
+                View::GitHistory => self.open_git_history(),
                 _ => self.open_review(),
             },
             Mode::Playbooks => self.view = View::Automations,
@@ -1409,7 +1410,7 @@ impl RunoApp {
         match self.mode() {
             Mode::Sessions => self.show_sidebar,
             Mode::Missions | Mode::Settings => true,
-            Mode::Git => matches!(self.view, View::Review | View::Branches),
+            Mode::Git => matches!(self.view, View::Review | View::GitHistory | View::Branches),
             Mode::Design => self
                 .design
                 .project
@@ -1812,6 +1813,11 @@ impl RunoApp {
             .max();
         match (self.mode(), latest) {
             (Mode::Git, _) if self.view == View::GitHub => self.load_github(),
+            (Mode::Git, _) if self.view == View::GitHistory => {
+                self.git_commit_sel = None;
+                self.git_log_filter.path.clear();
+                self.open_git_history();
+            }
             (Mode::Git, _) if self.view == View::Branches => {
                 self.git_branch_sel = None;
                 self.open_branches();
@@ -3493,6 +3499,7 @@ mod tests {
             (View::Missions, Mode::Missions),
             (View::GitHub, Mode::Git),
             (View::Branches, Mode::Git),
+            (View::GitHistory, Mode::Git),
             (View::History, Mode::History),
             (View::Notes, Mode::Notes),
             (View::Automations, Mode::Playbooks),

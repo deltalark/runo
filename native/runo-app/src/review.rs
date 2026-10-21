@@ -144,6 +144,7 @@ impl RunoApp {
     pub(crate) fn git_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let github = self.view == View::GitHub;
         let branches = self.view == View::Branches;
+        let history = self.view == View::GitHistory;
         let tab = |id: &'static str, label: &'static str, count: usize, alert: bool, on: bool| {
             shell::strip_tab(id, "git", on)
                 .child(label)
@@ -172,7 +173,13 @@ impl RunoApp {
         } else {
             pane(c_sheet())
         };
-        let body = if branches {
+        let body = if history {
+            shell::island(
+                div().size_full().flex().child(self.git_history_view(cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        } else if branches {
             shell::island(
                 div().size_full().flex().child(self.branches_view(cx)),
                 rgba(0),
@@ -224,13 +231,22 @@ impl RunoApp {
                             "Changes",
                             self.review_list().len(),
                             false,
-                            !github && !branches,
+                            !github && !branches && !history,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_review();
                             this.save();
                             cx.notify();
                         })),
+                    )
+                    .child(
+                        tab("git-history", "History", 0, false, history).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.open_git_history();
+                                this.save();
+                                cx.notify();
+                            },
+                        )),
                     )
                     .child(
                         tab(

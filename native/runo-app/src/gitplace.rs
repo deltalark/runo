@@ -152,6 +152,7 @@ impl RunoApp {
                 // Sessions on this folder, and the branch list, see the change too.
                 this.refresh();
                 this.load_branches();
+                this.load_history();
                 cx.notify();
             },
         );
@@ -390,7 +391,13 @@ impl RunoApp {
     }
 
     /// A popover hanging under one of the strip's controls.
-    fn git_popover(&self, id: &'static str, width: f32, body: Div, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn git_popover(
+        &self,
+        id: &'static str,
+        width: f32,
+        body: Div,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div().absolute().top(px(32.)).right_0().child(
             deferred(
                 anchored().snap_to_window_with_margin(px(8.)).child(

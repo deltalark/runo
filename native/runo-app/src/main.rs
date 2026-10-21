@@ -32,6 +32,7 @@ mod fileview;
 mod fixes;
 mod gemini;
 mod git;
+mod githistory;
 mod github;
 mod gitplace;
 mod handoff;
@@ -180,6 +181,8 @@ enum View {
     Review,
     /// The project folder's branches and work set aside.
     Branches,
+    /// The project folder's commits as a graph.
+    GitHistory,
     /// Goals planned into parts that several agents work on at once.
     Missions,
 }
@@ -222,6 +225,16 @@ struct RunoApp {
     /// The Branches tab's name box, while open, and the box itself.
     git_naming: Option<branches::Naming>,
     git_name: Entity<InputState>,
+    /// The History tab's commits, filter and search box, and the picked commit.
+    git_history: Option<githistory::History>,
+    git_log_filter: git::LogFilter,
+    git_log_search: Entity<InputState>,
+    git_commit_sel: Option<String>,
+    git_commit: Option<githistory::Picked>,
+    /// What the agent said each commit did; None while it's still answering.
+    git_explain: HashMap<String, Option<String>>,
+    /// The commit Go back waits on a second click for.
+    git_go_back: Option<String>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1361,6 +1374,12 @@ impl RunoApp {
         let git_name_sub = cx.subscribe_in(&git_name, window, |this, _, event, _, cx| {
             this.on_git_name(event, cx);
         });
+        let git_log_search = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Search commit messages and people"));
+        let git_log_search_sub =
+            cx.subscribe_in(&git_log_search, window, |this, _, event, _, cx| {
+                this.on_git_log_search(event, cx);
+            });
         let commit_msg = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let commit_sub = cx.subscribe_in(&commit_msg, window, |this, _, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -1478,6 +1497,16 @@ impl RunoApp {
             git_merge: None,
             git_naming: None,
             git_name: git_name.clone(),
+            git_history: None,
+            git_log_filter: git::LogFilter {
+                all: true,
+                ..Default::default()
+            },
+            git_log_search,
+            git_commit_sel: None,
+            git_commit: None,
+            git_explain: HashMap::new(),
+            git_go_back: None,
             git_repo: None,
             git_undo: None,
             git_working: None,
@@ -1739,6 +1768,7 @@ impl RunoApp {
                 settings_search_sub,
                 commit_sub,
                 git_name_sub,
+                git_log_search_sub,
                 rename_sub,
                 note_sub,
             ],
@@ -2802,6 +2832,7 @@ impl RunoApp {
                 View::GitHub => self.load_github(),
                 View::Review => self.open_review(),
                 View::Branches => self.open_branches(),
+                View::GitHistory => self.open_git_history(),
                 View::Missions => self.open_missions(cx),
                 _ => self.view = view,
             },
@@ -2879,6 +2910,11 @@ impl RunoApp {
             ),
             ("Go to Git: Changes", IconName::GitCompare, View::Review),
             ("Go to Missions", IconName::Rocket, View::Missions),
+            (
+                "Go to Git: History",
+                IconName::GitCommitHorizontal,
+                View::GitHistory,
+            ),
             ("Go to Git: Branches", IconName::GitBranch, View::Branches),
             ("Go to Git: GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
@@ -8889,7 +8925,7 @@ impl Render for RunoApp {
             View::Notes => self.notes_view(cx),
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
-            View::GitHub | View::Review | View::Branches => self.git_view(cx),
+            View::GitHub | View::Review | View::GitHistory | View::Branches => self.git_view(cx),
             View::Missions => self.missions_view(cx),
             View::Editor => div()
                 .flex_1()
@@ -8993,7 +9029,7 @@ impl Render for RunoApp {
         // sidebar.
         let page_fill = if matches!(
             self.view,
-            View::Review | View::Branches | View::GitHub | View::Settings
+            View::Review | View::GitHistory | View::Branches | View::GitHub | View::Settings
         ) || (self.view == View::Architecture && self.arch_diagram_open())
             || (self.view == View::Design && self.design_canvas_open())
         {
