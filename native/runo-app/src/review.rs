@@ -48,6 +48,7 @@ impl RunoApp {
         self.view = View::Review;
         self.git_tab = View::Review;
         self.load_repo();
+        self.load_folder();
     }
 
     /// Show one session in Review.
@@ -58,6 +59,7 @@ impl RunoApp {
             self.selected_file = None;
         }
         self.select(id);
+        self.git_folder_open = false;
         self.view = View::Review;
         self.git_tab = View::Review;
         self.load_repo();
@@ -65,7 +67,7 @@ impl RunoApp {
 
     fn review_row(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let id = session.id;
-        let on = self.selected == Some(id);
+        let on = self.selected == Some(id) && !self.git_folder_open;
         let (files, added, removed) = self.stats.get(&id).copied().unwrap_or_default();
         let mission = self.mission_ready(id);
         let project = self
@@ -293,6 +295,10 @@ impl RunoApp {
     /// ship controls beside it.
     pub(crate) fn review_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let list = self.review_list();
+        let folder = self
+            .git_folder
+            .as_ref()
+            .is_some_and(|f| !f.files.is_empty());
         let rows: Vec<AnyElement> = list
             .iter()
             .filter_map(|id| self.state.session(*id))
@@ -306,6 +312,7 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
+            .children(self.folder_row(cx))
             .child(
                 div()
                     .px_3()
@@ -314,7 +321,7 @@ impl RunoApp {
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(c_muted()))
-                    .child("READY TO REVIEW"),
+                    .child(if folder { "FROM AGENTS  ·  READY TO SHIP" } else { "READY TO REVIEW" }),
             )
             .child(
                 div()
@@ -339,7 +346,11 @@ impl RunoApp {
                         )
                     }),
             );
-        let main = match self.current().filter(|s| list.contains(&s.id)) {
+        let main = match self
+            .current()
+            .filter(|s| list.contains(&s.id) && !self.git_folder_open)
+        {
+            _ if self.git_folder_open && self.git_folder.is_some() => self.folder_page(cx),
             Some(session) => {
                 let id = session.id;
                 let project = self

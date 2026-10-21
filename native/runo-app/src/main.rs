@@ -50,6 +50,7 @@ mod mission_view;
 mod modelcheck;
 mod models;
 mod notes;
+mod parts;
 mod pbfile;
 mod pbrunner;
 mod pbshare;
@@ -235,6 +236,17 @@ struct RunoApp {
     git_explain: HashMap<String, Option<String>>,
     /// The commit Go back waits on a second click for.
     git_go_back: Option<String>,
+    /// The project folder's own changes in Changes, whether they're the page shown, the
+    /// file whose parts are shown, and the lines left out of the next commit.
+    git_folder: Option<parts::Folder>,
+    git_folder_open: bool,
+    git_folder_file: Option<String>,
+    git_left_out: parts::LeftOut,
+    /// The folder's commit box, a value waiting to go into it, and the message being
+    /// committed, put back if the commit fails.
+    git_folder_msg: Entity<InputState>,
+    git_folder_msg_set: Option<String>,
+    git_folder_msg_kept: Option<String>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1380,6 +1392,8 @@ impl RunoApp {
             cx.subscribe_in(&git_log_search, window, |this, _, event, _, cx| {
                 this.on_git_log_search(event, cx);
             });
+        let git_folder_msg =
+            cx.new(|cx| InputState::new(window, cx).placeholder("What does this commit do?"));
         let commit_msg = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let commit_sub = cx.subscribe_in(&commit_msg, window, |this, _, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -1507,6 +1521,13 @@ impl RunoApp {
             git_commit: None,
             git_explain: HashMap::new(),
             git_go_back: None,
+            git_folder: None,
+            git_folder_open: false,
+            git_folder_file: None,
+            git_left_out: Default::default(),
+            git_folder_msg,
+            git_folder_msg_set: None,
+            git_folder_msg_kept: None,
             git_repo: None,
             git_undo: None,
             git_working: None,

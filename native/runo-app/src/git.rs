@@ -76,6 +76,11 @@ fn exists(dir: &str, rev: &str) -> bool {
     .is_ok()
 }
 
+/// The commit the folder is on, if there is one yet.
+pub fn head(dir: &str) -> Option<String> {
+    rev(dir, "HEAD")
+}
+
 fn rev(dir: &str, rev: &str) -> Option<String> {
     git(
         dir,
@@ -917,6 +922,274 @@ pub fn file_diff_context(dir: &str, path: &str, whole: bool, against: &str) -> S
     out.unwrap_or_else(|e| e)
 }
 
+/// One line of a part: ' ' unchanged, '+' added, '-' removed, '\\' git's note that the
+/// line before has no newline at the end.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct PartLine {
+    pub kind: char,
+    pub text: String,
+    /// Line numbers before and after, 0 where the line isn't on that side.
+    pub old: usize,
+    pub new: usize,
+}
+
+/// One part of a file's change: a hunk.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Part {
+    /// What git shows after the @@, often the function the part is in.
+    pub title: String,
+    pub old_start: usize,
+    pub new_start: usize,
+    pub lines: Vec<PartLine>,
+}
+
+/// A changed file split into its parts.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FileParts {
+    pub change: Change,
+    /// The diff's header, everything before the first part.
+    pub head: String,
+    pub parts: Vec<Part>,
+    /// The whole diff, to tell when the file changed again.
+    pub diff: String,
+}
+
+impl FileParts {
+    /// Only whole: binary, deleted or renamed files, which can't be split into lines.
+    pub fn whole_only(&self) -> bool {
+        self.change.binary || self.parts.is_empty() || self.change.status == "D"
+    }
+}
+
+fn hunk_start(text: &str, sign: char) -> usize {
+    text.split_whitespace()
+        .find_map(|w| w.strip_prefix(sign))
+        .and_then(|w| w.split(',').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Split a unified diff of one file into its header and parts.
+pub fn parse_parts(diff: &str) -> (String, Vec<Part>) {
+    let mut head = String::new();
+    let mut parts: Vec<Part> = Vec::new();
+    let (mut old, mut new) = (0, 0);
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("@@") {
+            let (range, title) = rest.split_once("@@").unwrap_or((rest, ""));
+            let (old_start, new_start) = (hunk_start(range, '-'), hunk_start(range, '+'));
+            old = old_start;
+            new = new_start;
+            parts.push(Part {
+                title: title.trim().to_string(),
+                old_start,
+                new_start,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        let Some(part) = parts.last_mut() else {
+            head.push_str(line);
+            head.push('\n');
+            continue;
+        };
+        let kind = line.chars().next().unwrap_or(' ');
+        let text = line.get(1..).unwrap_or("").to_string();
+        let (o, n) = match kind {
+            '+' => {
+                new += 1;
+                (0, new - 1)
+            }
+            '-' => {
+                old += 1;
+                (old - 1, 0)
+            }
+            '\\' => (0, 0),
+            _ => {
+                old += 1;
+                new += 1;
+                (old - 1, new - 1)
+            }
+        };
+        part.lines.push(PartLine {
+            kind,
+            text,
+            old: o,
+            new: n,
+        });
+    }
+    (head, parts)
+}
+
+/// The folder's changed files against HEAD, each split into parts.
+pub fn file_parts(dir: &str) -> Vec<FileParts> {
+    changes(dir)
+        .into_iter()
+        .map(|change| {
+            let diff = if change.binary {
+                String::new()
+            } else {
+                file_diff_context(dir, &change.path, false, "HEAD")
+            };
+            let (head, parts) = parse_parts(&diff);
+            FileParts {
+                change,
+                head,
+                parts,
+                diff,
+            }
+        })
+        .collect()
+}
+
+/// A patch with only the picked lines of a file's change. Unpicked removals stay as
+/// unchanged lines and unpicked additions are left out, so the patch applies to HEAD's
+/// version. None when nothing is picked.
+pub fn picked_patch(file: &FileParts, picked: impl Fn(usize, usize) -> bool) -> Option<String> {
+    let mut out = String::new();
+    let mut shift: isize = 0;
+    for (p, part) in file.parts.iter().enumerate() {
+        let mut body = String::new();
+        let (mut olds, mut news, mut any) = (0usize, 0usize, false);
+        let mut kept_last = true;
+        for (l, line) in part.lines.iter().enumerate() {
+            let kind = match line.kind {
+                '+' if picked(p, l) => '+',
+                '+' => {
+                    kept_last = false;
+                    continue;
+                }
+                '-' if picked(p, l) => '-',
+                '-' => ' ',
+                '\\' => {
+                    if kept_last {
+                        body.push_str("\\ No newline at end of file\n");
+                    }
+                    continue;
+                }
+                _ => ' ',
+            };
+            any |= kind != ' ';
+            kept_last = true;
+            if kind != '+' {
+                olds += 1;
+            }
+            if kind != '-' {
+                news += 1;
+            }
+            body.push(kind);
+            body.push_str(&line.text);
+            body.push('\n');
+        }
+        if any {
+            let new_start = (part.old_start as isize + shift).max(0) as usize;
+            out.push_str(&format!(
+                "@@ -{},{olds} +{new_start},{news} @@\n{body}",
+                part.old_start
+            ));
+            shift += news as isize - olds as isize;
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(format!("{}{out}", file.head))
+}
+
+/// Commit some of the folder's changes: whole files, and patches of picked lines, built
+/// in an index of its own so nothing else in the folder is touched. With `amend` they
+/// join the last commit instead, keeping its message when `message` is empty.
+pub fn commit_parts(
+    dir: &str,
+    whole: &[String],
+    patch: &str,
+    message: &str,
+    amend: bool,
+) -> Result<String, String> {
+    let git_dir = git(dir, &["rev-parse", "--absolute-git-dir"])?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let index = format!("{}/runo-index-{nanos}", git_dir.trim());
+    let env = [("GIT_INDEX_FILE", index.as_str()), ("GIT_EDITOR", "true")];
+    let result = (|| {
+        if rev(dir, "HEAD").is_some() {
+            git_with(dir, &["read-tree", "HEAD"], &env, None)?;
+        } else {
+            git_with(dir, &["read-tree", "--empty"], &env, None)?;
+        }
+        if !whole.is_empty() {
+            let mut args = vec!["add", "-A", "--"];
+            args.extend(whole.iter().map(String::as_str));
+            git_with(dir, &args, &env, None)?;
+        }
+        if !patch.is_empty() {
+            git_with(
+                dir,
+                &["apply", "--cached", "--recount", "--whitespace=nowarn", "-"],
+                &env,
+                Some(patch.as_bytes()),
+            )
+            .map_err(|e| format!("Couldn't pick those lines out: {}", e.trim()))?;
+        }
+        let mut args = vec!["commit", "-q"];
+        if amend {
+            args.push("--amend");
+        }
+        if message.trim().is_empty() {
+            args.push("--no-edit");
+        } else {
+            args.extend(["-m", message]);
+        }
+        git_with(dir, &args, &env, None)
+    })();
+    let _ = std::fs::remove_file(&index);
+    result?;
+    // The folder's own index catches up on the files committed, so what's left shows as
+    // still to commit.
+    let mut paths: Vec<String> = whole.to_vec();
+    paths.extend(patch.lines().filter_map(|l| {
+        l.strip_prefix("+++ b/")
+            .or_else(|| l.strip_prefix("--- a/"))
+            .map(str::to_string)
+    }));
+    paths.sort();
+    paths.dedup();
+    if !paths.is_empty() {
+        let mut args = vec!["reset", "-q", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let _ = git(dir, &args);
+    }
+    git(dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string())
+}
+
+/// Throw a patch's changes out of the folder. Applying the patch again puts them back.
+pub fn throw_away(dir: &str, patch: &str) -> Result<(), String> {
+    git_with(
+        dir,
+        &["apply", "-R", "--recount", "--whitespace=nowarn", "-"],
+        &[],
+        Some(patch.as_bytes()),
+    )
+    .map(|_| ())
+}
+
+/// The last commit's subject, and whether it is only on this computer, so it can still
+/// be added to.
+pub fn last_commit(dir: &str) -> Option<(String, bool)> {
+    let subject = git(dir, &["log", "-1", "--format=%s"])
+        .ok()?
+        .trim()
+        .to_string();
+    if subject.is_empty() {
+        return None;
+    }
+    let sent = git(dir, &["branch", "-r", "--contains", "HEAD"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    Some((subject, !sent))
+}
+
 /// Every file git knows or would add (tracked plus untracked, minus ignored).
 pub fn tracked_files(dir: &str) -> Vec<String> {
     git(
@@ -1540,6 +1813,10 @@ pub enum Undo {
     Unstash,
     /// Remove a tag the step made.
     Untag(String),
+    /// Take the last commit back off the branch, keeping its changes in the folder.
+    Uncommit { head: String },
+    /// Put back a part that was thrown away, applying its patch to the folder again.
+    Reapply(String),
     /// Several of these, in order.
     Steps(Vec<Undo>),
 }
@@ -1636,6 +1913,17 @@ pub fn undo(point: &UndoPoint) -> Result<(), String> {
         }
         Undo::Untag(name) => {
             delete_tag(dir, name)?;
+        }
+        Undo::Uncommit { head } => {
+            git(dir, &["reset", "-q", "--mixed", head])?;
+        }
+        Undo::Reapply(patch) => {
+            git_with(
+                dir,
+                &["apply", "--recount", "--whitespace=nowarn", "-"],
+                &[],
+                Some(patch.as_bytes()),
+            )?;
         }
         Undo::Steps(steps) => {
             for undo in steps {
@@ -3115,6 +3403,92 @@ index 1..2 100644
         for p in [&repo, &remote, &other] {
             let _ = std::fs::remove_dir_all(p);
         }
+    }
+
+    #[test]
+    fn commit_and_throw_away_parts_of_files() {
+        let (repo, _remote) = with_origin("parts");
+        let dir = repo.to_str().unwrap();
+        let lines: Vec<String> = (1..=30).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("f.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "thirty lines"]);
+        // Two parts far apart: change line 2, add after line 25.
+        let mut edited = lines.clone();
+        edited[1] = "line two".into();
+        edited.insert(25, "added one".into());
+        edited.insert(26, "added two".into());
+        std::fs::write(repo.join("f.txt"), edited.join("\n") + "\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "a\nb\n").unwrap();
+        let files = file_parts(dir);
+        let f = files.iter().find(|f| f.change.path == "f.txt").unwrap();
+        assert_eq!(f.parts.len(), 2);
+        let second = &f.parts[1];
+        let added: Vec<usize> = second
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == '+')
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(added.len(), 2);
+        assert_eq!(second.lines[added[0]].new, 26);
+        // Commit only the first added line of the second part.
+        let patch = picked_patch(f, |p, l| p == 1 && l == added[0]).unwrap();
+        let head = rev(dir, "HEAD").unwrap();
+        commit_parts(dir, &[], &patch, "Add one line", false).unwrap();
+        let committed = git(dir, &["show", "HEAD:f.txt"]).unwrap();
+        assert!(committed.contains("added one") && !committed.contains("added two"));
+        assert!(!committed.contains("line two"));
+        // The rest is still in the folder, and nothing was lost.
+        let left = file_parts(dir);
+        let f = left.iter().find(|f| f.change.path == "f.txt").unwrap();
+        assert_eq!(f.parts.len(), 2);
+        assert!(std::fs::read_to_string(repo.join("f.txt"))
+            .unwrap()
+            .contains("added two"));
+        assert!(left.iter().any(|f| f.change.path == "new.txt"));
+        // Undo puts the commit's changes back as uncommitted.
+        undo(&UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo: Undo::Uncommit { head: head.clone() },
+        })
+        .unwrap();
+        assert_eq!(rev(dir, "HEAD").unwrap(), head);
+        assert!(std::fs::read_to_string(repo.join("f.txt"))
+            .unwrap()
+            .contains("added one"));
+        // Whole files and a new file go in whole; amending keeps the message.
+        commit_parts(dir, &["new.txt".into()], "", "Add new", false).unwrap();
+        let files = file_parts(dir);
+        let f = files.iter().find(|f| f.change.path == "f.txt").unwrap();
+        let patch = picked_patch(f, |p, _| p == 0).unwrap();
+        commit_parts(dir, &[], &patch, "", true).unwrap();
+        assert_eq!(
+            git(dir, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "Add new"
+        );
+        assert!(git(dir, &["show", "HEAD:f.txt"])
+            .unwrap()
+            .contains("line two"));
+        assert_eq!(last_commit(dir), Some(("Add new".into(), true)));
+        // Throw away the second part, then put it back.
+        let files = file_parts(dir);
+        let f = files.iter().find(|f| f.change.path == "f.txt").unwrap();
+        assert_eq!(f.parts.len(), 1);
+        let part = picked_patch(f, |p, _| p == 0).unwrap();
+        throw_away(dir, &part).unwrap();
+        assert!(changes(dir).is_empty());
+        undo(&UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo: Undo::Reapply(part),
+        })
+        .unwrap();
+        assert!(std::fs::read_to_string(repo.join("f.txt"))
+            .unwrap()
+            .contains("added two"));
     }
 
     #[test]
