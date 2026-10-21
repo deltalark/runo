@@ -7470,8 +7470,16 @@ impl Render for ArchEditor {
                     .v_flex()
                     .child(self.toolbar(cx))
                     .child(self.canvas_area(scene, &theme, cx))
-                    .child(crate::shell::frame_corner(true, false))
-                    .child(crate::shell::frame_corner(false, false)),
+                    .child(crate::shell::frame_corner(
+                        true,
+                        false,
+                        glass_fill(c_canvas()),
+                    ))
+                    .child(crate::shell::frame_corner(
+                        false,
+                        false,
+                        glass_fill(c_canvas()),
+                    )),
             )
             .child(self.side_panel(cx))
             .when_some(ghost, |el, ((w, h), label, at)| {

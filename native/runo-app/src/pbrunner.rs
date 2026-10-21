@@ -180,6 +180,7 @@ pub fn command(
         images: &[],
         memory: None,
         local: true,
+        thread: 0,
     };
     Ok(agent::turn_command(&spec))
 }
@@ -373,6 +374,7 @@ fn run_one(auto: &Automation, project: &Project, settings: &AppSettings) -> Head
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         },
         &run.dir,
         false,

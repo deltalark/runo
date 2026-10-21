@@ -42,6 +42,10 @@ pub(crate) struct MergeForm {
 pub(crate) enum Naming {
     New,
     Rename(String),
+    /// A branch starting at this commit, from History.
+    BranchAt(String),
+    /// A release name for this commit, from History.
+    Tag(String),
 }
 
 /// "The commit", "Both commits", "All 3 commits".
@@ -142,6 +146,8 @@ impl RunoApp {
     }
 
     fn pick_branch(&mut self, name: String) {
+        self.git_radar_sel = None;
+        self.git_kit = None;
         self.git_branch_sel = Some(name);
         self.git_naming = None;
         self.load_branches();
@@ -158,6 +164,14 @@ impl RunoApp {
             let onto = git::base_ref(dir, &base);
             let behind = git::commits_ahead(dir, &onto, &name);
             match git::update_from(&at, &onto, true)? {
+                // In the project folder itself, the clash page sorts it out.
+                git::Update::Conflicts(files) if at == dir => Ok(Some((
+                    format!(
+                        "{name} and {base} change the same lines in {}. Pick what to keep.",
+                        files.join(", ")
+                    ),
+                    None,
+                ))),
                 git::Update::Conflicts(files) => {
                     let _ = git::abort_update(&at);
                     Err(format!(
@@ -256,16 +270,42 @@ impl RunoApp {
                 });
                 self.git_branch_sel = Some(picked);
             }
+            Naming::BranchAt(sha) => {
+                self.git_step("Starting…", move |dir| {
+                    let undo = git::branches_point(dir, &[&name]);
+                    git::new_branch(dir, &name, &sha)?;
+                    Ok(Some((
+                        format!("Started {name} from {}.", &sha[..7.min(sha.len())]),
+                        Some(undo),
+                    )))
+                });
+            }
+            Naming::Tag(sha) => {
+                self.git_step("Marking…", move |dir| {
+                    git::tag(dir, &name, &sha)?;
+                    Ok(Some((
+                        format!("Marked {} as {name}.", &sha[..7.min(sha.len())]),
+                        Some(Undo::Untag(name.clone())),
+                    )))
+                });
+            }
         }
+    }
+
+    /// Open the name box for a new branch where the folder is.
+    pub(crate) fn start_new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_naming(Naming::New, window, cx);
     }
 
     fn start_naming(&mut self, naming: Naming, window: &mut Window, cx: &mut Context<Self>) {
         let value = match &naming {
             Naming::New => String::new(),
             Naming::Rename(from) => from.clone(),
+            Naming::BranchAt(_) | Naming::Tag(_) => String::new(),
         };
         self.git_naming = Some(naming);
         self.git_name.update(cx, |input, cx| {
+            input.set_placeholder("Branch name", window, cx);
             input.set_value(value, window, cx);
             input.focus(window, cx);
         });
@@ -301,7 +341,8 @@ impl RunoApp {
         base: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let on = self.git_branch_sel.as_deref() == Some(row.name.as_str());
+        let on = self.git_branch_sel.as_deref() == Some(row.name.as_str())
+            && self.git_radar_sel.is_none();
         let session = self.branch_session(&row.name);
         let host = self
             .git_repo
@@ -516,7 +557,7 @@ impl RunoApp {
             .git_repo
             .as_ref()
             .map_or("the remote".to_string(), |r| r.state.host.clone());
-        let mut list = div().v_flex().gap(px(2.));
+        let mut list = div().v_flex().gap(px(2.)).children(self.radar_rows(cx));
         let mut i = 0;
         let mut group = |list: Div, label: String, rows: Vec<&BranchRow>, i: &mut usize| {
             if rows.is_empty() {
@@ -657,7 +698,13 @@ impl RunoApp {
                     .pb(px(12.))
                     .child(list),
             );
-        let main = self.branch_page(data, &current, &host, cx);
+        let main = match self
+            .git_radar_sel
+            .and_then(|i| self.git_radar.as_ref()?.get(i).cloned())
+        {
+            Some(hit) => self.radar_page(&hit, cx),
+            None => self.branch_page(data, &current, &host, cx),
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -691,6 +738,9 @@ impl RunoApp {
         else {
             return div().into_any_element();
         };
+        if self.git_kit.as_ref() == Some(&row.name) {
+            return self.kit_page(&row, cx);
+        }
         let base = data.base.clone();
         let is_base = row.name == base;
         let session = self
@@ -909,6 +959,25 @@ impl RunoApp {
                 false,
             ));
         }
+        if can_merge {
+            let lines: usize = self
+                .git_branch_detail
+                .as_ref()
+                .filter(|d| d.name == row.name)
+                .map_or(0, |d| d.files.iter().map(|f| f.added + f.removed).sum());
+            tiles.push((
+                "reviewable",
+                IconName::ScanSearch,
+                "Make it reviewable".into(),
+                if lines > 400 {
+                    format!("{lines} lines is a lot for one review. Split it and write a guide.")
+                } else {
+                    "A reviewer's guide, and a split if it's big.".into()
+                },
+                "",
+                false,
+            ));
+        }
         if session.is_some() {
             tiles.push((
                 "session",
@@ -996,6 +1065,7 @@ impl RunoApp {
                                 });
                             }
                             "switch" => this.git_switch(row.name.clone()),
+                            "reviewable" => this.git_kit = Some(row.name.clone()),
                             "sync" => this.git_sync(gitplace::SyncStep::Push),
                             "pr" | "session" => {
                                 if let Some(id) = session_id {

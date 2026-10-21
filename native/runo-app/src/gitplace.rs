@@ -19,10 +19,12 @@ pub(crate) struct Repo {
     pub state: git::RepoState,
     /// When the remote was last fetched, if it has been.
     pub fetched: Option<Instant>,
+    /// A rebase or merge stopped on clashing lines, waiting to be sorted out.
+    pub clash: Option<git::Clash>,
 }
 
 /// Which half of a sync to run.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncStep {
     /// Bring the remote's commits in, then send this folder's up.
     Both,
@@ -73,6 +75,7 @@ impl RunoApp {
             self.git_repo = None;
             return;
         };
+        self.load_radar();
         let known = self.git_repo.as_ref().filter(|r| r.dir == dir);
         let fetched = known.and_then(|r| r.fetched);
         let fetch = fetched.is_none_or(|at| at.elapsed() > FETCH_AFTER);
@@ -88,6 +91,7 @@ impl RunoApp {
                 };
                 Some(Repo {
                     state: git::repo_state(&dir),
+                    clash: git::clash(&dir),
                     dir,
                     fetched,
                 })
@@ -125,12 +129,18 @@ impl RunoApp {
             move || {
                 let result = work(&dir);
                 let state = git::repo_state(&dir);
-                (result, dir, state)
+                let clash = git::clash(&dir);
+                (result, dir, state, clash)
             },
-            |this, (result, dir, state), cx| {
+            |this, (result, dir, state, clash), cx| {
                 this.git_working = None;
                 if let Some(repo) = this.git_repo.as_mut() {
                     repo.state = state;
+                    repo.clash = clash;
+                }
+                match result {
+                    Ok(_) => this.git_folder_msg_kept = None,
+                    Err(_) => this.git_folder_msg_set = this.git_folder_msg_kept.take(),
                 }
                 match result {
                     Ok(Some((note, undo))) => {
@@ -147,18 +157,66 @@ impl RunoApp {
                     Ok(None) => {
                         this.git_toast = Some(("Already up to date.".into(), Instant::now()));
                     }
-                    Err(error) => this.fail("git", error),
+                    Err(error) => this.git_failed(error),
                 }
                 // Sessions on this folder, and the branch list, see the change too.
                 this.refresh();
                 this.load_branches();
+                this.load_history();
+                this.load_time();
+                this.load_folder();
+                this.load_radar();
                 cx.notify();
             },
         );
     }
 
-    /// Bring the remote's commits in, send this folder's up, or both.
+    /// Bring the remote's commits in, send this folder's up, or both, after the seatbelt
+    /// has looked at what would be sent.
     pub(crate) fn git_sync(&mut self, step: SyncStep) {
+        let pass = std::mem::take(&mut self.git_belt_pass);
+        let Some(repo) = self.git_repo.as_ref() else {
+            return;
+        };
+        let state = repo.state.clone();
+        let dir = repo.dir.clone();
+        if step == SyncStep::Pull || pass || state.remote.is_empty() || state.branch.is_empty() {
+            return self.git_sync_now(step);
+        }
+        let main = state.branch == self.git_default_branch()
+            && state.host == "GitHub"
+            && !self.git_main_ok.contains(&dir);
+        self.git_banner = None;
+        self.menu = None;
+        self.bg(
+            move || {
+                let found = seatbelt::scan_patch(&git::outgoing_patch(&dir));
+                (found, git::sync_state(&dir).ahead)
+            },
+            move |this, (found, ahead), cx| {
+                let serious: Vec<_> = found.into_iter().filter(|(_, _, s)| s.serious()).collect();
+                if !serious.is_empty() {
+                    this.git_banner = Some(explain::Banner {
+                        explained: explain::seatbelt_stop(&serious, step),
+                        raw: String::new(),
+                        found: serious,
+                    });
+                } else if main && ahead > 0 {
+                    this.git_banner = Some(explain::Banner {
+                        explained: explain::main_stop(&state.branch, ahead, step),
+                        raw: String::new(),
+                        found: Vec::new(),
+                    });
+                } else {
+                    this.git_sync_now(step);
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Sync, with no seatbelt.
+    fn git_sync_now(&mut self, step: SyncStep) {
         let Some(repo) = self.git_repo.as_ref() else {
             return;
         };
@@ -194,11 +252,16 @@ impl RunoApp {
                     let before = git::repo_state(dir).behind;
                     match git::pull(dir)? {
                         git::Update::Conflicts(files) => {
-                            return Err(format!(
-                                "The new commits on {} and yours change the same lines in {}, so nothing was changed. Ask an agent in a session to bring them in and sort out the clash.",
-                                state.host,
-                                files.join(", ")
-                            ));
+                            // The clash page takes it from here; calling it off there
+                            // puts everything back.
+                            return Ok(Some((
+                                format!(
+                                    "The new commits on {} and yours change the same lines in {}. Pick what to keep.",
+                                    state.host,
+                                    files.join(", ")
+                                ),
+                                None,
+                            )));
                         }
                         git::Update::Updated => {
                             let behind = before.max(1);
@@ -294,7 +357,10 @@ impl RunoApp {
                     .truncate()
                     .text_color(rgb(c_text()))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(if state.branch.is_empty() {
+                    .child(if let Some(clash) = repo.clash.as_ref() {
+                        // Mid-rebase the folder has no branch checked out; say whose it is.
+                        clash.yours.clone()
+                    } else if state.branch.is_empty() {
                         "No branch".to_string()
                     } else {
                         state.branch.clone()
@@ -390,7 +456,13 @@ impl RunoApp {
     }
 
     /// A popover hanging under one of the strip's controls.
-    fn git_popover(&self, id: &'static str, width: f32, body: Div, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn git_popover(
+        &self,
+        id: &'static str,
+        width: f32,
+        body: Div,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div().absolute().top(px(32.)).right_0().child(
             deferred(
                 anchored().snap_to_window_with_margin(px(8.)).child(
@@ -600,10 +672,12 @@ impl RunoApp {
             .as_ref()
             .filter(|(_, at)| at.elapsed() < TOAST_FOR)?;
         let undo = self.git_undo_point().is_some_and(|p| p.label == *note);
+        // Above the clash page's own bar.
+        let clash = self.git_repo.as_ref().is_some_and(|r| r.clash.is_some());
         Some(
             div()
                 .absolute()
-                .bottom(px(18.))
+                .bottom(px(if clash { 70. } else { 18. }))
                 .left_0()
                 .right_0()
                 .flex()

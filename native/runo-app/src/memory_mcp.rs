@@ -177,7 +177,8 @@ fn tools() -> Value {
 }
 
 /// Tools only Crew's threads get; every other session's list is unchanged.
-const THREAD_TOOLS: [&str; 4] = ["set_checklist", "report", "ask_decision", "message_crew"];
+pub(crate) const THREAD_TOOLS: [&str; 4] =
+    ["set_checklist", "report", "ask_decision", "message_crew"];
 
 /// Messages a thread may send Crew from one run of this server, which lasts one turn in
 /// Chat. More would let two agents keep each other busy.

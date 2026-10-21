@@ -16,13 +16,10 @@ impl RunoApp {
             .sessions
             .iter()
             .filter(|s| {
-                // A mission's parts ship with the mission, from its own session.
                 !s.archived
                     && s.canvas.is_empty()
                     && !self.is_running(s)
-                    && (s.mission == 0 || self.mission_ready(s.id))
-                    && (self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
-                        || self.mission_ready(s.id))
+                    && self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
             })
             .map(|s| s.id)
             .collect();
@@ -40,24 +37,16 @@ impl RunoApp {
                 self.select(first);
             }
         }
-        // A mission's work is all in commits: show everything since its base.
-        if !self.diff_base && self.selected.is_some_and(|id| self.mission_ready(id)) {
-            self.diff_base = true;
-            self.refresh();
-        }
         self.view = View::Review;
         self.git_tab = View::Review;
         self.load_repo();
+        self.load_folder();
     }
 
     /// Show one session in Review.
     pub(crate) fn review(&mut self, id: u64) {
-        // A mission's work is all in commits: show everything since its base.
-        if self.mission_ready(id) {
-            self.diff_base = true;
-            self.selected_file = None;
-        }
         self.select(id);
+        self.git_folder_open = false;
         self.view = View::Review;
         self.git_tab = View::Review;
         self.load_repo();
@@ -65,9 +54,8 @@ impl RunoApp {
 
     fn review_row(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let id = session.id;
-        let on = self.selected == Some(id);
+        let on = self.selected == Some(id) && !self.git_folder_open;
         let (files, added, removed) = self.stats.get(&id).copied().unwrap_or_default();
-        let mission = self.mission_ready(id);
         let project = self
             .state
             .projects
@@ -118,23 +106,20 @@ impl RunoApp {
                             .text_size(px(11.5))
                             .text_color(rgb(c_muted()))
                             .child(match files {
-                                _ if mission => format!("Mission branch  ·  {project}"),
                                 1 => format!("1 file  ·  {project}"),
                                 n => format!("{n} files  ·  {project}"),
                             }),
                     ),
             )
-            .when(!mission, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .gap_1()
-                        .text_size(px(11.5))
-                        .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
-                        .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
-                )
-            })
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap_1()
+                    .text_size(px(11.5))
+                    .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
+                    .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
+            )
             .into_any_element()
     }
 
@@ -144,6 +129,7 @@ impl RunoApp {
     pub(crate) fn git_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let github = self.view == View::GitHub;
         let branches = self.view == View::Branches;
+        let history = self.view == View::GitHistory;
         let tab = |id: &'static str, label: &'static str, count: usize, alert: bool, on: bool| {
             shell::strip_tab(id, "git", on)
                 .child(label)
@@ -172,7 +158,20 @@ impl RunoApp {
         } else {
             pane(c_sheet())
         };
-        let body = if branches {
+        let clash = self.git_repo.as_ref().and_then(|r| r.clash.as_ref());
+        let body = if let Some(clash) = clash {
+            shell::island(
+                div().size_full().flex().child(self.clash_view(clash, cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        } else if history {
+            shell::island(
+                div().size_full().flex().child(self.git_history_view(cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        } else if branches {
             shell::island(
                 div().size_full().flex().child(self.branches_view(cx)),
                 rgba(0),
@@ -224,7 +223,7 @@ impl RunoApp {
                             "Changes",
                             self.review_list().len(),
                             false,
-                            !github && !branches,
+                            !github && !branches && !history,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_review();
@@ -233,13 +232,23 @@ impl RunoApp {
                         })),
                     )
                     .child(
+                        tab("git-history", "History", 0, false, history).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.open_git_history();
+                                this.save();
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
                         tab(
                             "git-branches",
                             "Branches",
                             self.git_branches
                                 .as_ref()
                                 .map_or(0, |b| b.rows.iter().filter(|r| !r.remote_only).count()),
-                            false,
+                            // Amber when the radar sees clashes coming.
+                            self.git_radar.as_ref().is_some_and(|h| !h.is_empty()),
                             branches,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -268,6 +277,7 @@ impl RunoApp {
                     .flex()
                     .child(body.size_full())
                     .children(self.merge_dialog(cx))
+                    .children(self.git_banner_view(cx))
                     .children(self.git_toast_view(cx)),
             )
             .into_any_element()
@@ -277,12 +287,17 @@ impl RunoApp {
     /// ship controls beside it.
     pub(crate) fn review_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let list = self.review_list();
+        let folder = self
+            .git_folder
+            .as_ref()
+            .is_some_and(|f| !f.files.is_empty());
         let rows: Vec<AnyElement> = list
             .iter()
             .filter_map(|id| self.state.session(*id))
             .enumerate()
             .map(|(i, s)| shell::cascade(self.review_row(s, cx), format!("review-in-{}", s.id), i))
             .collect();
+        // The list and the page paint the island's corners over their own fills.
         let side = div()
             .w(px(LIST_WIDTH))
             .flex_none()
@@ -290,6 +305,9 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
+            .children(self.folder_row(cx))
+            .child(shell::frame_corner(true, true, pane(c_sheet())))
+            .child(shell::frame_corner(false, true, pane(c_sheet())))
             .child(
                 div()
                     .px_3()
@@ -298,7 +316,7 @@ impl RunoApp {
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(c_muted()))
-                    .child("READY TO REVIEW"),
+                    .child(if folder { "FROM AGENTS  ·  READY TO SHIP" } else { "READY TO REVIEW" }),
             )
             .child(
                 div()
@@ -323,7 +341,11 @@ impl RunoApp {
                         )
                     }),
             );
-        let main = match self.current().filter(|s| list.contains(&s.id)) {
+        let main = match self
+            .current()
+            .filter(|s| list.contains(&s.id) && !self.git_folder_open)
+        {
+            _ if self.git_folder_open && self.git_folder.is_some() => self.folder_page(cx),
             Some(session) => {
                 let id = session.id;
                 let project = self
@@ -439,9 +461,12 @@ impl RunoApp {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
                     .flex()
                     .bg(glass_fill(c_canvas()))
-                    .child(main),
+                    .child(main)
+                    .child(shell::frame_corner(true, false, glass_fill(c_canvas())))
+                    .child(shell::frame_corner(false, false, glass_fill(c_canvas()))),
             )
             .into_any_element()
     }

@@ -468,10 +468,6 @@ impl RunoApp {
                 if self.selected == Some(id) {
                     self.refresh();
                 }
-                // A mission's own worktree is the branch its parts start from.
-                if self.state.session(id).is_some_and(|s| s.mission != 0) {
-                    self.missions_tick_all(cx);
-                }
             }
             Err(error) => {
                 self.pending_start.remove(&id);
@@ -664,6 +660,12 @@ impl RunoApp {
                 .join("\n")
         } else {
             String::new()
+        };
+        // A reviewer's guide written for this branch leads the description.
+        let body = match self.git_guides.get(&session.branch) {
+            Some(Some(guide)) if body.is_empty() => guide.clone(),
+            Some(Some(guide)) => format!("{guide}\n\n## Commits\n{body}"),
+            _ => body,
         };
         let branch = format!("runo/session-{id}");
         self.pr_title

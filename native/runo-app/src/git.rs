@@ -76,7 +76,17 @@ fn exists(dir: &str, rev: &str) -> bool {
     .is_ok()
 }
 
-fn rev(dir: &str, rev: &str) -> Option<String> {
+/// Where the folder was before the last rebase, merge or reset.
+pub fn orig_head(dir: &str) -> Option<String> {
+    rev(dir, "ORIG_HEAD")
+}
+
+/// The commit the folder is on, if there is one yet.
+pub fn head(dir: &str) -> Option<String> {
+    rev(dir, "HEAD")
+}
+
+pub fn rev(dir: &str, rev: &str) -> Option<String> {
     git(
         dir,
         &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")],
@@ -87,7 +97,7 @@ fn rev(dir: &str, rev: &str) -> Option<String> {
 }
 
 /// Whether `a` is `b` or one of its ancestors.
-fn is_ancestor(dir: &str, a: &str, b: &str) -> bool {
+pub fn is_ancestor(dir: &str, a: &str, b: &str) -> bool {
     git(dir, &["merge-base", "--is-ancestor", a, b]).is_ok()
 }
 
@@ -643,6 +653,241 @@ pub fn in_progress(dir: &str) -> Option<&'static str> {
     }
 }
 
+/// One stretch of a clashing file: lines both sides agree on, or a spot where each side
+/// changed the same lines its own way. `ours` is what git calls ours: the branch being
+/// rebased onto in a rebase, the checked-out branch in a merge.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stretch {
+    Same(String),
+    Spot { ours: String, theirs: String },
+}
+
+/// A file with clashing lines; `stretches` is None when it has no lines to pick from
+/// (binary, or deleted on one side), so one side's whole file has to win.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClashFile {
+    pub path: String,
+    pub stretches: Option<Vec<Stretch>>,
+    /// The file as it is, with git's markers, for an agent to read.
+    pub text: String,
+}
+
+/// A rebase or merge stopped on clashing lines in the folder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clash {
+    /// "rebase" or "merge".
+    pub kind: &'static str,
+    /// The person's own branch, and what is coming in.
+    pub yours: String,
+    pub theirs: String,
+    /// Whether the person's own side is git's "ours".
+    pub yours_is_ours: bool,
+    /// Files still clashing, and files that came together on their own.
+    pub files: Vec<ClashFile>,
+    pub merged: Vec<String>,
+}
+
+impl ClashFile {
+    pub fn spots(&self) -> usize {
+        self.stretches.as_ref().map_or(0, |s| {
+            s.iter()
+                .filter(|s| matches!(s, Stretch::Spot { .. }))
+                .count()
+        })
+    }
+}
+
+/// Split a file git left with clash markers into its stretches.
+pub fn parse_clash(text: &str) -> Option<Vec<Stretch>> {
+    let mut out = Vec::new();
+    let mut same = String::new();
+    let (mut ours, mut theirs) = (String::new(), String::new());
+    // 0: outside a spot, 1: our lines, 2: the common ancestor's (skipped), 3: theirs.
+    let mut at = 0;
+    let mut any = false;
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        match at {
+            0 if bare.starts_with("<<<<<<<") => {
+                if !same.is_empty() {
+                    out.push(Stretch::Same(std::mem::take(&mut same)));
+                }
+                at = 1;
+                any = true;
+            }
+            1 if bare.starts_with("|||||||") => at = 2,
+            1 | 2 if bare == "=======" => at = 3,
+            3 if bare.starts_with(">>>>>>>") => {
+                out.push(Stretch::Spot {
+                    ours: std::mem::take(&mut ours),
+                    theirs: std::mem::take(&mut theirs),
+                });
+                at = 0;
+            }
+            0 => same.push_str(line),
+            1 => ours.push_str(line),
+            2 => {}
+            _ => theirs.push_str(line),
+        }
+    }
+    if !any || at != 0 {
+        return None;
+    }
+    if !same.is_empty() {
+        out.push(Stretch::Same(same));
+    }
+    Some(out)
+}
+
+/// What a commit or branch is called, for people: a branch name where one points at it.
+fn name_of(dir: &str, sha: &str) -> String {
+    git(
+        dir,
+        &[
+            "name-rev",
+            "--name-only",
+            "--no-undefined",
+            "--refs=refs/heads/*",
+            "--refs=refs/remotes/*",
+            "--exclude=*/HEAD",
+            sha,
+        ],
+    )
+    .ok()
+    .map(|n| n.trim().trim_start_matches("remotes/").to_string())
+    .filter(|n| !n.is_empty() && !n.contains('~') && !n.contains('^'))
+    .unwrap_or_else(|| sha.chars().take(7).collect())
+}
+
+/// The rebase or merge stopped in the folder, if one is.
+pub fn clash(dir: &str) -> Option<Clash> {
+    let kind = in_progress(dir)?;
+    let path = |name: &str| {
+        git(dir, &["rev-parse", "--git-path", name])
+            .map(|p| Path::new(dir).join(p.trim()))
+            .ok()
+    };
+    let read = |name: &str| {
+        path(name)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let (yours, theirs, yours_is_ours) = if kind == "rebase" {
+        let state = if path("rebase-merge").is_some_and(|p| p.exists()) {
+            "rebase-merge"
+        } else {
+            "rebase-apply"
+        };
+        let head = read(&format!("{state}/head-name"));
+        let onto = read(&format!("{state}/onto"));
+        (
+            head.trim_start_matches("refs/heads/").to_string(),
+            name_of(dir, &onto),
+            false,
+        )
+    } else {
+        let merging = read("MERGE_HEAD");
+        let merging = merging.lines().next().unwrap_or("");
+        (current_branch(dir), name_of(dir, merging), true)
+    };
+    let left = conflicted(dir);
+    let files = left
+        .iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(Path::new(dir).join(p)).unwrap_or_default();
+            ClashFile {
+                path: p.clone(),
+                stretches: parse_clash(&text),
+                text,
+            }
+        })
+        .collect();
+    let merged = git(dir, &["diff", "--cached", "--name-only", "-z"])
+        .map(|s| split_z(&s))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !left.contains(p))
+        .collect();
+    Some(Clash {
+        kind,
+        yours,
+        theirs,
+        yours_is_ours,
+        files,
+        merged,
+    })
+}
+
+/// Settle a clashing file with this text.
+pub fn settle(dir: &str, path: &str, text: &str) -> Result<(), String> {
+    std::fs::write(Path::new(dir).join(path), text).map_err(|e| e.to_string())?;
+    git(dir, &["add", "--", path]).map(|_| ())
+}
+
+/// Settle a clashing file with one side's whole version, or its deletion where that side
+/// deleted it.
+pub fn settle_side(dir: &str, path: &str, ours: bool) -> Result<(), String> {
+    let side = if ours { "--ours" } else { "--theirs" };
+    match git(dir, &["checkout", side, "--", path]) {
+        Ok(_) => git(dir, &["add", "--", path]).map(|_| ()),
+        Err(_) => git(dir, &["rm", "-q", "--", path]).map(|_| ()),
+    }
+}
+
+/// A file two lines of work both change the same lines of, and where: the first line of
+/// each clashing spot in the file as the two would merge.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Overlap {
+    pub path: String,
+    pub lines: Vec<usize>,
+}
+
+/// Merge `a` and `b` in memory, touching no folder, and say where they clash. Empty when
+/// they come together cleanly.
+pub fn test_merge(dir: &str, a: &str, b: &str) -> Result<Vec<Overlap>, String> {
+    let out = match git(dir, &["merge-tree", "--write-tree", "--no-messages", a, b]) {
+        Ok(_) => return Ok(Vec::new()),
+        // With clashes git exits 1 and prints the merged tree, then the clashing files.
+        Err(out) => out,
+    };
+    let mut lines = out.lines();
+    let tree = lines.next().unwrap_or("").trim().to_string();
+    if tree.len() < 40 || !tree.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(out);
+    }
+    let mut paths: Vec<String> = lines
+        .filter_map(|l| l.split_once('\t').map(|(_, p)| p.to_string()))
+        .collect();
+    paths.dedup();
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let merged =
+                git(dir, &["cat-file", "-p", &format!("{tree}:{path}")]).unwrap_or_default();
+            let lines = merged
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.starts_with("<<<<<<<"))
+                .map(|(i, _)| i + 1)
+                .collect();
+            Overlap { path, lines }
+        })
+        .collect())
+}
+
+/// The tip of a folder's work: its uncommitted changes as a commit nothing points at,
+/// or its HEAD when there are none.
+pub fn work_tip(dir: &str) -> Option<String> {
+    let wip = git(dir, &["stash", "create"]).unwrap_or_default();
+    let wip = wip.trim();
+    if wip.is_empty() {
+        rev(dir, "HEAD")
+    } else {
+        Some(wip.to_string())
+    }
+}
+
 /// Give up on a stopped rebase or merge, back to where it started.
 pub fn abort_update(dir: &str) -> Result<(), String> {
     match in_progress(dir) {
@@ -915,6 +1160,274 @@ pub fn file_diff_context(dir: &str, path: &str, whole: bool, against: &str) -> S
             .map_err(|e| e.to_string())
     };
     out.unwrap_or_else(|e| e)
+}
+
+/// One line of a part: ' ' unchanged, '+' added, '-' removed, '\\' git's note that the
+/// line before has no newline at the end.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct PartLine {
+    pub kind: char,
+    pub text: String,
+    /// Line numbers before and after, 0 where the line isn't on that side.
+    pub old: usize,
+    pub new: usize,
+}
+
+/// One part of a file's change: a hunk.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Part {
+    /// What git shows after the @@, often the function the part is in.
+    pub title: String,
+    pub old_start: usize,
+    pub new_start: usize,
+    pub lines: Vec<PartLine>,
+}
+
+/// A changed file split into its parts.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FileParts {
+    pub change: Change,
+    /// The diff's header, everything before the first part.
+    pub head: String,
+    pub parts: Vec<Part>,
+    /// The whole diff, to tell when the file changed again.
+    pub diff: String,
+}
+
+impl FileParts {
+    /// Only whole: binary, deleted or renamed files, which can't be split into lines.
+    pub fn whole_only(&self) -> bool {
+        self.change.binary || self.parts.is_empty() || self.change.status == "D"
+    }
+}
+
+fn hunk_start(text: &str, sign: char) -> usize {
+    text.split_whitespace()
+        .find_map(|w| w.strip_prefix(sign))
+        .and_then(|w| w.split(',').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Split a unified diff of one file into its header and parts.
+pub fn parse_parts(diff: &str) -> (String, Vec<Part>) {
+    let mut head = String::new();
+    let mut parts: Vec<Part> = Vec::new();
+    let (mut old, mut new) = (0, 0);
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("@@") {
+            let (range, title) = rest.split_once("@@").unwrap_or((rest, ""));
+            let (old_start, new_start) = (hunk_start(range, '-'), hunk_start(range, '+'));
+            old = old_start;
+            new = new_start;
+            parts.push(Part {
+                title: title.trim().to_string(),
+                old_start,
+                new_start,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        let Some(part) = parts.last_mut() else {
+            head.push_str(line);
+            head.push('\n');
+            continue;
+        };
+        let kind = line.chars().next().unwrap_or(' ');
+        let text = line.get(1..).unwrap_or("").to_string();
+        let (o, n) = match kind {
+            '+' => {
+                new += 1;
+                (0, new - 1)
+            }
+            '-' => {
+                old += 1;
+                (old - 1, 0)
+            }
+            '\\' => (0, 0),
+            _ => {
+                old += 1;
+                new += 1;
+                (old - 1, new - 1)
+            }
+        };
+        part.lines.push(PartLine {
+            kind,
+            text,
+            old: o,
+            new: n,
+        });
+    }
+    (head, parts)
+}
+
+/// The folder's changed files against HEAD, each split into parts.
+pub fn file_parts(dir: &str) -> Vec<FileParts> {
+    changes(dir)
+        .into_iter()
+        .map(|change| {
+            let diff = if change.binary {
+                String::new()
+            } else {
+                file_diff_context(dir, &change.path, false, "HEAD")
+            };
+            let (head, parts) = parse_parts(&diff);
+            FileParts {
+                change,
+                head,
+                parts,
+                diff,
+            }
+        })
+        .collect()
+}
+
+/// A patch with only the picked lines of a file's change. Unpicked removals stay as
+/// unchanged lines and unpicked additions are left out, so the patch applies to HEAD's
+/// version. None when nothing is picked.
+pub fn picked_patch(file: &FileParts, picked: impl Fn(usize, usize) -> bool) -> Option<String> {
+    let mut out = String::new();
+    let mut shift: isize = 0;
+    for (p, part) in file.parts.iter().enumerate() {
+        let mut body = String::new();
+        let (mut olds, mut news, mut any) = (0usize, 0usize, false);
+        let mut kept_last = true;
+        for (l, line) in part.lines.iter().enumerate() {
+            let kind = match line.kind {
+                '+' if picked(p, l) => '+',
+                '+' => {
+                    kept_last = false;
+                    continue;
+                }
+                '-' if picked(p, l) => '-',
+                '-' => ' ',
+                '\\' => {
+                    if kept_last {
+                        body.push_str("\\ No newline at end of file\n");
+                    }
+                    continue;
+                }
+                _ => ' ',
+            };
+            any |= kind != ' ';
+            kept_last = true;
+            if kind != '+' {
+                olds += 1;
+            }
+            if kind != '-' {
+                news += 1;
+            }
+            body.push(kind);
+            body.push_str(&line.text);
+            body.push('\n');
+        }
+        if any {
+            let new_start = (part.old_start as isize + shift).max(0) as usize;
+            out.push_str(&format!(
+                "@@ -{},{olds} +{new_start},{news} @@\n{body}",
+                part.old_start
+            ));
+            shift += news as isize - olds as isize;
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(format!("{}{out}", file.head))
+}
+
+/// Commit some of the folder's changes: whole files, and patches of picked lines, built
+/// in an index of its own so nothing else in the folder is touched. With `amend` they
+/// join the last commit instead, keeping its message when `message` is empty.
+pub fn commit_parts(
+    dir: &str,
+    whole: &[String],
+    patch: &str,
+    message: &str,
+    amend: bool,
+) -> Result<String, String> {
+    let git_dir = git(dir, &["rev-parse", "--absolute-git-dir"])?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let index = format!("{}/runo-index-{nanos}", git_dir.trim());
+    let env = [("GIT_INDEX_FILE", index.as_str()), ("GIT_EDITOR", "true")];
+    let result = (|| {
+        if rev(dir, "HEAD").is_some() {
+            git_with(dir, &["read-tree", "HEAD"], &env, None)?;
+        } else {
+            git_with(dir, &["read-tree", "--empty"], &env, None)?;
+        }
+        if !whole.is_empty() {
+            let mut args = vec!["add", "-A", "--"];
+            args.extend(whole.iter().map(String::as_str));
+            git_with(dir, &args, &env, None)?;
+        }
+        if !patch.is_empty() {
+            git_with(
+                dir,
+                &["apply", "--cached", "--recount", "--whitespace=nowarn", "-"],
+                &env,
+                Some(patch.as_bytes()),
+            )
+            .map_err(|e| format!("Couldn't pick those lines out: {}", e.trim()))?;
+        }
+        let mut args = vec!["commit", "-q"];
+        if amend {
+            args.push("--amend");
+        }
+        if message.trim().is_empty() {
+            args.push("--no-edit");
+        } else {
+            args.extend(["-m", message]);
+        }
+        git_with(dir, &args, &env, None)
+    })();
+    let _ = std::fs::remove_file(&index);
+    result?;
+    // The folder's own index catches up on the files committed, so what's left shows as
+    // still to commit.
+    let mut paths: Vec<String> = whole.to_vec();
+    paths.extend(patch.lines().filter_map(|l| {
+        l.strip_prefix("+++ b/")
+            .or_else(|| l.strip_prefix("--- a/"))
+            .map(str::to_string)
+    }));
+    paths.sort();
+    paths.dedup();
+    if !paths.is_empty() {
+        let mut args = vec!["reset", "-q", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let _ = git(dir, &args);
+    }
+    git(dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string())
+}
+
+/// Throw a patch's changes out of the folder. Applying the patch again puts them back.
+pub fn throw_away(dir: &str, patch: &str) -> Result<(), String> {
+    git_with(
+        dir,
+        &["apply", "-R", "--recount", "--whitespace=nowarn", "-"],
+        &[],
+        Some(patch.as_bytes()),
+    )
+    .map(|_| ())
+}
+
+/// The last commit's subject, and whether it is only on this computer, so it can still
+/// be added to.
+pub fn last_commit(dir: &str) -> Option<(String, bool)> {
+    let subject = git(dir, &["log", "-1", "--format=%s"])
+        .ok()?
+        .trim()
+        .to_string();
+    if subject.is_empty() {
+        return None;
+    }
+    let sent = git(dir, &["branch", "-r", "--contains", "HEAD"])
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    Some((subject, !sent))
 }
 
 /// Every file git knows or would add (tracked plus untracked, minus ignored).
@@ -1510,13 +2023,8 @@ pub fn pull(dir: &str) -> Result<Update, String> {
                 .into(),
         );
     }
-    match update_from(dir, "@{u}", true)? {
-        Update::Conflicts(files) => {
-            abort_update(dir)?;
-            Ok(Update::Conflicts(files))
-        }
-        done => Ok(done),
-    }
+    // Clashing lines leave the rebase stopped, for the clash page to sort out.
+    update_from(dir, "@{u}", true)
 }
 
 /// Check out another local branch, or a remote one under its own name. Uncommitted work
@@ -1538,6 +2046,14 @@ pub enum Undo {
     Restash { commit: String, message: String },
     /// Bring back what was just set aside.
     Unstash,
+    /// Remove a tag the step made.
+    Untag(String),
+    /// Take the last commit back off the branch, keeping its changes in the folder.
+    Uncommit { head: String },
+    /// Put back a part that was thrown away, applying its patch to the folder again.
+    Reapply(String),
+    /// Put the folder's files back as they were in this checkpoint.
+    Restore(String),
     /// Several of these, in order.
     Steps(Vec<Undo>),
 }
@@ -1631,6 +2147,23 @@ pub fn undo(point: &UndoPoint) -> Result<(), String> {
         }
         Undo::Unstash => {
             stash_apply(dir, 0)?;
+        }
+        Undo::Untag(name) => {
+            delete_tag(dir, name)?;
+        }
+        Undo::Uncommit { head } => {
+            git(dir, &["reset", "-q", "--mixed", head])?;
+        }
+        Undo::Reapply(patch) => {
+            git_with(
+                dir,
+                &["apply", "--recount", "--whitespace=nowarn", "-"],
+                &[],
+                Some(patch.as_bytes()),
+            )?;
+        }
+        Undo::Restore(checkpoint) => {
+            restore(dir, checkpoint, None)?;
         }
         Undo::Steps(steps) => {
             for undo in steps {
@@ -1858,6 +2391,206 @@ pub fn push_branch(dir: &str, remote: &str, branch: &str) -> Result<(), String> 
         .map_err(|e| auth_hint(&e))
 }
 
+/// Add a new file to the folder's .gitignore, so git stops offering it, and take it
+/// out of the index if it was added there.
+pub fn ignore_path(dir: &str, path: &str) -> Result<(), String> {
+    let file = Path::new(dir).join(".gitignore");
+    let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+    let line = format!("/{path}");
+    if text.lines().any(|l| l.trim() == line) {
+        return Ok(());
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&line);
+    text.push('\n');
+    std::fs::write(&file, text).map_err(|e| e.to_string())?;
+    git(
+        dir,
+        &["rm", "-q", "--cached", "--ignore-unmatch", "--", path],
+    )
+    .map(|_| ())
+}
+
+/// Take the last commit off the branch, keeping its changes in the folder. Undo puts it
+/// back.
+pub fn uncommit(dir: &str) -> Result<Undo, String> {
+    let head = rev(dir, "HEAD").ok_or("This folder has no commits yet.")?;
+    rev(dir, "HEAD~1")
+        .ok_or("That's the first commit, so there's nothing before it to go back to.")?;
+    git(dir, &["reset", "-q", "--soft", "HEAD~1"])?;
+    git(dir, &["reset", "-q"])?;
+    keep_for_undo(dir, &head);
+    // Its changes are still in the folder, so pointing the branch back is enough.
+    Ok(Undo::Uncommit { head })
+}
+
+/// Every line the commits a push would send add, as one patch: from the tracked remote
+/// branch, or from what no remote branch has yet. Merges are left out; their sides are
+/// in it already.
+pub fn outgoing_patch(dir: &str) -> String {
+    let range: Vec<&str> = if rev(dir, "@{u}").is_some() {
+        vec!["@{u}..HEAD"]
+    } else {
+        vec!["HEAD", "--not", "--remotes"]
+    };
+    let mut args = vec![
+        "log",
+        "-p",
+        "--no-merges",
+        "--format=",
+        "--no-color",
+        "--no-ext-diff",
+    ];
+    args.extend(range);
+    git(dir, &args).unwrap_or_default()
+}
+
+/// Put the commits the checked-out branch has that its remote copy doesn't on a new
+/// branch `name`, and switch to it, leaving the branch as the remote has it.
+/// Uncommitted work comes along.
+pub fn move_to_new_branch(dir: &str, name: &str) -> Result<Undo, String> {
+    let branch = current_branch(dir);
+    let head = rev(dir, "HEAD").ok_or("This folder has no commits yet.")?;
+    let upstream = rev(dir, "@{u}")
+        .ok_or("This branch isn't on the remote yet, so there is nothing to move off it.")?;
+    git(dir, &["switch", "-c", name])?;
+    git(dir, &["branch", "-f", &branch, &upstream])?;
+    keep_for_undo(dir, &head);
+    Ok(Undo::Steps(vec![
+        Undo::Branches(vec![(branch.clone(), Some(head.clone()))]),
+        Undo::Folder { branch, head },
+        Undo::Branches(vec![(name.to_string(), None)]),
+    ]))
+}
+
+/// Send a branch the remote has an older copy of, made again here (a stack part made
+/// over), only if the remote's copy is still the one this folder last saw.
+pub fn push_branch_over(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
+    git(dir, &["push", "--force-with-lease", remote, branch])
+        .map(|_| ())
+        .map_err(|e| auth_hint(&e))
+}
+
+/// What a branch changes against `base`, commit subjects first, cut at `max` bytes, for
+/// an agent to read.
+pub fn branch_patch(dir: &str, branch: &str, base: &str, max: usize) -> String {
+    let range = format!("{base}...{branch}");
+    let subjects = git(
+        dir,
+        &[
+            "log",
+            "--reverse",
+            "--format=- %s",
+            &format!("{base}..{branch}"),
+        ],
+    )
+    .unwrap_or_default();
+    let stat = git(dir, &["diff", "--stat", &range]).unwrap_or_default();
+    let mut diff = git(dir, &["diff", "--no-color", &range]).unwrap_or_default();
+    if diff.len() > max {
+        let mut cut = max;
+        while !diff.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        diff.truncate(cut);
+        diff.push_str("\n… (cut short)");
+    }
+    format!("Commits:\n{subjects}\nFiles:\n{stat}\n{diff}")
+}
+
+/// Split a branch's work into a stack of new branches, one per part, each built on the
+/// one before and holding its part's files as they are at `tip`. The last branch has
+/// every file the parts name. Nothing checked out is touched. Returns the new names.
+pub fn stack_parts(
+    dir: &str,
+    base: &str,
+    tip: &str,
+    prefix: &str,
+    parts: &[(String, Vec<String>)],
+) -> Result<Vec<String>, String> {
+    let git_dir = git(dir, &["rev-parse", "--absolute-git-dir"])?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let index = format!("{}/runo-split-{nanos}", git_dir.trim());
+    let env = [("GIT_INDEX_FILE", index.as_str())];
+    let start = git(dir, &["merge-base", base, tip])?.trim().to_string();
+    let mut parent = start.clone();
+    let mut names = Vec::new();
+    let result = (|| {
+        git_with(dir, &["read-tree", &start], &env, None)?;
+        for (i, (title, files)) in parts.iter().enumerate() {
+            for path in files {
+                let entry = git(dir, &["ls-tree", tip, "--", path])?;
+                match entry.split_once('\t') {
+                    Some((meta, _)) => {
+                        let f: Vec<&str> = meta.split_whitespace().collect();
+                        let info = format!("{},{},{path}", f[0], f[2]);
+                        git_with(
+                            dir,
+                            &["update-index", "--add", "--cacheinfo", &info],
+                            &env,
+                            None,
+                        )?;
+                    }
+                    // Gone at the tip: this part deletes it.
+                    None => {
+                        git_with(
+                            dir,
+                            &["update-index", "--force-remove", "--", path],
+                            &env,
+                            None,
+                        )?;
+                    }
+                }
+            }
+            let tree = git_with(dir, &["write-tree"], &env, None)?;
+            let commit = git(
+                dir,
+                &["commit-tree", tree.trim(), "-p", &parent, "-m", title],
+            )?;
+            let name = format!("{prefix}-part-{}", i + 1);
+            git(dir, &["branch", "-f", &name, commit.trim()])?;
+            names.push(name);
+            parent = commit.trim().to_string();
+        }
+        Ok::<(), String>(())
+    })();
+    let _ = std::fs::remove_file(&index);
+    result.map(|_| names)
+}
+
+/// Open a pull request for `branch` onto `base` with the GitHub CLI, returning its link.
+pub fn open_pull_request(
+    dir: &str,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    let out = Command::new("gh")
+        .args([
+            "pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body,
+        ])
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("The GitHub CLI (gh) is needed for pull requests: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(text
+        .lines()
+        .rev()
+        .find(|l| l.starts_with("https://"))
+        .unwrap_or(text.trim())
+        .to_string())
+}
+
 pub fn rename_branch(dir: &str, from: &str, to: &str) -> Result<(), String> {
     git(dir, &["branch", "-m", from, to]).map(|_| ())
 }
@@ -1882,21 +2615,76 @@ pub fn merge_branch(
     how: MergeHow,
     message: &str,
 ) -> Result<String, String> {
-    if !exists(repo, &format!("refs/heads/{base}")) {
+    let editor = [("GIT_EDITOR", "true")];
+    on_branch(repo, base, |dir| {
+        let result = match how {
+            MergeHow::Merge => git_with(dir, &["merge", "--no-edit", branch], &editor, None),
+            MergeHow::Squash => git_with(dir, &["merge", "--squash", branch], &editor, None)
+                .and_then(|_| git(dir, &["commit", "-q", "-m", message])),
+            MergeHow::Rebase => {
+                let start = git(dir, &["merge-base", "HEAD", branch])?;
+                git_with(
+                    dir,
+                    &[
+                        "cherry-pick",
+                        "--allow-empty",
+                        &format!("{}..{branch}", start.trim()),
+                    ],
+                    &editor,
+                    None,
+                )
+            }
+        };
+        match result {
+            Ok(_) => git(dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string()),
+            Err(error) => {
+                let files = conflicted(dir);
+                // A merge in the project folder itself waits for the clash page.
+                if how == MergeHow::Merge && !files.is_empty() && dir == repo {
+                    return Err(format!(
+                        "{branch} and {base} change the same lines in {}. Pick what to keep, then Finish.",
+                        files.join(", ")
+                    ));
+                }
+                let _ = match how {
+                    MergeHow::Rebase => git(dir, &["cherry-pick", "--abort"]),
+                    _ => git(dir, &["merge", "--abort"])
+                        .or_else(|_| git(dir, &["reset", "--hard", "-q", "HEAD"])),
+                };
+                Err(if files.is_empty() {
+                    error
+                } else {
+                    format!(
+                        "{branch} and {base} change the same lines in {}, so nothing was merged. Bring {base}'s updates into {branch} first to sort it out there.",
+                        files.join(", ")
+                    )
+                })
+            }
+        }
+    })
+}
+
+/// Run `work` in a folder with `branch` checked out: where it already is, or a temporary
+/// worktree. Refuses when that folder has uncommitted changes to tracked files.
+fn on_branch<T>(
+    repo: &str,
+    branch: &str,
+    work: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    if !exists(repo, &format!("refs/heads/{branch}")) {
         // Only the remote has it: start a local branch there first.
         let remote = remote_name(repo);
         git(
             repo,
-            &["branch", "--track", base, &format!("{remote}/{base}")],
+            &["branch", "--track", branch, &format!("{remote}/{branch}")],
         )?;
     }
-    let editor = [("GIT_EDITOR", "true")];
-    let (dir, temporary) = match checked_out_at(repo, base) {
+    let (dir, temporary) = match checked_out_at(repo, branch) {
         Some(dir) => {
             let dirty = git(&dir, &["status", "--porcelain", "--untracked-files=no"])?;
             if !dirty.trim().is_empty() {
                 return Err(format!(
-                    "{base} has changes that aren't committed yet. Commit or set them aside first."
+                    "{branch} has changes that aren't committed yet. Commit or set them aside first."
                 ));
             }
             (dir, false)
@@ -1912,51 +2700,530 @@ pub fn merge_branch(
                 .join(format!("runo-merge-{nanos}"))
                 .to_string_lossy()
                 .into_owned();
-            git(repo, &["worktree", "add", "--quiet", &dir, base])?;
+            git(repo, &["worktree", "add", "--quiet", &dir, branch])?;
             (dir, true)
         }
     };
-    let result = match how {
-        MergeHow::Merge => git_with(&dir, &["merge", "--no-edit", branch], &editor, None),
-        MergeHow::Squash => git_with(&dir, &["merge", "--squash", branch], &editor, None)
-            .and_then(|_| git(&dir, &["commit", "-q", "-m", message])),
-        MergeHow::Rebase => {
-            let start = git(&dir, &["merge-base", "HEAD", branch])?;
-            git_with(
-                &dir,
-                &[
-                    "cherry-pick",
-                    "--allow-empty",
-                    &format!("{}..{branch}", start.trim()),
-                ],
-                &editor,
-                None,
-            )
-        }
-    };
-    let outcome = match result {
-        Ok(_) => git(&dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string()),
-        Err(error) => {
-            let files = conflicted(&dir);
-            let _ = match how {
-                MergeHow::Rebase => git(&dir, &["cherry-pick", "--abort"]),
-                _ => git(&dir, &["merge", "--abort"])
-                    .or_else(|_| git(&dir, &["reset", "--hard", "-q", "HEAD"])),
-            };
-            Err(if files.is_empty() {
-                error
-            } else {
-                format!(
-                    "{branch} and {base} change the same lines in {}, so nothing was merged. Bring {base}'s updates into {branch} first to sort it out there.",
-                    files.join(", ")
-                )
-            })
-        }
-    };
+    let outcome = work(&dir);
     if temporary {
         let _ = remove_worktree(repo, &dir);
     }
     outcome
+}
+
+/// One commit in History, with the branch and tag names pointing at it.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct LogRow {
+    pub sha: String,
+    pub short: String,
+    pub parents: Vec<String>,
+    pub subject: String,
+    pub author: String,
+    pub when: String,
+    /// Names as git decorates them: "HEAD -> main", "origin/main", "tag: v1.0".
+    pub refs: Vec<String>,
+}
+
+/// What History lists.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct LogFilter {
+    /// Every branch, or only the checked-out one.
+    pub all: bool,
+    /// Words in the message or the author's name.
+    pub text: String,
+    /// Only commits that touch this file or folder.
+    pub path: String,
+}
+
+/// Commits newest first, children before parents, at most `limit`. Found by words, they
+/// come newest first only.
+pub fn log(dir: &str, filter: &LogFilter, limit: usize) -> Vec<LogRow> {
+    let format = "--format=%H%x00%h%x00%P%x00%s%x00%an%x00%cr%x00%D";
+    let limit = format!("-n{limit}");
+    let mut scope: Vec<&str> = Vec::new();
+    if filter.all {
+        scope.extend(["--branches", "--remotes", "--tags", "HEAD"]);
+    }
+    let mut path: Vec<&str> = Vec::new();
+    if !filter.path.trim().is_empty() {
+        path.extend(["--", filter.path.as_str()]);
+    }
+    let text = filter.text.trim();
+    let out = if text.is_empty() {
+        // --parents rewrites parents past commits a path filter leaves out, so the
+        // graph stays joined up.
+        let args: Vec<&str> = ["log", "--topo-order", "--parents", format, &limit]
+            .into_iter()
+            .chain(scope.iter().copied())
+            .chain(path.iter().copied())
+            .collect();
+        git(dir, &args)
+    } else {
+        // Message or author: git ANDs --grep with --author, so ask for each and join them.
+        let grep = format!("--grep={text}");
+        let author = format!("--author={text}");
+        let mut found = String::new();
+        for by in [&grep, &author] {
+            let args: Vec<&str> = ["rev-list", "-i", "--fixed-strings", by.as_str(), &limit]
+                .into_iter()
+                .chain(scope.iter().copied())
+                .chain(if filter.all { None } else { Some("HEAD") })
+                .chain(path.iter().copied())
+                .collect();
+            found.push_str(&git(dir, &args).unwrap_or_default());
+        }
+        if found.trim().is_empty() {
+            return Vec::new();
+        }
+        git_with(
+            dir,
+            &["log", "--no-walk=sorted", "--stdin", format, &limit],
+            &[],
+            Some(found.as_bytes()),
+        )
+    };
+    out.unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split('\0');
+            Some(LogRow {
+                sha: f.next()?.to_string(),
+                short: f.next()?.to_string(),
+                parents: f.next()?.split_whitespace().map(str::to_string).collect(),
+                subject: f.next()?.to_string(),
+                author: f.next()?.to_string(),
+                when: f.next()?.to_string(),
+                refs: f
+                    .next()
+                    .unwrap_or("")
+                    .split(", ")
+                    .filter(|r| !r.is_empty() && *r != "refs/runo/undo" && !r.ends_with("/HEAD"))
+                    .map(str::to_string)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// How one row of the commit graph is drawn: which lane its dot sits in, the lines
+/// coming in from the row above and going out to the row below, as (from lane, to lane).
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct GraphRow {
+    pub lane: usize,
+    pub top: Vec<(usize, usize)>,
+    pub bottom: Vec<(usize, usize)>,
+}
+
+/// Lay commits (children before parents) out in lanes. Each lane waits for one commit;
+/// a commit takes the first lane waiting for it, the others waiting for it join it,
+/// its first parent carries the lane on and other parents get a lane of their own.
+pub fn graph(rows: &[LogRow]) -> Vec<GraphRow> {
+    let mut lanes: Vec<Option<String>> = Vec::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let waiting: Vec<usize> = lanes
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.as_deref() == Some(row.sha.as_str()))
+            .map(|(i, _)| i)
+            .collect();
+        let lane = match waiting.first() {
+            Some(&l) => l,
+            None => match lanes.iter().position(Option::is_none) {
+                Some(free) => free,
+                None => {
+                    lanes.push(None);
+                    lanes.len() - 1
+                }
+            },
+        };
+        let mut top = Vec::new();
+        for (i, l) in lanes.iter().enumerate() {
+            if l.is_some() {
+                top.push((i, if waiting.contains(&i) { lane } else { i }));
+            }
+        }
+        for &i in &waiting {
+            lanes[i] = None;
+        }
+        let mut bottom = Vec::new();
+        let mut parents = row.parents.iter();
+        lanes[lane] = parents.next().cloned();
+        for parent in parents {
+            let to = match lanes.iter().position(|l| l.as_deref() == Some(parent)) {
+                Some(existing) => existing,
+                None => {
+                    let free = match lanes.iter().position(Option::is_none) {
+                        Some(free) => free,
+                        None => {
+                            lanes.push(None);
+                            lanes.len() - 1
+                        }
+                    };
+                    lanes[free] = Some(parent.clone());
+                    free
+                }
+            };
+            bottom.push((lane, to));
+        }
+        for (i, l) in lanes.iter().enumerate() {
+            if l.is_some() && !bottom.iter().any(|(_, to)| *to == i) {
+                bottom.push((i, i));
+            }
+        }
+        while lanes.last().is_some_and(Option::is_none) {
+            lanes.pop();
+        }
+        out.push(GraphRow { lane, top, bottom });
+    }
+    out
+}
+
+/// A commit's message, and the files it changed against its first parent.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub body: String,
+    pub files: Vec<Change>,
+}
+
+pub fn commit_info(dir: &str, sha: &str) -> CommitInfo {
+    let parent = format!("{sha}^");
+    let from = if rev(dir, &parent).is_some() {
+        parent
+    } else {
+        // The first commit: compare with the empty tree.
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+    };
+    CommitInfo {
+        sha: sha.to_string(),
+        body: git(dir, &["log", "-1", "--format=%b", sha])
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        files: changes_between(dir, &from, sha),
+    }
+}
+
+/// Files changed from `a` to `b`, with line counts.
+fn changes_between(dir: &str, a: &str, b: &str) -> Vec<Change> {
+    let stats =
+        numstat(&git(dir, &["diff", "--numstat", "--no-renames", "-z", a, b]).unwrap_or_default());
+    git(dir, &["diff", "--name-status", "--no-renames", "-z", a, b])
+        .unwrap_or_default()
+        .split('\0')
+        .collect::<Vec<_>>()
+        .chunks(2)
+        .filter_map(|pair| {
+            let (status, path) = (pair.first()?, pair.get(1)?);
+            if status.is_empty() {
+                return None;
+            }
+            let (added, removed, binary) = stats.get(*path).copied().unwrap_or_default();
+            Some(Change {
+                path: path.to_string(),
+                status: status.chars().next()?.to_string(),
+                added,
+                removed,
+                binary,
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+/// A commit's message and changes, cut at `max` bytes, for an agent to read.
+pub fn commit_patch(dir: &str, sha: &str, max: usize) -> String {
+    let mut text = git(dir, &["show", "--format=%s%n%n%b", "--no-color", sha]).unwrap_or_default();
+    if text.len() > max {
+        let mut cut = max;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n… (cut short)");
+    }
+    text
+}
+
+/// Add a commit that takes `sha` back, on the checked-out branch. Clashing lines change
+/// nothing.
+pub fn revert(dir: &str, sha: &str) -> Result<(), String> {
+    let editor = [("GIT_EDITOR", "true")];
+    let mut args = vec!["revert", "--no-edit"];
+    let parents = git(dir, &["rev-list", "--parents", "-n1", sha]).unwrap_or_default();
+    if parents.split_whitespace().count() > 2 {
+        // A merge: take back what it brought in, against the branch it landed on.
+        args.extend(["-m", "1"]);
+    }
+    args.push(sha);
+    git_with(dir, &args, &editor, None).map(|_| ()).map_err(|error| {
+        let files = conflicted(dir);
+        let _ = git(dir, &["revert", "--abort"]);
+        if files.is_empty() {
+            error
+        } else {
+            format!(
+                "Later commits changed the same lines in {}, so it can't be taken back on its own. Nothing was changed.",
+                files.join(", ")
+            )
+        }
+    })
+}
+
+/// Copy one commit onto `branch`, wherever it is checked out. Clashing lines change
+/// nothing.
+pub fn copy_to(repo: &str, sha: &str, branch: &str) -> Result<(), String> {
+    let editor = [("GIT_EDITOR", "true")];
+    if is_ancestor(repo, sha, branch) {
+        return Err(format!("{branch} already has this commit."));
+    }
+    on_branch(repo, branch, |dir| {
+        git_with(dir, &["cherry-pick", sha], &editor, None)
+            .map(|_| ())
+            .map_err(|error| {
+                let files = conflicted(dir);
+                let _ = git(dir, &["cherry-pick", "--abort"]);
+                if files.is_empty() && error.contains("empty") {
+                    format!("{branch} already has these changes, so nothing was copied.")
+                } else if files.is_empty() {
+                    error
+                } else {
+                    format!(
+                        "{branch} has different changes on the same lines in {}, so nothing was copied.",
+                        files.join(", ")
+                    )
+                }
+            })
+    })
+}
+
+/// Name a commit as a release.
+pub fn tag(dir: &str, name: &str, sha: &str) -> Result<(), String> {
+    git(dir, &["tag", "-a", name, "-m", name, sha]).map(|_| ())
+}
+
+pub fn delete_tag(dir: &str, name: &str) -> Result<(), String> {
+    git(dir, &["tag", "-d", name]).map(|_| ())
+}
+
+/// Move the checked-out branch back to `sha`, one of its own commits, keeping
+/// uncommitted work. Git refuses rather than overwrite any of it.
+pub fn go_back(dir: &str, sha: &str) -> Result<usize, String> {
+    if !is_ancestor(dir, sha, "HEAD") {
+        return Err("That commit isn't part of this branch, so it can't go back to it.".into());
+    }
+    let dropped = commits_ahead(dir, "HEAD", sha);
+    git(dir, &["reset", "--keep", sha])?;
+    Ok(dropped)
+}
+
+/// What kind of moment the time machine shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MomentKind {
+    /// A step git recorded: a commit, a switch, a sync, a go back.
+    Step,
+    /// A snapshot of every file Runo took before an agent's turn.
+    Snapshot,
+}
+
+/// One moment in a folder's past.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Moment {
+    pub kind: MomentKind,
+    /// Seconds since the epoch.
+    pub at: i64,
+    /// What happened, in plain words.
+    pub label: String,
+    /// The commit (or snapshot) the folder was at right after it.
+    pub commit: String,
+    /// The branch the folder was on then; empty when it wasn't on one.
+    pub branch: String,
+}
+
+/// A reflog subject in plain words, or `None` for the in-between steps git records while
+/// it works (a rebase's picks, say).
+fn moment_words(subject: &str) -> Option<String> {
+    let (what, rest) = subject.split_once(": ").unwrap_or((subject, ""));
+    let rest = rest.trim();
+    let quoted = |s: &str| format!("\u{201c}{}\u{201d}", s.lines().next().unwrap_or(""));
+    Some(match what {
+        "commit" => format!("Committed {}", quoted(rest)),
+        "commit (initial)" => format!("First commit, {}", quoted(rest)),
+        "commit (amend)" => format!("Changed the last commit, {}", quoted(rest)),
+        "commit (merge)" => "Finished bringing changes in".into(),
+        "checkout" => match rest
+            .strip_prefix("moving from ")
+            .and_then(|r| r.split_once(" to "))
+        {
+            Some((from, to)) if from == to => return None,
+            Some((from, to)) => format!("Switched from {from} to {to}"),
+            None => "Switched branch".into(),
+        },
+        "reset" => match rest.strip_prefix("moving to ") {
+            Some(to) => format!("Moved back to {}", to.get(..7).unwrap_or(to)),
+            None => "Moved the branch".into(),
+        },
+        "cherry-pick" => format!("Copied {} here", quoted(rest)),
+        "revert" => format!("Took back {}", quoted(rest.trim_start_matches("Revert "))),
+        w if w.starts_with("merge ") => format!("Brought in {}", &w[6..]),
+        w if w.starts_with("pull") => "Synced with GitHub".into(),
+        "rebase (finish)" => "Put your commits on top".into(),
+        w if w.starts_with("rebase") => return None,
+        "branch" => "Made the branch".into(),
+        _ => {
+            let mut c = subject.chars();
+            c.next()?.to_uppercase().chain(c).collect()
+        }
+    })
+}
+
+/// The folder's past, newest first: every step git recorded on HEAD, and the snapshots
+/// in `snapshots` (checkpoint commits) with their labels, up to `limit` steps.
+pub fn moments(dir: &str, snapshots: &[(String, String)], limit: usize) -> Vec<Moment> {
+    let mut out = Vec::new();
+    let log = git(
+        dir,
+        &[
+            "log",
+            "-g",
+            "--date=unix",
+            &format!("-n{limit}"),
+            "--format=%H%x1f%gd%x1f%gs",
+            "HEAD",
+        ],
+    )
+    .unwrap_or_default();
+    // Walking back in time, a switch tells which branch the steps before it were on.
+    let mut branch = current_branch(dir);
+    for line in log.lines() {
+        let mut f = line.split('\x1f');
+        let (Some(commit), Some(selector), Some(subject)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        let at = selector
+            .rsplit('{')
+            .next()
+            .and_then(|t| t.trim_end_matches('}').parse().ok())
+            .unwrap_or(0);
+        let on = branch.clone();
+        if let Some((from, _)) = subject
+            .strip_prefix("checkout: moving from ")
+            .and_then(|r| r.split_once(" to "))
+        {
+            // A sha (detached) is no branch.
+            branch = if from.len() == 40 && from.chars().all(|c| c.is_ascii_hexdigit()) {
+                String::new()
+            } else {
+                from.to_string()
+            };
+        }
+        if let Some(label) = moment_words(subject) {
+            out.push(Moment {
+                kind: MomentKind::Step,
+                at,
+                label,
+                commit: commit.to_string(),
+                branch: on,
+            });
+        }
+    }
+    let shas: Vec<&str> = snapshots.iter().map(|(s, _)| s.as_str()).collect();
+    if !shas.is_empty() {
+        let mut args = vec!["show", "-s", "--format=%H %ct"];
+        args.extend(&shas);
+        let times = git(dir, &args).unwrap_or_default();
+        for line in times.lines() {
+            let Some((sha, at)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some((_, label)) = snapshots.iter().find(|(s, _)| s == sha) else {
+                continue;
+            };
+            out.push(Moment {
+                kind: MomentKind::Snapshot,
+                at: at.trim().parse().unwrap_or(0),
+                label: label.clone(),
+                commit: sha.to_string(),
+                branch: String::new(),
+            });
+        }
+    }
+    out.sort_by_key(|m| std::cmp::Reverse(m.at));
+    out
+}
+
+/// Files that differ between `commit` (a commit or a snapshot) and the folder now.
+pub fn differs_from_now(dir: &str, commit: &str) -> Vec<String> {
+    changed_since(dir, commit)
+}
+
+/// Take the folder back to a moment, safely. A step moves `branch` to its commit: the
+/// checked-out branch keeps uncommitted work, another branch just moves, and a branch
+/// that's gone is made again. A snapshot puts every file back, after taking a snapshot
+/// of now. Returns the words for what happened and how to take it back.
+pub fn travel(dir: &str, moment: &Moment) -> Result<(String, Undo), String> {
+    let short = moment.commit.get(..7).unwrap_or(&moment.commit);
+    match moment.kind {
+        MomentKind::Snapshot => {
+            let now = checkpoint(dir)?;
+            let done = restore(dir, &moment.commit, None)?;
+            let n = done.files.len();
+            let note = match n {
+                0 if !done.moved_head => "The files already match that moment.".to_string(),
+                1 => "Put 1 file back as it was.".to_string(),
+                n => format!("Put {n} files back as they were."),
+            };
+            Ok((note, Undo::Restore(now)))
+        }
+        MomentKind::Step if moment.branch.is_empty() => {
+            Err("The folder wasn't on a branch then. Start a branch from that commit in History instead.".into())
+        }
+        MomentKind::Step if moment.branch == current_branch(dir) => {
+            let head = rev(dir, "HEAD").ok_or("This folder has no commits yet.")?;
+            if head == moment.commit {
+                return Err("The branch is already there.".into());
+            }
+            keep_for_undo(dir, &head);
+            git(dir, &["reset", "--keep", &moment.commit]).map_err(|e| {
+                if e.contains("not uptodate") || e.contains("would be overwritten") {
+                    "Some files you're changing would be overwritten. Commit or set them aside first.".to_string()
+                } else {
+                    e
+                }
+            })?;
+            Ok((
+                format!("Took {} back to {short}.", moment.branch),
+                Undo::Folder {
+                    branch: moment.branch.clone(),
+                    head,
+                },
+            ))
+        }
+        MomentKind::Step => {
+            let name = moment.branch.as_str();
+            let was = rev(dir, &format!("refs/heads/{name}"));
+            if was.as_deref() == Some(moment.commit.as_str()) {
+                return Err(format!("{name} is already there."));
+            }
+            match checked_out_at(dir, name) {
+                Some(at) => {
+                    git(&at, &["reset", "--keep", &moment.commit])?;
+                }
+                None => {
+                    git(dir, &["branch", "-f", name, &moment.commit])?;
+                }
+            }
+            if let Some(was) = &was {
+                keep_for_undo(dir, was);
+            }
+            let note = match was {
+                Some(_) => format!("Took {name} back to {short}."),
+                None => format!("Brought {name} back, at {short}."),
+            };
+            Ok((note, Undo::Branches(vec![(name.to_string(), was)])))
+        }
+    }
 }
 
 /// Work set aside, newest first.
@@ -2778,8 +4045,33 @@ index 1..2 100644
             pull(dir).unwrap(),
             Update::Conflicts(vec!["a.txt".to_string()])
         );
+        // The clash waits to be sorted out; calling it off puts everything back.
+        let found = clash(dir).unwrap();
+        assert_eq!((found.kind, found.yours.as_str()), ("rebase", "main"));
+        assert_eq!(found.theirs, "origin/main");
+        assert!(!found.yours_is_ours);
+        assert_eq!(
+            found.files[0].stretches,
+            Some(vec![Stretch::Spot {
+                ours: "theirs\n".into(),
+                theirs: "mine\n".into()
+            }])
+        );
+        abort_update(dir).unwrap();
         assert_eq!(in_progress(dir), None);
         assert_eq!(rev(dir, "HEAD"), head);
+        // Sorted out: keep both, and finish.
+        pull(dir).unwrap();
+        settle(dir, "a.txt", "mine\ntheirs\n").unwrap();
+        assert!(clash(dir).unwrap().files.is_empty());
+        assert_eq!(continue_update(dir).unwrap(), Update::Updated);
+        assert_eq!(clash(dir), None);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "mine\ntheirs\n"
+        );
+        assert!(is_ancestor(dir, "origin/main", "HEAD"));
+        sh(&repo, &["reset", "-q", "--hard", head.as_deref().unwrap()]);
         // Switching branches, and undoing the switch.
         sh(&repo, &["branch", "side"]);
         assert_eq!(repo_state(dir).branches.len(), 2);
@@ -2791,6 +4083,421 @@ index 1..2 100644
         for p in [&repo, &remote, &other] {
             let _ = std::fs::remove_dir_all(p);
         }
+    }
+
+    #[test]
+    fn a_branch_splits_into_a_stack() {
+        let (repo, _remote) = with_origin("split");
+        let dir = repo.to_str().unwrap();
+        new_branch(dir, "big", "main").unwrap();
+        switch(dir, "big").unwrap();
+        std::fs::write(repo.join("one.txt"), "1\n").unwrap();
+        std::fs::write(repo.join("two.txt"), "2\n").unwrap();
+        std::fs::write(repo.join("three.txt"), "3\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "everything"]);
+        switch(dir, "main").unwrap();
+        assert!(branch_patch(dir, "big", "main", 10_000).contains("- everything"));
+        let names = stack_parts(
+            dir,
+            "main",
+            "big",
+            "big",
+            &[
+                ("First".into(), vec!["one.txt".into()]),
+                ("Rest".into(), vec!["two.txt".into(), "three.txt".into()]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(names, vec!["big-part-1", "big-part-2"]);
+        let files = |b: &str| git(dir, &["ls-tree", "--name-only", b]).unwrap();
+        assert!(
+            files("big-part-1").contains("one.txt") && !files("big-part-1").contains("two.txt")
+        );
+        // The top of the stack is the whole branch, built on the part below it.
+        assert!(git(dir, &["diff", "--quiet", "big", "big-part-2"]).is_ok());
+        assert!(is_ancestor(dir, "big-part-1", "big-part-2"));
+        assert_eq!(
+            git(dir, &["log", "-1", "--format=%s", "big-part-1"])
+                .unwrap()
+                .trim(),
+            "First"
+        );
+        assert_eq!(current_branch(dir), "main");
+        assert!(changes(dir).is_empty());
+    }
+
+    #[test]
+    fn radar_finds_clashes_without_touching_folders() {
+        let (repo, _remote) = with_origin("radar");
+        let dir = repo.to_str().unwrap();
+        let lines: Vec<String> = (1..=20).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("f.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "twenty"]);
+        for (branch, text, file) in [
+            ("one", "one's", "f.txt"),
+            ("two", "two's", "f.txt"),
+            ("three", "x", "g.txt"),
+        ] {
+            new_branch(dir, branch, "main").unwrap();
+            switch(dir, branch).unwrap();
+            let mut edited = lines.clone();
+            edited[9] = text.into();
+            std::fs::write(repo.join(file), edited.join("\n") + "\n").unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", branch]);
+            switch(dir, "main").unwrap();
+        }
+        let hit = test_merge(dir, "one", "two").unwrap();
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].path, "f.txt");
+        assert_eq!(hit[0].lines, vec![10]);
+        assert!(test_merge(dir, "one", "three").unwrap().is_empty());
+        assert!(changes(dir).is_empty());
+        // Uncommitted work counts too, and stays where it is.
+        let mut edited = lines.clone();
+        edited[9] = "main's own".into();
+        std::fs::write(repo.join("f.txt"), edited.join("\n") + "\n").unwrap();
+        let tip = work_tip(dir).unwrap();
+        assert_ne!(Some(tip.clone()), rev(dir, "HEAD"));
+        assert_eq!(test_merge(dir, &tip, "one").unwrap()[0].path, "f.txt");
+        assert_eq!(changes(dir).len(), 1);
+        assert!(stashes(dir).is_empty());
+    }
+
+    #[test]
+    fn clash_markers_split_into_stretches() {
+        let text =
+            "a\n<<<<<<< HEAD\nmine\n||||||| base\nold\n=======\ntheirs\nmore\n>>>>>>> x\nb\n";
+        assert_eq!(
+            parse_clash(text),
+            Some(vec![
+                Stretch::Same("a\n".into()),
+                Stretch::Spot {
+                    ours: "mine\n".into(),
+                    theirs: "theirs\nmore\n".into()
+                },
+                Stretch::Same("b\n".into()),
+            ])
+        );
+        assert_eq!(parse_clash("no markers\n"), None);
+        assert_eq!(parse_clash("<<<<<<< HEAD\nunfinished\n"), None);
+    }
+
+    #[test]
+    fn commit_and_throw_away_parts_of_files() {
+        let (repo, _remote) = with_origin("parts");
+        let dir = repo.to_str().unwrap();
+        let lines: Vec<String> = (1..=30).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("f.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "thirty lines"]);
+        // Two parts far apart: change line 2, add after line 25.
+        let mut edited = lines.clone();
+        edited[1] = "line two".into();
+        edited.insert(25, "added one".into());
+        edited.insert(26, "added two".into());
+        std::fs::write(repo.join("f.txt"), edited.join("\n") + "\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "a\nb\n").unwrap();
+        let files = file_parts(dir);
+        let f = files.iter().find(|f| f.change.path == "f.txt").unwrap();
+        assert_eq!(f.parts.len(), 2);
+        let second = &f.parts[1];
+        let added: Vec<usize> = second
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.kind == '+')
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(added.len(), 2);
+        assert_eq!(second.lines[added[0]].new, 26);
+        // Commit only the first added line of the second part.
+        let patch = picked_patch(f, |p, l| p == 1 && l == added[0]).unwrap();
+        let head = rev(dir, "HEAD").unwrap();
+        commit_parts(dir, &[], &patch, "Add one line", false).unwrap();
+        let committed = git(dir, &["show", "HEAD:f.txt"]).unwrap();
+        assert!(committed.contains("added one") && !committed.contains("added two"));
+        assert!(!committed.contains("line two"));
+        // The rest is still in the folder, and nothing was lost.
+        let left = file_parts(dir);
+        let f = left.iter().find(|f| f.change.path == "f.txt").unwrap();
+        assert_eq!(f.parts.len(), 2);
+        assert!(std::fs::read_to_string(repo.join("f.txt"))
+            .unwrap()
+            .contains("added two"));
+        assert!(left.iter().any(|f| f.change.path == "new.txt"));
+        // Undo puts the commit's changes back as uncommitted.
+        undo(&UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo: Undo::Uncommit { head: head.clone() },
+        })
+        .unwrap();
+        assert_eq!(rev(dir, "HEAD").unwrap(), head);
+        assert!(std::fs::read_to_string(repo.join("f.txt"))
+            .unwrap()
+            .contains("added one"));
+        // Whole files and a new file go in whole; amending keeps the message.
+        commit_parts(dir, &["new.txt".into()], "", "Add new", false).unwrap();
+        let files = file_parts(dir);
+        let f = files.iter().find(|f| f.change.path == "f.txt").unwrap();
+        let patch = picked_patch(f, |p, _| p == 0).unwrap();
+        commit_parts(dir, &[], &patch, "", true).unwrap();
+        assert_eq!(
+            git(dir, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "Add new"
+        );
+        assert!(git(dir, &["show", "HEAD:f.txt"])
+            .unwrap()
+            .contains("line two"));
+        assert_eq!(last_commit(dir), Some(("Add new".into(), true)));
+        // Throw away the second part, then put it back.
+        let files = file_parts(dir);
+        let f = files.iter().find(|f| f.change.path == "f.txt").unwrap();
+        assert_eq!(f.parts.len(), 1);
+        let part = picked_patch(f, |p, _| p == 0).unwrap();
+        throw_away(dir, &part).unwrap();
+        assert!(changes(dir).is_empty());
+        undo(&UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo: Undo::Reapply(part),
+        })
+        .unwrap();
+        assert!(std::fs::read_to_string(repo.join("f.txt"))
+            .unwrap()
+            .contains("added two"));
+    }
+
+    #[test]
+    fn seatbelt_steps_take_back_and_move_commits() {
+        let (repo, _remote) = with_origin("seatbelt");
+        let dir = repo.to_str().unwrap();
+        let point = |undo: Undo| UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo,
+        };
+        std::fs::write(repo.join("k.js"), "const t = 1;\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "key"]);
+        let sent = rev(dir, "@{u}").unwrap();
+        let head = rev(dir, "HEAD").unwrap();
+        assert!(outgoing_patch(dir).contains("+const t = 1;"));
+
+        // Taking the commit back keeps the file; Undo puts the commit back.
+        let undo = uncommit(dir).unwrap();
+        assert_eq!(rev(dir, "HEAD").unwrap(), sent);
+        assert!(repo.join("k.js").exists());
+        super::undo(&point(undo)).unwrap();
+        assert_eq!(rev(dir, "HEAD").unwrap(), head);
+
+        // Moving the commit to a branch leaves main as the remote has it.
+        let undo = move_to_new_branch(dir, "my-key").unwrap();
+        assert_eq!(current_branch(dir), "my-key");
+        assert_eq!(rev(dir, "main").unwrap(), sent);
+        assert_eq!(rev(dir, "my-key").unwrap(), head);
+        super::undo(&point(undo)).unwrap();
+        assert_eq!(current_branch(dir), "main");
+        assert_eq!(rev(dir, "main").unwrap(), head);
+        assert!(!has_branch(dir, "my-key"));
+
+        // Ignoring a new file adds it to .gitignore once.
+        std::fs::write(repo.join(".env"), "A=1\n").unwrap();
+        ignore_path(dir, ".env").unwrap();
+        ignore_path(dir, ".env").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join(".gitignore")).unwrap(),
+            "/.env\n"
+        );
+    }
+
+    #[test]
+    fn time_machine_goes_back_to_any_moment() {
+        let (repo, _remote) = with_origin("moments");
+        let dir = repo.to_str().unwrap();
+        let commit = |file: &str, text: &str| {
+            std::fs::write(repo.join(file), text).unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", file]);
+        };
+        commit("b.txt", "b\n");
+        let at_b = rev(dir, "HEAD").unwrap();
+        new_branch(dir, "side", "main").unwrap();
+        switch(dir, "side").unwrap();
+        commit("s.txt", "s\n");
+        switch(dir, "main").unwrap();
+        commit("c.txt", "c\n");
+        // A snapshot with a file nobody committed, then the file changes.
+        std::fs::write(repo.join("draft.txt"), "first\n").unwrap();
+        let snap = checkpoint(dir).unwrap();
+        std::fs::write(repo.join("draft.txt"), "second\n").unwrap();
+        delete_branch(dir, "side", true).unwrap();
+
+        let list = moments(dir, &[(snap.clone(), "Before the agent".into())], 50);
+        // Steps in the same second can sort either side of the snapshot.
+        let snapshot = list
+            .iter()
+            .find(|m| m.kind == MomentKind::Snapshot)
+            .unwrap();
+        assert_eq!(snapshot.commit, snap);
+        let labels: Vec<&str> = list.iter().map(|m| m.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Committed \u{201c}c.txt\u{201d}"),
+            "{labels:?}"
+        );
+        assert!(labels.contains(&"Switched from side to main"), "{labels:?}");
+        let on_side = list
+            .iter()
+            .find(|m| m.label == "Committed \u{201c}s.txt\u{201d}")
+            .unwrap();
+        assert_eq!(on_side.branch, "side");
+        let point = |undo: Undo| UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo,
+        };
+
+        // A deleted branch comes back, and Undo removes it again.
+        let (note, undo) = travel(dir, on_side).unwrap();
+        assert!(note.starts_with("Brought side back"), "{note}");
+        assert!(has_branch(dir, "side"));
+        super::undo(&point(undo)).unwrap();
+        assert!(!has_branch(dir, "side"));
+
+        // The checked-out branch goes back and keeps the uncommitted draft.
+        let at_b_moment = list
+            .iter()
+            .find(|m| m.commit == at_b && m.branch == "main")
+            .unwrap();
+        let (_, undo) = travel(dir, at_b_moment).unwrap();
+        assert_eq!(rev(dir, "HEAD").unwrap(), at_b);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
+            "second\n"
+        );
+        super::undo(&point(undo)).unwrap();
+        assert!(repo.join("c.txt").exists());
+
+        // A snapshot puts the files back, and Undo brings now back.
+        assert_eq!(differs_from_now(dir, &snap), vec!["draft.txt"]);
+        let (_, undo) = travel(dir, snapshot).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
+            "first\n"
+        );
+        super::undo(&point(undo)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
+            "second\n"
+        );
+    }
+
+    #[test]
+    fn history_graph_and_commit_steps() {
+        let (repo, _remote) = with_origin("history");
+        let dir = repo.to_str().unwrap();
+        let point = |undo: Undo| UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo,
+        };
+        let commit = |file: &str, text: &str| {
+            std::fs::write(repo.join(file), text).unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", file]);
+        };
+        // main: base, then side branches off and merges back in.
+        new_branch(dir, "side", "main").unwrap();
+        switch(dir, "side").unwrap();
+        commit("s.txt", "s\n");
+        switch(dir, "main").unwrap();
+        commit("m.txt", "m\n");
+        sh(&repo, &["merge", "-q", "--no-edit", "side"]);
+        let all = LogFilter {
+            all: true,
+            ..Default::default()
+        };
+        let rows = log(dir, &all, 50);
+        assert_eq!(rows[0].parents.len(), 2);
+        assert!(rows[0].refs.iter().any(|r| r == "HEAD -> main"));
+        let lanes = graph(&rows);
+        assert_eq!(lanes.len(), rows.len());
+        // The merge opens a second lane, which joins back where side started.
+        assert_eq!(lanes[0].lane, 0);
+        assert!(lanes[0].bottom.contains(&(0, 1)));
+        assert!(lanes.iter().any(|g| g.lane == 1));
+        assert!(lanes.last().unwrap().bottom.is_empty());
+        // Filters by words and by file.
+        let words = LogFilter {
+            text: "S.TXT".into(),
+            ..all.clone()
+        };
+        let found = log(dir, &words, 50);
+        assert!(found.iter().any(|r| r.subject == "s.txt"));
+        assert!(!found.iter().any(|r| r.subject == "m.txt"));
+        let people = LogFilter {
+            text: "T".into(),
+            ..all.clone()
+        };
+        assert_eq!(log(dir, &people, 50).len(), rows.len());
+        let file = LogFilter {
+            path: "m.txt".into(),
+            ..all.clone()
+        };
+        assert_eq!(log(dir, &file, 50)[0].subject, "m.txt");
+        let m = rows
+            .iter()
+            .find(|r| r.subject == "m.txt")
+            .unwrap()
+            .sha
+            .clone();
+        let info = commit_info(dir, &m);
+        assert_eq!(info.files.len(), 1);
+        assert_eq!(
+            (info.files[0].status.as_str(), info.files[0].added),
+            ("A", 1)
+        );
+        assert!(commit_patch(dir, &m, 10_000).contains("+m"));
+        assert!(is_ancestor(dir, &m, "HEAD"));
+        // Take a commit back, and undo that.
+        let before = point(folder_point(dir).unwrap());
+        revert(dir, &m).unwrap();
+        assert!(!repo.join("m.txt").exists());
+        undo(&before).unwrap();
+        assert!(repo.join("m.txt").exists());
+        // Copy a commit to a branch that isn't checked out.
+        new_branch(dir, "release", "main~2").unwrap();
+        copy_to(dir, &m, "release").unwrap();
+        assert_eq!(commits_ahead(dir, "release", "main~2"), 1);
+        assert!(copy_to(dir, &m, "main").unwrap_err().contains("already"));
+        assert!(copy_to(dir, &m, "release").unwrap_err().contains("already"));
+        assert_eq!(current_branch(dir), "main");
+        // A release name, taken back.
+        tag(dir, "v1.0", &m).unwrap();
+        assert!(log(dir, &all, 50)
+            .iter()
+            .any(|r| r.refs.iter().any(|n| n == "tag: v1.0")));
+        undo(&point(Undo::Untag("v1.0".into()))).unwrap();
+        assert!(rev(dir, "refs/tags/v1.0").is_none());
+        // Go back keeps uncommitted work, and can be undone.
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        let before = point(folder_point(dir).unwrap());
+        assert_eq!(go_back(dir, &m).unwrap(), 2);
+        assert!(!repo.join("s.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+        undo(&before).unwrap();
+        assert!(repo.join("s.txt").exists());
+        // Not part of main: refused.
+        switch(dir, "release").unwrap();
+        commit("r.txt", "r\n");
+        switch(dir, "main").unwrap();
+        assert!(go_back(dir, "release").is_err());
     }
 
     #[test]
