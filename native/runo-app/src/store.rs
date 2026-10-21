@@ -1546,7 +1546,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn data_dir_is_runo_home_else_home_dot_runo() {
+    fn data_dir_uses_runo_home_else_falls_back_to_home_dot_runo() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _restore = RestoreEnv(
             ["RUNO_HOME", "HOME"]
