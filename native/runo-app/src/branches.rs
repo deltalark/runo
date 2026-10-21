@@ -146,6 +146,7 @@ impl RunoApp {
     }
 
     fn pick_branch(&mut self, name: String) {
+        self.git_radar_sel = None;
         self.git_branch_sel = Some(name);
         self.git_naming = None;
         self.load_branches();
@@ -334,7 +335,8 @@ impl RunoApp {
         base: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let on = self.git_branch_sel.as_deref() == Some(row.name.as_str());
+        let on = self.git_branch_sel.as_deref() == Some(row.name.as_str())
+            && self.git_radar_sel.is_none();
         let session = self.branch_session(&row.name);
         let host = self
             .git_repo
@@ -549,7 +551,7 @@ impl RunoApp {
             .git_repo
             .as_ref()
             .map_or("the remote".to_string(), |r| r.state.host.clone());
-        let mut list = div().v_flex().gap(px(2.));
+        let mut list = div().v_flex().gap(px(2.)).children(self.radar_rows(cx));
         let mut i = 0;
         let mut group = |list: Div, label: String, rows: Vec<&BranchRow>, i: &mut usize| {
             if rows.is_empty() {
@@ -690,7 +692,13 @@ impl RunoApp {
                     .pb(px(12.))
                     .child(list),
             );
-        let main = self.branch_page(data, &current, &host, cx);
+        let main = match self
+            .git_radar_sel
+            .and_then(|i| self.git_radar.as_ref()?.get(i).cloned())
+        {
+            Some(hit) => self.radar_page(&hit, cx),
+            None => self.branch_page(data, &current, &host, cx),
+        };
         div()
             .flex_1()
             .min_w_0()

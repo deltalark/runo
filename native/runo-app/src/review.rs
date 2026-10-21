@@ -264,7 +264,8 @@ impl RunoApp {
                             self.git_branches
                                 .as_ref()
                                 .map_or(0, |b| b.rows.iter().filter(|r| !r.remote_only).count()),
-                            false,
+                            // Amber when the radar sees clashes coming.
+                            self.git_radar.as_ref().is_some_and(|h| !h.is_empty()),
                             branches,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {

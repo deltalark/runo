@@ -62,6 +62,7 @@ mod projects;
 mod proof;
 mod proof_ui;
 mod pty;
+mod radar;
 mod review;
 mod schedule;
 mod sessions;
@@ -253,6 +254,9 @@ struct RunoApp {
     git_clash_file: Option<String>,
     git_picks: HashMap<(String, usize), clashes::Pick>,
     git_agent_fix: HashMap<String, Option<String>>,
+    /// Clash radar: pairs of lines of work that change the same lines, and the one shown.
+    git_radar: Option<Vec<radar::Hit>>,
+    git_radar_sel: Option<usize>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1537,6 +1541,8 @@ impl RunoApp {
             git_clash_file: None,
             git_picks: HashMap::new(),
             git_agent_fix: HashMap::new(),
+            git_radar: None,
+            git_radar_sel: None,
             git_repo: None,
             git_undo: None,
             git_working: None,
