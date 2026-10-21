@@ -32,6 +32,7 @@ mod github;
 mod handoff;
 mod health;
 mod history;
+mod home;
 mod inbox;
 mod install;
 mod keymap;
@@ -342,6 +343,8 @@ struct RunoApp {
     new_branches: Option<sessions::Branches>,
     /// Search, filters and sort of the Sessions page, and matches in conversations.
     finder: sessions::Finder,
+    /// Home's prompt, its picks and the status it's narrowed to.
+    home: home::HomeState,
     /// Newer releases of installed agents, from the last update check.
     updates: Vec<alerts::AgentUpdate>,
     /// Agent updates and installs running now, just finished, or failed.
@@ -1337,6 +1340,7 @@ impl RunoApp {
         let (design, design_subs) = design::DesignPage::new(window, cx);
         let (assistant, assistant_subs) = assistant::Assistant::new(window, cx);
         let (arch, arch_subs) = architecture::ArchPage::new(window, cx);
+        let (home, home_sub) = home::HomeState::new(window, cx);
         let notes_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Write anything worth remembering about this project…")
@@ -1542,6 +1546,7 @@ impl RunoApp {
             new_base: None,
             new_branches: None,
             finder: sessions::Finder::new(window, cx),
+            home,
             updates: Vec::new(),
             update_runs: HashMap::new(),
             update_checked: None,
@@ -1840,6 +1845,7 @@ impl RunoApp {
             }
         });
         app._subscriptions.push(activation_sub);
+        app._subscriptions.push(home_sub);
         app._subscriptions.extend(design_subs);
         app._subscriptions.extend(assistant_subs);
         app._subscriptions.extend(arch_subs);
@@ -8713,6 +8719,7 @@ impl Render for RunoApp {
         if let Some(path) = self.pending_file.take() {
             self.open_or_ask(&path, window, cx);
         }
+        self.home_focus(window, cx);
         self.restore_open_file(window, cx);
         if !st.browser_enabled {
             self.browser_open = false;
@@ -8806,6 +8813,9 @@ impl Render for RunoApp {
         if self.applied_enter != Some(st.send_on_enter) {
             self.applied_enter = Some(st.send_on_enter);
             self.prompt
+                .update(cx, |p, cx| p.set_submit_on_enter(st.send_on_enter, cx));
+            self.home
+                .prompt
                 .update(cx, |p, cx| p.set_submit_on_enter(st.send_on_enter, cx));
         }
         // New session is a dialog; the view it was opened from stays behind it.
