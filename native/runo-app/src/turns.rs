@@ -392,13 +392,28 @@ impl RunoApp {
                 .state
                 .session(id)
                 .is_some_and(|s| s.canvas.is_empty() && !s.cli);
+        // The reply the files are recorded on, found now: a queued prompt may add more
+        // messages before the comparison is done.
+        let reply = self.state.session(id).and_then(|s| {
+            let user = s.messages.iter().rposition(|m| m.role == Role::User)?;
+            s.messages[user..]
+                .iter()
+                .rposition(|m| m.role == Role::Agent)
+                .map(|i| user + i)
+        });
         if let Some((cp, dir)) = checkpoint.filter(|(cp, _)| !cp.is_empty()) {
             self.bg(
-                move || (git::changed_since(&dir, &cp).len(), git::checkpoint(&dir)),
-                move |this, (files, end), cx| {
+                move || (git::changed_since(&dir, &cp), git::checkpoint(&dir)),
+                move |this, (changed, end), cx| {
+                    let files = changed.len();
                     this.turn_files.insert(id, files);
-                    if let (Ok(end), Some(s)) = (end, this.state.session_mut(id)) {
-                        s.snapshot = end;
+                    if let Some(s) = this.state.session_mut(id) {
+                        if let Some(m) = reply.and_then(|i| s.messages.get_mut(i)) {
+                            m.changed = changed;
+                        }
+                        if let Ok(end) = end {
+                            s.snapshot = end;
+                        }
                     }
                     this.save();
                     if prove && files > 0 {
