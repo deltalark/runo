@@ -222,6 +222,8 @@ fn rail_fill(tab: Rgba) -> AnyElement {
                     f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
                 };
             let (left, top, right, bottom) = (b.origin.x, b.origin.y, b.right(), b.bottom());
+            // Where the islands end, above the gutter along the bottom.
+            let floor = bottom - px(GUTTER);
             // The tab's outline, from the rail's edge above it round to the edge below.
             let outline = |f: &mut PathBuilder, t: Bounds<Pixels>| {
                 let (tx, ty, tb, r, o) = (t.origin.x, t.origin.y, t.bottom(), px(r), px(RAIL_R));
@@ -229,10 +231,19 @@ fn rail_fill(tab: Rgba) -> AnyElement {
                 turn(f, at(right, ty - o), at(right, ty), at(right - o, ty));
                 f.line_to(at(tx + r, ty));
                 turn(f, at(tx + r, ty), at(tx, ty), at(tx, ty + r));
-                f.line_to(at(tx, tb - r));
-                turn(f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
-                f.line_to(at(right - o, tb));
-                turn(f, at(right - o, tb), at(right, tb), at(right, tb + o));
+                if tb + o > floor {
+                    // A tab at the foot, such as Settings, has no room to curve out below:
+                    // it runs level with the island's square bottom edge instead.
+                    let tb = tb.min(floor);
+                    f.line_to(at(tx, tb - r));
+                    turn(f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
+                    f.line_to(at(right, tb));
+                } else {
+                    f.line_to(at(tx, tb - r));
+                    turn(f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
+                    f.line_to(at(right - o, tb));
+                    turn(f, at(right - o, tb), at(right, tb), at(right, tb + o));
+                }
             };
             let cut = TAB_CUT.get();
             let mut f = PathBuilder::fill();
@@ -391,6 +402,9 @@ pub(crate) fn sheet_corner() -> Div {
 pub(crate) const GUTTER: f32 = 8.;
 /// Radius of an island's rounded corners.
 pub(crate) const ISLAND_R: f32 = 14.;
+/// How far the frame's curves reach past an island's or tab's rounded edge, so their
+/// antialiased rims overlap.
+const SEAM: f32 = 0.75;
 /// Radius of an open tab's top corners, and of the curves where it flows into its island.
 const STRIP_TAB_R: f32 = 9.;
 const STRIP_FLARE_R: f32 = 8.;
@@ -452,7 +466,9 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     f.line_to(at(right, top));
                     f.line_to(at(right, bottom));
                     if let Some(t) = cut {
-                        let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
+                        let s = px(SEAM);
+                        let (x0, x1, y0) = (t.origin.x + s, t.right() - s, t.origin.y.max(top) + s);
+                        let (fr, tr) = (fr + s, tr - s);
                         f.line_to(at(x1 + fr, bottom));
                         turn(
                             &mut f,
@@ -474,33 +490,45 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     }
                     f.line_to(at(left, bottom));
                     f.close();
-                    if let Ok(path) = f.build() {
-                        window.paint_path(path, frame);
-                    }
-                    let Some(t) = cut else { return };
+                    let frame_path = f.build();
+                    let Some(t) = cut else {
+                        if let Ok(path) = frame_path {
+                            window.paint_path(path, frame);
+                        }
+                        return;
+                    };
                     let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
-                    let mut f = PathBuilder::fill();
-                    f.move_to(at(x0 - fr, bottom));
-                    turn(
-                        &mut f,
-                        at(x0 - fr, bottom),
-                        at(x0, bottom),
-                        at(x0, bottom - fr),
-                    );
-                    f.line_to(at(x0, y0 + tr));
-                    turn(&mut f, at(x0, y0 + tr), at(x0, y0), at(x0 + tr, y0));
-                    f.line_to(at(x1 - tr, y0));
-                    turn(&mut f, at(x1 - tr, y0), at(x1, y0), at(x1, y0 + tr));
-                    f.line_to(at(x1, bottom - fr));
-                    turn(
-                        &mut f,
-                        at(x1, bottom - fr),
-                        at(x1, bottom),
-                        at(x1 + fr, bottom),
-                    );
-                    f.close();
-                    if let Ok(path) = f.build() {
+                    // The tab goes down first and the frame over it, its hole a little
+                    // inside the tab's outline: the two antialiased rims then overlap
+                    // instead of meeting, which would leave a light seam round the tab in
+                    // glass mode.
+                    let tab = |mut f: PathBuilder| {
+                        f.move_to(at(x0 - fr, bottom));
+                        turn(
+                            &mut f,
+                            at(x0 - fr, bottom),
+                            at(x0, bottom),
+                            at(x0, bottom - fr),
+                        );
+                        f.line_to(at(x0, y0 + tr));
+                        turn(&mut f, at(x0, y0 + tr), at(x0, y0), at(x0 + tr, y0));
+                        f.line_to(at(x1 - tr, y0));
+                        turn(&mut f, at(x1 - tr, y0), at(x1, y0), at(x1, y0 + tr));
+                        f.line_to(at(x1, bottom - fr));
+                        turn(
+                            &mut f,
+                            at(x1, bottom - fr),
+                            at(x1, bottom),
+                            at(x1 + fr, bottom),
+                        );
+                        f.close();
+                        f.build()
+                    };
+                    if let Ok(path) = tab(PathBuilder::fill()) {
                         window.paint_path(path, island);
+                    }
+                    if let Ok(path) = frame_path {
+                        window.paint_path(path, frame);
                     }
                     // The bracket: up the tab's left edge and round its top corner.
                     let (i, reach) = (px(1.), px(9.));
@@ -546,10 +574,17 @@ pub(crate) fn frame_corner(top: bool, left: bool) -> AnyElement {
                         let y = if top { y } else { r - y };
                         point(b.origin.x + px(x), b.origin.y + px(y))
                     };
+                    // The curve runs a little inside the island's own rounded edge, so
+                    // the two antialiased rims overlap instead of meeting. Where they
+                    // only meet, both are part-clear along the curve and the desktop
+                    // shows through as a light seam in glass mode.
+                    let q = r - SEAM;
                     let mut f = PathBuilder::fill();
                     f.move_to(p(0., 0.));
                     f.line_to(p(r, 0.));
-                    f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
+                    f.line_to(p(r, r - q));
+                    f.cubic_bezier_to(p(r - q, r), p(r - k * q, r - q), p(r - q, r - k * q));
+                    f.line_to(p(0., r));
                     f.close();
                     if let Ok(path) = f.build() {
                         window.paint_path(path, fill);
@@ -1443,7 +1478,8 @@ impl RunoApp {
             .v_flex()
             .items_center()
             .pt(px(10.))
-            .pb_2()
+            // The foot's open tab ends level with the islands' bottom edge.
+            .pb(px(GUTTER + TAB_PAD))
             .gap(px(18.))
             .relative()
             // Keeps the open tab inside the rail, under the top bar.
@@ -3539,9 +3575,17 @@ fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
 }
 
 /// Fill of a tab that is not open, at rest and under the pointer: a wash of white over
-/// the frame, stronger on the light theme's grey frame than on the dark one.
+/// the frame, stronger on the light theme's grey frame than on the dark one. In glass
+/// mode the open tab is as see-through as its island, so a resting wash would read as the
+/// open one: there the rest sit clear on the frame and only the pointer lifts them.
 pub(crate) fn tab_chip() -> (Rgba, Rgba) {
-    if is_dark() {
+    if settings::glass_on() {
+        if is_dark() {
+            (rgba(0), rgba(0xffffff1a))
+        } else {
+            (rgba(0), rgba(0xffffff59))
+        }
+    } else if is_dark() {
         (rgba(0xffffff14), rgba(0xffffff26))
     } else {
         (rgba(0xffffff80), rgba(0xffffffd0))

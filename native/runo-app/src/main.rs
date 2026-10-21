@@ -8964,9 +8964,15 @@ impl Render for RunoApp {
             .v_flex()
             .when(show_tabs, |el| el.child(self.tab_strip(cx)))
             .child(
-                shell::island(page, page_fill, [false, true, true, !show_left])
-                    .flex_1()
-                    .min_h_0(),
+                // Settings' tab sits at the rail's foot and joins the page's
+                // bottom-left, so that corner stays square.
+                shell::island(
+                    page,
+                    page_fill,
+                    [false, true, true, !show_left && mode != Mode::Settings],
+                )
+                .flex_1()
+                .min_h_0(),
             );
         let root = div()
             .size_full()

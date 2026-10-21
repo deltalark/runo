@@ -2531,8 +2531,8 @@ impl RunoApp {
         let query = self.settings_search.read(cx).value().trim().to_lowercase();
 
         // Navigation
-        // A sheet beside the page, curving into the frame at its top like the Sessions
-        // list; the open page's row fuses through its right edge into the page.
+        // A sheet beside the page, level with it at the top since no tabs sit over the
+        // page; the open page's row fuses through its right edge into the page.
         let mut nav = div()
             .relative()
             .w(px(252.))
@@ -2542,9 +2542,7 @@ impl RunoApp {
             .gap_3()
             .pl(px(7.))
             .py_3()
-            .rounded_tr(px(crate::shell::ISLAND_R))
             .bg(pane(c_sheet()))
-            .child(crate::shell::frame_corner(true, false))
             .child(
                 div()
                     .relative()
@@ -2559,9 +2557,11 @@ impl RunoApp {
                     .bg(tint(c_subtle()))
                     .child(icon(IconName::Search, 14., c_muted()))
                     .child(
-                        Input::new(&self.settings_search)
-                            .appearance(false)
-                            .h(px(30.)),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.settings_search)
+                                .appearance(false)
+                                .h(px(30.)),
+                        ),
                     ),
             );
         let mut groups = div()
@@ -2779,11 +2779,15 @@ impl RunoApp {
             .flex()
             .child(nav)
             .child(
+                // The page holds the island's right corners, so the frame's corners lie
+                // over clear space instead of over a square fill.
                 div()
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .flex()
+                    .rounded_tr(px(crate::shell::ISLAND_R))
+                    .rounded_br(px(crate::shell::ISLAND_R))
                     .bg(glass_fill(c_canvas()))
                     .child(main),
             )
