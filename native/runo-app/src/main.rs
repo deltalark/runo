@@ -409,8 +409,6 @@ struct RunoApp {
     panel_anim: HashMap<&'static str, (bool, std::time::Instant)>,
     /// Whether the last frame showed Settings; panels snap rather than slide across that change.
     was_settings: bool,
-    /// When Settings last opened or closed; views appear without motion right after.
-    settings_switch_at: Option<std::time::Instant>,
     /// Change counts (files, added, removed) per session, for the sidebar.
     stats: HashMap<u64, (usize, usize, usize)>,
     confirm_delete: Option<u64>,
@@ -610,7 +608,24 @@ fn demo_changes() -> Vec<git::Change> {
     .collect()
 }
 
-/// `with_animation` that is skipped entirely when animations are switched off.
+thread_local! {
+    /// The page or tab last shown, and when the view last moved to another one.
+    static SHOWN_PAGE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static SWITCHED_AT: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether the view has just moved to another page or tab. What mounts with it is shown
+/// as it ends up rather than played in, so a switch lands at once instead of rows and
+/// cards rising and fading in, which reads as a blink.
+fn page_settling() -> bool {
+    SWITCHED_AT
+        .get()
+        .is_some_and(|at| at.elapsed() < Duration::from_millis(700))
+}
+
+/// `with_animation` that is skipped entirely when animations are switched off, and that
+/// starts at its end while a page switch is settling (see `page_settling`).
 trait Animate: IntoElement + Sized + 'static {
     fn animated(
         self,
@@ -619,7 +634,15 @@ trait Animate: IntoElement + Sized + 'static {
         f: impl Fn(Self, f32) -> Self + 'static,
     ) -> AnyElement {
         if anim_on() {
-            self.with_animation(id, animation, f).into_any_element()
+            // A one-shot animation drawn during a switch shows its end. Every one-shot
+            // `animated` is shorter than the settling time, so by the time settling ends
+            // it has run out anyway and stays at its end. Loops (a pulse, a spinner)
+            // keep moving.
+            let settled = animation.oneshot && page_settling();
+            self.with_animation(id, animation, move |el, d| {
+                f(el, if settled { 1. } else { d })
+            })
+            .into_any_element()
         } else {
             self.into_any_element()
         }
@@ -763,10 +786,6 @@ fn slide_in<E: IntoElement + Styled + 'static>(
         |el, d| el.opacity(d).left(px(24. * (1. - d))),
     )
 }
-
-/// How long a page takes to fade in when you move to it: short enough to feel instant,
-/// long enough to read as a soft change rather than a cut.
-const PAGE_MS: u64 = 180;
 
 /// Decelerating cubic: starts quick and settles gently, without the long tail of quint.
 fn ease_out_cubic(t: f32) -> f32 {
@@ -1412,7 +1431,6 @@ impl RunoApp {
             show_sidebar: true,
             panel_anim: HashMap::new(),
             was_settings: false,
-            settings_switch_at: None,
             stats: HashMap::new(),
             new_project: state.projects.first().map(|p| p.id),
             view: View::Session,
@@ -3698,53 +3716,57 @@ impl RunoApp {
                 rows = rows.child(shell::card_rule());
             }
             rows = rows.child(stagger(
-                div()
-                    .id(("past", i))
-                    .mx_1()
-                    .my_1()
-                    .px_3()
-                    .py_2()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .hover(|el| el.bg(tint(c_active())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.resume_past(item.clone(), cx);
-                        cx.notify();
-                    }))
-                    .child(self.provider_badge(provider, 28.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .v_flex()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(past.title.clone()),
-                            )
-                            .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
-                                format!(
-                                    "{}  ·  {place}  ·  {}",
-                                    provider.name,
-                                    history::ago(past.modified)
-                                ),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(rgb(c_blue()))
-                            .child(if open { "Open" } else { "Resume" })
-                            .child(icon(IconName::ArrowRight, 12., c_blue())),
-                    ),
+                shell::hover_wash(
+                    div().id(("past", i)).relative(),
+                    ("past", i),
+                    tint(c_active()),
+                    8.,
+                )
+                .mx_1()
+                .my_1()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_lg()
+                .cursor_pointer()
+                .active(|el| el.opacity(0.85))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.resume_past(item.clone(), cx);
+                    cx.notify();
+                }))
+                .child(self.provider_badge(provider, 28.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .v_flex()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(past.title.clone()),
+                        )
+                        .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
+                            format!(
+                                "{}  ·  {place}  ·  {}",
+                                provider.name,
+                                history::ago(past.modified)
+                            ),
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(rgb(c_blue()))
+                        .child(if open { "Open" } else { "Resume" })
+                        .child(icon(IconName::ArrowRight, 12., c_blue())),
+                ),
                 SharedString::from(format!("past-{i}")),
                 i.min(12),
             ));
@@ -4861,9 +4883,9 @@ impl RunoApp {
                         .object_fit(ObjectFit::Contain),
                 );
             }
+            let group = SharedString::from(format!("user-msg-{sid}-{index}"));
             return fade(
-                div()
-                    .id(("message", index))
+                shell::reveal_group(div().id(("message", index)), group.clone())
                     .group("user-msg")
                     .w_full()
                     .v_flex()
@@ -4876,7 +4898,7 @@ impl RunoApp {
                             .items_start()
                             .gap_1()
                             .when(can_undo, |el| {
-                                el.child(
+                                el.child(shell::reveal(
                                     self.ghost_button_sized(
                                         ("restore", index),
                                         IconName::RotateCcw,
@@ -4892,10 +4914,11 @@ impl RunoApp {
                                             cx.notify();
                                         },
                                     )),
-                                )
+                                    group.clone(),
+                                ))
                             })
                             .when(!working, |el| {
-                                el.child(
+                                el.child(shell::reveal(
                                     self.ghost_button_sized(
                                         ("edit-msg", index),
                                         IconName::Pencil,
@@ -4911,7 +4934,8 @@ impl RunoApp {
                                             cx.notify();
                                         },
                                     )),
-                                )
+                                    group.clone(),
+                                ))
                             })
                             .child(if message.playbook.is_empty() {
                                 div()
@@ -5056,9 +5080,9 @@ impl RunoApp {
                 n,
                 if n == 1 { "" } else { "s" }
             ));
+        let group = SharedString::from(format!("msg-{}-{index}", self.selected.unwrap_or(0)));
         fade(
-            div()
-                .id(("message", index))
+            shell::reveal_group(div().id(("message", index)), group.clone())
                 .group("message")
                 .v_flex()
                 .gap_2()
@@ -5147,7 +5171,7 @@ impl RunoApp {
                             })
                             .when(!live, |el| {
                                 let sid = self.selected.unwrap_or(0);
-                                el.child(
+                                el.child(shell::reveal(
                                     self.ghost_button_sized(
                                         ("fork", index),
                                         IconName::GitFork,
@@ -5162,9 +5186,10 @@ impl RunoApp {
                                             cx.notify();
                                         },
                                     )),
-                                )
+                                    group.clone(),
+                                ))
                             })
-                            .child(
+                            .child(shell::reveal(
                                 self.ghost_button_sized(
                                     ("copy", index),
                                     IconName::Copy,
@@ -5185,7 +5210,8 @@ impl RunoApp {
                                         cx.notify();
                                     },
                                 )),
-                            ),
+                                group,
+                            )),
                     )
                 }),
         )
@@ -5660,14 +5686,13 @@ impl RunoApp {
                 .child(self.composer(provider, working, cx))
                 .into_any_element()
         };
-        let body = div().flex_1().min_h_0().v_flex().child(body).animated(
-            SharedString::from(format!("view-{id}-{cli}")),
-            Animation::new(Duration::from_millis(280)).with_easing(ease_out_quint()),
-            move |el, d| {
-                el.opacity(0.2 + 0.8 * d)
-                    .top(px(if cli { 10. } else { -10. } * (1. - d)))
-            },
-        );
+        // Chat and terminal swap in place, without a dip or a slide.
+        let body = div()
+            .id(SharedString::from(format!("view-{id}-{cli}")))
+            .flex_1()
+            .min_h_0()
+            .v_flex()
+            .child(body);
         let main = div().flex_1().min_w_0().v_flex().child(header).child(body);
         div()
             .flex_1()
@@ -8532,22 +8557,20 @@ impl RunoApp {
     }
 
     fn right_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let body = fade(
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(match self.right_tab {
-                    RightTab::Changes => self.changes_tab(cx),
-                    RightTab::Files => self.files_tab(cx),
-                }),
-            SharedString::from(format!(
+        // Switching tabs shows the other tab at once; keyed so each keeps its own state.
+        let body = div()
+            .id(SharedString::from(format!(
                 "rtab-{}-{}",
                 self.right_tab as u8,
                 self.selected.unwrap_or(0)
-            )),
-            260,
-        );
+            )))
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(match self.right_tab {
+                RightTab::Changes => self.changes_tab(cx),
+                RightTab::Files => self.files_tab(cx),
+            });
         div()
             .w(px(self.panel_width))
             .flex_none()
@@ -8643,12 +8666,6 @@ impl RunoApp {
         }
     }
 
-    /// Settings just opened or closed, so views switch without motion.
-    pub(crate) fn settings_switching(&self) -> bool {
-        self.settings_switch_at
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(PANEL_MS + 120))
-    }
-
     /// The panel's last change, while it is still animating.
     fn panel_motion(&self, key: &str) -> Option<(bool, std::time::Instant)> {
         self.panel_anim
@@ -8667,9 +8684,6 @@ impl Render for RunoApp {
         let in_settings = self.view == View::Settings;
         let settings_snap = in_settings != self.was_settings;
         self.was_settings = in_settings;
-        if settings_snap {
-            self.settings_switch_at = Some(std::time::Instant::now());
-        }
         let dark = match st.theme.as_str() {
             "dark" => true,
             "light" => false,
@@ -8800,7 +8814,6 @@ impl Render for RunoApp {
         } else {
             self.view
         };
-        let still = self.settings_switching();
         let center = match shown {
             View::Home => self.home_view(cx),
             View::Design => self.design_view(window, cx),
@@ -8858,11 +8871,12 @@ impl Render for RunoApp {
         let left_motion = self.panel_motion("sidebar");
         let right_motion = self.panel_motion("right");
         let page_fade = |el: AnyElement, id: &str| {
-            div().flex_none().h_full().flex().child(el).animated(
-                SharedString::from(format!("{id}-{mode:?}")),
-                Animation::new(Duration::from_millis(PAGE_MS)).with_easing(ease_out_cubic),
-                move |el, d| if still { el } else { el.opacity(d) },
-            )
+            div()
+                .id(SharedString::from(format!("{id}-{mode:?}")))
+                .flex_none()
+                .h_full()
+                .flex()
+                .child(el)
         };
         let left = panel_slide(
             "sidebar-slide",
@@ -8924,17 +8938,26 @@ impl Render for RunoApp {
         } else {
             glass_fill(c_canvas())
         };
-        // A new page fades up in place inside its island. The island, its corners and
-        // the tabs over it hold still, and nothing moves, so the frame never jumps.
-        let page = div().size_full().flex().child(center).animated(
-            SharedString::from(format!(
-                "center-{}-{}",
-                shown as u8,
-                self.selected.unwrap_or(0)
-            )),
-            Animation::new(Duration::from_millis(PAGE_MS)).with_easing(ease_out_cubic),
-            move |el, delta| if still { el } else { el.opacity(delta) },
+        // A new page or tab is simply there: no fade that dips it to nothing first and no
+        // slide, so switching never blinks. The page is keyed by what it shows, so each
+        // keeps its own scroll and state; and what would animate in as the page mounts
+        // (rows, cards) settles at once instead, see `Animate`.
+        let page_key = format!(
+            "center-{}-{}-{}",
+            shown as u8,
+            self.selected.unwrap_or(0),
+            self.settings_page.label()
         );
+        let last = SHOWN_PAGE.replace(page_key.clone());
+        // The first page the window shows still plays in.
+        if !last.is_empty() && last != page_key {
+            SWITCHED_AT.set(Some(std::time::Instant::now()));
+        }
+        let page = div()
+            .id(SharedString::from(page_key))
+            .size_full()
+            .flex()
+            .child(center);
         let center_column = div()
             .flex_1()
             .min_w_0()

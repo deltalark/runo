@@ -760,6 +760,40 @@ pub(crate) fn hover_wash(
     )
 }
 
+thread_local! {
+    /// Whether the pointer is over each hover group that reveals actions, and since when.
+    static GROUPS: std::cell::RefCell<HashMap<ElementId, (bool, std::time::Instant)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// How long actions take to fade in when their row is hovered.
+const REVEAL_MS: u64 = 140;
+
+/// Mark a row whose actions show on hover, so `reveal` can fade them in rather than
+/// have them pop. Keep `on_hover` free on the row for it.
+pub(crate) fn reveal_group(el: Stateful<Div>, id: impl Into<ElementId>) -> Stateful<Div> {
+    let id = id.into();
+    el.on_hover(move |hovered, window, _| {
+        GROUPS.with_borrow_mut(|g| {
+            g.insert(id.clone(), (*hovered, std::time::Instant::now()));
+        });
+        window.refresh();
+    })
+}
+
+/// An action that shows while its row is hovered (with `group_hover`, which still decides
+/// whether it shows at all), faded in over a moment each time the pointer arrives.
+/// `group` is the id the row was given in `reveal_group`.
+pub(crate) fn reveal(el: impl IntoElement + 'static, group: impl Into<ElementId>) -> AnyElement {
+    let group = group.into();
+    let since = GROUPS.with_borrow(|g| g.get(&group).filter(|(on, _)| *on).map(|(_, at)| *at));
+    div().flex().child(el).animated(
+        ElementId::Name(SharedString::from(format!("reveal-{group}-{since:?}"))),
+        Animation::new(Duration::from_millis(REVEAL_MS)).with_easing(ease_out_quint()),
+        move |el, d| if since.is_some() { el.opacity(d) } else { el },
+    )
+}
+
 /// The places on the mode rail.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
@@ -3508,7 +3542,7 @@ fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
 /// the frame, stronger on the light theme's grey frame than on the dark one.
 pub(crate) fn tab_chip() -> (Rgba, Rgba) {
     if is_dark() {
-        (rgba(0xffffff0d), rgba(0xffffff1c))
+        (rgba(0xffffff14), rgba(0xffffff26))
     } else {
         (rgba(0xffffff80), rgba(0xffffffd0))
     }

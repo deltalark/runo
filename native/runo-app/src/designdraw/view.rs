@@ -19,6 +19,14 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+/// The ask bar's width put away to one line, and opened up.
+const ASK_NARROW: f32 = 560.;
+const ASK_WIDE: f32 = 600.;
+/// Height of the row of suggestions and buttons under the opened ask bar's input.
+const ASK_ROW_H: f32 = 28.;
+/// How long the ask bar takes to open up or put itself away.
+const ASK_EASE_MS: u64 = 200;
+
 mod agents;
 mod chrome;
 mod codelinks;
@@ -307,6 +315,9 @@ pub(crate) struct DesignCanvas {
     last_shape: shapes::Shape,
     /// The ask bar has the keyboard, so it shows its suggestions.
     ask_focused: bool,
+    /// Whether the ask bar was put away to one line when it last drew, and since when,
+    /// so it can ease between its two sizes.
+    ask_shape: Cell<Option<(bool, Instant)>>,
     /// The project's branch, read when the canvas opens or reloads.
     branch: String,
     new_device: Device,
@@ -640,6 +651,7 @@ impl DesignCanvas {
             flyout: None,
             last_shape: shapes::Shape::Rect,
             ask_focused: false,
+            ask_shape: Cell::new(None),
             branch,
             new_device: Device::Phone,
             playing: None,
@@ -1749,23 +1761,26 @@ impl DesignCanvas {
                                 .on_click(cx.listener(|this, _, _, cx| this.keep_ai(cx))),
                         ),
                 )
-                .when(ai.by_ai, |bar| bar.children(self.ai_screens_row(cx))),
-            Some(ai) => askbar::composer("design-ask-bar", true).child(
-                askbar::working_row(
-                    "design-wait-spin",
-                    if ai.reviewed {
-                        "Checking its work".to_string()
-                    } else {
-                        design_line(ai.started.elapsed().as_secs()).to_string()
-                    },
-                    ai.task.clone(),
-                    ai.started.elapsed().as_secs(),
-                )
+                .when(ai.by_ai, |bar| bar.children(self.ai_screens_row(cx)))
+                .into_any_element(),
+            Some(ai) => askbar::composer("design-ask-bar", true)
                 .child(
-                    text_btn("design-ai-stop", "Stop", None, false)
-                        .on_click(cx.listener(|this, _, _, cx| this.stop_ai(cx))),
-                ),
-            ),
+                    askbar::working_row(
+                        "design-wait-spin",
+                        if ai.reviewed {
+                            "Checking its work".to_string()
+                        } else {
+                            design_line(ai.started.elapsed().as_secs()).to_string()
+                        },
+                        ai.task.clone(),
+                        ai.started.elapsed().as_secs(),
+                    )
+                    .child(
+                        text_btn("design-ai-stop", "Stop", None, false)
+                            .on_click(cx.listener(|this, _, _, cx| this.stop_ai(cx))),
+                    ),
+                )
+                .into_any_element(),
             None => {
                 let empty = self.f_ask.read(cx).value().trim().is_empty();
                 let screen = self.screen.as_ref().and_then(|id| self.canvas.screen(id));
@@ -1955,15 +1970,78 @@ impl DesignCanvas {
                             .min_w(px(160.))
                             .child(Input::new(&self.f_ask).appearance(false)),
                     );
-                if compact {
-                    askbar::composer("design-ask-bar", any)
-                        .w(px(560.))
-                        .child(input_row.child(tail))
+                // Opening up and putting away ease between the two sizes: the bar widens
+                // or narrows, the suggestions' row grows up out of it or folds back in,
+                // and the buttons fade into their new place.
+                let since = match self.ask_shape.get() {
+                    Some((was, at)) if was == compact => at,
+                    // The first draw is already settled.
+                    None => Instant::now() - Duration::from_secs(1),
+                    Some(_) => Instant::now(),
+                };
+                self.ask_shape.set(Some((compact, since)));
+                let moving = anim_on() && since.elapsed() < Duration::from_millis(ASK_EASE_MS);
+                let ease = || {
+                    Animation::new(Duration::from_millis(ASK_EASE_MS))
+                        .with_easing(|t: f32| 1. - (1. - t).powi(3))
+                };
+                let key = |part: &str| SharedString::from(format!("design-ask-{part}-{since:?}"));
+                let tail = if moving {
+                    tail.with_animation(key("tail"), ease(), |el, d| el.opacity(d))
+                        .into_any_element()
                 } else {
+                    tail.into_any_element()
+                };
+                let (from, to) = if compact {
+                    (ASK_WIDE, ASK_NARROW)
+                } else {
+                    (ASK_NARROW, ASK_WIDE)
+                };
+                // The row under the input: its height, and the gap above it.
+                let fold = ASK_ROW_H + 4.;
+                let bar = if compact {
                     askbar::composer("design-ask-bar", any)
+                        .w(px(to))
+                        .child(input_row.child(tail))
+                        .when(moving, |el| {
+                            // Room the suggestions' row leaves as it folds away.
+                            el.child(div().flex_none().with_animation(
+                                key("fold"),
+                                ease(),
+                                move |el, d| el.h(px((fold - 4.) * (1. - d))).mt(px(-4. * d)),
+                            ))
+                        })
+                } else {
+                    let below = div().flex().items_center().gap_1().child(row).child(tail);
+                    askbar::composer("design-ask-bar", any)
+                        .w(px(to))
                         .children(top_chips)
                         .child(input_row)
-                        .child(div().flex().items_center().gap_1().child(row).child(tail))
+                        .map(|el| {
+                            if moving {
+                                el.child(
+                                    div()
+                                        .v_flex()
+                                        .overflow_hidden()
+                                        .child(below)
+                                        .with_animation(key("unfold"), ease(), move |el, d| {
+                                            el.h(px(ASK_ROW_H * d))
+                                                .mt(px(-4. * (1. - d)))
+                                                .opacity(d)
+                                        }),
+                                )
+                            } else {
+                                el.child(below)
+                            }
+                        })
+                };
+                if moving {
+                    bar.with_animation(key("width"), ease(), move |el, d| {
+                        el.w(px(from + (to - from) * d))
+                    })
+                    .into_any_element()
+                } else {
+                    bar.into_any_element()
                 }
             }
         };

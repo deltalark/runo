@@ -301,6 +301,8 @@ pub(crate) struct Assistant {
     /// The agent answering the question being asked.
     answerer: &'static str,
     scroll: ScrollHandle,
+    /// Whether the pointer is over the mark in the corner, and since when.
+    hover: Option<(bool, std::time::Instant)>,
 }
 
 impl Assistant {
@@ -328,6 +330,7 @@ impl Assistant {
                 asked: 0,
                 answerer: "",
                 scroll: ScrollHandle::new(),
+                hover: None,
             },
             subs,
         )
@@ -607,13 +610,22 @@ impl RunoApp {
             .bottom(px(36.))
             .occlude()
             .cursor_pointer()
+            .active(|el| el.opacity(0.85))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.assistant.hover = Some((*hovered, std::time::Instant::now()));
+                cx.notify();
+            }))
             .tooltip(|window, cx| {
                 let keys = keymap::label(cx, "ask-runo");
                 gpui_kit::component::tooltip::Tooltip::new(format!("Ask Runo  {keys}"))
                     .build(window, cx)
             })
             .on_click(cx.listener(|this, _, window, cx| this.toggle_assistant(window, cx)))
-            .child(mark(state, 46., (waiting > 0).then_some(waiting)));
+            .child(live_mark(
+                state,
+                (waiting > 0).then_some(waiting),
+                self.assistant.hover,
+            ));
         let mut layer = div().absolute().top_0().left_0().size_full().child(mark);
         if self.assistant.open {
             layer = layer.child(self.assistant_panel(cx));
@@ -830,11 +842,16 @@ impl RunoApp {
             .child(header)
             .child(body)
             .child(footer)
-            .into_any_element()
+            // It opens up out of the mark: fading in while rising the last few pixels.
+            .animated(
+                "assistant-panel-in",
+                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                |el, d| el.opacity(d).bottom(px(96. - 10. * (1. - d))),
+            )
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Mood {
     Idle,
     Listening,
@@ -842,16 +859,154 @@ enum Mood {
     NeedsYou,
 }
 
-/// Runo's icon, three staggered bars on a rounded square, posed for `mood`. At `size` 46 it
-/// is the mark in the corner; smaller in the panel header.
-fn mark(mood: Mood, size: f32, badge: Option<usize>) -> AnyElement {
-    let s = size / 46.;
-    let (bars, middle): ([(f32, f32); 3], u32) = match mood {
+/// Where Runo's three bars sit for `mood`, as (left, width) at size 46, and the middle
+/// bar's colour.
+fn pose(mood: Mood) -> (Bars, u32) {
+    match mood {
         Mood::Idle => ([(10., 17.), (17., 19.), (12., 13.)], c_text()),
         Mood::Listening => ([(12., 22.), (9., 28.), (15., 16.)], c_blue()),
         Mood::Thinking => ([(18., 17.), (9., 19.), (21., 13.)], VIOLET),
         Mood::NeedsYou => ([(10., 17.), (17., 19.), (12., 13.)], c_amber()),
+    }
+}
+
+/// Each of Runo's bars, as (left, width) at size 46.
+type Bars = [(f32, f32); 3];
+
+thread_local! {
+    /// The corner mark's mood, when it took it, and where its bars were then.
+    static MARK: std::cell::Cell<Option<(Mood, std::time::Instant, Bars)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// How long the bars take to move into a new mood's pose.
+const MORPH_MS: f32 = 260.;
+/// How long the mark takes to lift under the pointer, or settle back.
+const LIFT_MS: f32 = 140.;
+
+fn ease_out(t: f32) -> f32 {
+    1. - (1. - t.clamp(0., 1.)).powi(3)
+}
+
+fn ms_since(at: std::time::Instant) -> f32 {
+    at.elapsed().as_secs_f32() * 1000.
+}
+
+/// Where the bars are `since` a change from `from` to `to`.
+fn bars_between(from: Bars, to: Bars, t: f32) -> Bars {
+    let k = ease_out(t);
+    std::array::from_fn(|i| {
+        (
+            from[i].0 + (to[i].0 - from[i].0) * k,
+            from[i].1 + (to[i].1 - from[i].1) * k,
+        )
+    })
+}
+
+/// The mark in the corner, alive: its bars glide into each new mood's pose, drift to and
+/// fro while Runo thinks, and the mark lifts a little, its middle bar reaching out, while
+/// the pointer is over it. Still when animations are off.
+fn live_mark(
+    mood: Mood,
+    badge: Option<usize>,
+    hover: Option<(bool, std::time::Instant)>,
+) -> AnyElement {
+    let target = pose(mood).0;
+    let now = std::time::Instant::now();
+    let (since, from) = match MARK.get() {
+        Some((was, since, from)) if was == mood => (since, from),
+        Some((was, since, from)) => {
+            // Start from wherever the bars are now, even mid-glide.
+            let at = bars_between(from, pose(was).0, ms_since(since) / MORPH_MS);
+            (now, at)
+        }
+        None => (now, target),
     };
+    MARK.set(Some((mood, since, from)));
+    if !anim_on() {
+        return mark(mood, 46., badge);
+    }
+    let lift_at = move || match hover {
+        Some((on, at)) => {
+            let t = ease_out(ms_since(at) / LIFT_MS);
+            if on {
+                t
+            } else {
+                1. - t
+            }
+        }
+        None => 0.,
+    };
+    let thinking = mood == Mood::Thinking;
+    let animation = if thinking {
+        Animation::new(Duration::from_millis(1400)).repeat()
+    } else {
+        Animation::new(Duration::from_millis(MORPH_MS.max(LIFT_MS) as u64))
+    };
+    let key = format!("runo-mark-{mood:?}-{since:?}-{:?}", hover);
+    let el = div().relative().size(px(46.)).with_animation(
+        ElementId::Name(key.into()),
+        animation,
+        move |el, d| {
+            let mut bars = bars_between(from, target, ms_since(since) / MORPH_MS);
+            if thinking {
+                // Each bar drifts a little out of step with the next.
+                for (i, bar) in bars.iter_mut().enumerate() {
+                    let phase = (d + i as f32 / 3.) * std::f32::consts::TAU;
+                    bar.0 += 3. * phase.sin();
+                }
+            }
+            let lift = lift_at();
+            bars[1].1 += 5. * lift;
+            el.child(
+                div()
+                    .absolute()
+                    .top(px(-2. * lift))
+                    .child(mark_with(mood, 46., bars, None)),
+            )
+        },
+    );
+    let mut layer = div().relative().child(el);
+    if let Some(n) = badge {
+        layer = layer.child(badge_dot(n).with_animation(
+            ElementId::Name(format!("runo-badge-{n}").into()),
+            Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+            |el, d| el.opacity(d).top(px(-6. + 4. * (1. - d))),
+        ));
+    }
+    layer.into_any_element()
+}
+
+/// The count of things waiting, on the mark's corner.
+fn badge_dot(n: usize) -> Div {
+    div()
+        .absolute()
+        .top(px(-6.))
+        .right(px(-6.))
+        .min_w(px(18.))
+        .h(px(18.))
+        .px(px(4.))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(c_amber()))
+        .text_color(rgb(0x1a1205))
+        .text_size(px(11.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(n.to_string())
+}
+
+/// Runo's icon, three staggered bars on a rounded square, posed for `mood`. At `size` 46 it
+/// is the mark in the corner; smaller in the panel header.
+fn mark(mood: Mood, size: f32, badge: Option<usize>) -> AnyElement {
+    mark_with(mood, size, pose(mood).0, badge)
+}
+
+/// The icon with its bars at `bars`, as (left, width) at size 46.
+fn mark_with(mood: Mood, size: f32, bars: Bars, badge: Option<usize>) -> AnyElement {
+    let s = size / 46.;
+    let middle = pose(mood).1;
     let tops = [13., 20.5, 28.];
     let shades = [
         settings::mix(c_muted(), c_raised(), 0.85),
@@ -883,24 +1038,7 @@ fn mark(mood: Mood, size: f32, badge: Option<usize>) -> AnyElement {
         );
     }
     if let Some(n) = badge {
-        square = square.child(
-            div()
-                .absolute()
-                .top(px(-6.))
-                .right(px(-6.))
-                .min_w(px(18.))
-                .h(px(18.))
-                .px(px(4.))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(c_amber()))
-                .text_color(rgb(0x1a1205))
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(n.to_string()),
-        );
+        square = square.child(badge_dot(n));
     }
     square.into_any_element()
 }

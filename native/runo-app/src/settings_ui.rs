@@ -2754,8 +2754,7 @@ impl RunoApp {
         }
 
         let main = div().flex_1().min_w_0().h_full().v_flex().child({
-            // Pages cross-fade inside Settings, but opening Settings shows it at once.
-            let still = self.settings_switching();
+            // Each page shows at once; keyed by page so each keeps its own scroll.
             div()
                 .id("settings-scroll")
                 .flex_1()
@@ -2772,7 +2771,7 @@ impl RunoApp {
                         }
                     )),
                     Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                    move |el, d| if still { el } else { el.opacity(d) },
+                    |el, _| el,
                 )
         });
         div()
