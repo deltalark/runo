@@ -84,6 +84,8 @@ pub struct AppSettings {
     pub quick_commands: String,
     /// Group the sidebar by status (Needs you, Running, Ready to review, Done) instead of project.
     pub group_by_status: bool,
+    /// Places pinned out on the rail beside the main ones, by label, such as "Notes".
+    pub rail_pins: Vec<String>,
     /// Translucent window over a blurred desktop: "off", "subtle", "frosted" or "clear".
     pub glass: String,
     /// Cards, menus and dialogs are translucent too.
@@ -208,6 +210,7 @@ impl Default for AppSettings {
             quick_commands: "Test = cargo test\nBuild = cargo build\nStatus = git status --short"
                 .into(),
             group_by_status: false,
+            rail_pins: Vec::new(),
             glass: "off".into(),
             glass_cards: true,
             font: "bundled".into(),
@@ -354,6 +357,19 @@ impl AppSettings {
     }
 
     /// The widest the conversation column gets, or None to fill the window.
+    /// Whether the place with this label is pinned out on the rail.
+    pub fn pinned(&self, label: &str) -> bool {
+        self.rail_pins.iter().any(|p| p == label)
+    }
+
+    /// Pin the place with this label out on the rail, or put it back in the ⋯ menu.
+    pub fn pin(&mut self, label: &str, on: bool) {
+        self.rail_pins.retain(|p| p != label);
+        if on {
+            self.rail_pins.push(label.to_string());
+        }
+    }
+
     pub fn content_max_width(&self) -> Option<f32> {
         match self.content_width.as_str() {
             "comfortable" => Some(780.),
