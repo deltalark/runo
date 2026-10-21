@@ -175,7 +175,14 @@ impl RunoApp {
         } else {
             pane(c_sheet())
         };
-        let body = if history {
+        let clash = self.git_repo.as_ref().and_then(|r| r.clash.as_ref());
+        let body = if let Some(clash) = clash {
+            shell::island(
+                div().size_full().flex().child(self.clash_view(clash, cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        } else if history {
             shell::island(
                 div().size_full().flex().child(self.git_history_view(cx)),
                 rgba(0),

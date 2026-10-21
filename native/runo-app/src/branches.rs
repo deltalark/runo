@@ -162,6 +162,14 @@ impl RunoApp {
             let onto = git::base_ref(dir, &base);
             let behind = git::commits_ahead(dir, &onto, &name);
             match git::update_from(&at, &onto, true)? {
+                // In the project folder itself, the clash page sorts it out.
+                git::Update::Conflicts(files) if at == dir => Ok(Some((
+                    format!(
+                        "{name} and {base} change the same lines in {}. Pick what to keep.",
+                        files.join(", ")
+                    ),
+                    None,
+                ))),
                 git::Update::Conflicts(files) => {
                     let _ = git::abort_update(&at);
                     Err(format!(
