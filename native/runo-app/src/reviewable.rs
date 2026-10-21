@@ -87,13 +87,24 @@ impl RunoApp {
         };
         let base = git::base_ref(&dir, &git::default_branch(&dir));
         let patch = git::branch_patch(&dir, &branch, &base, 24_000);
+        // An agent session on this branch may have had its work checked after each turn.
+        let checks = self
+            .state
+            .sessions
+            .iter()
+            .filter(|s| s.branch == branch)
+            .find_map(|s| s.proof.as_ref())
+            .map(crate::proof::tested_note)
+            .filter(|note| !note.is_empty())
+            .map(|note| format!("{note}\n\n"))
+            .unwrap_or_default();
         let prompt = format!(
             "Write a reviewer's guide for this branch, in Markdown, under 250 words, with \
              exactly these headings:\n## What changed\n(two to four plain sentences)\n\
              ## Read in this order\n(a numbered list of files, one line each on what to look \
-             for)\n## Where the risk is\n(short bullets)\n## How it was tested\n(what the \
-             commits and diff show; say plainly if nothing shows tests)\nReply with only the \
-             guide, no preamble.\n\n{patch}"
+             for)\n## Where the risk is\n(short bullets)\n## How it was tested\n(the checks \
+             Runo ran, when given below, and what the commits and diff show; say plainly if \
+             nothing shows tests)\nReply with only the guide, no preamble.\n\n{checks}{patch}"
         );
         self.ask_about_branch(format!("guide:{branch}"), prompt, cx);
         self.git_guides.insert(branch, None);

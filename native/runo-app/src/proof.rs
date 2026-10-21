@@ -290,6 +290,37 @@ pub fn fix_prompt(results: &[CheckRun]) -> String {
     out
 }
 
+/// What Runo's checks showed after the session's last turn, for a reviewer's guide.
+pub fn tested_note(proof: &Proof) -> String {
+    if !proof.skipped.is_empty() {
+        return format!("Runo's checks didn't run: {}", proof.skipped);
+    }
+    let mut lines: Vec<String> = proof
+        .results
+        .iter()
+        .map(|r| {
+            let verdict = if r.timed_out {
+                "timed out"
+            } else if r.ok {
+                "passed"
+            } else {
+                "failed"
+            };
+            format!("`{}` {verdict} ({}s)", r.command, r.secs)
+        })
+        .collect();
+    if !proof.review.is_empty() {
+        lines.push(format!("Second opinion: {}", proof.review));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Runo ran the project's checks after the agent's last turn on this branch:\n- {}",
+        lines.join("\n- ")
+    )
+}
+
 /// Ask another agent to review the turn's change, read-only, one note per line.
 pub fn review_prompt(task: &str, patch: &str) -> String {
     let task: String = task.chars().take(2000).collect();
@@ -376,6 +407,37 @@ pub fn review_summary(name: &str, findings: usize, said_none: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_guide_hears_how_the_checks_went() {
+        let mut proof = Proof {
+            results: vec![
+                CheckRun {
+                    command: "cargo test".into(),
+                    ok: true,
+                    secs: 47,
+                    ..Default::default()
+                },
+                CheckRun {
+                    command: "cargo clippy".into(),
+                    ok: false,
+                    secs: 12,
+                    ..Default::default()
+                },
+            ],
+            review: "Codex left 2 notes".into(),
+            ..Default::default()
+        };
+        let note = tested_note(&proof);
+        assert!(note.contains("`cargo test` passed (47s)"));
+        assert!(note.contains("`cargo clippy` failed (12s)"));
+        assert!(note.contains("Second opinion: Codex left 2 notes"));
+        proof.results.clear();
+        proof.review.clear();
+        assert_eq!(tested_note(&proof), "");
+        proof.skipped = "the session runs on a connection".into();
+        assert!(tested_note(&proof).contains("didn't run"));
+    }
 
     fn temp(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("runo-proof-{name}-{}", std::process::id()));
