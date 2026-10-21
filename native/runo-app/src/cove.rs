@@ -532,6 +532,35 @@ pub fn sign_in_command(
     Ok(c)
 }
 
+/// Whether this Mac has a login file for `provider` that Cove can copy to a server.
+pub fn has_local_login(provider: &str) -> bool {
+    keeps_login(provider)
+        && crate::connections::sign_in(provider)
+            .and_then(|s| s.file)
+            .zip(std::env::var_os("HOME"))
+            .is_some_and(|(f, home)| Path::new(&home).join(f).is_file())
+}
+
+/// Copy this Mac's login for `provider` to a Cove connection's server (`cove agents
+/// import`), for every VM there.
+pub fn import_login(conn: &crate::connections::Connection, provider: &str) -> Result<(), String> {
+    let out = conn
+        .cove()?
+        .args(["agents", "import", provider])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run cove: {e}"))?;
+    forget_logins();
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .trim_start_matches("cove: ")
+            .to_string())
+    }
+}
+
 /// Sign `provider` out on a Cove connection's server and its VMs.
 pub fn sign_out(conn: &crate::connections::Connection, provider: &str) -> Result<(), String> {
     let out = conn
