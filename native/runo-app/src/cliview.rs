@@ -575,7 +575,7 @@ impl RunoApp {
             .items_center()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_subtle()))
             .text_size(px(12.))
             .text_color(rgb(c_secondary()))
@@ -622,7 +622,7 @@ impl RunoApp {
             .flex_1()
             .min_h_0()
             .v_flex()
-            .bg(rgb(c_term_bg()))
+            .bg(term_fill())
             .child(banner)
             .child(
                 div()
@@ -639,7 +639,7 @@ impl RunoApp {
     pub(crate) fn cli_divider(&self, index: usize, meta: &str) -> Option<AnyElement> {
         let (provider, turns) = parse_divider(meta)?;
         let provider = agent::provider(provider);
-        let line = || div().flex_1().h(px(1.)).bg(rgb(c_border()));
+        let line = || div().flex_1().h(px(1.)).bg(divider());
         Some(
             rise(
                 div()
@@ -658,7 +658,7 @@ impl RunoApp {
                             .py(px(5.))
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(rgb(c_raised()))
                             .text_size(px(12.))
                             .child(icon(IconName::SquareTerminal, 13., c_secondary()))

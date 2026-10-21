@@ -646,7 +646,7 @@ impl RunoApp {
     pub(crate) fn switch_divider(&self, index: usize, meta: &str) -> Option<AnyElement> {
         let (from, to, carried, cost) = parse_divider(meta)?;
         let (from, to) = (agent::provider(from), agent::provider(to));
-        let line = || div().flex_1().h(px(1.)).bg(rgb(c_border()));
+        let line = || div().flex_1().h(px(1.)).bg(divider());
         let label = if carried {
             format!("context carried over · ~{} tokens", short_count(cost))
         } else {
@@ -670,7 +670,7 @@ impl RunoApp {
                             .py(px(5.))
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(rgb(c_raised()))
                             .text_size(px(12.))
                             .child(self.provider_badge(from, 16.).opacity(0.7))
@@ -760,7 +760,7 @@ impl RunoApp {
                     .w(px(TRACK))
                     .h(px(2.))
                     .rounded_full()
-                    .bg(rgb(c_border())),
+                    .bg(divider()),
             )
             .children((0..3i32).map(|i| {
                 div()
@@ -926,8 +926,8 @@ impl RunoApp {
                                 .p_3()
                                 .rounded_lg()
                                 .border_1()
-                                .border_color(rgb(c_border()))
-                                .bg(rgb(c_term_bg()))
+                                .border_color(divider())
+                                .bg(term_fill())
                                 .font_family(self.mono_font.clone())
                                 .text_size(px(11.5))
                                 .text_color(rgb(c_secondary()))

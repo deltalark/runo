@@ -220,7 +220,7 @@ impl DesignCanvas {
             .items_start()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(
                 div()
                     .flex_1()
@@ -333,7 +333,7 @@ impl DesignCanvas {
             .flex_none()
             .pb(px(6.))
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(
                 div()
                     .h(px(30.))
@@ -376,7 +376,7 @@ impl DesignCanvas {
     // ---- The toolbar at the bottom of the canvas
 
     pub(super) fn bottom_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let sep = || div().w(px(1.)).h(px(22.)).mx(px(4.)).bg(rgb(c_border()));
+        let sep = || div().w(px(1.)).h(px(22.)).mx(px(4.)).bg(divider());
         let moving = !self.hand && !self.commenting && self.shape.is_none() && self.pen.is_none();
         let shape_on = self.shape.is_some_and(|s| {
             matches!(s, Shape::Rect | Shape::Ellipse | Shape::Line | Shape::Arrow)
@@ -793,7 +793,7 @@ impl DesignCanvas {
             .items_center()
             .gap(px(2.))
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(
                 icon_btn("design-undo", IconName::Undo2, "Undo (⌘Z)", false)
                     .when(!can_undo, |el| el.opacity(0.4))
@@ -1149,11 +1149,7 @@ impl DesignCanvas {
             }));
         for (i, item) in items.into_iter().enumerate() {
             list = list.child(match item {
-                Item::Line => div()
-                    .my(px(4.))
-                    .h(px(1.))
-                    .bg(rgb(c_border()))
-                    .into_any_element(),
+                Item::Line => div().my(px(4.)).h(px(1.)).bg(divider()).into_any_element(),
                 Item::Do {
                     label,
                     keys,

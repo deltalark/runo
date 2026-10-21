@@ -629,7 +629,7 @@ impl RunoApp {
             .px_4()
             .py_3()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(mark(Mood::Idle, 24., None))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Runo"))
             .child(
@@ -700,7 +700,7 @@ impl RunoApp {
                         .py_2()
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .bg(rgb(c_raised()))
                         .cursor_pointer()
                         .hover(|el| el.bg(tint(c_subtle())))
@@ -750,7 +750,7 @@ impl RunoApp {
                                 .py(px(2.))
                                 .rounded_md()
                                 .border_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .text_size(px(11.))
                                 .text_color(rgb(c_muted()))
                                 .child(format!("Guide: {}", a.title)),

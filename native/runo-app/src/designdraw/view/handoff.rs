@@ -347,7 +347,7 @@ impl DesignCanvas {
                                 .flex_none()
                                 .rounded(px(3.))
                                 .border_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .when_some(swatch, |el, c| el.bg(rgb(c))),
                         )
                         .child(
@@ -438,7 +438,7 @@ fn code_block(text: String) -> Div {
         .rounded(px(6.))
         .bg(rgb(c_subtle()))
         .border_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .font_family("monospace")
         .text_size(px(11.))
         .text_color(rgb(c_text()))
@@ -455,7 +455,7 @@ fn app_block(id: &'static str, text: String) -> Stateful<Div> {
         .rounded(px(6.))
         .bg(rgb(c_subtle()))
         .border_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .font_family("monospace")
         .text_size(px(10.5))
         .text_color(rgb(c_text()))

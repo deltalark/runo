@@ -394,7 +394,7 @@ impl RunoApp {
                             .text_color(rgb(c_text()))
                     })
                     .when(!on, |el| {
-                        el.border_color(rgb(c_border()))
+                        el.border_color(divider())
                             .text_color(rgb(c_muted()))
                             .opacity(0.75)
                             .hover(|el| el.opacity(1.))
@@ -489,7 +489,7 @@ impl RunoApp {
                     .flex()
                     .rounded_full()
                     .when(review, |el| el.bg(rgb(c_blue())).justify_end())
-                    .when(!review, |el| el.bg(rgb(c_border())))
+                    .when(!review, |el| el.bg(divider()))
                     .child(div().size(px(12.)).rounded_full().bg(rgb(0xffffff))),
             )
             .child("Second opinion")
@@ -509,7 +509,7 @@ impl RunoApp {
             .v_flex()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()))
             .shadow_lg()
             .child(
@@ -1207,7 +1207,7 @@ impl RunoApp {
                 .rounded_xl()
                 .bg(rgb(c_raised()))
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .child(
                     div()
                         .h(px(10.))
@@ -1469,7 +1469,7 @@ impl RunoApp {
             .flex()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()))
             .overflow_hidden()
             .child(
@@ -2058,7 +2058,7 @@ impl RunoApp {
                 .gap_1()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(rgb(settings::mix(0x000000, c_canvas(), 0.2)))
                 .font_family("monospace")
                 .text_size(px(10.5))
@@ -2388,7 +2388,7 @@ impl RunoApp {
                                     .child(icon(glyph, 11., tone)),
                             )
                             .when(i + 1 < total, |el| {
-                                el.child(div().flex_1().w(px(1.)).bg(rgb(c_border())))
+                                el.child(div().flex_1().w(px(1.)).bg(divider()))
                             }),
                     )
                     .child(

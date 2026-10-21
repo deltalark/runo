@@ -401,7 +401,7 @@ impl DesignCanvas {
                     .rounded(px(4.))
                     .overflow_hidden()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .hover(|el| el.border_color(rgb(c_blue())))
                     .tooltip(move |window, cx| {

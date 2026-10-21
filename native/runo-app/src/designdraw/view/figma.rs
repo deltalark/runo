@@ -25,7 +25,7 @@ pub(super) fn sec(title: impl Into<SharedString>, action: Option<AnyElement>) ->
         .pt(px(10.))
         .pb(px(12.))
         .border_b_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .child(
             div()
                 .h(px(22.))
@@ -227,7 +227,7 @@ impl DesignCanvas {
             .bg(tint(c_subtle()))
             .border_1()
             .border_color(tint(c_subtle()))
-            .hover(|el| el.border_color(rgb(c_border())))
+            .hover(|el| el.border_color(divider()))
             .child(mark)
             .child(div().flex_1().min_w_0().children(input))
     }
@@ -247,7 +247,7 @@ impl DesignCanvas {
                 .flex_none()
                 .rounded(px(3.))
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(rgb(c))
                 .into_any_element(),
         )
@@ -320,9 +320,8 @@ impl DesignCanvas {
             .flex_none()
             .h_full()
             .v_flex()
-            .border_r_1()
-            .border_color(rgb(c_border()))
-            // The sidebar's own sheet, so the rail's Design tab joins it.
+            // The sidebar's own sheet, so the rail's Design tab joins it. Its tone sets it
+            // apart from the canvas, so it needs no rule.
             .bg(pane(c_sheet()))
             .child(self.file_head(cx))
             .child(
@@ -556,7 +555,7 @@ impl DesignCanvas {
                             .items_center()
                             .justify_between()
                             .border_b_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .text_size(px(12.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(c_text()))
@@ -601,7 +600,7 @@ impl DesignCanvas {
                         .items_center()
                         .gap(px(1.))
                         .border_b_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(tab("design-tab-design", "Design", 0, Panel::Design, cx))
                         .child(tab(
                             "design-tab-proto",
@@ -1496,7 +1495,7 @@ impl DesignCanvas {
             .items_center()
             .gap(px(6.))
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(icon(
                 if multi {
                     IconName::Group
@@ -1572,7 +1571,7 @@ impl DesignCanvas {
                     } else {
                         tint(c_subtle())
                     })
-                    .hover(|el| el.border_color(rgb(c_border())))
+                    .hover(|el| el.border_color(divider()))
                     .text_size(px(12.))
                     .text_color(rgb(c_text()))
                     .child(lead)

@@ -542,7 +542,7 @@ impl RunoApp {
                 handoff::short_count(tokens)
             )
         };
-        let line = || div().flex_1().h(px(1.)).bg(rgb(c_border()));
+        let line = || div().flex_1().h(px(1.)).bg(divider());
         Some(
             div()
                 .id(("context-div", index))
@@ -560,7 +560,7 @@ impl RunoApp {
                         .py(px(5.))
                         .rounded_full()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .text_size(px(11.5))
                         .text_color(rgb(c_muted()))
                         .child(icon(

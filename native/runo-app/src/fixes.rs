@@ -675,7 +675,7 @@ impl RunoApp {
                 .rounded_lg()
                 .bg(tint(c_subtle()))
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .font_family(self.mono_font.clone())
                 .text_size(px(12.))
                 .child(text)

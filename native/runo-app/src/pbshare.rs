@@ -537,7 +537,7 @@ impl RunoApp {
                     .items_center()
                     .gap_3()
                     .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(Self::tile(glyph, color, 34.))
                     .child(
                         div()
@@ -578,7 +578,7 @@ impl RunoApp {
                     .justify_end()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(
                         self.button("pb-run-cancel", "Cancel", false)
                             .h(px(30.))
@@ -747,7 +747,7 @@ impl RunoApp {
                     .items_center()
                     .gap_3()
                     .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(Self::tile(IconName::Download, c_blue(), 40.))
                     .child(
                         div()
@@ -793,7 +793,7 @@ impl RunoApp {
                     .justify_end()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(
                         self.button("pb-install-cancel", "Cancel", false)
                             .h(px(32.))

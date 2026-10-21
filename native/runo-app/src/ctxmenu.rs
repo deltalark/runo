@@ -708,7 +708,7 @@ impl RunoApp {
         let mut list = div().v_flex().p_1();
         for (i, entry) in items.into_iter().enumerate() {
             let Some(entry) = entry else {
-                list = list.child(div().my_1().mx_2().h(px(1.)).bg(rgb(c_border())));
+                list = list.child(div().my_1().mx_2().h(px(1.)).bg(divider()));
                 continue;
             };
             let color = if entry.danger { c_red() } else { c_text() };

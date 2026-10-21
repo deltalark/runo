@@ -1915,7 +1915,7 @@ impl RunoApp {
                                                     .max_h(px(320.))
                                                     .rounded_xl()
                                                     .border_1()
-                                                    .border_color(rgb(c_border()))
+                                                    .border_color(divider())
                                                     .bg(rgb(c_canvas()))
                                                     .shadow_lg()
                                                     .occlude()
@@ -2055,7 +2055,7 @@ impl RunoApp {
                             ))
                         })
                         .when(!on, |el| {
-                            el.border_color(rgb(c_border()))
+                            el.border_color(divider())
                                 .bg(rgb(c_canvas()))
                                 .hover(|el| el.border_color(rgb(c_secondary())))
                         })
@@ -2081,7 +2081,7 @@ impl RunoApp {
                     .text_color(rgb(color))
                     .bg(rgb(c_canvas()))
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(text)
                     .into_any_element()
             }
@@ -2098,7 +2098,7 @@ impl RunoApp {
                             .justify_center()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(rgb(c_canvas()))
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
@@ -2209,9 +2209,7 @@ impl RunoApp {
                                     .cursor_pointer()
                                     .border_1()
                                     .border_color(gpui_kit::transparent_black())
-                                    .hover(|el| {
-                                        el.border_color(rgb(c_border())).bg(tint(c_subtle()))
-                                    })
+                                    .hover(|el| el.border_color(divider()).bg(tint(c_subtle())))
                                     .tooltip(move |window, cx| {
                                         gpui_kit::component::tooltip::Tooltip::new(if recording {
                                             "Press Esc to cancel"
@@ -2310,7 +2308,7 @@ impl RunoApp {
                             .py(px(2.))
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(rgb(c_raised()))
                             .text_xs()
                             .text_color(rgb(c_green()))
@@ -2620,7 +2618,7 @@ impl RunoApp {
                                         .h(px(20.))
                                         .border_l_1()
                                         .border_b_1()
-                                        .border_color(rgb(c_border()))
+                                        .border_color(divider())
                                         .rounded_bl(px(6.)),
                                 )
                                 // The trunk on to the next sibling.
@@ -2632,7 +2630,7 @@ impl RunoApp {
                                             .top(px(-2.))
                                             .bottom(px(-2.))
                                             .w(px(1.))
-                                            .bg(rgb(c_border())),
+                                            .bg(divider()),
                                     )
                                 })
                                 .child(self.settings_nav_item(*child, cx)),

@@ -346,7 +346,7 @@ impl RunoApp {
                     .min_h_0()
                     .v_flex()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(self.file_view(false, cx)),
             )
             .into_any_element()

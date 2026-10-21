@@ -538,9 +538,11 @@ pub fn glass_fill(color: u32) -> Rgba {
 fn sidebar_alpha() -> u8 {
     let (light, dark) = match GLASS.load(Ordering::Relaxed) {
         255 => return 255,
-        a if a >= 248 => (204, 232),
-        a if a >= 236 => (164, 212),
-        _ => (124, 188),
+        // Light glass needs more body than it looks: a pale sheet over a bright, colourful
+        // desktop takes on its colour, and grey text on it loses contrast fast.
+        a if a >= 248 => (220, 232),
+        a if a >= 236 => (192, 212),
+        _ => (160, 188),
     };
     if is_dark() {
         dark
@@ -563,7 +565,35 @@ pub fn pane(color: u32) -> Rgba {
 /// the rail stays a clear step darker than its open tab in every glass style.
 pub fn rail_shade() -> Rgba {
     if glass_on() {
-        with_alpha(c_rail(), if is_dark() { 168 } else { 150 })
+        with_alpha(c_rail(), if is_dark() { 128 } else { 110 })
+    } else {
+        rgb(c_rail())
+    }
+}
+
+/// `top` laid over `under`, flattened into one fill.
+pub fn stack(top: Rgba, under: Rgba) -> Rgba {
+    let a = top.a + under.a * (1.0 - top.a);
+    if a <= 0.0 {
+        return rgba(0);
+    }
+    let ch = |t: f32, u: f32| (t * top.a + u * under.a * (1.0 - top.a)) / a;
+    Rgba {
+        r: ch(top.r, under.r),
+        g: ch(top.g, under.g),
+        b: ch(top.b, under.b),
+        a,
+    }
+}
+
+/// The frame round the islands: the top and status bars, the gutters, the strip behind
+/// the tabs and the corners outside each island. The rail is the rail's shade over the
+/// open tab's sheet (see `shell::rail_fill`), so the rest of the frame is that same pair
+/// flattened into one fill: in glass mode every part of the frame is one material, with
+/// no lighter band where the rail meets the top bar or the tab strip.
+pub fn frame() -> Rgba {
+    if glass_on() {
+        stack(rail_shade(), pane(c_sheet()))
     } else {
         rgb(c_rail())
     }
@@ -617,6 +647,28 @@ pub fn tint(color: u32) -> Rgba {
         rgba(alpha((base - fill) / base.max(1.0)))
     } else {
         rgba(0xffffff00 | alpha((fill - base) / (255.0 - base).max(1.0)))
+    }
+}
+
+/// The fill that, laid over `under`, looks the same as `top` laid straight on the
+/// desktop. A selected row joined to the page sits on its list's sheet, and in glass mode
+/// the page's own fill stacked on the sheet turns nearly solid, a visible step from the
+/// page beside it; this fill makes up only the difference. Solid layers are unchanged.
+pub fn over(top: Rgba, under: Rgba) -> Rgba {
+    if top.a >= 1.0 || under.a <= 0.0 {
+        return top;
+    }
+    if under.a >= top.a {
+        // Already as solid as the target: the best is the target's colour, solid.
+        return Rgba { a: 1.0, ..top };
+    }
+    let a = (top.a - under.a) / (1.0 - under.a);
+    let ch = |t: f32, u: f32| ((t * top.a - u * under.a * (1.0 - a)) / a).clamp(0.0, 1.0);
+    Rgba {
+        r: ch(top.r, under.r),
+        g: ch(top.g, under.g),
+        b: ch(top.b, under.b),
+        a,
     }
 }
 
@@ -689,20 +741,30 @@ pub fn c_text() -> u32 {
 /// let the desktop through under the text too, which would otherwise wash it out.
 pub fn c_secondary() -> u32 {
     if glass_on() {
-        pick(0x45454d, 0xbdbdc6)
+        pick(0x3d3d45, 0xc4c4cc)
     } else {
         pick(0x55555e, 0xa1a1aa)
     }
 }
 pub fn c_muted() -> u32 {
     if glass_on() {
-        pick(0x7c7c86, 0x93939d)
+        pick(0x6a6a74, 0x9c9ca6)
     } else {
-        pick(0x9b9ba4, 0x6e6e78)
+        pick(0x8a8a94, 0x7a7a84)
     }
 }
 pub fn c_term_bg() -> u32 {
     pick(0xfafafa, 0x111113)
+}
+/// Behind an agent's CLI and other terminal screens: the terminal's own shade on a solid
+/// window, and in glass mode a shade over the glass, so the CLI is part of the window
+/// like the chat it swaps with rather than an opaque block cut into it.
+pub fn term_fill() -> Rgba {
+    if glass_on() {
+        code_wash()
+    } else {
+        rgb(c_term_bg())
+    }
 }
 /// Neutral fill for the selected row, so selection does not compete with status colours.
 pub fn c_active() -> u32 {

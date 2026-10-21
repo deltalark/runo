@@ -313,7 +313,7 @@ impl DesignCanvas {
                                 .flex_none()
                                 .rounded(px(3.))
                                 .border_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .bg(rgb(c)),
                         )
                     })

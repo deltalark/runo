@@ -1619,7 +1619,7 @@ impl RunoApp {
                     .py_1()
                     .rounded_full()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(rgb(c_raised()))
                     .shadow_md()
                     .cursor_pointer()
@@ -1873,7 +1873,7 @@ impl RunoApp {
                         .rounded_md()
                         .bg(tint(c_subtle()))
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .font_family(self.mono_font.clone())
                         .text_size(px(11.))
                         .child(command),

@@ -1463,7 +1463,7 @@ impl RunoApp {
                 .gap_2()
                 .rounded_xl()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(tint(c_subtle()))
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
                 .child(
@@ -1520,7 +1520,7 @@ impl RunoApp {
                 .gap_2()
                 .rounded_xl()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(tint(c_subtle()))
                 .child(icon(IconName::Trophy, 14., c_blue()))
                 .child(div().flex_1().text_sm().child(format!(
@@ -1590,7 +1590,7 @@ impl RunoApp {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_canvas()))
             .child(
                 div()
