@@ -9608,8 +9608,26 @@ fn main() {
         startup::time("shortcuts", || bind_keys(cx));
         cx.on_action(quit);
         startup::time("notifications", || desktop_notify::install(cx));
-        startup::time("menus", || cx.set_menus(app_menus()));
         startup::time("main window", || open_main_window(cx));
+        // The menu bar once the window is on screen: setting it at launch can wait on the
+        // window server for several hundred milliseconds, and the window is what people
+        // look for first.
+        let shown = cx.windows().first().and_then(|window| {
+            window
+                .update(cx, |_, window, _| {
+                    // Callbacks run before their frame is drawn, so the second one runs
+                    // once the first frame is up.
+                    window.on_next_frame(|window, _| {
+                        window.on_next_frame(|_, cx| {
+                            startup::time("menus", || cx.set_menus(app_menus()));
+                        });
+                    });
+                })
+                .ok()
+        });
+        if shown.is_none() {
+            cx.set_menus(app_menus());
+        }
     });
 }
 
