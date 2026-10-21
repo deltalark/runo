@@ -701,6 +701,12 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
                 switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
             ]),
+            section("Rail", "Pin places out on the rail so they're one click away. The rest stay in its ⋯ menu.", vec![
+                switch_row("Playbooks", "Saved tasks you run in any project.", st.pinned("Playbooks"), |s, v| s.pin("Playbooks", v)),
+                switch_row("History", "Past Claude Code and Codex conversations on this machine.", st.pinned("History"), |s, v| s.pin("History", v)),
+                switch_row("Notes", "Each project's notes.", st.pinned("Notes"), |s, v| s.pin("Notes", v)),
+                switch_row("Inbox", "What needs you, also under the bell in the top bar.", st.pinned("Inbox"), |s, v| s.pin("Inbox", v)),
+            ]),
             section("Limits", "Keep agents from running away with time, money or tokens.", vec![
                 row("Flag a quiet agent after", "An agent that prints nothing for this long gets a card with Stop. A long build or test run can be quiet too.", Ctl::Dropdown(options(&[("5", "5 minutes"), ("10", "10 minutes"), ("20", "20 minutes"), ("60", "1 hour"), ("0", "Never")]), st.stuck_after_mins.to_string(), Rc::new(|s, v| s.stuck_after_mins = v.parse().unwrap_or(10)))),
                 row("Spending limit per session", &format!("Counts the cost agents report. Once a session reaches it, new turns wait until you raise the limit or send anyway. {}", agent::cost_note()), Ctl::Dropdown(options(&[("0", "No limit"), ("1", "$1"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100")]), st.session_limit_usd.to_string(), Rc::new(|s, v| s.session_limit_usd = v.parse().unwrap_or(0)))),

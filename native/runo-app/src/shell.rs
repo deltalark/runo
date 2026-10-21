@@ -706,6 +706,10 @@ impl Mode {
     /// The places in the rail's More menu, used less than the ones out on the rail.
     pub(crate) const MORE: [Mode; 3] = [Mode::Playbooks, Mode::History, Mode::Notes];
 
+    /// The places Settings > General > Rail can pin out on the rail, in rail order.
+    pub(crate) const PINNABLE: [Mode; 4] =
+        [Mode::Playbooks, Mode::History, Mode::Notes, Mode::Inbox];
+
     /// The current project's own modes, grouped under its badge below the main ones; ⌘7
     /// and ⌘8.
     pub(crate) const PLAN: [Mode; 2] = [Mode::Design, Mode::Architecture];
@@ -1292,6 +1296,12 @@ impl RunoApp {
             };
             work = work.child(self.rail_item(*mode, badge, cx));
         }
+        // Places pinned from Settings follow the main ones, in a fixed order.
+        for mode in Mode::PINNABLE {
+            if cx.global::<AppSettings>().pinned(mode.label()) {
+                work = work.child(self.rail_item(mode, None, cx));
+            }
+        }
         let foot = group().child(self.rail_more(cx)).child(
             div()
                 .relative()
@@ -1325,9 +1335,24 @@ impl RunoApp {
     /// It lights up while one of them is open.
     fn rail_more(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = self.menu.as_deref() == Some("rail-more");
-        let on = Mode::MORE.contains(&self.mode());
+        let st = cx.global::<AppSettings>();
+        let unpinned: Vec<Mode> = Mode::MORE
+            .into_iter()
+            .filter(|m| !st.pinned(m.label()))
+            .collect();
+        // Everything it held is pinned out on the rail.
+        if unpinned.is_empty() {
+            return div().into_any_element();
+        }
+        let on = unpinned.contains(&self.mode());
+        let tip: SharedString = unpinned
+            .iter()
+            .map(|m| m.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .into();
         let mut list = div().v_flex().p_1();
-        for mode in Mode::MORE {
+        for mode in unpinned {
             let here = self.mode() == mode;
             list = list.child(
                 div()
@@ -1371,9 +1396,7 @@ impl RunoApp {
                     .when(!(on || open), |el| el.hover(|el| el.bg(tint(c_subtle()))))
                     .when(on, |el| el.child(rail_tile("more")))
                     .when(!open, |el| {
-                        el.tooltip(|window, cx| {
-                            Tooltip::new("Playbooks, History and Notes").build(window, cx)
-                        })
+                        el.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.menu = match this.menu.as_deref() {
