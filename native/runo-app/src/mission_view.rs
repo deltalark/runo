@@ -138,6 +138,8 @@ impl RunoApp {
             .v_flex()
             .bg(pane(c_sheet()))
             .child(shell::sheet_corner())
+            // The island's bottom-left corner, as on the Sessions list.
+            .child(shell::frame_corner(false, true, pane(c_sheet())))
             .child(
                 shell::list_header(
                     "Missions",
@@ -205,9 +207,12 @@ impl RunoApp {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
                     .flex()
                     .bg(glass_fill(c_canvas()))
-                    .child(main),
+                    .child(main)
+                    .child(shell::frame_corner(true, false, glass_fill(c_canvas())))
+                    .child(shell::frame_corner(false, false, glass_fill(c_canvas()))),
             )
             .into_any_element()
     }

@@ -4521,17 +4521,13 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
-            .rounded_bl(px(shell::ISLAND_R))
             // Beside the session tabs the sheet meets the frame, so it curves away there.
             .when(
                 self.mode() == Mode::Sessions && !self.tabs.is_empty(),
-                |el| {
-                    el.rounded_tr(px(shell::ISLAND_R))
-                        .child(shell::frame_corner(true, false))
-                },
+                |el| el.child(shell::frame_corner(true, false, pane(c_sheet()))),
             )
             .child(shell::sheet_corner())
-            .child(shell::frame_corner(false, true))
+            .child(shell::frame_corner(false, true, pane(c_sheet())))
             .child(
                 // The list's own header: what it holds and how much is running, with the
                 // new-session button beside it.
@@ -8930,8 +8926,10 @@ impl Render for RunoApp {
         // The page is an island under the session tabs. Pages with their own list beside
         // the content paint the two layers themselves, so the list is as clear as the
         // sidebar.
-        let page_fill = if matches!(self.view, View::Review | View::GitHub | View::Settings)
-            || (self.view == View::Architecture && self.arch_diagram_open())
+        let page_fill = if matches!(
+            self.view,
+            View::Review | View::GitHub | View::Settings | View::Missions
+        ) || (self.view == View::Architecture && self.arch_diagram_open())
             || (self.view == View::Design && self.design_canvas_open())
         {
             rgba(0)

@@ -2823,17 +2823,25 @@ impl RunoApp {
             .flex()
             .child(nav)
             .child(
-                // The page holds the island's right corners, so the frame's corners lie
-                // over clear space instead of over a square fill.
+                // The page paints the island's right corners over its own fill.
                 div()
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
                     .flex()
-                    .rounded_tr(px(crate::shell::ISLAND_R))
-                    .rounded_br(px(crate::shell::ISLAND_R))
                     .bg(glass_fill(c_canvas()))
-                    .child(main),
+                    .child(main)
+                    .child(crate::shell::frame_corner(
+                        true,
+                        false,
+                        glass_fill(c_canvas()),
+                    ))
+                    .child(crate::shell::frame_corner(
+                        false,
+                        false,
+                        glass_fill(c_canvas()),
+                    )),
             )
             .into_any_element()
     }

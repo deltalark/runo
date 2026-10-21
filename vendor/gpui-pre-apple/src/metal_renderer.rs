@@ -3,8 +3,8 @@ use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use core_graphics::geometry::CGSize;
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    point, size, AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path,
+    Point, PrimitiveBatch, ScaledPixels, Scene, Size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -31,9 +31,12 @@ pub(crate) type PointF = gpui::Point<f32>;
 const SHADERS_METALLIB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/shaders.metallib"));
 #[cfg(feature = "runtime_shaders")]
 const SHADERS_SOURCE_FILE: &str = include_str!(concat!(env!("OUT_DIR"), "/stitched_shaders.metal"));
-// Use 4x MSAA, all devices support it.
+// Paths use 8x MSAA where the device supports it, else 4x, which all devices support.
+// At 4x a curve has only five shades along its edge and shows visible steps, most of
+// all over a translucent window.
 // https://developer.apple.com/documentation/metal/mtldevice/1433355-supportstexturesamplecount
 const PATH_SAMPLE_COUNT: u32 = 4;
+const PATH_SAMPLE_COUNT_HIGH: u32 = 8;
 /// Metal requires the offset a buffer is bound at to be 256-byte aligned.
 const INSTANCE_BUFFER_ALIGNMENT: usize = 256;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
@@ -293,6 +296,12 @@ impl MetalRenderer {
             },
         );
 
+        let path_sample_count = if device.supports_texture_sample_count(PATH_SAMPLE_COUNT_HIGH as _)
+        {
+            PATH_SAMPLE_COUNT_HIGH
+        } else {
+            PATH_SAMPLE_COUNT
+        };
         let paths_rasterization_pipeline_state = build_path_rasterization_pipeline_state(
             &device,
             &library,
@@ -300,7 +309,7 @@ impl MetalRenderer {
             "path_rasterization_vertex",
             "path_rasterization_fragment",
             MTLPixelFormat::BGRA8Unorm,
-            PATH_SAMPLE_COUNT,
+            path_sample_count,
         );
         let path_sprites_pipeline_state = build_path_sprite_pipeline_state(
             &device,
@@ -387,7 +396,7 @@ impl MetalRenderer {
             core_video_texture_cache,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
-            path_sample_count: PATH_SAMPLE_COUNT,
+            path_sample_count,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
         }

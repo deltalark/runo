@@ -591,9 +591,20 @@ pub fn stack(top: Rgba, under: Rgba) -> Rgba {
 /// open tab's sheet (see `shell::rail_fill`), so the rest of the frame is that same pair
 /// flattened into one fill: in glass mode every part of the frame is one material, with
 /// no lighter band where the rail meets the top bar or the tab strip.
+///
+/// It is also always a step more opaque than the content layer, the most solid island.
+/// Where the frame meets an island's rounded corner or an open tab, the frame is painted
+/// as the difference over the island's own square fill (see `over`), so the two never
+/// overlap or leave a gap along the antialiased curve; that only works while the frame
+/// is the more opaque of the two.
 pub fn frame() -> Rgba {
     if glass_on() {
-        stack(rail_shade(), pane(c_sheet()))
+        let f = stack(rail_shade(), pane(c_sheet()));
+        let floor = (GLASS.load(Ordering::Relaxed) as f32 + 8.0).min(255.0) / 255.0;
+        Rgba {
+            a: f.a.max(floor),
+            ..f
+        }
     } else {
         rgb(c_rail())
     }

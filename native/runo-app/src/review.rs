@@ -246,6 +246,7 @@ impl RunoApp {
             .enumerate()
             .map(|(i, s)| shell::cascade(self.review_row(s, cx), format!("review-in-{}", s.id), i))
             .collect();
+        // The list and the page paint the island's corners over their own fills.
         let side = div()
             .w(px(LIST_WIDTH))
             .flex_none()
@@ -253,6 +254,8 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
+            .child(shell::frame_corner(true, true, pane(c_sheet())))
+            .child(shell::frame_corner(false, true, pane(c_sheet())))
             .child(
                 div()
                     .px_3()
@@ -402,9 +405,12 @@ impl RunoApp {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
                     .flex()
                     .bg(glass_fill(c_canvas()))
-                    .child(main),
+                    .child(main)
+                    .child(shell::frame_corner(true, false, glass_fill(c_canvas())))
+                    .child(shell::frame_corner(false, false, glass_fill(c_canvas()))),
             )
             .into_any_element()
     }
