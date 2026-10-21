@@ -1205,7 +1205,7 @@ impl State {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1525,5 +1525,44 @@ mod tests {
                 tokens: 42
             }
         );
+    }
+
+    /// Held by any test that changes process-wide environment variables,
+    /// since cargo runs tests on parallel threads.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Puts the named variables back as they were when dropped.
+    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, old) in &self.0 {
+                match old {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn data_dir_is_runo_home_else_home_dot_runo() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv(
+            ["RUNO_HOME", "HOME"]
+                .into_iter()
+                .map(|k| (k, std::env::var_os(k)))
+                .collect(),
+        );
+        let base = std::env::temp_dir().join(format!("runo-data-dir-{}", std::process::id()));
+
+        let runo_home = base.join("runo-home");
+        std::env::set_var("RUNO_HOME", &runo_home);
+        assert_eq!(data_dir(), runo_home);
+
+        let home = base.join("home");
+        std::env::remove_var("RUNO_HOME");
+        std::env::set_var("HOME", &home);
+        assert_eq!(data_dir(), home.join(".runo"));
     }
 }
