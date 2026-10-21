@@ -3716,53 +3716,57 @@ impl RunoApp {
                 rows = rows.child(shell::card_rule());
             }
             rows = rows.child(stagger(
-                div()
-                    .id(("past", i))
-                    .mx_1()
-                    .my_1()
-                    .px_3()
-                    .py_2()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .rounded_lg()
-                    .cursor_pointer()
-                    .hover(|el| el.bg(tint(c_active())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.resume_past(item.clone(), cx);
-                        cx.notify();
-                    }))
-                    .child(self.provider_badge(provider, 28.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .v_flex()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(past.title.clone()),
-                            )
-                            .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
-                                format!(
-                                    "{}  ·  {place}  ·  {}",
-                                    provider.name,
-                                    history::ago(past.modified)
-                                ),
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(rgb(c_blue()))
-                            .child(if open { "Open" } else { "Resume" })
-                            .child(icon(IconName::ArrowRight, 12., c_blue())),
-                    ),
+                shell::hover_wash(
+                    div().id(("past", i)).relative(),
+                    ("past", i),
+                    tint(c_active()),
+                    8.,
+                )
+                .mx_1()
+                .my_1()
+                .px_3()
+                .py_2()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_lg()
+                .cursor_pointer()
+                .active(|el| el.opacity(0.85))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.resume_past(item.clone(), cx);
+                    cx.notify();
+                }))
+                .child(self.provider_badge(provider, 28.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .v_flex()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(past.title.clone()),
+                        )
+                        .child(div().truncate().text_xs().text_color(rgb(c_muted())).child(
+                            format!(
+                                "{}  ·  {place}  ·  {}",
+                                provider.name,
+                                history::ago(past.modified)
+                            ),
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(rgb(c_blue()))
+                        .child(if open { "Open" } else { "Resume" })
+                        .child(icon(IconName::ArrowRight, 12., c_blue())),
+                ),
                 SharedString::from(format!("past-{i}")),
                 i.min(12),
             ));
@@ -4879,9 +4883,9 @@ impl RunoApp {
                         .object_fit(ObjectFit::Contain),
                 );
             }
+            let group = SharedString::from(format!("user-msg-{sid}-{index}"));
             return fade(
-                div()
-                    .id(("message", index))
+                shell::reveal_group(div().id(("message", index)), group.clone())
                     .group("user-msg")
                     .w_full()
                     .v_flex()
@@ -4894,7 +4898,7 @@ impl RunoApp {
                             .items_start()
                             .gap_1()
                             .when(can_undo, |el| {
-                                el.child(
+                                el.child(shell::reveal(
                                     self.ghost_button_sized(
                                         ("restore", index),
                                         IconName::RotateCcw,
@@ -4910,10 +4914,11 @@ impl RunoApp {
                                             cx.notify();
                                         },
                                     )),
-                                )
+                                    group.clone(),
+                                ))
                             })
                             .when(!working, |el| {
-                                el.child(
+                                el.child(shell::reveal(
                                     self.ghost_button_sized(
                                         ("edit-msg", index),
                                         IconName::Pencil,
@@ -4929,7 +4934,8 @@ impl RunoApp {
                                             cx.notify();
                                         },
                                     )),
-                                )
+                                    group.clone(),
+                                ))
                             })
                             .child(if message.playbook.is_empty() {
                                 div()
@@ -5074,9 +5080,9 @@ impl RunoApp {
                 n,
                 if n == 1 { "" } else { "s" }
             ));
+        let group = SharedString::from(format!("msg-{}-{index}", self.selected.unwrap_or(0)));
         fade(
-            div()
-                .id(("message", index))
+            shell::reveal_group(div().id(("message", index)), group.clone())
                 .group("message")
                 .v_flex()
                 .gap_2()
@@ -5165,7 +5171,7 @@ impl RunoApp {
                             })
                             .when(!live, |el| {
                                 let sid = self.selected.unwrap_or(0);
-                                el.child(
+                                el.child(shell::reveal(
                                     self.ghost_button_sized(
                                         ("fork", index),
                                         IconName::GitFork,
@@ -5180,9 +5186,10 @@ impl RunoApp {
                                             cx.notify();
                                         },
                                     )),
-                                )
+                                    group.clone(),
+                                ))
                             })
-                            .child(
+                            .child(shell::reveal(
                                 self.ghost_button_sized(
                                     ("copy", index),
                                     IconName::Copy,
@@ -5203,7 +5210,8 @@ impl RunoApp {
                                         cx.notify();
                                     },
                                 )),
-                            ),
+                                group,
+                            )),
                     )
                 }),
         )
