@@ -4190,7 +4190,10 @@ impl ArchEditor {
             .gap_1()
             .border_b_1()
             .border_color(divider())
-            .bg(tint(c_canvas()))
+            // The page's own surface: the island under the editor is clear, and `tint`
+            // of the page colour is nothing in glass styles, which let the desktop show
+            // through the bar.
+            .bg(glass_fill(c_canvas()))
             .child(div().flex_1().min_w_0().child(tabs))
             .child(
                 icon_btn(
@@ -5656,7 +5659,7 @@ impl ArchEditor {
                     .items_center()
                     .border_t_1()
                     .border_color(divider())
-                    .bg(tint(c_canvas()))
+                    .bg(glass_fill(c_canvas()))
                     .text_size(px(11.5))
                     .text_color(rgb(c_muted()))
                     .child(div().min_w_0().truncate().child(status)),
