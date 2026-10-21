@@ -2436,7 +2436,7 @@ impl RunoApp {
 const QUICK_HOME: u64 = 360;
 
 /// The soft accent light at the top of Home, behind the greeting and the prompt.
-fn home_glow() -> AnyElement {
+pub(crate) fn home_glow() -> AnyElement {
     let accent = c_blue();
     let blob = |left: f32, top: f32, w: f32, h: f32, color: u32, a: f32| {
         div()

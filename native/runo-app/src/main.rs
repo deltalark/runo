@@ -1612,7 +1612,7 @@ impl RunoApp {
             menu: None,
             menu_agent: None,
             shown_mode: None,
-            settings_page: SettingsPage::General,
+            settings_page: SettingsPage::Overview,
             settings_search,
             settings_inputs: HashMap::new(),
             settings_areas: HashMap::new(),
