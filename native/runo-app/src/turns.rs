@@ -1077,6 +1077,10 @@ impl RunoApp {
 
     /// Results of one-off background commands.
     pub(crate) fn handle_output(&mut self, key: String, result: Result<String, String>) {
+        if key.starts_with("guide:") || key.starts_with("split:") {
+            self.handle_reviewable(&key, result);
+            return;
+        }
         if key.starts_with("resolve:") {
             self.handle_resolve(&key, result);
             return;

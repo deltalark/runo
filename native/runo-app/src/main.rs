@@ -60,6 +60,7 @@ mod proof_ui;
 mod pty;
 mod radar;
 mod review;
+mod reviewable;
 mod schedule;
 mod sessions;
 mod settings;
@@ -253,6 +254,11 @@ struct RunoApp {
     /// Clash radar: pairs of lines of work that change the same lines, and the one shown.
     git_radar: Option<Vec<radar::Hit>>,
     git_radar_sel: Option<usize>,
+    /// Make it reviewable: the branch whose review kit is open, and the agent's guides and
+    /// split plans by branch, None while it's writing them.
+    git_kit: Option<String>,
+    git_guides: HashMap<String, Option<String>>,
+    git_splits: HashMap<String, Option<Vec<reviewable::SplitPart>>>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1536,6 +1542,9 @@ impl RunoApp {
             git_agent_fix: HashMap::new(),
             git_radar: None,
             git_radar_sel: None,
+            git_kit: None,
+            git_guides: HashMap::new(),
+            git_splits: HashMap::new(),
             git_repo: None,
             git_undo: None,
             git_working: None,
