@@ -94,6 +94,9 @@ impl RunoApp {
                         })),
                 );
             }
+            Waiting::Decision(d) => {
+                actions = actions.children(self.decision_chips("inbox-dec", n, id, &d, cx));
+            }
         }
         actions
     }
@@ -159,6 +162,9 @@ impl RunoApp {
                     provider.name
                 ),
             ),
+            Some(Waiting::Decision(d)) => {
+                (IconName::CircleQuestionMark, c_amber(), d.question.clone())
+            }
             None if need == Need::Failed => (
                 IconName::CircleX,
                 c_red(),

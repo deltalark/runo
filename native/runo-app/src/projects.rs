@@ -1022,9 +1022,11 @@ impl RunoApp {
             // and the first sessions run in the folder until something is committed.
             let _ = git::initial_commit(&path_str);
         }
-        match self.add_project(&path, name, color, glyph, start) {
+        // A Crew project starts in Crew's chat rather than the New session dialog.
+        match self.add_project(&path, name, color, glyph, start && !crew) {
             Ok(()) => {
                 self.project_form = None;
+                let mut pid = None;
                 if let Some(p) = self.state.projects.last_mut() {
                     p.setup = setup;
                     p.checks = checks;
@@ -1032,8 +1034,12 @@ impl RunoApp {
                     if crew {
                         p.mode = crate::crew::MODE_CREW.into();
                     }
+                    pid = Some(p.id);
                 }
                 self.save();
+                if let Some(pid) = pid.filter(|_| crew && start) {
+                    self.open_crew(pid, cx);
+                }
             }
             Err(why) => {
                 crate::applog::warn("project", format!("could not add the project: {why}"));
@@ -1692,8 +1698,13 @@ impl RunoApp {
                         .child(check(
                             "project-start",
                             form.start_session,
-                            "Start a session",
-                            "Open a new session in this project right away.".into(),
+                            if form.crew { "Open Crew" } else { "Start a session" },
+                            if form.crew {
+                                "Open this project's Crew chat right away."
+                            } else {
+                                "Open a new session in this project right away."
+                            }
+                            .into(),
                             |f, v| f.start_session = v,
                         )),
                 )

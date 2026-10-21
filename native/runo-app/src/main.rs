@@ -204,6 +204,8 @@ enum Jump {
     Playbook(u64),
     /// Switch the top bar to a project.
     Project(u64),
+    /// Open a Crew project's chat.
+    Crew(u64),
     AddProject,
     Settings(SettingsPage),
 }
@@ -2871,6 +2873,10 @@ impl RunoApp {
             },
             Jump::Session(id) => self.open_session(id, window, cx),
             Jump::Project(pid) => self.switch_project(pid, window, cx),
+            Jump::Crew(pid) => {
+                self.open_crew(pid, cx);
+                self.right_tab = RightTab::Threads;
+            }
             Jump::AddProject => self.pick_project(cx),
             Jump::Settings(page) => {
                 self.open_settings();
@@ -2981,6 +2987,15 @@ impl RunoApp {
                     .action(Box::new(AskRuno)),
             );
             command_jumps.push(Jump::Action);
+        }
+        if let Some(pid) = self.current_project().filter(|pid| self.crew_mode(*pid)) {
+            commands = commands.item(
+                CommandItem::new()
+                    .label("Open Crew")
+                    .icon(crew_view::CREW_ICON)
+                    .keywords(["crew", "threads", "chat"]),
+            );
+            command_jumps.push(Jump::Crew(pid));
         }
         groups.push((commands, command_jumps));
 
