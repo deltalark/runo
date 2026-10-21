@@ -485,7 +485,7 @@ impl RunoApp {
                     .p_3()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .when(isolated > 0, |el| {
                         el.child(check(
                             "remove-worktrees",
@@ -1133,7 +1133,7 @@ impl RunoApp {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_subtle()))
             .when(!editing, |el| {
                 el.cursor_pointer()
@@ -1205,7 +1205,7 @@ impl RunoApp {
             .gap(px(2.))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_canvas()));
         for (j, (value, start, glyph, text)) in [
             (false, None, IconName::FolderOpen, "Folder"),
@@ -1285,7 +1285,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(tint(c_subtle()))
                     .cursor_pointer()
                     .hover(|el| el.border_color(rgb(c_muted())))
@@ -1367,7 +1367,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(tint(c_subtle()))
                     .child(icon(IconName::FolderPlus, 15., c_muted()))
                     .child(
@@ -1531,7 +1531,7 @@ impl RunoApp {
                         .rounded_lg()
                         .bg(tint(c_subtle()))
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(icon(ICONS[form.icon].1, 18., accent)),
                 )
                 .child(

@@ -1673,7 +1673,7 @@ fn chip(text: String, color: u32) -> Div {
         .items_center()
         .rounded_full()
         .border_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .text_size(px(11.5))
         .text_color(rgb(color))
         .child(text)
@@ -1709,7 +1709,7 @@ impl RunoApp {
             .v_flex()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_canvas()))
             .overflow_hidden()
             .child(
@@ -1813,7 +1813,7 @@ impl RunoApp {
                         .gap_2()
                         .text_size(px(12.))
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(
                             div()
                                 .w(px(150.))
@@ -1905,7 +1905,7 @@ impl RunoApp {
             .p_4()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_raised()))
             .child(
                 div()
@@ -2024,7 +2024,7 @@ impl RunoApp {
                     .gap_1()
                     .rounded_full()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .text_size(px(12.))
                     .text_color(rgb(c_secondary()))
@@ -2043,7 +2043,7 @@ impl RunoApp {
             .p_4()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_raised()))
             .child(
                 div()
@@ -2097,7 +2097,7 @@ impl RunoApp {
             .v_flex()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_raised()))
             .overflow_hidden()
             .child(
@@ -2108,7 +2108,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(
                         div()
                             .flex_1()
@@ -2159,7 +2159,7 @@ impl RunoApp {
                     .px_4()
                     .py_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .text_size(px(11.5))
                     .text_color(rgb(if self.arch.error.is_some() {
                         c_red()
@@ -2238,7 +2238,7 @@ impl RunoApp {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .bg(rail_shade())
+                    .bg(settings::frame())
                     .child(icon(Mode::Architecture.glyph(), 16., c_blue()))
                     .child(
                         div()

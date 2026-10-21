@@ -182,7 +182,7 @@ impl DesignCanvas {
             .v_flex()
             .gap(px(6.))
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(
                 div()
                     .flex()
@@ -388,7 +388,7 @@ impl DesignCanvas {
                     .h(px(h * scale))
                     .rounded(px(10.))
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .flex()
                     .items_center()
                     .justify_center()

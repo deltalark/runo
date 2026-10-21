@@ -149,7 +149,7 @@ impl DesignCanvas {
             .pt_2()
             .pb_2()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(components::asset_heading("Libraries").px_0().pt_0())
             .child(
                 div()

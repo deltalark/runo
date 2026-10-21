@@ -470,7 +470,7 @@ impl RunoApp {
                     })
                     .when(files == 0 || running, |el| {
                         el.border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .text_color(rgb(c_muted()))
                     })
                     .child(icon(

@@ -675,7 +675,7 @@ impl RunoApp {
             .items_center()
             .gap_1()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(
                 nav("page-back", IconName::ArrowLeft, "Back").on_click(cx.listener(
                     |this, _, _, _| {
@@ -958,7 +958,7 @@ impl RunoApp {
                     .p_3()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(tint(c_subtle()))
                     .flex()
                     .items_center()
@@ -1080,7 +1080,7 @@ impl RunoApp {
         let mut bar = div()
             .flex_none()
             .border_t_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .v_flex()
             .child(
                 div()

@@ -265,7 +265,7 @@ impl RunoApp {
                         .px(px(14.))
                         .py(px(10.))
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .text_size(px(13.5))
                         .child(message.note.clone()),
                 )
@@ -924,7 +924,7 @@ impl RunoApp {
                             .gap(px(5.))
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .text_size(px(11.5))
                             .text_color(rgb(c_secondary()))
                             .child(self.provider_badge(provider, 16.))
@@ -947,7 +947,7 @@ impl RunoApp {
                 )
             })
             .when(!auto.runs.is_empty(), |el| el.child(history))
-            .child(div().h(px(1.)).bg(rgb(c_border())))
+            .child(div().h(px(1.)).bg(divider()))
             .child(if confirming {
                 div()
                     .flex()
@@ -1403,7 +1403,7 @@ impl RunoApp {
                         .text_color(rgb(c_text()))
                 })
                 .when(!on, |el| {
-                    el.border_color(rgb(c_border()))
+                    el.border_color(divider())
                         .text_color(rgb(c_secondary()))
                         .hover(|el| el.bg(tint(c_subtle())))
                 })
@@ -1460,7 +1460,7 @@ impl RunoApp {
             .gap(px(2.))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_canvas()));
         // Presets carry their minutes; the others pick a kind of schedule.
         let options = SCHEDULES
@@ -1674,7 +1674,7 @@ impl RunoApp {
                     .items_center()
                     .gap_3()
                     .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(linear_gradient(
                         180.,
                         linear_color_stop(
@@ -1846,7 +1846,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(
                         div()
                             .flex_1()

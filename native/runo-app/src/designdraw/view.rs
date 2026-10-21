@@ -1841,7 +1841,7 @@ impl DesignCanvas {
                             .gap_1()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .cursor_pointer()
                             .text_size(px(11.5))
                             .text_color(rgb(c_secondary()))
@@ -2070,7 +2070,7 @@ impl DesignCanvas {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()))
             .shadow_lg()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -4178,7 +4178,7 @@ impl DesignCanvas {
             .rounded_md()
             .cursor_pointer()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .hover(|el| el.bg(tint(c_subtle())))
             .child(icon(IconName::Sparkles, 14., c_blue()))
             .child(
@@ -4841,7 +4841,7 @@ impl DesignCanvas {
                     .gap(px(2.))
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(rgb(c_raised()))
                     .shadow_md()
                     .text_size(px(11.))
@@ -4868,7 +4868,7 @@ impl DesignCanvas {
                                 )
                             })),
                     )
-                    .child(div().w(px(1.)).h(px(14.)).bg(rgb(c_border())))
+                    .child(div().w(px(1.)).h(px(14.)).bg(divider()))
                     .child(
                         chip("design-layout-gap-less")
                             .child(icon(IconName::Minus, 11., c_secondary()))
@@ -4890,7 +4890,7 @@ impl DesignCanvas {
                                 this.set_style("gap", &format!("{}px", gap + 4.), cx)
                             })),
                     )
-                    .child(div().w(px(1.)).h(px(14.)).bg(rgb(c_border())))
+                    .child(div().w(px(1.)).h(px(14.)).bg(divider()))
                     .child(
                         chip("design-layout-align")
                             .child(format!("Align {align_word}"))
@@ -5209,7 +5209,7 @@ impl DesignCanvas {
                         .rounded_xl()
                         .bg(float(c_canvas()))
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
@@ -5272,7 +5272,8 @@ impl DesignCanvas {
             .flex_1()
             .min_h_0()
             .overflow_hidden()
-            .bg(rgb(c_subtle()))
+            // The page under the screens: translucent in glass mode, like every page.
+            .bg(glass_fill(c_subtle()))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right))
@@ -5380,7 +5381,7 @@ impl DesignCanvas {
                             .py_2()
                             .rounded_lg()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(float(c_canvas()))
                             .shadow_md()
                             .text_size(px(12.5))
@@ -5447,8 +5448,8 @@ impl DesignCanvas {
                     .flex()
                     .items_center()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
-                    .bg(tint(c_canvas()))
+                    .border_color(divider())
+                    .bg(glass_fill(c_canvas()))
                     .text_size(px(11.5))
                     .text_color(rgb(c_muted()))
                     .child(div().min_w_0().truncate().child(status)),
@@ -5990,7 +5991,7 @@ fn template_card(
         .p(px(6.))
         .rounded_lg()
         .border_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .cursor_pointer()
         .hover(|el| el.bg(tint(c_subtle())).border_color(rgb(c_blue())))
         .child(
@@ -6137,7 +6138,7 @@ fn wireframe(kind: &str, device: Device) -> Div {
         .overflow_hidden()
         .rounded(px(5.))
         .border_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .bg(rgb(c_canvas()));
     match kind {
         "Sign in" => frame

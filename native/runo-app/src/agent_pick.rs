@@ -243,7 +243,7 @@ impl AgentPick {
                 div()
                     .flex()
                     .child(agents)
-                    .child(div().w(px(1.)).bg(rgb(c_border())))
+                    .child(div().w(px(1.)).bg(divider()))
                     .child(models),
             );
         Some(

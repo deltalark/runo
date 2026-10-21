@@ -729,7 +729,7 @@ fn menu_box(key: &str, list: impl IntoElement) -> Div {
     div()
         .rounded_lg()
         .border_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .bg(rgb(c_raised()))
         .shadow_lg()
         .occlude()
@@ -848,7 +848,7 @@ fn empty_hint(id: &'static str, name: IconName, title: &str, body: &str) -> AnyE
                     .justify_center()
                     .bg(tint(c_subtle()))
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(
                         icon(name, 20., c_secondary()).animated(
                             (id, 1usize),
@@ -2968,7 +2968,7 @@ impl RunoApp {
                                     .items_center()
                                     .gap(px(16.))
                                     .border_t_1()
-                                    .border_color(rgb(c_border()))
+                                    .border_color(divider())
                                     .text_size(px(11.5))
                                     .text_color(rgb(c_muted()))
                                     .child(hint("↑↓", "move"))
@@ -3863,7 +3863,7 @@ impl RunoApp {
             })
             .when(!primary, |el| {
                 el.border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(rgb(c_raised()))
                     .text_color(rgb(c_text()))
                     .hover(|el| el.bg(tint(c_subtle())))
@@ -4303,7 +4303,7 @@ impl RunoApp {
             // A hairline between projects, so each group reads as one block.
             let mut group = div().v_flex().mx_1().when(!first, |el| {
                 el.mt(px(8.))
-                    .child(div().mx_2().mb(px(8.)).h(px(1.)).bg(rgb(c_border())))
+                    .child(div().mx_2().mb(px(8.)).h(px(1.)).bg(divider()))
             });
             first = false;
             group = group.child(
@@ -4433,7 +4433,7 @@ impl RunoApp {
                             .cursor_pointer()
                             .opacity(0.)
                             .group_hover("project", |el| el.opacity(1.))
-                            .hover(|el| el.bg(rgb(c_border())))
+                            .hover(|el| el.bg(divider()))
                             .tooltip(|window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(
                                     "New session in this project",
@@ -4694,7 +4694,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .hover(|el| el.bg(tint(c_subtle())))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -4739,7 +4739,7 @@ impl RunoApp {
             .mt_1()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .overflow_hidden()
             .child(
                 div()
@@ -4798,7 +4798,7 @@ impl RunoApp {
                         .flex()
                         .items_center()
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .text_size(px(12.))
                         .text_color(rgb(c_muted()))
                         .child(format!("{more} more")),
@@ -5004,7 +5004,7 @@ impl RunoApp {
             .ml(px(5.))
             .pl_3()
             .border_l_1()
-            .border_color(rgb(c_border()));
+            .border_color(divider());
         let shown = if open { message.steps.len() } else { 0 };
         for (i, step) in message.steps.iter().take(shown).enumerate() {
             steps = steps.child(stagger(
@@ -5214,7 +5214,7 @@ impl RunoApp {
                         el.border_color(rgb(c_blue())).bg(tint(c_selected()))
                     })
                     .when(!current, |el| {
-                        el.border_color(rgb(c_border()))
+                        el.border_color(divider())
                             .hover(|el| el.bg(tint(c_subtle())))
                     })
                     .when(racer.archived, |el| el.opacity(0.5))
@@ -5260,7 +5260,7 @@ impl RunoApp {
             .gap_2()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_subtle()))
             .child(
                 div()
@@ -5365,7 +5365,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(tint(c_subtle()))
                     .child(
                         div()
@@ -5402,7 +5402,7 @@ impl RunoApp {
             .items_center()
             .gap_3()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(if self.renaming {
                 div()
                     .w(px(360.))
@@ -5831,7 +5831,7 @@ impl RunoApp {
                     .pb(px(4.))
                     .px_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .max_w(px(220.))
                     .whitespace_normal()
                     .text_size(px(11.5))
@@ -6125,7 +6125,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded(px(12.))
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(rgb(c_raised()))
                     .shadow_sm()
                     .drag_over::<ExternalPaths>(|el, _, _, _| el.border_color(rgb(c_blue())))
@@ -6273,7 +6273,7 @@ impl RunoApp {
                         .justify_center()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .bg(tint(c_subtle()))
                         .text_xs()
                         .font_weight(FontWeight::MEDIUM)
@@ -6631,7 +6631,7 @@ impl RunoApp {
                     el.border_color(rgb(c_blue())).bg(tint(c_selected()))
                 })
                 .when(!selected, |el| {
-                    el.border_color(rgb(c_border()))
+                    el.border_color(divider())
                         .hover(|el| el.bg(tint(c_subtle())))
                 })
         };
@@ -6770,7 +6770,7 @@ impl RunoApp {
                     .rounded_xl()
                     .border_1()
                     .border_dashed()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .text_sm()
                     .text_color(rgb(c_secondary()))
@@ -7207,7 +7207,7 @@ impl RunoApp {
                     .gap_3()
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .when(archived, |el| el.opacity(0.7))
                     .hover(|el| el.bg(tint(c_subtle())))
@@ -7645,7 +7645,7 @@ impl RunoApp {
                         .gap_2()
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .bg(rgb(c_canvas()))
                         .font_family(cx.theme().font_family.clone())
                         .child(icon(IconName::MessageSquareText, 13., c_blue()))
@@ -7781,7 +7781,7 @@ impl RunoApp {
                                 .when(staged, |el| {
                                     el.bg(rgb(c_blue())).border_color(rgb(c_blue()))
                                 })
-                                .when(!staged, |el| el.border_color(rgb(c_border())))
+                                .when(!staged, |el| el.border_color(divider()))
                                 .hover(|el| el.border_color(rgb(c_blue())))
                                 .tooltip(move |window, cx| {
                                     gpui_kit::component::tooltip::Tooltip::new(if partly {
@@ -8079,7 +8079,7 @@ impl RunoApp {
                                 .items_center()
                                 .gap_2()
                                 .border_b_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .child(icon(IconName::File, 12., c_muted()))
                                 .child(
                                     div()
@@ -8184,11 +8184,13 @@ impl RunoApp {
                     .text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
+                let (rest, hover) = shell::tab_chip();
                 el.h(px(24.))
                     .mb(px(3.))
-                    .rounded_md()
-                    .text_color(rgb(c_muted()))
-                    .hover(|el| el.text_color(rgb(c_text())))
+                    .rounded(px(7.))
+                    .bg(rest)
+                    .text_color(rgb(c_secondary()))
+                    .hover(move |el| el.bg(hover).text_color(rgb(c_text())))
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.shell_tab = None;
@@ -8887,6 +8889,7 @@ impl Render for RunoApp {
         // sidebar.
         let page_fill = if matches!(self.view, View::Review | View::GitHub | View::Settings)
             || (self.view == View::Architecture && self.arch_diagram_open())
+            || (self.view == View::Design && self.design_canvas_open())
         {
             rgba(0)
         } else {
@@ -9218,7 +9221,7 @@ impl Render for RunoApp {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .bg(rail_shade())
+                    .bg(settings::frame())
                     .text_size(px(11.5))
                     .gap_4()
                     .child(fade(

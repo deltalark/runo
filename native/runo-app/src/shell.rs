@@ -198,12 +198,18 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         )
 }
 
-/// The rail's own fill: the open tab's sheet under the whole column, then the rail's
-/// shade over it as one path, its whole column less the tab and the curves into it.
-/// Where the shade's edge is antialiased it blends into the sheet beneath, never into
-/// the desktop, so the outline stays one smooth curve in every glass style.
-fn rail_fill(base: Rgba) -> AnyElement {
+/// The rail's own fill: the sheet under the whole column, then the rail's shade over it
+/// as one path, its whole column less the tab and the curves into it. Where the shade's
+/// edge is antialiased it blends into the sheet beneath, never into the desktop, so the
+/// outline stays one smooth curve in every glass style. The rest of the frame is this
+/// same pair flattened (see `settings::frame`), so the rail and the bars match.
+///
+/// A tab cut from the page rather than a list (`tab`) has the difference between the
+/// page and the sheet laid in the hole too, so it is the very shade of the page.
+fn rail_fill(tab: Rgba) -> AnyElement {
+    let base = pane(c_sheet());
     let fill = Hsla::from(rail_shade());
+    let lift = (tab != base).then(|| Hsla::from(settings::over(tab, base)));
     let shade = canvas(
         |_, _, _| TAB_CUT.set(None),
         move |b, _, window, _| {
@@ -215,25 +221,39 @@ fn rail_fill(base: Rgba) -> AnyElement {
                     f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
                 };
             let (left, top, right, bottom) = (b.origin.x, b.origin.y, b.right(), b.bottom());
+            // The tab's outline, from the rail's edge above it round to the edge below.
+            let outline = |f: &mut PathBuilder, t: Bounds<Pixels>| {
+                let (tx, ty, tb, r, o) = (t.origin.x, t.origin.y, t.bottom(), px(r), px(RAIL_R));
+                f.line_to(at(right, ty - o));
+                turn(f, at(right, ty - o), at(right, ty), at(right - o, ty));
+                f.line_to(at(tx + r, ty));
+                turn(f, at(tx + r, ty), at(tx, ty), at(tx, ty + r));
+                f.line_to(at(tx, tb - r));
+                turn(f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
+                f.line_to(at(right - o, tb));
+                turn(f, at(right - o, tb), at(right, tb), at(right, tb + o));
+            };
+            let cut = TAB_CUT.get();
             let mut f = PathBuilder::fill();
             f.move_to(at(left, top));
             f.line_to(at(right, top));
-            if let Some(t) = TAB_CUT.get() {
-                let (tx, ty, tb, r, o) = (t.origin.x, t.origin.y, t.bottom(), px(r), px(RAIL_R));
-                f.line_to(at(right, ty - o));
-                turn(&mut f, at(right, ty - o), at(right, ty), at(right - o, ty));
-                f.line_to(at(tx + r, ty));
-                turn(&mut f, at(tx + r, ty), at(tx, ty), at(tx, ty + r));
-                f.line_to(at(tx, tb - r));
-                turn(&mut f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
-                f.line_to(at(right - o, tb));
-                turn(&mut f, at(right - o, tb), at(right, tb), at(right, tb + o));
+            if let Some(t) = cut {
+                outline(&mut f, t);
             }
             f.line_to(at(right, bottom));
             f.line_to(at(left, bottom));
             f.close();
             if let Ok(path) = f.build() {
                 window.paint_path(path, fill);
+            }
+            if let (Some(t), Some(lift)) = (cut, lift) {
+                let mut f = PathBuilder::fill();
+                f.move_to(at(right, t.origin.y - px(RAIL_R)));
+                outline(&mut f, t);
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, lift);
+                }
             }
         },
     )
@@ -277,7 +297,9 @@ fn rail_icon(glyph: IconName, on: bool) -> AnyElement {
 /// first, under its content.
 pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
     let key = key.into();
-    let page = glass_fill(c_canvas());
+    // The row sits on the list's sheet: in glass mode only the difference is painted, so
+    // the row and its curves are the very shade of the page they join.
+    let page = settings::over(glass_fill(c_canvas()), pane(c_sheet()));
     div()
         .absolute()
         .top_0()
@@ -406,7 +428,7 @@ pub(crate) fn strip_cut(strip: &'static str) -> AnyElement {
 /// paths that never overlap, so the join looks the same in every glass style. A child
 /// of the strip, which must be `relative`, added first so it sits under the tabs.
 pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
-    let frame = Hsla::from(rail_shade());
+    let frame = Hsla::from(settings::frame());
     let island = Hsla::from(island);
     let accent = Hsla::from(rgb(c_blue()));
     div()
@@ -505,7 +527,7 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
 /// the frame's grey, so the island reads as rounded over whatever it holds. The island's
 /// own fill is rounded too, so the two never overlap in glass mode.
 pub(crate) fn frame_corner(top: bool, left: bool) -> AnyElement {
-    let fill = Hsla::from(rail_shade());
+    let fill = Hsla::from(settings::frame());
     let r = ISLAND_R;
     div()
         .absolute()
@@ -583,11 +605,13 @@ pub(crate) fn strip_tab(
                 .text_color(rgb(c_text()))
         })
         .when(!selected, |el| {
+            let (rest, hover) = tab_chip();
             el.h(px(28.))
                 .mb(px(3.))
-                .rounded_md()
+                .rounded(px(8.))
+                .bg(rest)
                 .text_color(rgb(c_secondary()))
-                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+                .hover(move |el| el.bg(hover).text_color(rgb(c_text())))
         })
 }
 
@@ -641,7 +665,7 @@ pub(crate) fn add_button(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// A strip of the frame's grey, such as the gutter between two islands.
 pub(crate) fn gutter() -> Div {
-    div().flex_none().bg(rail_shade())
+    div().flex_none().bg(settings::frame())
 }
 
 /// A card on an island: a borderless step lighter than the page, so groups read by
@@ -652,7 +676,7 @@ pub(crate) fn card() -> Div {
 
 /// A hairline between rows inside a `card`, inset from its edges.
 pub(crate) fn card_rule() -> Div {
-    div().mx_4().h(px(1.)).flex_none().bg(rgb(c_border()))
+    div().mx_4().h(px(1.)).flex_none().bg(divider())
 }
 
 /// Let a list's rows fade in one after another when the list opens, each a beat after
@@ -918,7 +942,7 @@ impl Render for DraggedTab {
             .items_center()
             .rounded_md()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()))
             .shadow_md()
             .text_size(px(12.5))
@@ -1482,7 +1506,7 @@ impl RunoApp {
             .gap(px(6.))
             .rounded_full()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .text_size(px(12.))
             .text_color(rgb(c_secondary()))
             .cursor_pointer()
@@ -1565,28 +1589,26 @@ impl RunoApp {
                     }),
             );
         }
-        list = list
-            .child(div().h(px(1.)).my_1().bg(rgb(c_border())))
-            .child(
-                div()
-                    .id("project-add")
-                    .h(px(30.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu = None;
-                        this.pick_project(cx);
-                    }))
-                    .child(icon(IconName::FolderPlus, 14., c_muted()))
-                    .child("New project…"),
-            );
+        list = list.child(div().h(px(1.)).my_1().bg(divider())).child(
+            div()
+                .id("project-add")
+                .h(px(30.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .text_color(rgb(c_secondary()))
+                .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    this.pick_project(cx);
+                }))
+                .child(icon(IconName::FolderPlus, 14., c_muted()))
+                .child("New project…"),
+        );
         div()
             .absolute()
             .top(px(34.))
@@ -1822,7 +1844,7 @@ impl RunoApp {
             .pl(px(lead))
             .pr_2()
             // The frame's grey, the same as the rail and the gutters between islands.
-            .bg(rail_shade())
+            .bg(settings::frame())
             .window_control_area(WindowControlArea::Drag)
             // Three zones: the two sides share what the search box leaves, so the box
             // sits in the middle of the window on every page instead of moving with the
@@ -1897,7 +1919,7 @@ impl RunoApp {
                                 .gap(px(5.))
                                 .rounded_md()
                                 .border_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .text_size(px(12.))
                                 .text_color(rgb(c_secondary()))
                                 .cursor_pointer()
@@ -1983,7 +2005,7 @@ impl RunoApp {
                         .gap_2()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .bg(tint(c_subtle()))
                         .cursor_pointer()
                         .text_size(px(12.5))
@@ -2007,7 +2029,7 @@ impl RunoApp {
                                 .px(px(5.))
                                 .rounded_sm()
                                 .border_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .text_size(px(11.))
                                 .child(keymap::label(cx, "quick-open")),
                         ),
@@ -2303,7 +2325,7 @@ impl RunoApp {
                             .items_center()
                             .justify_center()
                             .rounded_sm()
-                            .hover(|el| el.bg(rgb(c_border())))
+                            .hover(|el| el.bg(divider()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.close_tab(id);
@@ -2352,7 +2374,7 @@ impl RunoApp {
                             .items_center()
                             .justify_center()
                             .rounded_sm()
-                            .hover(|el| el.bg(rgb(c_border())))
+                            .hover(|el| el.bg(divider()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.browser_open = false;
@@ -2634,7 +2656,7 @@ impl RunoApp {
             .gap_2()
             .rounded_md()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()))
             .cursor_pointer()
             .text_size(px(13.))
@@ -3019,7 +3041,7 @@ impl RunoApp {
                 .gap_2()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(tint(c_subtle()))
                 .text_size(px(12.5))
                 .child(icon(IconName::Paperclip, 13., c_secondary()))
@@ -3072,7 +3094,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .text_size(px(14.))
                     .font_weight(FontWeight::MEDIUM)
@@ -3130,7 +3152,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(pane(c_canvas()))
                     .cursor_pointer()
                     .hover(|el| el.border_color(rgb(c_muted())).bg(tint(c_subtle())))
@@ -3194,7 +3216,7 @@ impl RunoApp {
                 .rounded_xl()
                 .border_1()
                 .border_dashed()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .cursor_pointer()
                 .text_color(rgb(c_secondary()))
                 .hover(|el| el.border_color(rgb(c_muted())).text_color(rgb(c_text())))
@@ -3371,7 +3393,8 @@ fn tab_slot(_active: bool, tab: Stateful<Div>) -> Div {
 }
 
 /// A tab's look: the open tab is cut from the page below the strip, which the strip's
-/// fill paints (see `strip_fill`); the others sit quietly on the frame.
+/// fill paints (see `strip_fill`); the others sit on the frame as soft raised chips, so
+/// they read as tabs, and lift a step more under the pointer.
 fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
     if active {
         el.relative()
@@ -3379,11 +3402,23 @@ fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
             .child(strip_cut("tabs"))
             .text_color(rgb(c_text()))
     } else {
+        let (rest, hover) = tab_chip();
         el.h(px(28.))
             .mb(px(3.))
-            .rounded_md()
+            .rounded(px(8.))
+            .bg(rest)
             .text_color(rgb(c_secondary()))
-            .hover(|el| el.bg(tint(c_subtle())))
+            .hover(move |el| el.bg(hover).text_color(rgb(c_text())))
+    }
+}
+
+/// Fill of a tab that is not open, at rest and under the pointer: a wash of white over
+/// the frame, stronger on the light theme's grey frame than on the dark one.
+pub(crate) fn tab_chip() -> (Rgba, Rgba) {
+    if is_dark() {
+        (rgba(0xffffff0d), rgba(0xffffff1c))
+    } else {
+        (rgba(0xffffff80), rgba(0xffffffd0))
     }
 }
 
@@ -3693,7 +3728,7 @@ impl RunoApp {
                         .gap_1()
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .cursor_pointer()
                         .text_size(px(12.5))
                         .when(open, |el| el.bg(tint(c_active())))

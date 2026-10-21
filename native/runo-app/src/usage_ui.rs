@@ -171,7 +171,7 @@ impl RunoApp {
                         })),
                 ),
         );
-        let line = || div().mx_2().my_1().h(px(1.)).bg(rgb(c_border()));
+        let line = || div().mx_2().my_1().h(px(1.)).bg(divider());
         let mut rows = div().v_flex().px_1();
         let agents = self.usage_agents();
         if agents.is_empty() {

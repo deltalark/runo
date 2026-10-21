@@ -1350,7 +1350,7 @@ impl RunoApp {
         div()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .overflow_hidden()
             .child(
                 div()
@@ -1383,7 +1383,7 @@ impl RunoApp {
                         .items_center()
                         .gap_2()
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .bg(rgb(settings::mix(c_amber(), c_canvas(), 0.08)))
                         .child(icon(IconName::ShieldAlert, 13., c_amber()))
                         .child(
@@ -1420,7 +1420,7 @@ impl RunoApp {
                         .justify_end()
                         .gap_2()
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(
                             self.button(("plan-more", index), "Keep planning", false)
                                 .child(icon(IconName::Pencil, 12., c_secondary()))
@@ -1520,7 +1520,7 @@ impl RunoApp {
             .gap_3()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()));
         for (qi, q) in questions.iter().enumerate() {
             let picked = picks.and_then(|p| p.get(qi)).cloned().flatten();
@@ -1803,7 +1803,7 @@ impl RunoApp {
                         .gap_2()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(
                             img(std::path::PathBuf::from(path))
                                 .size(px(40.))
@@ -1838,7 +1838,7 @@ impl RunoApp {
                 .p_1()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(rgb(c_raised()))
                 .shadow_lg();
             for (i, path) in matches.into_iter().enumerate() {
@@ -1876,7 +1876,7 @@ impl RunoApp {
                 .p_1()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(rgb(c_raised()))
                 .shadow_lg();
             let heading = |text: String| {

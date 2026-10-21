@@ -274,6 +274,17 @@ impl RunoApp {
             .into_any_element()
     }
 
+    /// Whether Design shows a project's canvas, which paints its own layers (the layers
+    /// list, the canvas and the inspector) rather than sitting on the page.
+    pub(crate) fn design_canvas_open(&self) -> bool {
+        !self.all_scope()
+            && self
+                .design
+                .project
+                .filter(|pid| self.state.projects.iter().any(|p| p.id == *pid))
+                .is_some_and(|pid| self.design.canvases.contains_key(&pid))
+    }
+
     pub(crate) fn design_view(&self, _: &Window, cx: &mut Context<Self>) -> AnyElement {
         if self.all_scope() {
             return shell::mode_frame(

@@ -420,7 +420,7 @@ impl RunoApp {
                             .text_color(rgb(color))
                     })
                     .when(!on, |el| {
-                        el.border_color(rgb(c_border()))
+                        el.border_color(divider())
                             .text_color(rgb(c_secondary()))
                             .hover(|el| el.bg(tint(c_subtle())))
                     })
@@ -518,7 +518,7 @@ impl RunoApp {
         let mut toolbar = div().flex().items_center().gap(px(2.));
         for (j, (glyph, tip, format)) in tools.into_iter().enumerate() {
             if j == 2 || j == 5 || j == 8 {
-                toolbar = toolbar.child(div().w(px(1.)).h(px(16.)).mx_1().bg(rgb(c_border())));
+                toolbar = toolbar.child(div().w(px(1.)).h(px(16.)).mx_1().bg(divider()));
             }
             toolbar = toolbar.child(self.tool_button(("notes-tool", j), glyph, tip).on_click(
                 cx.listener(move |this, _, window, cx| {
@@ -539,7 +539,7 @@ impl RunoApp {
                     .gap_1()
                     .rounded_full()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .text_size(px(11.5))
                     .text_color(rgb(c_secondary()))
@@ -584,7 +584,7 @@ impl RunoApp {
                 .flex()
                 .gap_4()
                 .child(editor)
-                .child(div().w(px(1.)).bg(rgb(c_border())))
+                .child(div().w(px(1.)).bg(divider()))
                 .child(preview),
         };
 
@@ -655,7 +655,7 @@ impl RunoApp {
                                 .justify_between()
                                 .gap_2()
                                 .border_b_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .child(toolbar)
                                 .child(inserts),
                         )
@@ -666,7 +666,7 @@ impl RunoApp {
                             .px_4()
                             .py_2()
                             .border_t_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .child(footer),
                     ),
             );

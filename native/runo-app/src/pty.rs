@@ -177,6 +177,16 @@ impl Shell {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // Light text on a dark background, or the reverse, for programs that read it
+        // rather than ask the terminal.
+        cmd.env(
+            "COLORFGBG",
+            if crate::settings::is_dark() {
+                "15;0"
+            } else {
+                "0;15"
+            },
+        );
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -506,6 +516,10 @@ enum Query {
     Primary,
     /// `CSI > c`: which version?
     Secondary,
+    /// `OSC 10 ; ?` or `OSC 11 ; ?`: what are your text and background colours? CLIs
+    /// such as Claude Code ask, to pick shades that suit the theme; one left guessing
+    /// takes the terminal for a light one and paints light panels over a dark theme.
+    Color { background: bool, bel: bool },
 }
 
 impl Query {
@@ -520,6 +534,22 @@ impl Query {
             }
             Query::Primary => b"\x1b[?62;22c".to_vec(),
             Query::Secondary => b"\x1b[>0;10;1c".to_vec(),
+            Query::Color { background, bel } => {
+                let c = if background {
+                    crate::settings::c_term_bg()
+                } else {
+                    crate::settings::c_text()
+                };
+                // xterm's form: each channel as four hex digits.
+                let ch = |shift: u32| (c >> shift) & 0xff;
+                let (r, g, b) = (ch(16), ch(8), ch(0));
+                format!(
+                    "\x1b]{};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{}",
+                    if background { 11 } else { 10 },
+                    if bel { "\x07" } else { "\x1b\\" }
+                )
+                .into_bytes()
+            }
         }
     }
 }
@@ -529,7 +559,8 @@ impl Query {
 /// one arrives, so a terminal that stays silent looks frozen, Ctrl-C included.
 #[derive(Default)]
 struct Queries {
-    /// 0 outside a sequence, 1 after ESC, 2 inside a CSI sequence.
+    /// 0 outside a sequence, 1 after ESC, 2 inside a CSI sequence, 3 inside an OSC
+    /// string, 4 after an ESC inside one.
     state: u8,
     params: Vec<u8>,
 }
@@ -538,6 +569,31 @@ impl Queries {
     /// Take one byte of output; returns the question it completes, if any.
     fn feed(&mut self, b: u8) -> Option<Query> {
         match (self.state, b) {
+            (3, 0x07) | (4, b'\\') => {
+                let bel = self.state == 3;
+                self.state = 0;
+                match self.params.as_slice() {
+                    b"10;?" => Some(Query::Color {
+                        background: false,
+                        bel,
+                    }),
+                    b"11;?" => Some(Query::Color {
+                        background: true,
+                        bel,
+                    }),
+                    _ => None,
+                }
+            }
+            (3, 0x1b) => {
+                self.state = 4;
+                None
+            }
+            (3, _) => {
+                if self.params.len() < 16 {
+                    self.params.push(b);
+                }
+                None
+            }
             (_, 0x1b) => {
                 self.state = 1;
                 self.params.clear();
@@ -545,6 +601,10 @@ impl Queries {
             }
             (1, b'[') => {
                 self.state = 2;
+                None
+            }
+            (1, b']') => {
+                self.state = 3;
                 None
             }
             (2, 0x20..=0x3f) => {
@@ -894,6 +954,20 @@ mod tests {
         assert_eq!(
             found(&mut q, b"\x1b[31m\x1b[2J\x1b[6;1H\x1b]0;t\x07"),
             vec![]
+        );
+        // Colour questions, ended by BEL or by ST.
+        assert_eq!(
+            found(&mut q, b"\x1b]11;?\x07\x1b]10;?\x1b\\"),
+            vec![
+                Query::Color {
+                    background: true,
+                    bel: true
+                },
+                Query::Color {
+                    background: false,
+                    bel: false
+                }
+            ]
         );
     }
 

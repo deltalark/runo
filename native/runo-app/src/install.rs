@@ -435,7 +435,7 @@ impl RunoApp {
                         .rounded_lg()
                         .bg(tint(c_subtle()))
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .font_family(self.mono_font.clone())
                         .text_size(px(12.))
                         .child(plan.shown.clone()),
@@ -565,7 +565,7 @@ impl RunoApp {
             .gap_1()
             .rounded_md()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()))
             .text_size(px(11.5))
             .font_weight(FontWeight::MEDIUM)

@@ -553,7 +553,7 @@ impl RunoApp {
             .items_center()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(icon(Self::file_icon(kind), 14., c_muted()))
             .child(
                 div()
@@ -741,7 +741,7 @@ impl RunoApp {
                     let mut line = div()
                         .flex()
                         .border_b_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .when(r == 0, |el| {
                             el.bg(tint(c_subtle())).font_weight(FontWeight::MEDIUM)
                         })
@@ -755,7 +755,7 @@ impl RunoApp {
                                 .py(px(4.))
                                 .truncate()
                                 .border_r_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .child(row.get(c).cloned().unwrap_or_default()),
                         );
                     }

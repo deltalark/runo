@@ -596,10 +596,13 @@ impl RunoApp {
                     .text_color(rgb(c_text()))
             })
             .when(!selected, |el| {
+                let (rest, hover) = shell::tab_chip();
                 el.h(px(24.))
                     .mb(px(3.))
-                    .rounded_md()
-                    .text_color(rgb(c_muted()))
+                    .rounded(px(7.))
+                    .bg(rest)
+                    .text_color(rgb(c_secondary()))
+                    .hover(move |el| el.bg(hover))
             })
             .child(
                 div()
@@ -685,7 +688,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .text_size(px(12.))
                     .child(icon(
                         if ok {
@@ -919,7 +922,7 @@ impl RunoApp {
                 .rounded_md()
                 .bg(float(c_raised()))
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .text_size(px(12.))
                 .child(icon(IconName::Search, 12., c_muted()))
                 .child(
