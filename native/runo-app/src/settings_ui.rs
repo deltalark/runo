@@ -2783,7 +2783,7 @@ impl RunoApp {
         let data = self.discovered.clone().unwrap_or_default();
         let query = self.settings_search.read(cx).value().trim().to_lowercase();
 
-        // The header: the name, a tab per area and the search, over the page.
+        // The header: a tab per area and the search, over the page.
         let mut tabs = crate::shell::seg_track();
         for tab in SettingsTab::ALL {
             tabs = tabs.child(self.settings_tab(tab, cx));
@@ -2792,20 +2792,6 @@ impl RunoApp {
             .flex()
             .items_center()
             .gap(px(16.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(tile(IconName::Settings, 30.))
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
-                            .child("Settings"),
-                    ),
-            )
             .child(tabs)
             .child(div().flex_1())
             .child(
