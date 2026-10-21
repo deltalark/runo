@@ -20,8 +20,6 @@ mod connections;
 mod connections_ui;
 mod copies;
 mod cove;
-// Read by the app from Crew's first visible phase; until then only the MCP server writes.
-#[cfg_attr(not(test), allow(dead_code))]
 mod crew;
 mod crew_ui;
 mod crew_view;
@@ -413,7 +411,6 @@ struct RunoApp {
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
-    /// Run the new session in its own Cove VM.
     /// Where the next session runs: a connection id, or 0 for this machine.
     new_connection: u64,
     /// Race mode in the New session form, and the agents picked for it.
