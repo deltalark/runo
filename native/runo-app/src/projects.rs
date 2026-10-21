@@ -98,6 +98,8 @@ pub(crate) struct ProjectForm {
     pub cloning: Option<String>,
     /// Start with no code, for Design or Architecture: a new folder under `~/Runo/`.
     pub blank: Option<Mode>,
+    /// Work through Crew rather than directly in sessions (Labs).
+    pub crew: bool,
 }
 
 /// Where projects started without code get their folder: `~/Runo/`.
@@ -599,6 +601,7 @@ impl RunoApp {
             parent: clone_parent(&self.state.projects),
             cloning: None,
             blank: None,
+            crew: false,
         });
         cx.notify();
     }
@@ -644,6 +647,7 @@ impl RunoApp {
             parent: None,
             cloning: None,
             blank: None,
+            crew: crate::crew::is_crew(p),
         });
     }
 
@@ -948,6 +952,7 @@ impl RunoApp {
         let setup = self.project_setup.read(cx).value().trim().to_string();
         let checks = self.project_checks.read(cx).value().trim().to_string();
         let fix_rounds = form.fix_rounds;
+        let crew = form.crew;
         let color = COLORS[form.color].0.to_string();
         let glyph = ICONS[form.icon].0.to_string();
         if let Some(pid) = form.editing {
@@ -961,6 +966,7 @@ impl RunoApp {
                 p.checks = checks;
                 p.fix_rounds = fix_rounds;
             }
+            self.set_project_mode(pid, crew);
             self.project_form = None;
             self.save();
             cx.notify();
@@ -1023,6 +1029,9 @@ impl RunoApp {
                     p.setup = setup;
                     p.checks = checks;
                     p.fix_rounds = fix_rounds;
+                    if crew {
+                        p.mode = crate::crew::MODE_CREW.into();
+                    }
                 }
                 self.save();
             }
@@ -1114,6 +1123,45 @@ impl RunoApp {
             hex => hex,
         };
         let checks = form.blank.is_none().then(|| self.checks_field(cx));
+        let mode_choice = form.blank.is_none().then(|| {
+            let on = form.crew;
+            let choice = |id: &'static str, title: &'static str, crew: bool| {
+                shell::seg_choice(id, format!("project-mode-{}", crew == on), crew == on)
+                    .flex_1()
+                    .child(title)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.project_form.as_mut() {
+                            f.crew = crew;
+                        }
+                        cx.notify();
+                    }))
+            };
+            div()
+                .v_flex()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c_secondary()))
+                        .child("How you work here"),
+                )
+                .child(
+                    shell::seg_track()
+                        .child(choice("project-mode-crew", "Crew", true))
+                        .child(choice("project-mode-direct", "Direct", false)),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(if on {
+                            "You talk to Crew. It answers, and starts threads for the work, each an ordinary session. Switch any time from the project menu."
+                        } else {
+                            "You start and run sessions yourself, as Runo always has. Switch to Crew any time from the project menu."
+                        }),
+                )
+        });
         let label = |text: &'static str| {
             div()
                 .text_size(px(11.5))
@@ -1623,6 +1671,7 @@ impl RunoApp {
                     ),
             ))
             .children(checks)
+            .children(mode_choice)
             .child(div().v_flex().gap_1p5().child(label("Color")).child(swatches))
             .child(div().v_flex().gap_1p5().child(label("Icon")).child(glyphs))
             .when(!editing && blank.is_none(), |el| {

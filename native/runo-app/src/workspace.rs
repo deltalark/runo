@@ -25,6 +25,7 @@ impl RunoApp {
             right_tab: match self.right_tab {
                 RightTab::Changes => "changes",
                 RightTab::Files => "files",
+                RightTab::Threads => "threads",
             }
             .to_string(),
             expanded: Some(self.expanded.clone()),

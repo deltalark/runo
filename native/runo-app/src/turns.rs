@@ -76,6 +76,8 @@ impl RunoApp {
             return;
         }
         let demo = self.demo;
+        // Crew's rules and what changed in its threads, or a thread's rules: unseen context.
+        let preface = self.crew_preface(id);
         // Notes the person shared with agents open each new conversation in the project.
         let notes = self
             .state
@@ -174,6 +176,10 @@ impl RunoApp {
         } else {
             format!("{undo_note}\n\n{sent}")
         };
+        let sent = match preface {
+            Some(preface) => format!("{preface}\n{sent}"),
+            None => sent,
+        };
         let mut user = Message::now(Role::User, prompt.clone());
         user.images = images.clone();
         user.playbook = playbook.unwrap_or_default();
@@ -225,6 +231,11 @@ impl RunoApp {
             images: &attached,
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
+            thread: if session.crew.is_some() && sandbox.is_none() {
+                id
+            } else {
+                0
+            },
         };
         match agent::run_agent(
             Target::Session(id),
@@ -346,6 +357,7 @@ impl RunoApp {
         hold: bool,
         cx: &mut Context<Self>,
     ) {
+        self.crew_turn_ended(id, ok, stopped, cx);
         // Servers Runo merged into the agent's project file go before the snapshot.
         if let Some(s) = self.state.session(id) {
             crate::mcp::clean_project(std::path::Path::new(&s.dir));
@@ -513,6 +525,11 @@ impl RunoApp {
         } else {
             text
         };
+        // In a Crew chat an @thread or the New thread chip skips Crew.
+        if playbook.is_none() && self.crew_route_submit(id, &text, &images, cx) {
+            self.editing = None;
+            return;
+        }
         // While the agent or its setup command runs, the prompt and its images wait.
         if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
             self.editing = None;

@@ -23,6 +23,8 @@ mod cove;
 // Read by the app from Crew's first visible phase; until then only the MCP server writes.
 #[cfg_attr(not(test), allow(dead_code))]
 mod crew;
+mod crew_ui;
+mod crew_view;
 mod ctxmenu;
 mod design;
 mod designdraw;
@@ -210,6 +212,8 @@ enum Jump {
 enum RightTab {
     Changes,
     Files,
+    /// Beside Crew's chat: the project's threads.
+    Threads,
 }
 
 struct RunoApp {
@@ -536,6 +540,8 @@ struct RunoApp {
     proving: std::collections::HashSet<u64>,
     /// Sessions waiting on a second opinion, with the agent giving it.
     reviewing: HashMap<u64, &'static str>,
+    /// Crew's chats and threads while the app runs.
+    crew: crew_ui::CrewState,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
     /// Images that go with a new session's first prompt.
@@ -1710,6 +1716,7 @@ impl RunoApp {
             turn_files: HashMap::new(),
             proving: Default::default(),
             reviewing: HashMap::new(),
+            crew: Default::default(),
             attachments: HashMap::new(),
             launch_images: HashMap::new(),
             new_context: None,
@@ -2005,6 +2012,7 @@ impl RunoApp {
                     .update(cx, |this, cx| {
                         this.take_playbook_requests(cx);
                         this.take_phone_requests(cx);
+                        this.crew_tick(cx);
                     })
                     .is_err()
                 {
@@ -2308,6 +2316,26 @@ impl RunoApp {
                     None => vec![stream::Update::Text(line)],
                 };
                 let plain = !self.streams.contains_key(&id);
+                // Crew's chat and its threads have Runo's blocks taken out as they stream.
+                // Crew never proposes a plan to approve: one it writes is its reply.
+                let crew_chat = self
+                    .state
+                    .session(id)
+                    .is_some_and(|s| s.canvas == crew::CANVAS);
+                let updates: Vec<stream::Update> = updates
+                    .into_iter()
+                    .map(|u| match u {
+                        stream::Update::Plan(plan) if crew_chat => stream::Update::Text(plan),
+                        other => other,
+                    })
+                    .filter_map(|u| match u {
+                        stream::Update::Text(text) => match self.crew_text(id, &text, plain) {
+                            Some(shown) => shown.map(stream::Update::Text),
+                            None => Some(stream::Update::Text(text)),
+                        },
+                        other => Some(other),
+                    })
+                    .collect();
                 let refused = self.refused.get(&id).cloned().unwrap_or_default();
                 // The reply's run summary names the model it ran on.
                 let model = updates
@@ -3617,10 +3645,9 @@ impl RunoApp {
         // playbook runs stay in Chat, where their limits hold.
         if cx.global::<AppSettings>().default_view == "cli"
             && agent::imports_cli_turns(&provider)
-            && self
-                .state
-                .session(id)
-                .is_some_and(|s| s.playbook == 0 && cliview::cli_blocker(s).is_none())
+            && self.state.session(id).is_some_and(|s| {
+                s.playbook == 0 && s.crew.is_none() && cliview::cli_blocker(s).is_none()
+            })
         {
             // Context a session was started with goes ahead of the task here too.
             let mut task = task;
@@ -4313,7 +4340,11 @@ impl RunoApp {
                                     }))
                                     .child(session.title.clone()),
                             )
-                            .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted()))),
+                            .when(pinned, |el| el.child(icon(IconName::Pin, 11., c_muted())))
+                            // Crew's threads carry its mark.
+                            .when(session.crew.is_some(), |el| {
+                                el.child(icon(crew_view::CREW_ICON, 11., c_muted()))
+                            }),
                     )
                     .child(
                         div()
@@ -4571,7 +4602,11 @@ impl RunoApp {
             if open || !filter.is_empty() {
                 // Sessions sit a step in from their project's name.
                 let mut rows = div().v_flex().gap(px(2.)).mt(px(2.)).mb_1().pl(px(15.));
-                if sessions.is_empty() {
+                let crew_on = self.crew_mode(pid);
+                if crew_on {
+                    rows = rows.child(self.crew_row(pid, cx));
+                }
+                if sessions.is_empty() && !crew_on {
                     rows = rows.child(
                         div()
                             .px_3()
@@ -5460,7 +5495,14 @@ impl RunoApp {
                     .child(format!("Started {}", first.time)),
             );
         }
+        if let Some(strip) = self.thread_strip(session, cx) {
+            list = list.child(strip);
+        }
         for (i, message) in session.messages.iter().enumerate() {
+            if let Some(card) = self.crew_card(session.id, i, message, cx) {
+                list = list.child(card);
+                continue;
+            }
             let show = Some(i) == last_agent && !self.changes.is_empty();
             list = list.child(
                 div()
@@ -5735,6 +5777,7 @@ impl RunoApp {
                         .track_scroll(&self.chat_scroll)
                         .child(list),
                 )
+                .children(self.crew_route_bar(session, cx))
                 .child(self.composer(provider, working, cx))
                 .into_any_element()
         };
@@ -8619,6 +8662,10 @@ impl RunoApp {
             .child(match self.right_tab {
                 RightTab::Changes => self.changes_tab(cx),
                 RightTab::Files => self.files_tab(cx),
+                RightTab::Threads if self.current().is_some_and(|s| s.canvas == crew::CANVAS) => {
+                    self.threads_tab(cx)
+                }
+                RightTab::Threads => self.changes_tab(cx),
             });
         div()
             .w(px(self.panel_width))
@@ -8660,7 +8707,18 @@ impl RunoApp {
                                 IconName::FileText,
                                 "Files".into(),
                                 cx,
-                            )),
+                            ))
+                            .when(
+                                self.current().is_some_and(|s| s.canvas == crew::CANVAS),
+                                |el| {
+                                    el.child(self.right_tab_button(
+                                        RightTab::Threads,
+                                        crew_view::CREW_ICON,
+                                        "Threads".into(),
+                                        cx,
+                                    ))
+                                },
+                            ),
                     )
                     .child(
                         shell::island(body, panel(c_sheet()), [false, true, true, true])
