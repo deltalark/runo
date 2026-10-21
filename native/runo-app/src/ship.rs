@@ -546,7 +546,7 @@ impl RunoApp {
         }
         let typed = self.commit_msg.read(cx).value().trim().to_string();
         let mut message = if typed.is_empty() {
-            title
+            title.trim_end_matches('…').to_string()
         } else {
             typed.clone()
         };

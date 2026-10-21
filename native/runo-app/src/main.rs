@@ -3579,13 +3579,9 @@ impl RunoApp {
         } else {
             (git::current_branch(&project.path), project.path.clone())
         };
-        let title: String = task
-            .lines()
-            .next()
-            .unwrap_or("Session")
-            .chars()
-            .take(48)
-            .collect();
+        let title = Some(crew::title_from(task))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Session".into());
         self.state.sessions.push(Session {
             id,
             project_id: project.id,
