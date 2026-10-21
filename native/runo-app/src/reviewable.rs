@@ -191,7 +191,10 @@ impl RunoApp {
     }
 
     /// Send the stack and open its pull requests, each onto the one below.
-    fn open_stack(&mut self, branch: String, parts: Vec<SplitPart>) {
+    pub(crate) fn open_stack(&mut self, branch: String, parts: Vec<SplitPart>) {
+        if !self.belt_clear(&branch, explain::Fix::OpenStackAnyway(branch.clone())) {
+            return;
+        }
         let remote = self
             .git_repo
             .as_ref()

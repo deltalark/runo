@@ -94,6 +94,9 @@ impl RunoApp {
                         })),
                 );
             }
+            Waiting::Decision(d) => {
+                actions = actions.children(self.decision_chips("inbox-dec", n, id, &d, cx));
+            }
         }
         actions
     }
@@ -159,6 +162,9 @@ impl RunoApp {
                     provider.name
                 ),
             ),
+            Some(Waiting::Decision(d)) => {
+                (IconName::CircleQuestionMark, c_amber(), d.question.clone())
+            }
             None if need == Need::Failed => (
                 IconName::CircleX,
                 c_red(),
@@ -212,7 +218,7 @@ impl RunoApp {
             .gap_2()
             .when(self.cursor == Some(id), |el| {
                 el.bg(tint(c_active()))
-                    .child(shell::accent_bracket(format!("inbox-bracket-{id}")))
+                    .child(shell::accent_bracket(format!("inbox-bracket-{id}"), 12.))
             })
             .child(
                 div()
@@ -414,5 +420,5 @@ fn section(label: &'static str, count: usize) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(c_muted()))
         .child(label.to_uppercase())
-        .child(count.to_string())
+        .child(shell::count_badge(count, shell::Tone::Quiet))
 }

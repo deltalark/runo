@@ -556,6 +556,8 @@ pub(crate) enum Waiting {
     /// The agent's questions; each is answered in turn and the answers go back together.
     Questions(Vec<store::Question>),
     Plan,
+    /// A Crew thread's decision: one question and the answers it offers.
+    Decision(crate::crew::Decision),
 }
 
 /// The npm package each agent CLI ships as, for looking up its latest release.
@@ -593,6 +595,11 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
 /// What the latest reply of a session asks of the person, if anything. Notices after it,
 /// such as the error a run ended with, don't hide the request.
 pub(crate) fn waiting_on(session: &Session) -> Option<(usize, Waiting)> {
+    // A Crew thread's open decision waits until it is answered, whatever came after it.
+    if let Some(d) = session.crew.as_ref().and_then(|i| i.decision.as_ref()) {
+        let index = session.messages.len().saturating_sub(1);
+        return Some((index, Waiting::Decision(d.clone())));
+    }
     let index = session
         .messages
         .iter()
@@ -1319,6 +1326,12 @@ impl RunoApp {
                         provider.name
                     ),
                 ),
+                Waiting::Decision(d) => (
+                    c_blue(),
+                    IconName::CircleQuestionMark,
+                    "Decision needed",
+                    d.question.clone(),
+                ),
             };
             let mut actions = div().flex().flex_wrap().gap_2();
             match waiting {
@@ -1397,6 +1410,9 @@ impl RunoApp {
                                 cx.notify();
                             })),
                     );
+                }
+                Waiting::Decision(d) => {
+                    actions = actions.children(self.decision_chips("al-dec", n, id, &d, cx));
                 }
             }
             cards.push(self.alert_card(
@@ -2225,6 +2241,28 @@ mod tests {
         ));
         assert!(matches!(waiting_on(&s), Some((0, Waiting::Denied(_)))));
         s.messages.push(Message::new(Role::User, "ok"));
+        assert!(waiting_on(&s).is_none());
+    }
+
+    #[test]
+    fn a_crew_decision_waits_until_answered() {
+        let mut s = Session {
+            messages: vec![
+                Message::new(Role::Agent, "Which way?"),
+                Message::new(Role::User, "later"),
+            ],
+            ..Session::default()
+        };
+        s.crew = Some(crate::crew::ThreadInfo {
+            decision: Some(crate::crew::Decision {
+                question: "Keep the old API?".into(),
+                options: vec![Default::default(), Default::default()],
+                recommended: 0,
+            }),
+            ..Default::default()
+        });
+        assert!(matches!(waiting_on(&s), Some((1, Waiting::Decision(_)))));
+        s.crew.as_mut().unwrap().decision = None;
         assert!(waiting_on(&s).is_none());
     }
 }

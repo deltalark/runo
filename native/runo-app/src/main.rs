@@ -1,3 +1,4 @@
+mod accent;
 mod agent;
 mod agent_pick;
 mod agentcmds;
@@ -20,8 +21,6 @@ mod connections;
 mod connections_ui;
 mod copies;
 mod cove;
-// Read by the app from Crew's first visible phase; until then only the MCP server writes.
-#[cfg_attr(not(test), allow(dead_code))]
 mod crew;
 mod crew_ui;
 mod crew_view;
@@ -39,7 +38,6 @@ mod git;
 mod githistory;
 mod github;
 mod gitplace;
-mod glow;
 mod handoff;
 mod health;
 mod history;
@@ -204,6 +202,8 @@ enum Jump {
     Playbook(u64),
     /// Switch the top bar to a project.
     Project(u64),
+    /// Open a Crew project's chat.
+    Crew(u64),
     AddProject,
     Settings(SettingsPage),
 }
@@ -281,6 +281,10 @@ struct RunoApp {
     /// straight to main.
     git_belt_pass: bool,
     git_main_ok: HashSet<String>,
+    /// What the seatbelt found in a session's commits before a push, and the session
+    /// whose next push goes past it.
+    belt_found: Vec<(String, usize, seatbelt::Snag)>,
+    belt_pass: Option<u64>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -413,7 +417,6 @@ struct RunoApp {
     new_provider: usize,
     new_project: Option<u64>,
     new_isolated: bool,
-    /// Run the new session in its own Cove VM.
     /// Where the next session runs: a connection id, or 0 for this machine.
     new_connection: u64,
     /// Race mode in the New session form, and the agents picked for it.
@@ -1562,6 +1565,8 @@ impl RunoApp {
             git_state_seen: None,
             git_belt_pass: false,
             git_main_ok: HashSet::new(),
+            belt_found: Vec::new(),
+            belt_pass: None,
             git_repo: None,
             git_undo: None,
             git_working: None,
@@ -2871,6 +2876,10 @@ impl RunoApp {
             },
             Jump::Session(id) => self.open_session(id, window, cx),
             Jump::Project(pid) => self.switch_project(pid, window, cx),
+            Jump::Crew(pid) => {
+                self.open_crew(pid, cx);
+                self.right_tab = RightTab::Threads;
+            }
             Jump::AddProject => self.pick_project(cx),
             Jump::Settings(page) => {
                 self.open_settings();
@@ -2981,6 +2990,15 @@ impl RunoApp {
                     .action(Box::new(AskRuno)),
             );
             command_jumps.push(Jump::Action);
+        }
+        if let Some(pid) = self.current_project().filter(|pid| self.crew_mode(*pid)) {
+            commands = commands.item(
+                CommandItem::new()
+                    .label("Open Crew")
+                    .icon(crew_view::CREW_ICON)
+                    .keywords(["crew", "threads", "chat"]),
+            );
+            command_jumps.push(Jump::Crew(pid));
         }
         groups.push((commands, command_jumps));
 
@@ -3422,6 +3440,19 @@ impl RunoApp {
                     if let Some(session) = self.state.session_mut(id) {
                         session.canvas = shell::canvas_name(view).into();
                     }
+                }
+            }
+        }
+        // In a Crew project, a session the person starts is one of Crew's threads too, so
+        // Crew sees it on its board. One asked from a canvas stays with the canvas.
+        if crew::is_crew(&project) {
+            for &id in &created {
+                if let Some(session) = self.state.session_mut(id).filter(|s| s.canvas.is_empty()) {
+                    session.crew = Some(crew::ThreadInfo {
+                        origin: crew::Origin::Person,
+                        brief: task.clone(),
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -4157,20 +4188,20 @@ impl RunoApp {
             View::AllSessions => !matches!(self.view, View::Worktrees | View::Inbox),
             _ => self.view == view,
         };
+        // Each choice is as wide as its label and count, and the spare room is shared,
+        // so a three-figure count widens "Needs you" instead of squeezing its neighbours.
         shell::seg_choice(id, format!("seg-fill-{id}"), on)
-            .flex_1()
-            .px_0()
+            .flex_auto()
+            .px(px(8.))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.view = view;
                 cx.notify();
             }))
             .child(label)
+            .gap(px(5.))
             .when_some(count.filter(|n| *n > 0), |el, n| {
                 el.child(shell::pop(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(rgb(c_blue()))
-                        .child(n.to_string()),
+                    shell::count_badge(n, shell::Tone::Accent),
                     format!("seg-count-{id}-{n}"),
                 ))
             })
@@ -4448,12 +4479,20 @@ impl RunoApp {
             }
             let color = projects::color_of(project);
             // Each project is one block: its header, then its sessions as cards under
-            // it. Space between blocks keeps them apart.
-            // A hairline between projects, so each group reads as one block.
-            let mut group = div().v_flex().mx_1().when(!first, |el| {
-                el.mt(px(8.))
-                    .child(div().mx_2().mb(px(8.)).h(px(1.)).bg(divider()))
-            });
+            // it. Borderless: each project sits on its own faint tonal card, so the groups
+            // part by shade and space rather than by a line between them.
+            let mut group = div()
+                .v_flex()
+                .mx_1()
+                .relative()
+                .when(!first, |el| el.mt(px(6.)))
+                .py(px(2.))
+                .rounded(px(10.))
+                .bg(if is_dark() {
+                    rgba(0xffffff09)
+                } else {
+                    rgba(0x0000000b)
+                });
             first = false;
             group = group.child(
                 div()
@@ -4557,20 +4596,12 @@ impl RunoApp {
                         })
                     })
                     .when(!sessions.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .px(px(4.))
-                                .h(px(16.))
-                                .flex()
-                                .items_center()
-                                .text_size(px(11.))
-                                .text_color(rgb(c_muted()))
-                                .group_hover("project", |el| el.opacity(0.))
-                                .child(shell::pop(
-                                    sessions.len().to_string(),
-                                    format!("project-count-{pid}-{}", sessions.len()),
-                                )),
-                        )
+                        el.child(div().group_hover("project", |el| el.opacity(0.)).child(
+                            shell::pop(
+                                shell::count_badge(sessions.len(), shell::Tone::Quiet),
+                                format!("project-count-{pid}-{}", sessions.len()),
+                            ),
+                        ))
                     })
                     .child(
                         div()
@@ -6981,6 +7012,12 @@ impl RunoApp {
             Some(c) if project.is_some() => format!("{where_to}, inside a VM on {}", c.name),
             _ => where_to,
         };
+        let where_to = match project {
+            Some(p) if crew::is_crew(p) => {
+                format!("{where_to}. Joins Crew's threads, so Crew sees it.")
+            }
+            _ => where_to,
+        };
         let provider = &agent::PROVIDERS[self.new_provider];
         let task_empty = self.new_task.read(cx).value().trim().is_empty();
         let ready = project.is_some() && !task_empty && (!self.race_mode || racing);
@@ -7492,7 +7529,8 @@ impl RunoApp {
         &self,
         tab: RightTab,
         name: IconName,
-        label: String,
+        label: &'static str,
+        count: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.right_tab == tab;
@@ -7528,6 +7566,9 @@ impl RunoApp {
                 icon(name, 13., c_muted()).into_any_element()
             })
             .child(label)
+            .when(count > 0, |el| {
+                el.child(shell::count_badge(count, shell::Tone::Quiet))
+            })
     }
 
     /// The selected file's diff, or every changed file one after another.
@@ -8698,17 +8739,15 @@ impl RunoApp {
                             .child(self.right_tab_button(
                                 RightTab::Changes,
                                 IconName::GitCompare,
-                                if self.changes.is_empty() {
-                                    "Changes".into()
-                                } else {
-                                    format!("Changes  {}", self.changes.len())
-                                },
+                                "Changes",
+                                self.changes.len(),
                                 cx,
                             ))
                             .child(self.right_tab_button(
                                 RightTab::Files,
                                 IconName::FileText,
-                                "Files".into(),
+                                "Files",
+                                0,
                                 cx,
                             ))
                             .when(
@@ -8717,7 +8756,8 @@ impl RunoApp {
                                     el.child(self.right_tab_button(
                                         RightTab::Threads,
                                         crew_view::CREW_ICON,
-                                        "Threads".into(),
+                                        "Threads",
+                                        0,
                                         cx,
                                     ))
                                 },
@@ -9674,7 +9714,9 @@ fn load_fonts(cx: &mut App) {
 
 const SIDEBAR_WIDTH: f32 = 264.;
 /// How narrow and wide the sidebar can be dragged.
-const SIDEBAR_MIN: f32 = 200.;
+/// Narrow enough to give the page room, wide enough for the All, Isolated and Needs you
+/// filter with a three-figure count beside Needs you.
+const SIDEBAR_MIN: f32 = 240.;
 const SIDEBAR_MAX: f32 = 400.;
 const PANEL_WIDTH: f32 = 460.;
 const PANEL_MIN: f32 = 320.;

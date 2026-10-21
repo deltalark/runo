@@ -2426,6 +2426,27 @@ pub fn uncommit(dir: &str) -> Result<Undo, String> {
     Ok(Undo::Uncommit { head })
 }
 
+/// Every line `branch`'s commits add that its remote copy, or else every remote branch,
+/// doesn't have yet: what sending `branch` would send.
+pub fn branch_outgoing_patch(dir: &str, branch: &str) -> String {
+    let tracked = format!("{branch}@{{u}}");
+    let range: Vec<String> = if rev(dir, &tracked).is_some() {
+        vec![format!("{tracked}..{branch}")]
+    } else {
+        vec![branch.to_string(), "--not".into(), "--remotes".into()]
+    };
+    let mut args = vec![
+        "log",
+        "-p",
+        "--no-merges",
+        "--format=",
+        "--no-color",
+        "--no-ext-diff",
+    ];
+    args.extend(range.iter().map(String::as_str));
+    git(dir, &args).unwrap_or_default()
+}
+
 /// Every line the commits a push would send add, as one patch: from the tracked remote
 /// branch, or from what no remote branch has yet. Merges are left out; their sides are
 /// in it already.
@@ -4286,6 +4307,9 @@ index 1..2 100644
         let sent = rev(dir, "@{u}").unwrap();
         let head = rev(dir, "HEAD").unwrap();
         assert!(outgoing_patch(dir).contains("+const t = 1;"));
+        assert!(branch_outgoing_patch(dir, "main").contains("+const t = 1;"));
+        sh(&repo, &["branch", "side"]);
+        assert!(branch_outgoing_patch(dir, "side").contains("+const t = 1;"));
 
         // Taking the commit back keeps the file; Undo puts the commit back.
         let undo = uncommit(dir).unwrap();

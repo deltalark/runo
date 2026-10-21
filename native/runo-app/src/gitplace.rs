@@ -197,7 +197,7 @@ impl RunoApp {
                 let serious: Vec<_> = found.into_iter().filter(|(_, _, s)| s.serious()).collect();
                 if !serious.is_empty() {
                     this.git_banner = Some(explain::Banner {
-                        explained: explain::seatbelt_stop(&serious, step),
+                        explained: explain::seatbelt_stop(&serious, explain::Fix::SendAnyway(step)),
                         raw: String::new(),
                         found: serious,
                     });
@@ -213,6 +213,55 @@ impl RunoApp {
                 cx.notify();
             },
         );
+    }
+
+    /// Whether sending `branch` may go ahead now. Otherwise the seatbelt looks at what it
+    /// would send first: when that's clean the send runs again past it, and when it isn't
+    /// a card stops it, with `again` as its Send anyway.
+    pub(crate) fn belt_clear(&mut self, branch: &str, again: explain::Fix) -> bool {
+        if std::mem::take(&mut self.git_belt_pass) {
+            return true;
+        }
+        let Some(dir) = self.git_repo.as_ref().map(|r| r.dir.clone()) else {
+            return true;
+        };
+        let branch = branch.to_string();
+        self.git_banner = None;
+        self.bg(
+            move || {
+                seatbelt::scan_patch(&git::branch_outgoing_patch(&dir, &branch))
+                    .into_iter()
+                    .filter(|(_, _, s)| s.serious())
+                    .collect::<Vec<_>>()
+            },
+            move |this, serious, cx| {
+                if serious.is_empty() {
+                    this.git_belt_pass = true;
+                    this.belt_resend(again);
+                } else {
+                    this.git_banner = Some(explain::Banner {
+                        explained: explain::seatbelt_stop(&serious, again),
+                        raw: String::new(),
+                        found: serious,
+                    });
+                }
+                cx.notify();
+            },
+        );
+        false
+    }
+
+    /// Take a send the seatbelt held up again.
+    pub(crate) fn belt_resend(&mut self, fix: explain::Fix) {
+        match fix {
+            explain::Fix::SendBranchAnyway(name) => self.send_branch(name),
+            explain::Fix::OpenStackAnyway(branch) => {
+                if let Some(Some(parts)) = self.git_splits.get(&branch).cloned() {
+                    self.open_stack(branch, parts);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Sync, with no seatbelt.
