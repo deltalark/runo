@@ -8356,15 +8356,41 @@ impl RunoApp {
                                 el.child(self.output_tab(shell.is_none(), cx))
                             })
                             .children(shell_tabs)
-                            .child(
-                                self.ghost_button_sized(
-                                    "shell-new",
-                                    IconName::Plus,
-                                    "New shell",
-                                    22.,
+                            // With no tab yet, the plus is the one thing on the strip, so it
+                            // stands out in the accent until the first shell opens.
+                            .when(fused, |el| {
+                                el.child(
+                                    self.ghost_button_sized(
+                                        "shell-new",
+                                        IconName::Plus,
+                                        "New shell",
+                                        22.,
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| this.new_shell(cx))),
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| this.new_shell(cx))),
-                            ),
+                            })
+                            .when(!fused, |el| {
+                                el.child(
+                                    div()
+                                        .id("shell-new")
+                                        .mb(px(5.))
+                                        .size(px(24.))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .bg(rgb(c_blue()))
+                                        .cursor_pointer()
+                                        .hover(|el| el.opacity(0.85))
+                                        .child(icon(IconName::Plus, 14., 0xffffff))
+                                        .tooltip(|window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new("New shell")
+                                                .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| this.new_shell(cx))),
+                                )
+                            }),
                     )
                     .child(
                         div()
