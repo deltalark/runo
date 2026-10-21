@@ -3482,6 +3482,9 @@ mod tests {
             .join(claude_folder_name(&remote.local_dir));
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("abc.jsonl"), "{\"x\":1}\n").unwrap();
+        let _env = crate::store::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old_home = std::env::var_os("HOME");
         std::env::set_var("HOME", &home);
         remote.sync_up().unwrap();
