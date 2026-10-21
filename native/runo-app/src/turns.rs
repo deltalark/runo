@@ -1116,6 +1116,7 @@ impl RunoApp {
 
     /// Apply values produced outside of render (they need a window to reach inputs).
     pub(crate) fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_folder_pending(window, cx);
         // Each session keeps its own unsent prompt while another one is on screen.
         if self.draft_for != self.selected {
             let text = self.prompt.read(cx).value().to_string();

@@ -133,6 +133,10 @@ impl RunoApp {
                     repo.state = state;
                 }
                 match result {
+                    Ok(_) => this.git_folder_msg_kept = None,
+                    Err(_) => this.git_folder_msg_set = this.git_folder_msg_kept.take(),
+                }
+                match result {
                     Ok(Some((note, undo))) => {
                         if let Some(undo) = undo {
                             let point = git::UndoPoint {
@@ -153,6 +157,7 @@ impl RunoApp {
                 this.refresh();
                 this.load_branches();
                 this.load_history();
+                this.load_folder();
                 cx.notify();
             },
         );
