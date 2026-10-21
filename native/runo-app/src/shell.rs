@@ -864,7 +864,6 @@ pub(crate) enum Mode {
     Sessions,
     Design,
     Architecture,
-    Missions,
     /// What waits to ship and the project's GitHub, as two tabs of one place.
     Git,
     Playbooks,
@@ -877,17 +876,16 @@ pub(crate) enum Mode {
 impl Mode {
     /// The modes at the top of the rail, in order. The first `WORK` are the day's work;
     /// the rest, what's been kept, sit apart.
-    pub(crate) const MAIN: [Mode; 6] = [
+    pub(crate) const MAIN: [Mode; 5] = [
         Mode::Home,
         Mode::Sessions,
-        Mode::Missions,
         Mode::Git,
         Mode::Playbooks,
         Mode::History,
     ];
 
     /// How many of `MAIN` stay out on the rail; the rest wait in its More menu.
-    const WORK: usize = 4;
+    const WORK: usize = 3;
 
     /// The places in the rail's More menu, used less than the ones out on the rail.
     pub(crate) const MORE: [Mode; 3] = [Mode::Playbooks, Mode::History, Mode::Notes];
@@ -911,7 +909,6 @@ impl Mode {
             Mode::Sessions => "Sessions",
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
-            Mode::Missions => "Missions",
             Mode::Git => "Git",
             Mode::Playbooks => "Playbooks",
             Mode::History => "History",
@@ -928,8 +925,7 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
-            Mode::Missions => "go-missions",
-            // Git's To ship tab; `go-reviews` opens its GitHub tab.
+            // Git's Changes tab; `go-reviews` opens its GitHub tab.
             Mode::Git => "go-review",
             Mode::Playbooks => "go-playbooks",
             Mode::History => "go-history",
@@ -945,7 +941,6 @@ impl Mode {
             Mode::Sessions => IconName::CodeXml,
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
-            Mode::Missions => IconName::Rocket,
             Mode::Git => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
             Mode::History => IconName::RotateCcwClock,
@@ -962,8 +957,7 @@ impl Mode {
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
-            View::Missions => Mode::Missions,
-            View::Review | View::GitHub => Mode::Git,
+            View::Review | View::GitHistory | View::Branches | View::GitHub => Mode::Git,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
             View::Notes => Mode::Notes,
@@ -1140,9 +1134,12 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
-            Mode::Missions => self.open_missions(cx),
-            Mode::Git if self.git_github => self.load_github(),
-            Mode::Git => self.open_review(),
+            Mode::Git => match self.git_tab {
+                View::GitHub => self.load_github(),
+                View::Branches => self.open_branches(),
+                View::GitHistory => self.open_git_history(),
+                _ => self.open_review(),
+            },
             Mode::Playbooks => self.view = View::Automations,
             Mode::History => self.open_history(cx),
             Mode::Inbox => self.view = View::Inbox,
@@ -1317,19 +1314,7 @@ impl RunoApp {
     pub(crate) fn nav_list(&self, cx: &App) -> Vec<u64> {
         match self.view {
             View::Inbox => self.needs_you().into_iter().map(|(s, _)| s.id).collect(),
-            View::Home => {
-                let mut out = Vec::new();
-                for bucket in [Bucket::NeedsYou, Bucket::Running, Bucket::Review] {
-                    out.extend(
-                        self.state
-                            .sessions
-                            .iter()
-                            .filter(|s| self.on_home(s) && self.bucket(s) == Some(bucket))
-                            .map(|s| s.id),
-                    );
-                }
-                out
-            }
+            View::Home => self.home_recent().into_iter().map(|s| s.id).collect(),
             _ if self.mode() == Mode::Sessions && self.show_sidebar => {
                 let filter = self.search.read(cx).value().to_lowercase();
                 self.sidebar_rows(&filter, cx)
@@ -1441,12 +1426,11 @@ impl RunoApp {
     }
 
     /// Whether the open place has a list beside the rail for its tab to join: the
-    /// sessions sidebar, the missions and review lists, or Design's layers.
+    /// sessions sidebar, the review list, Settings' pages, or Design's layers.
     pub(crate) fn has_panel(&self, cx: &App) -> bool {
         match self.mode() {
             Mode::Sessions => self.show_sidebar,
-            Mode::Missions | Mode::Settings => true,
-            Mode::Git => self.view == View::Review,
+            Mode::Git => matches!(self.view, View::Review | View::GitHistory | View::Branches),
             Mode::Design => self
                 .design
                 .project
@@ -1479,7 +1463,6 @@ impl RunoApp {
             let badge = match mode {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
-                Mode::Missions => self.missions_badge(),
                 Mode::Git if self.gh.needs_you() > 0 => Some(c_amber()),
                 Mode::Git if counts.review > 0 => Some(c_blue()),
                 _ => None,
@@ -1779,6 +1762,23 @@ impl RunoApp {
                     }),
             );
         }
+        // How the person works in the project the top bar shows: through Crew, or directly.
+        if let Some(pid) = current.filter(|_| !self.all_scope()) {
+            list = list.child(div().h(px(1.)).my_1().bg(divider())).child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .v_flex()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("How you work in this project"),
+                    )
+                    .child(self.crew_mode_switch(pid, cx)),
+            );
+        }
         list = list.child(div().h(px(1.)).my_1().bg(divider())).child(
             div()
                 .id("project-add")
@@ -1849,6 +1849,16 @@ impl RunoApp {
             .max();
         match (self.mode(), latest) {
             (Mode::Git, _) if self.view == View::GitHub => self.load_github(),
+            (Mode::Git, _) if self.view == View::GitHistory => {
+                self.git_commit_sel = None;
+                self.git_log_filter.path.clear();
+                self.open_git_history();
+            }
+            (Mode::Git, _) if self.view == View::Branches => {
+                self.git_branch_sel = None;
+                self.open_branches();
+            }
+            (Mode::Git, _) => self.load_repo(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
                 self.view = View::Home;
@@ -2644,190 +2654,6 @@ impl RunoApp {
 
     // ---------- Home ----------
 
-    /// One of Home's four numbers. The cards fade in one after another, the number settles
-    /// in again whenever it changes, and a live count's dot pulses while agents work.
-    fn stat_card(
-        &self,
-        i: usize,
-        label: &'static str,
-        value: String,
-        hint: String,
-        color: u32,
-    ) -> AnyElement {
-        let live = label == "Running" && value != "0";
-        let lead = i as f32 * 0.06;
-        card()
-            .flex_1()
-            .min_w_0()
-            .p_4()
-            .v_flex()
-            .gap_1()
-            .relative()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .child(if live {
-                        live_dot(color, 7., format!("stat-live-{label}"))
-                    } else {
-                        div()
-                            .size(px(7.))
-                            .rounded_full()
-                            .bg(rgb(color))
-                            .into_any_element()
-                    })
-                    .child(label),
-            )
-            .child(pop(
-                div()
-                    .text_size(px(24.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(value.clone()),
-                format!("stat-{label}-{value}"),
-            ))
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_muted()))
-                    .truncate()
-                    .child(hint),
-            )
-            .animated(
-                SharedString::from(format!("stat-card-{label}")),
-                Animation::new(Duration::from_millis(QUICK + 80)).with_easing(after(lead)),
-                |el, d| el.opacity(d),
-            )
-    }
-
-    fn home_row(&self, session: &Session, note: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        let id = session.id;
-        let provider = agent::provider(&session.provider);
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
-        let chosen = self.cursor == Some(id);
-        div()
-            .id(("home-row", id as usize))
-            .relative()
-            .mx_2()
-            .px_2()
-            .py(px(8.))
-            .flex()
-            .items_center()
-            .gap_3()
-            .rounded_lg()
-            .cursor_pointer()
-            .hover(|el| el.bg(tint(c_active())))
-            .when(chosen, |el| {
-                el.bg(tint(c_active()))
-                    .child(accent_bracket(format!("home-row-bracket-{id}")))
-            })
-            .on_mouse_down(
-                MouseButton::Right,
-                self.on_context(ctxmenu::CtxTarget::Session(id), cx),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                // Work waiting for review opens on Review, where it can be shipped.
-                let waiting = this
-                    .state
-                    .session(id)
-                    .is_some_and(|s| this.bucket(s) == Some(Bucket::Review));
-                if waiting {
-                    this.review(id);
-                } else {
-                    this.select(id);
-                }
-                cx.notify();
-            }))
-            .child(self.provider_badge(provider, 28.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .v_flex()
-                    .gap(px(1.))
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(session.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_muted()))
-                            .child(format!("{project}  ·  {}", session.branch)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .child(note),
-            )
-            .into_any_element()
-    }
-
-    fn home_panel(
-        &self,
-        title: &'static str,
-        count: usize,
-        rows: Vec<AnyElement>,
-        empty: &'static str,
-    ) -> Div {
-        let mut list = div().v_flex().pb_2();
-        for (i, row) in rows.into_iter().enumerate() {
-            if i > 0 {
-                list = list.child(card_rule().my(px(2.)));
-            }
-            list = list.child(cascade(row, format!("home-row-{title}-{i}"), i + 2));
-        }
-        card()
-            .flex_1()
-            .min_w_0()
-            .v_flex()
-            .child(
-                div()
-                    .px_4()
-                    .h(px(42.))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(title)
-                    .child(pop(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_muted()))
-                            .child(count.to_string()),
-                        format!("home-panel-{title}-{count}"),
-                    )),
-            )
-            .child(card_rule().mb_2())
-            .child(list)
-            .when(count == 0, |el| {
-                el.child(
-                    div()
-                        .px_4()
-                        .pt_1()
-                        .pb_4()
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_muted()))
-                        .child(empty),
-                )
-            })
-    }
-
     /// A small bordered button with an icon, for Home's actions.
     pub(crate) fn home_button(
         &self,
@@ -2862,317 +2688,6 @@ impl RunoApp {
                         .child(hint),
                 )
             })
-    }
-
-    /// Home: what needs you, what runs and what waits for review, in the top bar's project
-    /// or, with "All projects", everywhere.
-    pub(crate) fn home_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut needs: Vec<AnyElement> = Vec::new();
-        let mut running: Vec<AnyElement> = Vec::new();
-        let mut review: Vec<AnyElement> = Vec::new();
-        for s in self.state.sessions.iter().filter(|s| self.on_home(s)) {
-            match self.bucket(s) {
-                Some(Bucket::NeedsYou) => {
-                    let note = self.need(s).map_or("", Need::label);
-                    needs.push(self.home_row(s, note.into_any_element(), cx));
-                }
-                Some(Bucket::Running) => {
-                    let note = self
-                        .started
-                        .get(&s.id)
-                        .map_or("Working".to_string(), |t| elapsed(t.elapsed()));
-                    running.push(self.home_row(s, note.into_any_element(), cx));
-                }
-                Some(Bucket::Review) => {
-                    let (_, a, r) = self.stats.get(&s.id).copied().unwrap_or_default();
-                    let diff = div()
-                        .flex()
-                        .gap(px(6.))
-                        .child(div().text_color(rgb(c_green())).child(format!("+{a}")))
-                        .child(div().text_color(rgb(c_red())).child(format!("−{r}")));
-                    review.push(self.home_row(s, diff.into_any_element(), cx));
-                }
-                _ => {}
-            }
-        }
-        let (n_needs, n_running, n_review) = (needs.len(), running.len(), review.len());
-        let spend_today = self.counts().spend_today;
-        let project = self
-            .current_project()
-            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
-            .filter(|_| !self.home_all)
-            .cloned();
-        let missing = project
-            .as_ref()
-            .filter(|p| !self.demo && !std::path::Path::new(&p.path).is_dir())
-            .map(|p| (p.id, p.path.clone()));
-        let no_projects = self.state.projects.is_empty();
-        let scope = |label: &'static str, all: bool| {
-            let id = if all { "home-all" } else { "home-one" };
-            seg_choice(id, format!("seg-fill-{id}"), self.home_all == all)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.home_all = all;
-                    this.cursor = None;
-                    this.save();
-                    cx.notify();
-                }))
-                .child(label)
-        };
-        let links: [(&'static str, IconName, &'static str, View); 4] = [
-            (
-                "home-history",
-                IconName::RotateCcwClock,
-                "Agent history",
-                View::History,
-            ),
-            (
-                "home-activity",
-                IconName::Activity,
-                "Timeline",
-                View::Activity,
-            ),
-            (
-                "home-notes",
-                IconName::NotebookPen,
-                "Project notes",
-                View::Notes,
-            ),
-            (
-                "home-isolated",
-                IconName::GitBranch,
-                "Isolated sessions",
-                View::Worktrees,
-            ),
-        ];
-        let mut link_row = div().flex().flex_wrap().gap_2();
-        for (id, glyph, label, view) in links {
-            link_row = link_row.child(
-                self.home_button(id, glyph, label, String::new())
-                    .font_weight(FontWeight::NORMAL)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        match view {
-                            View::History => this.open_history(cx),
-                            View::Notes => {
-                                this.notes_project = this.current_project();
-                                this.open_notes(window, cx);
-                            }
-                            _ => this.view = view,
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        let body = div()
-            .v_flex()
-            .gap_4()
-            .when_some(missing, |el, (pid, path)| {
-                el.child(
-                    div()
-                        .p_4()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(rgb(c_amber()))
-                        .bg(rgb(settings::mix(c_amber(), c_canvas(), 0.1)))
-                        .child(icon(IconName::TriangleAlert, 18., c_amber()))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .v_flex()
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("This project's folder is missing"),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(c_secondary()))
-                                        .child(format!(
-                                            "{path} was moved or deleted. Point the project at its new place, or remove it from Runo."
-                                        )),
-                                ),
-                        )
-                        .child(
-                            self.button("home-relink", "Relink…", true)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.relink_project(pid, cx);
-                                })),
-                        )
-                        .child(
-                            self.button("home-remove", "Remove…", false)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.ask_remove_project(pid, window, cx);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(self.stat_card(
-                        0,
-                        "Needs you",
-                        n_needs.to_string(),
-                        "blocked, or finished unseen".into(),
-                        c_amber(),
-                    ))
-                    .child(self.stat_card(
-                        1,
-                        "Running",
-                        n_running.to_string(),
-                        "agents working now".into(),
-                        c_blue(),
-                    ))
-                    .child(self.stat_card(
-                        2,
-                        "Ready to review",
-                        n_review.to_string(),
-                        "idle with changes".into(),
-                        c_green(),
-                    ))
-                    .child(self.stat_card(
-                        3,
-                        "Spend today",
-                        format!("${:.2}", spend_today / 100.0),
-                        "reported by Claude Code and OpenCode, all projects".into(),
-                        c_muted(),
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .items_start()
-                    .child(self.home_panel(
-                        "Needs you",
-                        n_needs,
-                        needs,
-                        "Nothing is waiting on you.",
-                    ))
-                    .child(self.home_panel(
-                        "Running",
-                        n_running,
-                        running,
-                        "No agents are working right now.",
-                    )),
-            )
-            .child(self.home_panel(
-                "Ready to review",
-                n_review,
-                review,
-                "Sessions with changes to commit show up here.",
-            ))
-            .child(link_row);
-        let title = match &project {
-            Some(p) => p.name.clone(),
-            None if no_projects => "Welcome to Runo".into(),
-            None => "All projects".into(),
-        };
-        let subtitle = match &project {
-            _ if no_projects => "Add a project folder to get started.".to_string(),
-            Some(p) => p.path.clone(),
-            None => match self.state.projects.len() {
-                1 => "1 project".to_string(),
-                n => format!("{n} projects"),
-            },
-        };
-        div()
-            .flex_1()
-            .min_w_0()
-            .overflow_y_scrollbar()
-            .child(
-                div()
-                    .max_w(px(1080.))
-                    .mx_auto()
-                    .p_8()
-                    .v_flex()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .v_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_size(px(20.))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(12.5))
-                                            .text_color(rgb(c_muted()))
-                                            .child(subtitle),
-                                    ),
-                            )
-                            .when(self.state.projects.len() > 1, |el| {
-                                el.child(
-                                    seg_track()
-                                        .child(scope("This project", false))
-                                        .child(scope("All projects", true)),
-                                )
-                            })
-                            .child(
-                                self.home_button(
-                                    "home-add",
-                                    IconName::FolderPlus,
-                                    "Add project",
-                                    String::new(),
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
-                            )
-                            .when(!no_projects, |el| {
-                                el.child(
-                                    div()
-                                        .id("home-new")
-                                        .h(px(32.))
-                                        .px_3()
-                                        .flex()
-                                        .flex_none()
-                                        .items_center()
-                                        .gap_2()
-                                        .rounded_md()
-                                        .bg(rgb(c_text()))
-                                        .text_color(rgb(c_canvas()))
-                                        .cursor_pointer()
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .hover(|el| el.opacity(0.9))
-                                        .child(icon(IconName::Plus, 14., c_canvas()))
-                                        .child("New session")
-                                        .child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .opacity(0.6)
-                                                .child(keymap::label(cx, "new-session")),
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if let Some(pid) = this.current_project() {
-                                                this.new_project = Some(pid);
-                                            }
-                                            this.open_new_session();
-                                            cx.notify();
-                                        })),
-                                )
-                            }),
-                    )
-                    .child(body),
-            )
-            .into_any_element()
     }
 
     // ---------- Design and Architecture ----------
@@ -4017,8 +3532,9 @@ mod tests {
         // Each place on the rail opens a view that lights that same place up again.
         for (view, mode) in [
             (View::Review, Mode::Git),
-            (View::Missions, Mode::Missions),
             (View::GitHub, Mode::Git),
+            (View::Branches, Mode::Git),
+            (View::GitHistory, Mode::Git),
             (View::History, Mode::History),
             (View::Notes, Mode::Notes),
             (View::Automations, Mode::Playbooks),

@@ -435,8 +435,6 @@ impl RunoApp {
             branch: branch.clone(),
             dir,
             isolated: in_git,
-            mode: src.mode.clone(),
-            model: src.model.clone(),
             opts: src.opts.clone(),
             status: Status::Idle,
             conversation_start: messages.len(),

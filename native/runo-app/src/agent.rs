@@ -240,7 +240,7 @@ pub struct RunSpec<'a> {
     pub opts: &'a AgentOptions,
     /// Whether the working directory is a git repository.
     pub in_git: bool,
-    /// Claude Code conversation id for this session; empty for sessions saved before ids.
+    /// Claude Code conversation id for this session; empty until it has one.
     pub session_id: &'a str,
     /// Image files attached to the prompt.
     pub images: &'a [String],
@@ -248,6 +248,9 @@ pub struct RunSpec<'a> {
     pub memory: Option<(&'a str, &'a str)>,
     /// The run is on this machine, so MCP servers that are local programs can start.
     pub local: bool,
+    /// The session's id when it is a Crew thread, whose memory server adds the tools
+    /// threads report through; 0 otherwise.
+    pub thread: u64,
 }
 
 /// A random version-4 UUID, for naming a Claude Code conversation up front.
@@ -363,7 +366,16 @@ fn mcp_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
             MEMORY_SERVER.into(),
             McpSpec {
                 command: exe.to_string(),
-                args: vec!["--mcp-memory".into(), dir.to_string()],
+                args: if spec.thread == 0 {
+                    vec!["--mcp-memory".into(), dir.to_string()]
+                } else {
+                    vec![
+                        "--mcp-memory".into(),
+                        dir.to_string(),
+                        "--thread".into(),
+                        spec.thread.to_string(),
+                    ]
+                },
                 ..Default::default()
             },
         ));
@@ -706,6 +718,12 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 ] {
                     allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
                 }
+                // A thread reports back without asking.
+                if spec.thread != 0 {
+                    for tool in crate::memory_mcp::THREAD_TOOLS {
+                        allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
+                    }
+                }
             }
             if !servers.is_empty() {
                 let config = serde_json::json!({ "mcpServers": servers });
@@ -953,6 +971,7 @@ mod interactive_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         let claude = interactive_args(&spec("claude", true, ""));
         assert!(!claude
@@ -1724,6 +1743,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         })
     }
 
@@ -1743,6 +1763,7 @@ mod arg_tests {
                 images: &[],
                 memory: None,
                 local: true,
+                thread: 0,
             })
         };
         assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
@@ -1764,6 +1785,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
         let first = provider_args(&spec(false, id));
@@ -1838,6 +1860,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), None, tx).unwrap();
         let (mut out, mut err) = (vec![], vec![]);
@@ -1882,6 +1905,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         let error = run_agent(Target::Session(1), &spec, "/", None, tx)
             .err()
@@ -2115,6 +2139,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         let has = |p, resume, pair: [&str; 2]| {
             provider_args(&spec(p, resume))
@@ -2147,6 +2172,7 @@ mod arg_tests {
             images,
             memory: None,
             local: true,
+            thread: 0,
         })
     }
 
@@ -2229,6 +2255,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         });
         assert!(opencode.windows(2).any(|w| w == ["--agent", "plan"]));
         assert!(!opencode.contains(&"build".to_string()));
@@ -2273,6 +2300,7 @@ mod arg_tests {
             images: &[],
             memory: Some(("/bin/runo", "/work/app")),
             local: true,
+            thread: 0,
         };
         let claude = provider_args(&spec("claude"));
         let config = claude[claude.iter().position(|a| a == "--mcp-config").unwrap() + 1].clone();
@@ -2388,6 +2416,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         assert_eq!(
             interactive_args(&spec(true, "")),
