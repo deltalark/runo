@@ -27,6 +27,13 @@ impl RunoApp {
         images: Vec<String>,
         opts: &AgentOptions,
     ) {
+        // Whatever goes to a Crew thread next answers the decision it waits on: a choice,
+        // a reply typed in the thread, or a message from Crew.
+        if let Some(info) = self.state.session_mut(id).and_then(|s| s.crew.as_mut()) {
+            if info.decision.take().is_some() {
+                info.attention = None;
+            }
+        }
         // The worktree is still being made: the turn starts once it is ready.
         if let Some(waiting) = self.preparing.get_mut(&id) {
             waiting.push(crate::ship::Deferred {

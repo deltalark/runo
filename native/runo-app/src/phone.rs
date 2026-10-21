@@ -837,6 +837,10 @@ fn needs(s: &Session, pending: &[approvals::Request]) -> Value {
         Some((_, alerts::Waiting::Plan)) => {
             json!({ "kind": "plan", "text": "Proposed a plan and waits for your go-ahead" })
         }
+        // Answered in the app, or by replying in the thread.
+        Some((_, alerts::Waiting::Decision(d))) => {
+            json!({ "kind": "decision", "text": d.question })
+        }
         None => Value::Null,
     }
 }
