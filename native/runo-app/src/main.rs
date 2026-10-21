@@ -13,6 +13,7 @@ mod browser;
 mod browser_engine;
 mod caps;
 mod chatctl;
+mod clashes;
 mod cleanup;
 mod cliview;
 mod connections;
@@ -243,6 +244,11 @@ struct RunoApp {
     git_folder_msg: Entity<InputState>,
     git_folder_msg_set: Option<String>,
     git_folder_msg_kept: Option<String>,
+    /// The clash page: the file shown, what to keep at each spot (or for a whole file),
+    /// and the agent's version of a file, None while it's writing it.
+    git_clash_file: Option<String>,
+    git_picks: HashMap<(String, usize), clashes::Pick>,
+    git_agent_fix: HashMap<String, Option<String>>,
     /// The top bar project's folder as Git sees it, with when the remote was last fetched.
     git_repo: Option<gitplace::Repo>,
     /// The last git step taken from the Git place, which Undo takes back for a while.
@@ -1521,6 +1527,9 @@ impl RunoApp {
             git_folder_msg,
             git_folder_msg_set: None,
             git_folder_msg_kept: None,
+            git_clash_file: None,
+            git_picks: HashMap::new(),
+            git_agent_fix: HashMap::new(),
             git_repo: None,
             git_undo: None,
             git_working: None,

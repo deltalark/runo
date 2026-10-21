@@ -76,6 +76,11 @@ fn exists(dir: &str, rev: &str) -> bool {
     .is_ok()
 }
 
+/// Where the folder was before the last rebase, merge or reset.
+pub fn orig_head(dir: &str) -> Option<String> {
+    rev(dir, "ORIG_HEAD")
+}
+
 /// The commit the folder is on, if there is one yet.
 pub fn head(dir: &str) -> Option<String> {
     rev(dir, "HEAD")
@@ -645,6 +650,188 @@ pub fn in_progress(dir: &str) -> Option<&'static str> {
         Some("merge")
     } else {
         None
+    }
+}
+
+/// One stretch of a clashing file: lines both sides agree on, or a spot where each side
+/// changed the same lines its own way. `ours` is what git calls ours: the branch being
+/// rebased onto in a rebase, the checked-out branch in a merge.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Stretch {
+    Same(String),
+    Spot { ours: String, theirs: String },
+}
+
+/// A file with clashing lines; `stretches` is None when it has no lines to pick from
+/// (binary, or deleted on one side), so one side's whole file has to win.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClashFile {
+    pub path: String,
+    pub stretches: Option<Vec<Stretch>>,
+    /// The file as it is, with git's markers, for an agent to read.
+    pub text: String,
+}
+
+/// A rebase or merge stopped on clashing lines in the folder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clash {
+    /// "rebase" or "merge".
+    pub kind: &'static str,
+    /// The person's own branch, and what is coming in.
+    pub yours: String,
+    pub theirs: String,
+    /// Whether the person's own side is git's "ours".
+    pub yours_is_ours: bool,
+    /// Files still clashing, and files that came together on their own.
+    pub files: Vec<ClashFile>,
+    pub merged: Vec<String>,
+}
+
+impl ClashFile {
+    pub fn spots(&self) -> usize {
+        self.stretches.as_ref().map_or(0, |s| {
+            s.iter()
+                .filter(|s| matches!(s, Stretch::Spot { .. }))
+                .count()
+        })
+    }
+}
+
+/// Split a file git left with clash markers into its stretches.
+pub fn parse_clash(text: &str) -> Option<Vec<Stretch>> {
+    let mut out = Vec::new();
+    let mut same = String::new();
+    let (mut ours, mut theirs) = (String::new(), String::new());
+    // 0: outside a spot, 1: our lines, 2: the common ancestor's (skipped), 3: theirs.
+    let mut at = 0;
+    let mut any = false;
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        match at {
+            0 if bare.starts_with("<<<<<<<") => {
+                if !same.is_empty() {
+                    out.push(Stretch::Same(std::mem::take(&mut same)));
+                }
+                at = 1;
+                any = true;
+            }
+            1 if bare.starts_with("|||||||") => at = 2,
+            1 | 2 if bare == "=======" => at = 3,
+            3 if bare.starts_with(">>>>>>>") => {
+                out.push(Stretch::Spot {
+                    ours: std::mem::take(&mut ours),
+                    theirs: std::mem::take(&mut theirs),
+                });
+                at = 0;
+            }
+            0 => same.push_str(line),
+            1 => ours.push_str(line),
+            2 => {}
+            _ => theirs.push_str(line),
+        }
+    }
+    if !any || at != 0 {
+        return None;
+    }
+    if !same.is_empty() {
+        out.push(Stretch::Same(same));
+    }
+    Some(out)
+}
+
+/// What a commit or branch is called, for people: a branch name where one points at it.
+fn name_of(dir: &str, sha: &str) -> String {
+    git(
+        dir,
+        &[
+            "name-rev",
+            "--name-only",
+            "--no-undefined",
+            "--refs=refs/heads/*",
+            "--refs=refs/remotes/*",
+            "--exclude=*/HEAD",
+            sha,
+        ],
+    )
+    .ok()
+    .map(|n| n.trim().trim_start_matches("remotes/").to_string())
+    .filter(|n| !n.is_empty() && !n.contains('~') && !n.contains('^'))
+    .unwrap_or_else(|| sha.chars().take(7).collect())
+}
+
+/// The rebase or merge stopped in the folder, if one is.
+pub fn clash(dir: &str) -> Option<Clash> {
+    let kind = in_progress(dir)?;
+    let path = |name: &str| {
+        git(dir, &["rev-parse", "--git-path", name])
+            .map(|p| Path::new(dir).join(p.trim()))
+            .ok()
+    };
+    let read = |name: &str| {
+        path(name)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let (yours, theirs, yours_is_ours) = if kind == "rebase" {
+        let state = if path("rebase-merge").is_some_and(|p| p.exists()) {
+            "rebase-merge"
+        } else {
+            "rebase-apply"
+        };
+        let head = read(&format!("{state}/head-name"));
+        let onto = read(&format!("{state}/onto"));
+        (
+            head.trim_start_matches("refs/heads/").to_string(),
+            name_of(dir, &onto),
+            false,
+        )
+    } else {
+        let merging = read("MERGE_HEAD");
+        let merging = merging.lines().next().unwrap_or("");
+        (current_branch(dir), name_of(dir, merging), true)
+    };
+    let left = conflicted(dir);
+    let files = left
+        .iter()
+        .map(|p| {
+            let text = std::fs::read_to_string(Path::new(dir).join(p)).unwrap_or_default();
+            ClashFile {
+                path: p.clone(),
+                stretches: parse_clash(&text),
+                text,
+            }
+        })
+        .collect();
+    let merged = git(dir, &["diff", "--cached", "--name-only", "-z"])
+        .map(|s| split_z(&s))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !left.contains(p))
+        .collect();
+    Some(Clash {
+        kind,
+        yours,
+        theirs,
+        yours_is_ours,
+        files,
+        merged,
+    })
+}
+
+/// Settle a clashing file with this text.
+pub fn settle(dir: &str, path: &str, text: &str) -> Result<(), String> {
+    std::fs::write(Path::new(dir).join(path), text).map_err(|e| e.to_string())?;
+    git(dir, &["add", "--", path]).map(|_| ())
+}
+
+/// Settle a clashing file with one side's whole version, or its deletion where that side
+/// deleted it.
+pub fn settle_side(dir: &str, path: &str, ours: bool) -> Result<(), String> {
+    let side = if ours { "--ours" } else { "--theirs" };
+    match git(dir, &["checkout", side, "--", path]) {
+        Ok(_) => git(dir, &["add", "--", path]).map(|_| ()),
+        Err(_) => git(dir, &["rm", "-q", "--", path]).map(|_| ()),
     }
 }
 
@@ -1783,13 +1970,8 @@ pub fn pull(dir: &str) -> Result<Update, String> {
                 .into(),
         );
     }
-    match update_from(dir, "@{u}", true)? {
-        Update::Conflicts(files) => {
-            abort_update(dir)?;
-            Ok(Update::Conflicts(files))
-        }
-        done => Ok(done),
-    }
+    // Clashing lines leave the rebase stopped, for the clash page to sort out.
+    update_from(dir, "@{u}", true)
 }
 
 /// Check out another local branch, or a remote one under its own name. Uncommitted work
@@ -2199,6 +2381,13 @@ pub fn merge_branch(
             Ok(_) => git(dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string()),
             Err(error) => {
                 let files = conflicted(dir);
+                // A merge in the project folder itself waits for the clash page.
+                if how == MergeHow::Merge && !files.is_empty() && dir == repo {
+                    return Err(format!(
+                        "{branch} and {base} change the same lines in {}. Pick what to keep, then Finish.",
+                        files.join(", ")
+                    ));
+                }
                 let _ = match how {
                     MergeHow::Rebase => git(dir, &["cherry-pick", "--abort"]),
                     _ => git(dir, &["merge", "--abort"])
@@ -3390,8 +3579,33 @@ index 1..2 100644
             pull(dir).unwrap(),
             Update::Conflicts(vec!["a.txt".to_string()])
         );
+        // The clash waits to be sorted out; calling it off puts everything back.
+        let found = clash(dir).unwrap();
+        assert_eq!((found.kind, found.yours.as_str()), ("rebase", "main"));
+        assert_eq!(found.theirs, "origin/main");
+        assert!(!found.yours_is_ours);
+        assert_eq!(
+            found.files[0].stretches,
+            Some(vec![Stretch::Spot {
+                ours: "theirs\n".into(),
+                theirs: "mine\n".into()
+            }])
+        );
+        abort_update(dir).unwrap();
         assert_eq!(in_progress(dir), None);
         assert_eq!(rev(dir, "HEAD"), head);
+        // Sorted out: keep both, and finish.
+        pull(dir).unwrap();
+        settle(dir, "a.txt", "mine\ntheirs\n").unwrap();
+        assert!(clash(dir).unwrap().files.is_empty());
+        assert_eq!(continue_update(dir).unwrap(), Update::Updated);
+        assert_eq!(clash(dir), None);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "mine\ntheirs\n"
+        );
+        assert!(is_ancestor(dir, "origin/main", "HEAD"));
+        sh(&repo, &["reset", "-q", "--hard", head.as_deref().unwrap()]);
         // Switching branches, and undoing the switch.
         sh(&repo, &["branch", "side"]);
         assert_eq!(repo_state(dir).branches.len(), 2);
@@ -3403,6 +3617,25 @@ index 1..2 100644
         for p in [&repo, &remote, &other] {
             let _ = std::fs::remove_dir_all(p);
         }
+    }
+
+    #[test]
+    fn clash_markers_split_into_stretches() {
+        let text =
+            "a\n<<<<<<< HEAD\nmine\n||||||| base\nold\n=======\ntheirs\nmore\n>>>>>>> x\nb\n";
+        assert_eq!(
+            parse_clash(text),
+            Some(vec![
+                Stretch::Same("a\n".into()),
+                Stretch::Spot {
+                    ours: "mine\n".into(),
+                    theirs: "theirs\nmore\n".into()
+                },
+                Stretch::Same("b\n".into()),
+            ])
+        );
+        assert_eq!(parse_clash("no markers\n"), None);
+        assert_eq!(parse_clash("<<<<<<< HEAD\nunfinished\n"), None);
     }
 
     #[test]

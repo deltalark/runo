@@ -19,6 +19,8 @@ pub(crate) struct Repo {
     pub state: git::RepoState,
     /// When the remote was last fetched, if it has been.
     pub fetched: Option<Instant>,
+    /// A rebase or merge stopped on clashing lines, waiting to be sorted out.
+    pub clash: Option<git::Clash>,
 }
 
 /// Which half of a sync to run.
@@ -88,6 +90,7 @@ impl RunoApp {
                 };
                 Some(Repo {
                     state: git::repo_state(&dir),
+                    clash: git::clash(&dir),
                     dir,
                     fetched,
                 })
@@ -125,12 +128,14 @@ impl RunoApp {
             move || {
                 let result = work(&dir);
                 let state = git::repo_state(&dir);
-                (result, dir, state)
+                let clash = git::clash(&dir);
+                (result, dir, state, clash)
             },
-            |this, (result, dir, state), cx| {
+            |this, (result, dir, state, clash), cx| {
                 this.git_working = None;
                 if let Some(repo) = this.git_repo.as_mut() {
                     repo.state = state;
+                    repo.clash = clash;
                 }
                 match result {
                     Ok(_) => this.git_folder_msg_kept = None,
@@ -200,11 +205,16 @@ impl RunoApp {
                     let before = git::repo_state(dir).behind;
                     match git::pull(dir)? {
                         git::Update::Conflicts(files) => {
-                            return Err(format!(
-                                "The new commits on {} and yours change the same lines in {}, so nothing was changed. Ask an agent in a session to bring them in and sort out the clash.",
-                                state.host,
-                                files.join(", ")
-                            ));
+                            // The clash page takes it from here; calling it off there
+                            // puts everything back.
+                            return Ok(Some((
+                                format!(
+                                    "The new commits on {} and yours change the same lines in {}. Pick what to keep.",
+                                    state.host,
+                                    files.join(", ")
+                                ),
+                                None,
+                            )));
                         }
                         git::Update::Updated => {
                             let behind = before.max(1);
@@ -300,7 +310,10 @@ impl RunoApp {
                     .truncate()
                     .text_color(rgb(c_text()))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(if state.branch.is_empty() {
+                    .child(if let Some(clash) = repo.clash.as_ref() {
+                        // Mid-rebase the folder has no branch checked out; say whose it is.
+                        clash.yours.clone()
+                    } else if state.branch.is_empty() {
                         "No branch".to_string()
                     } else {
                         state.branch.clone()
@@ -612,10 +625,12 @@ impl RunoApp {
             .as_ref()
             .filter(|(_, at)| at.elapsed() < TOAST_FOR)?;
         let undo = self.git_undo_point().is_some_and(|p| p.label == *note);
+        // Above the clash page's own bar.
+        let clash = self.git_repo.as_ref().is_some_and(|r| r.clash.is_some());
         Some(
             div()
                 .absolute()
-                .bottom(px(18.))
+                .bottom(px(if clash { 70. } else { 18. }))
                 .left_0()
                 .right_0()
                 .flex()
