@@ -406,6 +406,156 @@ pub fn vm_action(action: &'static str, name: &str) {
     });
 }
 
+/// Agents a Cove server keeps the login of (`cove agents`): signed in once there, every
+/// VM on it is signed in, and tokens the agent refreshes come back to the server.
+const SERVER_LOGINS: [&str; 5] = ["claude", "codex", "gemini", "opencode", "qwen"];
+
+pub fn keeps_login(provider: &str) -> bool {
+    SERVER_LOGINS.contains(&provider)
+}
+
+/// The VM Runo signs agents in from, on a Cove server.
+const SIGN_IN_VM: &str = "runo-signin";
+
+/// An agent's login as a Cove server keeps it (`cove --json agents ls`).
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct AgentLogin {
+    pub agent: String,
+    pub signed_in: bool,
+}
+
+type LoginCache = std::collections::HashMap<u64, (Instant, Result<Vec<AgentLogin>, String>)>;
+
+fn login_cache() -> &'static Mutex<LoginCache> {
+    static CACHE: OnceLock<Mutex<LoginCache>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Ask the server which agents are signed in there, now.
+fn fetch_logins(conn: &crate::connections::Connection) -> Result<Vec<AgentLogin>, String> {
+    let out = conn
+        .cove()?
+        .args(["--json", "agents", "ls"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run cove: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("unrecognized subcommand") {
+            return Err(format!(
+                "This Mac's Cove is too old to sign agents in on a server. Update it with: curl -fsSL {INSTALL_URL} | sh"
+            ));
+        }
+        if err.contains("404") || err.to_lowercase().contains("not found") {
+            return Err(format!(
+                "This Cove server is too old to keep agent logins. Update it with: {}",
+                server_install_command()
+            ));
+        }
+        return Err(err
+            .lines()
+            .last()
+            .unwrap_or("cove failed")
+            .trim()
+            .to_string());
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("cove said something unexpected: {e}"))
+}
+
+/// The agents signed in on a Cove connection's server, refreshed in the background every
+/// 30 seconds. None until the first answer is in.
+pub fn logins(conn: &crate::connections::Connection) -> Option<Result<Vec<AgentLogin>, String>> {
+    let Ok(mut cache) = login_cache().lock() else {
+        return None;
+    };
+    let stale = cache
+        .get(&conn.id)
+        .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(30));
+    let known = cache.get(&conn.id).map(|(_, r)| r.clone());
+    if stale {
+        // Asked again in 30 seconds at the earliest, whatever this answer is.
+        let at = Instant::now();
+        let held = known.clone().unwrap_or_else(|| Ok(Vec::new()));
+        cache.insert(conn.id, (at, held));
+        let conn = conn.clone();
+        std::thread::spawn(move || {
+            let answer = fetch_logins(&conn);
+            if let Ok(mut cache) = login_cache().lock() {
+                cache.insert(conn.id, (at, answer));
+            }
+            crate::caps::mark_updated();
+        });
+    }
+    known
+}
+
+/// Ask the server now, off the UI thread (as Test does), and keep the answer.
+pub fn logins_now(conn: &crate::connections::Connection) -> Result<Vec<AgentLogin>, String> {
+    let answer = fetch_logins(conn);
+    if let Ok(mut cache) = login_cache().lock() {
+        cache.insert(conn.id, (Instant::now(), answer.clone()));
+    }
+    answer
+}
+
+/// Ask every server again on the next [`logins`] call, after signing in or out.
+pub fn forget_logins() {
+    if let Ok(mut cache) = login_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// Whether `provider` is signed in on the connection's server, once known.
+pub fn signed_in_there(conn: &crate::connections::Connection, provider: &str) -> Option<bool> {
+    let logins = logins(conn)?.ok()?;
+    logins
+        .iter()
+        .find(|l| l.agent == provider)
+        .map(|l| l.signed_in)
+}
+
+/// The command that signs `provider` in on a Cove connection's server: the agent's own
+/// login in a terminal in a small VM there, after which the server keeps the login for
+/// every VM.
+pub fn sign_in_command(
+    conn: &crate::connections::Connection,
+    provider: &str,
+) -> Result<Command, String> {
+    if !keeps_login(provider) {
+        return Err(format!(
+            "Cove can't keep {}'s login yet. Pass its API key to the connection under Keys passed in.",
+            crate::agent::provider(provider).name
+        ));
+    }
+    let mut c = conn.cove()?;
+    c.args(["agents", "login", provider, "--vm", SIGN_IN_VM]);
+    Ok(c)
+}
+
+/// Sign `provider` out on a Cove connection's server and its VMs.
+pub fn sign_out(conn: &crate::connections::Connection, provider: &str) -> Result<(), String> {
+    let out = conn
+        .cove()?
+        .args(["agents", "logout", provider])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run cove: {e}"))?;
+    forget_logins();
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// What a failed turn says when the agent isn't signed in on a Cove server.
+pub fn sign_in_help(provider: &str, place: &str) -> String {
+    format!(
+        "{} isn't signed in on {place}. Press Sign in on {place} below: you sign in once in a terminal there, and every session on {place} uses that login.",
+        crate::agent::provider(provider).name
+    )
+}
+
 pub fn vm_name(session: u64) -> String {
     format!("runo-{session}")
 }
@@ -644,6 +794,27 @@ mod tests {
                 "/code/app/.git:/code/app/.git:ro".into(),
             ],
         }
+    }
+
+    #[test]
+    fn agents_sign_in_on_the_server() {
+        let mut conn = crate::connections::Connection::new_cove(1);
+        conn.url = "http://127.0.0.1:17457".into();
+        conn.api_key = "cove_k".into();
+        if binary().is_some() {
+            let c = sign_in_command(&conn, "claude").unwrap();
+            let args: Vec<String> = c
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args.join(" "), "agents login claude --vm runo-signin");
+            assert!(c
+                .get_envs()
+                .any(|(k, v)| k == "COVE_URL" && v.is_some_and(|v| v == "http://127.0.0.1:17457")));
+        }
+        assert!(sign_in_command(&conn, "cursor").is_err());
+        assert!(keeps_login("codex") && !keeps_login("amp"));
+        assert!(sign_in_help("claude", "VPS").contains("isn't signed in on VPS"));
     }
 
     #[test]

@@ -315,7 +315,7 @@ impl Connection {
     }
 
     /// The `cove` command for this connection, pointed at its server.
-    fn cove(&self) -> Result<Command, String> {
+    pub(crate) fn cove(&self) -> Result<Command, String> {
         let bin = crate::cove::binary().ok_or("Cove is not installed on this machine.")?;
         let mut c = Command::new(bin);
         if self.remote() {
@@ -806,7 +806,14 @@ fn test_cove(conn: &Connection) -> TestResult {
             let mut lines = vec![format!(
                 "Connected to {place}. Agents install in each session's VM on first use."
             )];
-            lines.extend(sign_in_lines(conn, &[], &[]));
+            // Logins the server keeps count as signed in there.
+            let kept: Vec<String> = crate::cove::logins_now(conn)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| l.signed_in)
+                .map(|l| l.agent)
+                .collect();
+            lines.extend(sign_in_lines(conn, &[], &[], &kept));
             (Some(true), lines.join("\n"))
         }
         Ok(o) => (
@@ -859,7 +866,7 @@ fn test_server(conn: &Connection) -> TestResult {
                 "git will be installed on first sync"
             };
             let mut out = vec![format!("Connected: {host}, {git}.")];
-            out.extend(sign_in_lines(conn, &tools, &there));
+            out.extend(sign_in_lines(conn, &tools, &there, &[]));
             (Some(true), out.join("\n"))
         }
         Err(e) => (Some(false), e.lines().last().unwrap_or("").to_string()),
@@ -868,7 +875,12 @@ fn test_server(conn: &Connection) -> TestResult {
 
 /// One line per agent installed here or there: whether it is installed there and how it
 /// signs in, or what to do so it can.
-fn sign_in_lines(conn: &Connection, tools_there: &[String], files_there: &[String]) -> Vec<String> {
+fn sign_in_lines(
+    conn: &Connection,
+    tools_there: &[String],
+    files_there: &[String],
+    kept_there: &[String],
+) -> Vec<String> {
     let forwarded: Vec<String> = conn.forwarded_env().into_iter().map(|(k, _)| k).collect();
     let listed = conn.key_names();
     crate::agent::PROVIDERS
@@ -890,6 +902,8 @@ fn sign_in_lines(conn: &Connection, tools_there: &[String], files_there: &[Strin
                     .copied(),
                 local_file,
                 file_there: s.file.is_some_and(|f| files_there.iter().any(|t| t == f)),
+                kept_there: kept_there.iter().any(|k| k == p.id),
+                server_can_keep: conn.kind == Kind::Cove && crate::cove::keeps_login(p.id),
             };
             Some(agent_line(p.name, s, &check))
         })
@@ -905,6 +919,10 @@ struct AgentCheck<'a> {
     set_here_not_listed: Option<&'a str>,
     local_file: bool,
     file_there: bool,
+    /// The Cove server keeps a login for it (`cove agents`).
+    kept_there: bool,
+    /// The Cove server could keep one, once signed in there.
+    server_can_keep: bool,
 }
 
 fn agent_line(name: &str, s: &SignIn, c: &AgentCheck) -> String {
@@ -916,7 +934,7 @@ fn agent_line(name: &str, s: &SignIn, c: &AgentCheck) -> String {
     if let Some(key) = s.keys.iter().find(|k| c.forwarded.iter().any(|f| f == *k)) {
         return format!("✓ {name}: {install}signs in with {key}");
     }
-    if c.file_there {
+    if c.file_there || c.kept_there {
         return format!("✓ {name}: {install}signed in there");
     }
     if c.local_file {
@@ -928,6 +946,11 @@ fn agent_line(name: &str, s: &SignIn, c: &AgentCheck) -> String {
     if let Some(key) = c.set_here_not_listed {
         return format!(
             "✗ {name}: {install}not signed in there. {key} is set here; add it to Keys passed in"
+        );
+    }
+    if c.server_can_keep {
+        return format!(
+            "✗ {name}: {install}not signed in there. To fix: press Sign in at {name} login below"
         );
     }
     format!("✗ {name}: {install}not signed in there. To fix: {}", s.fix)
@@ -3809,6 +3832,8 @@ mod tests {
                 set_here_not_listed: unlisted,
                 local_file,
                 file_there,
+                kept_there: false,
+                server_can_keep: false,
             }
         }
         assert_eq!(
@@ -3831,6 +3856,16 @@ mod tests {
         assert!(
             claude.starts_with("✗") && claude.contains("claude setup-token"),
             "{claude}"
+        );
+        // On a Cove server that can keep it, the fix is signing in there.
+        let mut on_cove = check(&[], false, false, None);
+        on_cove.server_can_keep = true;
+        let line = agent_line("Claude Code", sign_in("claude").unwrap(), &on_cove);
+        assert!(line.contains("Sign in at Claude Code login"), "{line}");
+        on_cove.kept_there = true;
+        assert!(
+            agent_line("Claude Code", sign_in("claude").unwrap(), &on_cove)
+                .starts_with("✓ Claude Code: installed, signed in there")
         );
         for p in crate::agent::PROVIDERS.iter() {
             assert!(sign_in(p.id).is_some(), "{} has no sign-in", p.id);

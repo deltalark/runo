@@ -1216,6 +1216,54 @@ fn conn_switch(
     )
 }
 
+/// One row per agent Cove can keep the login of: signed in on that server or not, with
+/// Sign in or Sign out. Agents not installed here show only once signed in there.
+fn agent_login_rows(c: &Connection) -> Vec<Row> {
+    let id = c.id;
+    let known = crate::cove::logins(c);
+    if let Some(Err(e)) = &known {
+        return vec![row("Agent logins", e, Ctl::Chip("Unavailable".into(), 0))];
+    }
+    let logins = known.and_then(Result::ok);
+    crate::agent::PROVIDERS
+        .iter()
+        .filter(|p| crate::cove::keeps_login(p.id))
+        .filter_map(|p| {
+            let login = logins
+                .as_ref()
+                .and_then(|l| l.iter().find(|l| l.agent == p.id));
+            let signed_in = login.is_some_and(|l| l.signed_in);
+            if !signed_in && !crate::caps::get(p.id).installed {
+                return None;
+            }
+            let provider = p.id;
+            let title = format!("{} login", p.name);
+            Some(match (&logins, signed_in) {
+                (None, _) => row(&title, "Checking the server…", Ctl::Chip("…".into(), 0)),
+                (Some(_), true) => row(
+                    &title,
+                    "Signed in on this server. Every session's VM here gets this login, and tokens the agent refreshes come back.",
+                    Ctl::Button(
+                        "Sign out".into(),
+                        Rc::new(move |this, cx| this.sign_out_on_connection(id, provider, cx)),
+                    ),
+                ),
+                (Some(_), false) => row(
+                    &title,
+                    &format!(
+                        "Not signed in on this server. Sign in once in a terminal there, with {}'s own login, and every session's VM here uses it.",
+                        p.name
+                    ),
+                    Ctl::Button(
+                        "Sign in".into(),
+                        Rc::new(move |this, cx| this.sign_in_on_connection(id, provider, cx)),
+                    ),
+                ),
+            })
+        })
+        .collect()
+}
+
 fn connection_sections(st: &AppSettings) -> Vec<Section> {
     let mut out = Vec::new();
     let mut list: Vec<Row> = vec![row(
@@ -1386,6 +1434,9 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
                     ));
                 }
             }
+        }
+        if c.kind == connections::Kind::Cove {
+            rows.extend(agent_login_rows(c));
         }
         rows.push(conn_text(c, "Keys passed in", "Environment variables from this machine the agent gets there, comma separated. Nothing else reaches it.", connections::DEFAULT_KEYS, c.keys.clone(), |c, v| c.keys = v));
         rows.push(conn_switch(c, "GitHub access", "Give the agent your GitHub login (from gh auth token) for its own work there, such as cloning or opening PRs. Syncing never needs it. Passed per command, never saved there.", c.github, |c, v| c.github = v));
