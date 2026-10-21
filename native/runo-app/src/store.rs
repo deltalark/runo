@@ -59,6 +59,10 @@ pub struct Message {
     /// so the turn can be undone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub checkpoint: String,
+    /// Agent turns: the files the turn changed, found at its end by comparing the folder
+    /// with the checkpoint taken before it ran. Its files changed card lists only these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<String>,
     /// Agent turns: "kept" or "undone" once the person decided on the turn's changes.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub resolved: String,
@@ -135,6 +139,33 @@ impl Session {
     /// Current selections: model, effort, mode, tier and the rest.
     pub fn selections(&self) -> HashMap<String, String> {
         self.opts.clone()
+    }
+
+    /// For a session that works in a folder it doesn't have to itself, the files its
+    /// agent changed, turn by turn. Anything else uncommitted there came from somewhere
+    /// else: the person, another session, or Runo's Design and Architecture modes. An
+    /// isolated session owns its whole worktree, so it gets `None`.
+    pub fn touched(&self) -> Option<std::collections::HashSet<String>> {
+        (!self.isolated).then(|| {
+            self.messages
+                .iter()
+                .flat_map(|m| m.changed.iter().cloned())
+                .collect()
+        })
+    }
+}
+
+/// Changes cut down to the files in `touched`, when there is such a set.
+pub fn only_touched(
+    changes: Vec<crate::git::Change>,
+    touched: Option<&std::collections::HashSet<String>>,
+) -> Vec<crate::git::Change> {
+    match touched {
+        Some(t) => changes
+            .into_iter()
+            .filter(|c| t.contains(&c.path))
+            .collect(),
+        None => changes,
     }
 }
 
@@ -228,6 +259,7 @@ impl Message {
             time: String::new(),
             meta: String::new(),
             checkpoint: String::new(),
+            changed: Vec::new(),
             resolved: String::new(),
             redo: String::new(),
             images: Vec::new(),
@@ -1208,6 +1240,39 @@ impl State {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_folder_counts_only_what_the_agent_changed() {
+        let change = |path: &str| crate::git::Change {
+            path: path.into(),
+            status: "A".into(),
+            added: 1,
+            removed: 0,
+            staged: false,
+            unstaged: true,
+            binary: false,
+        };
+        let mut reply = Message::new(Role::Agent, "Done.");
+        reply.changed = vec!["src/lib.rs".into()];
+        let mut session = Session {
+            messages: vec![
+                Message::new(Role::User, "Fix it"),
+                reply,
+                Message::new(Role::User, "Did you change any files?"),
+                Message::new(Role::Agent, "No."),
+            ],
+            ..Default::default()
+        };
+        let folder = vec![change("src/lib.rs"), change("architecture/model.toml")];
+        let touched = session.touched();
+        let mine = only_touched(folder.clone(), touched.as_ref());
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].path, "src/lib.rs");
+        // An isolated session owns its worktree, so everything in it counts.
+        session.isolated = true;
+        assert_eq!(session.touched(), None);
+        assert_eq!(only_touched(folder, None).len(), 2);
+    }
 
     #[test]
     fn schedules_say_when_they_run_next() {

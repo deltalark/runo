@@ -2577,11 +2577,17 @@ impl RunoApp {
                     ),
             ));
         }
-        let (added, removed) = self
+        // A session sharing its folder counts only the files its agent changed.
+        let touched = self.current().and_then(|s| s.touched());
+        let mine: Vec<_> = self
             .changes
             .iter()
+            .filter(|c| touched.as_ref().is_none_or(|t| t.contains(&c.path)))
+            .collect();
+        let (added, removed) = mine
+            .iter()
             .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-        let show_stats = self.view == View::Session && !self.changes.is_empty();
+        let show_stats = self.view == View::Session && !mine.is_empty();
         let menu_open = self.menu.as_deref() == Some("tabs");
         div()
             .h(px(36.))
