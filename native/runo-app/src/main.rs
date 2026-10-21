@@ -18,6 +18,9 @@ mod connections;
 mod connections_ui;
 mod copies;
 mod cove;
+// Read by the app from Crew's first visible phase; until then only the MCP server writes.
+#[cfg_attr(not(test), allow(dead_code))]
+mod crew;
 mod ctxmenu;
 mod design;
 mod designdraw;
@@ -9565,10 +9568,14 @@ const PANEL_MAX: f32 = 900.;
 const CHAT_MIN: f32 = 600.;
 
 fn main() {
-    // `runo --mcp-memory <folder>`: serve the memory tools to an agent, without a window.
+    // `runo --mcp-memory <folder> [--thread <id>]`: serve the memory tools to an agent,
+    // without a window; a Crew thread also gets the tools it reports through.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--mcp-memory") {
-        memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."));
+        let thread = (args.get(3).map(String::as_str) == Some("--thread"))
+            .then(|| args.get(4).and_then(|id| id.parse().ok()))
+            .flatten();
+        memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."), thread);
         return;
     }
     // `runo --phone [address]`: the API Runo's mobile app talks to, without a window.
