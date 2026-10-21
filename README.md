@@ -4,12 +4,12 @@
 
 <h1>Runo</h1>
 
-<h3>Your whole team of coding agents, in one native app.</h3>
+<h3>Ten agents. One crew. Every turn proven.</h3>
 
 <p>
-Run Claude Code, Codex, Gemini, OpenCode, Cursor and five more side by side, each in its own git worktree.<br />
-Hand one goal to several of them at once, have every turn proven by your own tests,<br />
-and review, design, diagram and ship it all without leaving the window.
+<b>Crew</b> splits your goal into threads, and Claude Code, Codex, Gemini and seven more race it side by side, each in its own git worktree.<br />
+Your own tests prove every turn, and the <b>Git place</b>, <b>Design</b> canvas, <b>Architecture</b> diagrams and <b>Cove VMs</b><br />
+take it all the way to ship, without leaving one native app.
 </p>
 
 <p>
@@ -44,7 +44,7 @@ and review, design, diagram and ship it all without leaving the window.
 
 <br />
 
-<img src="docs/images/main.png" alt="Runo with a Claude Code session open: projects with colored rails in the sidebar, the conversation in the middle, and the changes and a diff on the right" width="920" />
+<img src="docs/images/hero.gif" alt="Runo in motion: Crew on the home screen, a session with its diff ready to ship, the Git place with changes and the history graph, and an Architecture diagram" width="920" />
 
 </div>
 
