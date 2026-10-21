@@ -3212,28 +3212,6 @@ pub fn next_id(all: &[Connection]) -> u64 {
     all.iter().map(|c| c.id).max().unwrap_or(0) + 1
 }
 
-/// Sessions saved before connections existed have `cove: true`; point them at a Cove
-/// connection, creating one for this machine's Cove if needed. True if anything changed.
-pub fn migrate(sessions: &mut [crate::store::Session], all: &mut Vec<Connection>) -> bool {
-    if !sessions.iter().any(|s| s.cove) {
-        return false;
-    }
-    let id = match all.iter().find(|c| c.kind == Kind::Cove && !c.remote()) {
-        Some(c) => c.id,
-        None => {
-            let c = Connection::new_cove(next_id(all));
-            let id = c.id;
-            all.push(c);
-            id
-        }
-    };
-    for s in sessions.iter_mut().filter(|s| s.cove) {
-        s.cove = false;
-        s.connection = id;
-    }
-    true
-}
-
 /// Whether `origin` is a public repository, as far as `gh` can tell.
 fn public_repo(dir: &str) -> bool {
     Command::new("gh")
@@ -3537,28 +3515,6 @@ mod tests {
         assert!(out.ends_with("[exit code 3]"));
         conn.agents = false;
         assert!(run_for_agent(&conn, "true").is_err());
-    }
-
-    #[test]
-    fn old_cove_sessions_get_a_cove_connection() {
-        let mut sessions = vec![
-            crate::store::Session {
-                id: 1,
-                cove: true,
-                ..Default::default()
-            },
-            crate::store::Session {
-                id: 2,
-                ..Default::default()
-            },
-        ];
-        let mut all = vec![Connection::new_ssh(4)];
-        assert!(migrate(&mut sessions, &mut all));
-        assert_eq!(all.len(), 2);
-        assert_eq!((all[1].id, all[1].kind), (5, Kind::Cove));
-        assert_eq!((sessions[0].connection, sessions[0].cove), (5, false));
-        assert_eq!(sessions[1].connection, LOCAL);
-        assert!(!migrate(&mut sessions, &mut all));
     }
 
     #[test]
