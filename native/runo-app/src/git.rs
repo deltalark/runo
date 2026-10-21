@@ -1525,25 +1525,43 @@ pub fn switch(dir: &str, branch: &str) -> Result<(), String> {
     git(dir, &["switch", branch]).map(|_| ())
 }
 
-/// Where a folder was before a git step, so the step can be taken back.
+/// How to take a git step back.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Undo {
+    /// Put the folder back on this branch (empty when HEAD was detached), at this commit.
+    Folder { branch: String, head: String },
+    /// Point these branches back at these commits; `None` deletes one that the step made.
+    Branches(Vec<(String, Option<String>)>),
+    /// Give a renamed branch its old name back.
+    Rename { from: String, to: String },
+    /// Put a dropped set-aside back in the list.
+    Restash { commit: String, message: String },
+    /// Bring back what was just set aside.
+    Unstash,
+    /// Several of these, in order.
+    Steps(Vec<Undo>),
+}
+
+/// A step taken in a folder, with how to take it back.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UndoPoint {
     pub dir: String,
     /// The step, in words: "Brought in 3 commits".
     pub label: String,
-    /// The branch checked out then, empty when HEAD was detached.
-    pub branch: String,
-    pub head: String,
+    pub undo: Undo,
 }
 
-/// Remember where `dir` is now. Its commit is kept under `refs/runo/undo` so git's
-/// clean-up never drops it while an undo can still reach it.
-pub fn undo_point(dir: &str, label: &str) -> Option<UndoPoint> {
+/// Keep `commit` under `refs/runo/undo`, so git's clean-up never drops it while an undo
+/// can still reach it.
+fn keep_for_undo(dir: &str, commit: &str) {
+    let _ = git(dir, &["update-ref", "refs/runo/undo", commit]);
+}
+
+/// Where `dir` is now, to come back to.
+pub fn folder_point(dir: &str) -> Option<Undo> {
     let head = rev(dir, "HEAD")?;
-    let _ = git(dir, &["update-ref", "refs/runo/undo", &head]);
-    Some(UndoPoint {
-        dir: dir.to_string(),
-        label: label.to_string(),
+    keep_for_undo(dir, &head);
+    Some(Undo::Folder {
         branch: match current_branch(dir) {
             b if b == "HEAD" => String::new(),
             b => b,
@@ -1552,17 +1570,453 @@ pub fn undo_point(dir: &str, label: &str) -> Option<UndoPoint> {
     })
 }
 
-/// Go back to an undo point: its branch, at its commit. Uncommitted work is kept, and git
-/// refuses rather than overwrite any of it.
+/// Where these branches point now (`None` for one that does not exist yet), to come
+/// back to.
+pub fn branches_point(dir: &str, names: &[&str]) -> Undo {
+    Undo::Branches(
+        names
+            .iter()
+            .map(|name| {
+                let head = rev(dir, &format!("refs/heads/{name}"));
+                if let Some(head) = &head {
+                    keep_for_undo(dir, head);
+                }
+                (name.to_string(), head)
+            })
+            .collect(),
+    )
+}
+
+/// Take a step back. Uncommitted work is kept, and git refuses rather than overwrite
+/// any of it.
 pub fn undo(point: &UndoPoint) -> Result<(), String> {
     let dir = point.dir.as_str();
-    if !point.branch.is_empty() && current_branch(dir) != point.branch {
-        switch(dir, &point.branch)?;
-    }
-    if rev(dir, "HEAD").as_deref() != Some(point.head.as_str()) {
-        git(dir, &["reset", "--keep", &point.head])?;
+    match &point.undo {
+        Undo::Folder { branch, head } => {
+            if !branch.is_empty() && current_branch(dir) != *branch {
+                switch(dir, branch)?;
+            }
+            if rev(dir, "HEAD").as_deref() != Some(head.as_str()) {
+                git(dir, &["reset", "--keep", head])?;
+            }
+        }
+        Undo::Branches(list) => {
+            for (name, head) in list {
+                let checked_out = checked_out_at(dir, name);
+                match (head, checked_out) {
+                    (Some(head), Some(at)) => {
+                        git(&at, &["reset", "--keep", head])?;
+                    }
+                    (Some(head), None) => {
+                        git(dir, &["update-ref", &format!("refs/heads/{name}"), head])?;
+                    }
+                    (None, Some(_)) => {
+                        return Err(format!(
+                            "{name} is checked out, so it can't be removed. Switch away from it first."
+                        ));
+                    }
+                    (None, None) => {
+                        if has_branch(dir, name) {
+                            delete_branch(dir, name, true)?;
+                        }
+                    }
+                }
+            }
+        }
+        Undo::Rename { from, to } => {
+            git(dir, &["branch", "-m", to, from])?;
+        }
+        Undo::Restash { commit, message } => {
+            git(dir, &["stash", "store", "-m", message, commit])?;
+        }
+        Undo::Unstash => {
+            stash_apply(dir, 0)?;
+        }
+        Undo::Steps(steps) => {
+            for undo in steps {
+                self::undo(&UndoPoint {
+                    dir: point.dir.clone(),
+                    label: point.label.clone(),
+                    undo: undo.clone(),
+                })?;
+            }
+        }
     }
     Ok(())
+}
+
+/// One branch in the Branches list.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct BranchRow {
+    pub name: String,
+    /// Only the remote has it.
+    pub remote_only: bool,
+    /// Commits it has that the base lacks, and the other way round.
+    pub ahead: usize,
+    pub behind: usize,
+    /// The remote branch it tracks, empty when none.
+    pub upstream: String,
+    pub subject: String,
+    /// When its last commit was made, as git says it: "3 hours ago".
+    pub when: String,
+    /// The folder it is checked out in, if any.
+    pub checked_out: Option<String>,
+}
+
+/// Every local branch, then the remote's that have no local copy, each against `base`,
+/// most recently committed first.
+pub fn branch_rows(dir: &str, base: &str) -> Vec<BranchRow> {
+    let base_ref = base_ref(dir, base);
+    let remote = remote_name(dir);
+    let mut refs = vec!["refs/heads".to_string()];
+    if !remote.is_empty() {
+        refs.push(format!("refs/remotes/{remote}"));
+    }
+    let mut args = vec![
+        "for-each-ref",
+        "--sort=-committerdate",
+        "--format=%(refname)%00%(upstream:short)%00%(subject)%00%(committerdate:relative)",
+    ];
+    args.extend(refs.iter().map(String::as_str));
+    let out = git(dir, &args).unwrap_or_default();
+    let worktrees = worktree_branches(dir);
+    let mut rows: Vec<BranchRow> = Vec::new();
+    let prefix = format!("refs/remotes/{remote}/");
+    for line in out.lines() {
+        let mut f = line.split('\0');
+        let (Some(full), Some(upstream), Some(subject), Some(when)) =
+            (f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
+        let (name, remote_only) = if let Some(n) = full.strip_prefix("refs/heads/") {
+            (n.to_string(), false)
+        } else if let Some(n) = full.strip_prefix(prefix.as_str()) {
+            if n == "HEAD" {
+                continue;
+            }
+            (n.to_string(), true)
+        } else {
+            continue;
+        };
+        if remote_only && rows.iter().any(|r| r.name == name) {
+            continue;
+        }
+        let rev = if remote_only {
+            full.to_string()
+        } else {
+            format!("refs/heads/{name}")
+        };
+        let (behind, ahead) = if base_ref.is_empty() {
+            (0, 0)
+        } else {
+            git(
+                dir,
+                &[
+                    "rev-list",
+                    "--left-right",
+                    "--count",
+                    &format!("{base_ref}...{rev}"),
+                ],
+            )
+            .ok()
+            .and_then(|s| {
+                let mut n = s.split_whitespace().filter_map(|n| n.parse().ok());
+                Some((n.next()?, n.next()?))
+            })
+            .unwrap_or((0, 0))
+        };
+        rows.push(BranchRow {
+            checked_out: worktrees
+                .iter()
+                .find(|(_, b)| *b == name && !remote_only)
+                .map(|(d, _)| d.clone()),
+            name,
+            remote_only,
+            ahead,
+            behind,
+            upstream: upstream.to_string(),
+            subject: subject.to_string(),
+            when: when.to_string(),
+        });
+    }
+    // A remote branch listed before its local copy was read: drop it now.
+    let local: Vec<String> = rows
+        .iter()
+        .filter(|r| !r.remote_only)
+        .map(|r| r.name.clone())
+        .collect();
+    rows.retain(|r| !r.remote_only || !local.contains(&r.name));
+    rows
+}
+
+/// Every worktree's folder with the branch checked out there.
+fn worktree_branches(dir: &str) -> Vec<(String, String)> {
+    let Ok(list) = git(dir, &["worktree", "list", "--porcelain", "-z"]) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut path = None;
+    for field in list.split('\0') {
+        if let Some(p) = field.strip_prefix("worktree ") {
+            path = Some(p.to_string());
+        } else if let Some(b) = field.strip_prefix("branch refs/heads/") {
+            if let Some(p) = path.clone() {
+                out.push((p, b.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// One commit in a list.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct CommitRow {
+    pub short: String,
+    pub subject: String,
+    pub author: String,
+    pub when: String,
+}
+
+/// Commits on `branch` that `base` lacks, newest first.
+pub fn commits_only_on(dir: &str, branch: &str, base: &str, limit: usize) -> Vec<CommitRow> {
+    let limit = format!("-n{limit}");
+    git(
+        dir,
+        &[
+            "log",
+            &limit,
+            "--format=%h%x00%s%x00%an%x00%cr",
+            &format!("{base}..{branch}"),
+        ],
+    )
+    .unwrap_or_default()
+    .lines()
+    .filter_map(|line| {
+        let mut f = line.split('\0');
+        Some(CommitRow {
+            short: f.next()?.to_string(),
+            subject: f.next()?.to_string(),
+            author: f.next()?.to_string(),
+            when: f.next()?.to_string(),
+        })
+    })
+    .collect()
+}
+
+/// Files `branch` changes since it left `base`.
+pub fn branch_changes(dir: &str, branch: &str, base: &str) -> Vec<Change> {
+    let range = format!("{base}...{branch}");
+    let stats = numstat(
+        &git(dir, &["diff", "--numstat", "--no-renames", "-z", &range]).unwrap_or_default(),
+    );
+    git(
+        dir,
+        &["diff", "--name-status", "--no-renames", "-z", &range],
+    )
+    .unwrap_or_default()
+    .split('\0')
+    .collect::<Vec<_>>()
+    .chunks(2)
+    .filter_map(|pair| {
+        let (status, path) = (pair.first()?, pair.get(1)?);
+        if status.is_empty() {
+            return None;
+        }
+        let (added, removed, binary) = stats.get(*path).copied().unwrap_or_default();
+        Some(Change {
+            path: path.to_string(),
+            status: status.chars().next()?.to_string(),
+            added,
+            removed,
+            binary,
+            ..Default::default()
+        })
+    })
+    .collect()
+}
+
+/// Start a branch at `start` without switching to it.
+pub fn new_branch(dir: &str, name: &str, start: &str) -> Result<(), String> {
+    git(dir, &["branch", name, start]).map(|_| ())
+}
+
+/// A local copy of a branch only the remote has, tracking it.
+pub fn get_remote_branch(dir: &str, name: &str) -> Result<(), String> {
+    let remote = remote_name(dir);
+    git(
+        dir,
+        &["branch", "--track", name, &format!("{remote}/{name}")],
+    )
+    .map(|_| ())
+}
+
+/// Send a branch to the remote under its own name.
+pub fn push_branch(dir: &str, remote: &str, branch: &str) -> Result<(), String> {
+    git(dir, &["push", remote, branch])
+        .map(|_| ())
+        .map_err(|e| auth_hint(&e))
+}
+
+pub fn rename_branch(dir: &str, from: &str, to: &str) -> Result<(), String> {
+    git(dir, &["branch", "-m", from, to]).map(|_| ())
+}
+
+/// How a branch's commits land on the base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeHow {
+    /// One new commit with all the branch's changes.
+    Squash,
+    /// The branch's commits plus a merge commit.
+    Merge,
+    /// The branch's commits copied on top of the base, for a straight history.
+    Rebase,
+}
+
+/// Land `branch` on `base` without touching the branch itself. Runs where `base` is
+/// checked out, or in a temporary worktree. Clashing lines change nothing.
+pub fn merge_branch(
+    repo: &str,
+    branch: &str,
+    base: &str,
+    how: MergeHow,
+    message: &str,
+) -> Result<String, String> {
+    if !exists(repo, &format!("refs/heads/{base}")) {
+        // Only the remote has it: start a local branch there first.
+        let remote = remote_name(repo);
+        git(
+            repo,
+            &["branch", "--track", base, &format!("{remote}/{base}")],
+        )?;
+    }
+    let editor = [("GIT_EDITOR", "true")];
+    let (dir, temporary) = match checked_out_at(repo, base) {
+        Some(dir) => {
+            let dirty = git(&dir, &["status", "--porcelain", "--untracked-files=no"])?;
+            if !dirty.trim().is_empty() {
+                return Err(format!(
+                    "{base} has changes that aren't committed yet. Commit or set them aside first."
+                ));
+            }
+            (dir, false)
+        }
+        None => {
+            let common = git(repo, &["rev-parse", "--git-common-dir"])?;
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = Path::new(repo)
+                .join(common.trim())
+                .join(format!("runo-merge-{nanos}"))
+                .to_string_lossy()
+                .into_owned();
+            git(repo, &["worktree", "add", "--quiet", &dir, base])?;
+            (dir, true)
+        }
+    };
+    let result = match how {
+        MergeHow::Merge => git_with(&dir, &["merge", "--no-edit", branch], &editor, None),
+        MergeHow::Squash => git_with(&dir, &["merge", "--squash", branch], &editor, None)
+            .and_then(|_| git(&dir, &["commit", "-q", "-m", message])),
+        MergeHow::Rebase => {
+            let start = git(&dir, &["merge-base", "HEAD", branch])?;
+            git_with(
+                &dir,
+                &[
+                    "cherry-pick",
+                    "--allow-empty",
+                    &format!("{}..{branch}", start.trim()),
+                ],
+                &editor,
+                None,
+            )
+        }
+    };
+    let outcome = match result {
+        Ok(_) => git(&dir, &["rev-parse", "--short", "HEAD"]).map(|s| s.trim().to_string()),
+        Err(error) => {
+            let files = conflicted(&dir);
+            let _ = match how {
+                MergeHow::Rebase => git(&dir, &["cherry-pick", "--abort"]),
+                _ => git(&dir, &["merge", "--abort"])
+                    .or_else(|_| git(&dir, &["reset", "--hard", "-q", "HEAD"])),
+            };
+            Err(if files.is_empty() {
+                error
+            } else {
+                format!(
+                    "{branch} and {base} change the same lines in {}, so nothing was merged. Bring {base}'s updates into {branch} first to sort it out there.",
+                    files.join(", ")
+                )
+            })
+        }
+    };
+    if temporary {
+        let _ = remove_worktree(repo, &dir);
+    }
+    outcome
+}
+
+/// Work set aside, newest first.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct Stash {
+    pub message: String,
+    pub when: String,
+    pub commit: String,
+}
+
+pub fn stashes(dir: &str) -> Vec<Stash> {
+    git(dir, &["stash", "list", "--format=%H%x00%s%x00%cr"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split('\0');
+            let commit = f.next()?.to_string();
+            let message = f.next()?;
+            // "On main: note" or "WIP on main: abc123 subject": keep the part after the colon.
+            let message = message
+                .split_once(": ")
+                .map_or(message, |(_, m)| m)
+                .to_string();
+            Some(Stash {
+                commit,
+                message,
+                when: f.next()?.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Set uncommitted work aside, new files included, leaving the folder clean.
+pub fn stash_push(dir: &str, message: &str) -> Result<(), String> {
+    git(
+        dir,
+        &["stash", "push", "--include-untracked", "-m", message],
+    )
+    .map(|_| ())
+}
+
+/// Bring set-aside work back and take it off the list. On clashing lines it stays on the
+/// list and nothing changes.
+pub fn stash_apply(dir: &str, index: usize) -> Result<(), String> {
+    let name = format!("stash@{{{index}}}");
+    git(dir, &["stash", "pop", "--index", &name])
+        .or_else(|_| {
+            // --index fails when staged changes clash; try without keeping staging.
+            let _ = git(dir, &["reset", "--merge"]);
+            git(dir, &["stash", "pop", &name])
+        })
+        .map(|_| ())
+        .map_err(|e| {
+            let _ = git(dir, &["reset", "--merge"]);
+            format!("It clashes with changes in the folder now, so it stays set aside. ({e})")
+        })
+}
+
+pub fn stash_drop(dir: &str, index: usize) -> Result<(), String> {
+    git(dir, &["stash", "drop", &format!("stash@{{{index}}}")]).map(|_| ())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2290,7 +2744,12 @@ index 1..2 100644
         fetch(dir).unwrap();
         let state = repo_state(dir);
         assert_eq!((state.ahead, state.behind), (1, 1));
-        let before = undo_point(dir, "Brought in 1 commit").unwrap();
+        let point = |dir: &str| UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo: folder_point(dir).unwrap(),
+        };
+        let before = point(dir);
         assert_eq!(pull(dir).unwrap(), Update::Updated);
         assert!(repo.join("b.txt").exists());
         assert_eq!(
@@ -2324,12 +2783,137 @@ index 1..2 100644
         // Switching branches, and undoing the switch.
         sh(&repo, &["branch", "side"]);
         assert_eq!(repo_state(dir).branches.len(), 2);
-        let point = undo_point(dir, "Switched to side").unwrap();
+        let before = point(dir);
         switch(dir, "side").unwrap();
         assert_eq!(current_branch(dir), "side");
-        undo(&point).unwrap();
+        undo(&before).unwrap();
         assert_eq!(current_branch(dir), "main");
         for p in [&repo, &remote, &other] {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+
+    #[test]
+    fn branches_merge_three_ways_and_set_aside() {
+        let (repo, remote) = with_origin("branches");
+        let dir = repo.to_str().unwrap();
+        let point = |undo: Undo| UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo,
+        };
+        // A branch with two commits, and main moving on by one.
+        let made = point(branches_point(dir, &["topic"]));
+        new_branch(dir, "topic", "main").unwrap();
+        switch(dir, "topic").unwrap();
+        for (file, text) in [("t1.txt", "1\n"), ("t2.txt", "2\n")] {
+            std::fs::write(repo.join(file), text).unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", file]);
+        }
+        switch(dir, "main").unwrap();
+        std::fs::write(repo.join("m.txt"), "m\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "main moves"]);
+        let rows = branch_rows(dir, "main");
+        let topic = rows.iter().find(|r| r.name == "topic").unwrap();
+        assert_eq!((topic.ahead, topic.behind), (2, 1));
+        assert_eq!(topic.subject, "t2.txt");
+        assert_eq!(
+            rows.iter()
+                .find(|r| r.name == "main")
+                .unwrap()
+                .checked_out
+                .as_deref(),
+            Some(dir)
+        );
+        assert_eq!(commits_only_on(dir, "topic", "main", 10).len(), 2);
+        assert_eq!(
+            branch_changes(dir, "topic", "main")
+                .iter()
+                .map(|c| (c.path.as_str(), c.status.as_str(), c.added))
+                .collect::<Vec<_>>(),
+            vec![("t1.txt", "A", 1), ("t2.txt", "A", 1)]
+        );
+        // Squash: one commit on main; undo puts main back.
+        let before = point(branches_point(dir, &["main"]));
+        merge_branch(dir, "topic", "main", MergeHow::Squash, "Topic").unwrap();
+        assert_eq!(commits_ahead(dir, "main", "main~1"), 1);
+        assert!(repo.join("t2.txt").exists());
+        undo(&before).unwrap();
+        assert!(!repo.join("t2.txt").exists());
+        // Rebase: both commits copied on top, main stays straight.
+        merge_branch(dir, "topic", "main", MergeHow::Rebase, "").unwrap();
+        assert_eq!(
+            count(dir, &["rev-list", "--count", "--merges", "main"]),
+            Some(0)
+        );
+        assert!(repo.join("t1.txt").exists() && repo.join("t2.txt").exists());
+        undo(&before).unwrap();
+        // Merge from a temporary worktree when main is not checked out anywhere.
+        switch(dir, "topic").unwrap();
+        merge_branch(dir, "topic", "main", MergeHow::Merge, "").unwrap();
+        assert_eq!(
+            count(dir, &["rev-list", "--count", "--merges", "main"]),
+            Some(1)
+        );
+        undo(&before).unwrap();
+        assert_eq!(
+            count(dir, &["rev-list", "--count", "--merges", "main"]),
+            Some(0)
+        );
+        switch(dir, "main").unwrap();
+        // Rename, delete and making a branch can all be undone.
+        rename_branch(dir, "topic", "feature").unwrap();
+        undo(&point(Undo::Rename {
+            from: "topic".into(),
+            to: "feature".into(),
+        }))
+        .unwrap();
+        assert!(has_branch(dir, "topic"));
+        let gone = point(branches_point(dir, &["topic"]));
+        delete_branch(dir, "topic", true).unwrap();
+        undo(&gone).unwrap();
+        assert_eq!(commits_ahead(dir, "topic", "main"), 2);
+        switch(dir, "main").unwrap();
+        // Set aside, bring back, drop and restore.
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        stash_push(dir, "half done").unwrap();
+        assert!(changes(dir).is_empty());
+        let list = stashes(dir);
+        assert_eq!(list[0].message, "half done");
+        undo(&point(Undo::Unstash)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+        assert!(repo.join("new.txt").exists());
+        stash_push(dir, "again").unwrap();
+        let kept = stashes(dir).remove(0);
+        stash_drop(dir, 0).unwrap();
+        assert!(stashes(dir).is_empty());
+        undo(&point(Undo::Restash {
+            commit: kept.commit,
+            message: "again".into(),
+        }))
+        .unwrap();
+        stash_apply(dir, 0).unwrap();
+        assert!(repo.join("new.txt").exists());
+        // A branch only on the remote.
+        sh(&repo, &["push", "-q", "origin", "topic:shared"]);
+        fetch(dir).unwrap();
+        assert!(branch_rows(dir, "main")
+            .iter()
+            .any(|r| r.name == "shared" && r.remote_only));
+        get_remote_branch(dir, "shared").unwrap();
+        assert!(branch_rows(dir, "main")
+            .iter()
+            .any(|r| r.name == "shared" && !r.remote_only && r.upstream == "origin/shared"));
+        // Taking back the step that made a branch deletes it.
+        undo(&made).unwrap();
+        assert!(!has_branch(dir, "topic"));
+        for p in [&repo, &remote] {
             let _ = std::fs::remove_dir_all(p);
         }
     }

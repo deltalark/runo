@@ -46,7 +46,7 @@ impl RunoApp {
             self.refresh();
         }
         self.view = View::Review;
-        self.git_github = false;
+        self.git_tab = View::Review;
         self.load_repo();
     }
 
@@ -59,7 +59,7 @@ impl RunoApp {
         }
         self.select(id);
         self.view = View::Review;
-        self.git_github = false;
+        self.git_tab = View::Review;
         self.load_repo();
     }
 
@@ -138,11 +138,12 @@ impl RunoApp {
             .into_any_element()
     }
 
-    /// Git: what waits to ship and the project's GitHub, as two tabs on the frame, the
-    /// open one cut from the page below it, with the project folder's branch, Sync and
-    /// Undo at the strip's right end.
+    /// Git: what waits to ship, the project folder's branches and its GitHub, as tabs on
+    /// the frame, the open one cut from the page below it, with the folder's branch, Sync
+    /// and Undo at the strip's right end.
     pub(crate) fn git_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let github = self.view == View::GitHub;
+        let branches = self.view == View::Branches;
         let tab = |id: &'static str, label: &'static str, count: usize, alert: bool, on: bool| {
             shell::strip_tab(id, "git", on)
                 .child(label)
@@ -171,7 +172,13 @@ impl RunoApp {
         } else {
             pane(c_sheet())
         };
-        let body = if github {
+        let body = if branches {
+            shell::island(
+                div().size_full().flex().child(self.branches_view(cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        } else if github {
             shell::island(
                 div().size_full().flex().child(self.github_view(cx)),
                 glass_fill(c_canvas()),
@@ -217,10 +224,26 @@ impl RunoApp {
                             "Changes",
                             self.review_list().len(),
                             false,
-                            !github,
+                            !github && !branches,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_review();
+                            this.save();
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        tab(
+                            "git-branches",
+                            "Branches",
+                            self.git_branches
+                                .as_ref()
+                                .map_or(0, |b| b.rows.iter().filter(|r| !r.remote_only).count()),
+                            false,
+                            branches,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_branches();
                             this.save();
                             cx.notify();
                         })),
@@ -244,6 +267,7 @@ impl RunoApp {
                     .relative()
                     .flex()
                     .child(body.size_full())
+                    .children(self.merge_dialog(cx))
                     .children(self.git_toast_view(cx)),
             )
             .into_any_element()

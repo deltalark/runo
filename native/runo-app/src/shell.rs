@@ -935,7 +935,7 @@ impl Mode {
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
             View::Missions => Mode::Missions,
-            View::Review | View::GitHub => Mode::Git,
+            View::Review | View::Branches | View::GitHub => Mode::Git,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
             View::Notes => Mode::Notes,
@@ -1113,8 +1113,11 @@ impl RunoApp {
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
             Mode::Missions => self.open_missions(cx),
-            Mode::Git if self.git_github => self.load_github(),
-            Mode::Git => self.open_review(),
+            Mode::Git => match self.git_tab {
+                View::GitHub => self.load_github(),
+                View::Branches => self.open_branches(),
+                _ => self.open_review(),
+            },
             Mode::Playbooks => self.view = View::Automations,
             Mode::History => self.open_history(cx),
             Mode::Inbox => self.view = View::Inbox,
@@ -1418,7 +1421,7 @@ impl RunoApp {
         match self.mode() {
             Mode::Sessions => self.show_sidebar,
             Mode::Missions | Mode::Settings => true,
-            Mode::Git => self.view == View::Review,
+            Mode::Git => matches!(self.view, View::Review | View::Branches),
             Mode::Design => self
                 .design
                 .project
@@ -1821,6 +1824,10 @@ impl RunoApp {
             .max();
         match (self.mode(), latest) {
             (Mode::Git, _) if self.view == View::GitHub => self.load_github(),
+            (Mode::Git, _) if self.view == View::Branches => {
+                self.git_branch_sel = None;
+                self.open_branches();
+            }
             (Mode::Git, _) => self.load_repo(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
@@ -3992,6 +3999,7 @@ mod tests {
             (View::Review, Mode::Git),
             (View::Missions, Mode::Missions),
             (View::GitHub, Mode::Git),
+            (View::Branches, Mode::Git),
             (View::History, Mode::History),
             (View::Notes, Mode::Notes),
             (View::Automations, Mode::Playbooks),
