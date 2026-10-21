@@ -316,6 +316,10 @@ pub struct Project {
     /// How many times in a row failing checks go back to the agent on their own; 0 asks.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub fix_rounds: u32,
+    /// How the person works here: `crew` through Crew's chat, anything else (empty for
+    /// every project saved before Crew) directly in sessions. See `crew::is_crew`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
@@ -431,6 +435,9 @@ pub struct Session {
     /// The mission this session works for: one of its parts, or its own session.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub mission: u64,
+    /// What Crew keeps for this session when it is one of Crew's threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew: Option<crate::crew::ThreadInfo>,
 }
 
 /// A prompt waiting for the agent, with the images attached to it.
@@ -1309,6 +1316,41 @@ mod tests {
             session.selections().get("model").map(String::as_str),
             Some("")
         );
+    }
+
+    /// `State::demo()` as the build before Crew saved it, with project checks set too.
+    const BEFORE_CREW: &str = include_str!("../tests/fixtures/state-before-crew.json");
+
+    #[test]
+    fn data_saved_before_crew_loads_and_saves_unchanged() {
+        let state: State = serde_json::from_str(BEFORE_CREW).unwrap();
+        assert!(state.projects.iter().all(|p| !crate::crew::is_crew(p)));
+        assert!(state.sessions.iter().all(|s| s.crew.is_none()));
+        // Saved again, it is the same file: Crew adds nothing until it is used.
+        assert_eq!(serde_json::to_string_pretty(&state).unwrap(), BEFORE_CREW);
+    }
+
+    #[test]
+    fn builds_before_crew_can_read_crew_data() {
+        let mut state: State = serde_json::from_str(BEFORE_CREW).unwrap();
+        state.projects[0].mode = crate::crew::MODE_CREW.into();
+        state.sessions[0].crew = Some(crate::crew::ThreadInfo {
+            brief: "Time launches".into(),
+            ..Default::default()
+        });
+        let saved = serde_json::to_value(&state).unwrap();
+        assert_eq!(saved["projects"][0]["mode"], "crew");
+        assert_eq!(saved["sessions"][0]["crew"]["brief"], "Time launches");
+        // Older builds ignore fields they don't know, as long as no type here refuses
+        // them; these unknown fields stand in for whatever comes after Crew.
+        let mut newer = saved.clone();
+        newer["future"] = serde_json::json!(1);
+        newer["projects"][0]["future"] = serde_json::json!({"a": 1});
+        newer["sessions"][0]["future"] = serde_json::json!([1]);
+        newer["sessions"][0]["crew"]["future"] = serde_json::json!("x");
+        let back: State = serde_json::from_value(newer).unwrap();
+        assert_eq!(back.projects[0].mode, "crew");
+        assert_eq!(back.sessions[0].crew, state.sessions[0].crew);
     }
 
     #[test]
