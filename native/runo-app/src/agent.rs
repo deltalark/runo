@@ -1028,6 +1028,7 @@ pub enum Event {
 pub fn oneshot(key: String, mut command: Command, dir: &str, tx: Sender<Event>) {
     command.current_dir(dir).stdin(Stdio::null());
     std::thread::spawn(move || {
+        crate::shellenv::wait_ready();
         let result = match command.output() {
             Ok(out) if out.status.success() => {
                 Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -1063,6 +1064,7 @@ pub fn oneshot_within(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     std::thread::spawn(move || {
+        crate::shellenv::wait_ready();
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -1477,6 +1479,8 @@ pub fn run_agent(
     sandbox: Option<&crate::connections::Sandbox>,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    // The agent finds its tools on the login shell's PATH, so it starts with it.
+    crate::shellenv::wait_ready();
     let bin = program(spec);
     let mut command = turn_command(spec);
     prepare_folder(spec, dir, sandbox.is_some());
@@ -1537,6 +1541,7 @@ pub(crate) fn spawn(
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    crate::shellenv::wait_ready();
     let runner = command
         .get_args()
         .next()

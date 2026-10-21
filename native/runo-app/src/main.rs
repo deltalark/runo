@@ -8664,7 +8664,6 @@ impl RunoApp {
 
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let began = startup::frame_begin();
         self.prepare_playbook_run(window, cx);
         self.prepare_playbook_editor(window, cx);
         let st = cx.global::<AppSettings>().clone();
@@ -8684,6 +8683,7 @@ impl Render for RunoApp {
             ),
         };
         set_dark(dark);
+        let began = startup::frame_begin();
         self.measure_cell(window, cx);
         self.tour_rects = self.anchors.take();
         self.sync_project_form(window, cx);
@@ -8726,7 +8726,17 @@ impl Render for RunoApp {
         // A new shell takes focus once its element has been drawn.
         if let Some(id) = self.selected.filter(|_| self.view == View::Session) {
             let wants = self.state.session(id).is_some_and(|s| s.cli);
-            if wants && !self.cli_runs.contains_key(&id) {
+            if wants && !self.cli_runs.contains_key(&id) && !shellenv::is_ready() {
+                // Right after launch: start the CLI once the login shell's PATH is in,
+                // without holding up the window.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(50))
+                        .await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+            } else if wants && !self.cli_runs.contains_key(&id) {
                 if self.handles.contains_key(&Target::Session(id)) {
                     // A chat turn is running (for example one picked up on a connection
                     // after a restart); two writers would fork the conversation.
@@ -9572,8 +9582,9 @@ fn main() {
             connections::connection_shell(file)
         });
     }
-    // Before any thread starts: find agents and Node.js where the person's terminal would.
-    startup::time("login shell environment", shellenv::init);
+    // Find agents and Node.js where the person's terminal would. The login shell is asked
+    // in the background; agents and terminals wait for it.
+    startup::time("login shell environment", shellenv::init_at_launch);
     applog::init();
     detach::enable(store::data_dir());
     let app = startup::time("application", || application().with_assets(assets::AllAssets));
@@ -9589,15 +9600,15 @@ fn main() {
         startup::time("component library", || init(cx));
         startup::time("fonts", || load_fonts(cx));
         let settings = startup::time("settings", AppSettings::load);
-        settings.apply();
+        startup::time("apply settings", || settings.apply());
         // Before any text is drawn: the renderer reads this once.
-        set_font_smoothing(settings.font_smoothing);
-        set_dock_icon();
+        startup::time("font smoothing", || set_font_smoothing(settings.font_smoothing));
+        startup::time("dock icon", set_dock_icon);
         cx.set_global(settings);
-        bind_keys(cx);
+        startup::time("shortcuts", || bind_keys(cx));
         cx.on_action(quit);
-        desktop_notify::install(cx);
-        cx.set_menus(app_menus());
+        startup::time("notifications", || desktop_notify::install(cx));
+        startup::time("menus", || cx.set_menus(app_menus()));
         startup::time("main window", || open_main_window(cx));
     });
 }
@@ -9715,6 +9726,7 @@ fn open_main_window(cx: &mut App) {
         app_id: Some("runo".into()),
         ..Default::default()
     };
+    startup::mark("opening the window");
     let (handle, _) = open_window(options, cx, |window, cx| {
         cx.new(|cx| RunoApp::new(window, cx))
     })

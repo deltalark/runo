@@ -137,6 +137,8 @@ pub fn take_updated() -> bool {
 /// Discover every provider on a background thread.
 pub fn refresh() {
     std::thread::spawn(|| {
+        // Agents are looked for on the login shell's PATH.
+        crate::shellenv::wait_ready();
         crate::install::refresh_node();
         for provider in crate::agent::PROVIDERS.iter() {
             detect(provider);

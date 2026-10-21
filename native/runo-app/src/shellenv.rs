@@ -11,8 +11,8 @@
 //! and leaving out what only makes sense inside that shell.
 
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
+use std::sync::{Condvar, Mutex, OnceLock, RwLock};
+use std::time::Duration;
 
 /// Where each folder on the PATH came from, for Settings.
 #[derive(Clone, Debug, PartialEq)]
@@ -30,30 +30,62 @@ static FOUND: RwLock<Vec<(PathBuf, Source)>> = RwLock::new(Vec::new());
 /// The login shell's variables, as it had them, for forwarding to connections.
 static LOGIN_ENV: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
 
-/// Build the full PATH and put it in this process's environment. Call before any thread
-/// starts; Settings > Providers > Re-detect calls it again.
+/// Build the full PATH and put it in this process's environment. Settings > Providers >
+/// Re-detect calls it again, off the window thread.
 pub fn init() {
-    let home = home();
-    let inherited: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    let env = if cfg!(windows) || std::env::var_os("RUNO_NO_SHELL_PATH").is_some() {
+    apply(&ask_login_shell());
+    mark_ready();
+}
+
+/// At launch: the PATH Runo was started with plus the folders version managers use, at
+/// once, so the window opens without waiting; the login shell is asked in the background,
+/// which takes most of a second with nvm, conda or oh-my-zsh in the profile. Agents and
+/// terminals wait for it (`wait_ready`), so they still start with the shell's PATH and
+/// variables.
+pub fn init_at_launch() {
+    apply(&[]);
+    if skip_shell() {
+        mark_ready();
+        return;
+    }
+    std::thread::spawn(init);
+}
+
+fn skip_shell() -> bool {
+    cfg!(windows) || std::env::var_os("RUNO_NO_SHELL_PATH").is_some()
+}
+
+fn ask_login_shell() -> Vec<(String, String)> {
+    if skip_shell() {
         Vec::new()
     } else {
         login_shell_env(Duration::from_secs(4)).unwrap_or_default()
-    };
-    let shell = env_path(&env).unwrap_or_default();
-    for (key, value) in importable(&env, |k| std::env::var_os(k).is_some()) {
-        // Single-threaded at startup, like PATH below.
+    }
+}
+
+/// The PATH Runo was started with, before anything was added to it.
+static INHERITED: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// Put the login shell's variables (`env`, empty when not asked yet) and the merged PATH
+/// in this process's environment.
+fn apply(env: &[(String, String)]) {
+    let home = home();
+    let inherited = INHERITED.get_or_init(|| {
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default()
+    });
+    let shell = env_path(env).unwrap_or_default();
+    for (key, value) in importable(env, |k| std::env::var_os(k).is_some()) {
         std::env::set_var(key, value);
     }
     if let Ok(mut vars) = LOGIN_ENV.write() {
-        vars.clone_from(&env);
+        vars.clear();
+        vars.extend_from_slice(env);
     }
     let known = known_dirs(&home);
-    let merged = merge(&shell, &inherited, &known);
+    let merged = merge(&shell, inherited, &known);
     if let Ok(joined) = std::env::join_paths(merged.iter().map(|(p, _)| p)) {
-        // Single-threaded at startup; on Re-detect the change is what we want children to see.
         std::env::set_var("PATH", joined);
     }
     if let Ok(mut found) = FOUND.write() {
@@ -61,8 +93,36 @@ pub fn init() {
     }
 }
 
+/// Whether the login shell has been asked since launch.
+static READY: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+fn mark_ready() {
+    let (lock, cvar) = &READY;
+    if let Ok(mut ready) = lock.lock() {
+        *ready = true;
+        cvar.notify_all();
+    }
+}
+
+/// Whether the login shell's PATH and variables are in place.
+pub fn is_ready() -> bool {
+    READY.0.lock().is_ok_and(|ready| *ready)
+}
+
+/// Wait until the login shell's PATH and variables are in place, before starting an agent
+/// or a terminal. Returns at once after the first second or so of launch.
+pub fn wait_ready() {
+    let (lock, cvar) = &READY;
+    let Ok(ready) = lock.lock() else {
+        return;
+    };
+    // The shell is killed after 4 s; this is a backstop.
+    let _ = cvar.wait_timeout_while(ready, Duration::from_secs(6), |ready| !*ready);
+}
+
 /// A variable as the login shell has it, when it is set and not empty.
 pub fn login_var(name: &str) -> Option<String> {
+    wait_ready();
     LOGIN_ENV
         .read()
         .ok()?
@@ -302,24 +362,20 @@ fn login_shell_env(timeout: Duration) -> Option<Vec<(String, String)>> {
         .spawn()
         .ok()?;
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut out = String::new();
         let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
-        out
+        let _ = tx.send(out);
     });
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let out = reader.join().ok()?;
+    // The output ends when the shell exits, so take it as soon as it does rather than
+    // polling for the exit.
+    let Ok(out) = rx.recv_timeout(timeout) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let _ = child.wait();
     let env = parse_env(&out);
     (!env.is_empty()).then_some(env)
 }

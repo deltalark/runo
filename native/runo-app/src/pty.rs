@@ -148,6 +148,8 @@ impl Shell {
         program: Option<Program>,
         wake: impl Fn(u64) + Send + 'static,
     ) -> Result<Self, String> {
+        // A terminal starts with the login shell's PATH and variables.
+        crate::shellenv::wait_ready();
         let (rows, cols) = (rows.max(2), cols.max(10));
         let pair = native_pty_system()
             .openpty(PtySize {
