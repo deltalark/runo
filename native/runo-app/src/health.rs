@@ -478,7 +478,7 @@ impl RunoApp {
                         .h(px(26.))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_settings();
-                            this.settings_page = SettingsPage::General;
+                            this.settings_page = SettingsPage::Safety;
                             cx.notify();
                         })),
                 );
