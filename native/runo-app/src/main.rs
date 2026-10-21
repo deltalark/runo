@@ -1269,13 +1269,6 @@ impl RunoApp {
         .detach();
 
         let mut state = State::load();
-        {
-            let mut conns = cx.global::<AppSettings>().connections.clone();
-            if connections::migrate(&mut state.sessions, &mut conns) {
-                settings::update(cx, |s| s.connections = conns);
-                state.save();
-            }
-        }
         let demo = state.projects.is_empty();
         if demo {
             state = State::demo();
@@ -3454,8 +3447,6 @@ impl RunoApp {
             branch: branch.clone(),
             dir,
             isolated,
-            mode: String::new(),
-            model: String::new(),
             opts: std::collections::HashMap::from([(
                 "mode".to_string(),
                 cx.global::<AppSettings>().default_mode.clone(),
@@ -3681,8 +3672,6 @@ impl RunoApp {
             branch,
             dir: past.cwd.clone(),
             isolated: false,
-            mode: String::new(),
-            model: String::new(),
             opts: std::collections::HashMap::from([(
                 "mode".to_string(),
                 cx.global::<AppSettings>().default_mode.clone(),
@@ -6016,9 +6005,6 @@ impl RunoApp {
                 move |this, i| {
                     if let Some(s) = this.state.session_mut(sid) {
                         let v = values[i].clone();
-                        if id == "mode" {
-                            s.mode.clear();
-                        }
                         if v.is_empty() {
                             s.opts.remove(id);
                             s.opts.insert(id.to_string(), String::new());

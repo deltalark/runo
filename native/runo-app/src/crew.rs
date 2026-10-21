@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 
 use crate::store::Project;
 
-/// `Project::mode` of a project that works through Crew. Any other value, including the
-/// empty one every project saved before Crew has, is Direct: Runo as it was.
+/// `Project::mode` of a project that works through Crew. Any other value, the empty
+/// default included, is Direct.
 pub const MODE_CREW: &str = "crew";
 
 /// Steps a checklist keeps; more are cut off.
@@ -515,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn projects_saved_before_crew_are_direct() {
+    fn projects_are_direct_unless_set_to_crew() {
         let project: Project = serde_json::from_str(r#"{"id":1,"name":"a","path":"/a"}"#).unwrap();
         assert!(!is_crew(&project));
         let crew = Project {

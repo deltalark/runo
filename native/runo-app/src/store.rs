@@ -129,16 +129,9 @@ pub struct Question {
 }
 
 impl Session {
-    /// Current selections, including values saved by older versions.
+    /// Current selections: model, effort, mode, tier and the rest.
     pub fn selections(&self) -> HashMap<String, String> {
-        let mut sel = self.opts.clone();
-        if !sel.contains_key("model") && !self.model.is_empty() {
-            sel.insert("model".into(), self.model.clone());
-        }
-        if !sel.contains_key("mode") && !self.mode.is_empty() {
-            sel.insert("mode".into(), self.mode.clone());
-        }
-        sel
+        self.opts.clone()
     }
 }
 
@@ -158,7 +151,6 @@ impl Session {
     pub fn set_model(&mut self, model: String) {
         self.opts.remove("effort");
         self.opts.remove("tier");
-        self.model.clear();
         self.opts.insert("model".into(), model);
     }
 
@@ -170,8 +162,6 @@ impl Session {
         self.switched_from = None;
         self.provider = provider.to_string();
         self.opts.clear();
-        self.model.clear();
-        self.mode.clear();
         self.agent_session.clear();
         self.conversation_start = self.messages.len();
     }
@@ -185,8 +175,6 @@ impl Session {
         let from = SwitchedFrom {
             provider: self.provider.clone(),
             agent_session: self.agent_session.clone(),
-            model: self.model.clone(),
-            mode: self.mode.clone(),
             opts: self.opts.clone(),
             conversation_start: self.conversation_start,
             carried: self.carried.clone(),
@@ -219,8 +207,6 @@ impl Session {
         }
         self.provider = from.provider;
         self.agent_session = from.agent_session;
-        self.model = from.model;
-        self.mode = from.mode;
         self.opts = from.opts;
         self.conversation_start = from.conversation_start.min(self.messages.len());
         self.handoff.clear();
@@ -316,18 +302,14 @@ pub struct Project {
     /// How many times in a row failing checks go back to the agent on their own; 0 asks.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub fix_rounds: u32,
-    /// How the person works here: `crew` through Crew's chat, anything else (empty for
-    /// every project saved before Crew) directly in sessions. See `crew::is_crew`.
+    /// How the person works here: `crew` through Crew's chat, empty directly in
+    /// sessions. See `crew::is_crew`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode: String,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
-}
-
-fn default_mode() -> String {
-    "edit".into()
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -340,10 +322,6 @@ pub struct Session {
     /// Directory the agent and terminal run in (a worktree, or the project itself).
     pub dir: String,
     pub isolated: bool,
-    #[serde(default = "default_mode")]
-    pub mode: String,
-    #[serde(default)]
-    pub model: String,
     /// Per-session choices for the agent's discovered options (model, effort, mode, tier…).
     #[serde(default)]
     pub opts: HashMap<String, String>,
@@ -388,10 +366,6 @@ pub struct Session {
     /// switching straight back resumes its own conversation instead of starting over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switched_from: Option<SwitchedFrom>,
-    /// Runs inside its own Cove VM (`runo-<id>`) instead of directly on this machine.
-    /// Replaced by `connection`; kept so older saves load.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub cove: bool,
     /// Where the session runs: a connection's id, or 0 for this machine.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub connection: u64,
@@ -442,7 +416,6 @@ pub struct Session {
 
 /// A prompt waiting for the agent, with the images attached to it.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
-#[serde(from = "SavedQueued")]
 pub struct Queued {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -458,34 +431,11 @@ impl Queued {
     }
 }
 
-/// Older saves keep queued prompts as plain strings.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SavedQueued {
-    Text(String),
-    Full {
-        text: String,
-        #[serde(default)]
-        images: Vec<String>,
-    },
-}
-
-impl From<SavedQueued> for Queued {
-    fn from(saved: SavedQueued) -> Self {
-        match saved {
-            SavedQueued::Text(text) => Queued::new(text, Vec::new()),
-            SavedQueued::Full { text, images } => Queued::new(text, images),
-        }
-    }
-}
-
 /// What a switch replaced, enough to undo it before anything is sent.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
 pub struct SwitchedFrom {
     pub provider: String,
     pub agent_session: String,
-    pub model: String,
-    pub mode: String,
     pub opts: HashMap<String, String>,
     pub conversation_start: usize,
     pub carried: String,
@@ -1078,15 +1028,11 @@ impl State {
         Self::load_from(&state_path())
     }
 
-    /// Load the state whose index is at `path`, splitting a single-file state from
-    /// before into one file per session (the old file is kept as a backup).
+    /// Load the state whose index is at `path`, with the session files next to it.
     pub fn load_from(path: &Path) -> Self {
         let root = path.parent().unwrap_or(Path::new("."));
         let mut state = match crate::persist::read(path) {
-            Ok((mut state, mut written, old)) => {
-                if old {
-                    crate::persist::migrate(path, &mut state, &mut written);
-                }
+            Ok((state, written)) => {
                 crate::persist::seed(root, written);
                 state
             }
@@ -1165,8 +1111,6 @@ impl State {
                 branch: branch.into(),
                 dir: String::new(),
                 isolated: true,
-                mode: default_mode(),
-                model: String::new(),
                 opts: HashMap::new(),
                 status,
                 messages,
@@ -1301,7 +1245,6 @@ mod tests {
     #[test]
     fn picking_a_model_resets_its_effort_and_speed() {
         let mut session = State::demo().sessions[0].clone();
-        session.model = "old".into();
         session.opts.insert("effort".into(), "high".into());
         session.opts.insert("tier".into(), "priority".into());
         session.opts.insert("mode".into(), "read-only".into());
@@ -1310,47 +1253,12 @@ mod tests {
         assert_eq!(sel.get("model").map(String::as_str), Some("gpt-5.5"));
         assert!(!sel.contains_key("effort") && !sel.contains_key("tier"));
         assert_eq!(sel.get("mode").map(String::as_str), Some("read-only"));
-        // The agent's default is an explicit empty pick, not a fall back to the old model.
+        // The agent's default is an explicit empty pick.
         session.set_model(String::new());
         assert_eq!(
             session.selections().get("model").map(String::as_str),
             Some("")
         );
-    }
-
-    /// `State::demo()` as the build before Crew saved it, with project checks set too.
-    const BEFORE_CREW: &str = include_str!("../tests/fixtures/state-before-crew.json");
-
-    #[test]
-    fn data_saved_before_crew_loads_and_saves_unchanged() {
-        let state: State = serde_json::from_str(BEFORE_CREW).unwrap();
-        assert!(state.projects.iter().all(|p| !crate::crew::is_crew(p)));
-        assert!(state.sessions.iter().all(|s| s.crew.is_none()));
-        // Saved again, it is the same file: Crew adds nothing until it is used.
-        assert_eq!(serde_json::to_string_pretty(&state).unwrap(), BEFORE_CREW);
-    }
-
-    #[test]
-    fn builds_before_crew_can_read_crew_data() {
-        let mut state: State = serde_json::from_str(BEFORE_CREW).unwrap();
-        state.projects[0].mode = crate::crew::MODE_CREW.into();
-        state.sessions[0].crew = Some(crate::crew::ThreadInfo {
-            brief: "Time launches".into(),
-            ..Default::default()
-        });
-        let saved = serde_json::to_value(&state).unwrap();
-        assert_eq!(saved["projects"][0]["mode"], "crew");
-        assert_eq!(saved["sessions"][0]["crew"]["brief"], "Time launches");
-        // Older builds ignore fields they don't know, as long as no type here refuses
-        // them; these unknown fields stand in for whatever comes after Crew.
-        let mut newer = saved.clone();
-        newer["future"] = serde_json::json!(1);
-        newer["projects"][0]["future"] = serde_json::json!({"a": 1});
-        newer["sessions"][0]["future"] = serde_json::json!([1]);
-        newer["sessions"][0]["crew"]["future"] = serde_json::json!("x");
-        let back: State = serde_json::from_value(newer).unwrap();
-        assert_eq!(back.projects[0].mode, "crew");
-        assert_eq!(back.sessions[0].crew, state.sessions[0].crew);
     }
 
     #[test]
@@ -1438,26 +1346,6 @@ mod tests {
     }
 
     #[test]
-    fn older_state_files_still_load() {
-        let json = r#"{"next_id":3,"projects":[{"id":1,"name":"p","path":"/p"}],
-            "sessions":[{"id":2,"project_id":1,"title":"t","provider":"claude","branch":"b",
-            "dir":"/p","isolated":false,"model":"opus","status":"Done",
-            "messages":[{"role":"User","text":"hi"}]}]}"#;
-        let state: State = serde_json::from_str(json).unwrap();
-        let session = state.session(2).unwrap();
-        assert_eq!(session.mode, "edit");
-        assert_eq!(
-            session.selections().get("model").map(String::as_str),
-            Some("opus")
-        );
-        assert_eq!(
-            session.selections().get("mode").map(String::as_str),
-            Some("edit")
-        );
-        assert!(session.agent_session.is_empty());
-    }
-
-    #[test]
     fn switching_agents_starts_a_new_conversation() {
         let mut state = State::demo();
         let session = state.session_mut(12).unwrap();
@@ -1515,16 +1403,6 @@ mod tests {
         let saved: Message = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(saved.failed_steps, [1]);
         assert!(saved.running_steps.is_empty());
-    }
-
-    #[test]
-    fn queued_prompts_load_from_older_saves() {
-        let old: Vec<Queued> =
-            serde_json::from_str(r#"["Fix it",{"text":"Look","images":["a.png"]}]"#).unwrap();
-        assert_eq!(old[0], Queued::new("Fix it", Vec::new()));
-        assert_eq!(old[1].images, ["a.png"]);
-        let saved = serde_json::to_string(&old[0]).unwrap();
-        assert_eq!(saved, r#"{"text":"Fix it"}"#);
     }
 
     #[test]
@@ -1649,10 +1527,5 @@ mod tests {
                 tokens: 42
             }
         );
-        // A state saved before these counts reads as none.
-        let mut saved = serde_json::to_value(&back).unwrap();
-        saved.as_object_mut().unwrap().remove("day_use");
-        let old: State = serde_json::from_value(saved).unwrap();
-        assert!(old.day_use.is_empty());
     }
 }

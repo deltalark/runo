@@ -1203,7 +1203,6 @@ mod tests {
         let mut session = Session {
             provider: "codex".into(),
             agent_session: "thread-1".into(),
-            model: "gpt-5".into(),
             carried: "older brief".into(),
             messages: vec![
                 Message::new(Role::User, "Go"),
@@ -1212,6 +1211,7 @@ mod tests {
             ..Session::default()
         };
         session.opts.insert("mode".into(), "plan".into());
+        session.opts.insert("model".into(), "gpt-5".into());
         session.switch_provider_keeping("claude");
         session.handoff = "brief".into();
         let mut divider = Message::new(Role::System, "");
@@ -1225,7 +1225,7 @@ mod tests {
         assert!(session.switch_back());
         assert_eq!(session.provider, "codex");
         assert_eq!(session.agent_session, "thread-1");
-        assert_eq!(session.model, "gpt-5");
+        assert_eq!(session.opts.get("model").map(String::as_str), Some("gpt-5"));
         assert_eq!(session.opts.get("mode").map(String::as_str), Some("plan"));
         assert_eq!(session.conversation_start, 0);
         assert_eq!(session.messages.len(), 2, "the divider is dropped");

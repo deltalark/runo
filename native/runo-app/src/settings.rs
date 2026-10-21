@@ -65,8 +65,6 @@ pub struct AppSettings {
     pub accent: String,
     pub diff_colors: String,
     pub animations: bool,
-    /// Saved under a new name so the old default (off) no longer applies.
-    #[serde(rename = "desktop_notifications")]
     pub notifications: bool,
     pub confirm_delete: bool,
     pub remove_worktree_on_delete: bool,
