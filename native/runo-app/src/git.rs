@@ -86,7 +86,7 @@ pub fn head(dir: &str) -> Option<String> {
     rev(dir, "HEAD")
 }
 
-fn rev(dir: &str, rev: &str) -> Option<String> {
+pub fn rev(dir: &str, rev: &str) -> Option<String> {
     git(
         dir,
         &["rev-parse", "-q", "--verify", &format!("{rev}^{{commit}}")],
@@ -832,6 +832,59 @@ pub fn settle_side(dir: &str, path: &str, ours: bool) -> Result<(), String> {
     match git(dir, &["checkout", side, "--", path]) {
         Ok(_) => git(dir, &["add", "--", path]).map(|_| ()),
         Err(_) => git(dir, &["rm", "-q", "--", path]).map(|_| ()),
+    }
+}
+
+/// A file two lines of work both change the same lines of, and where: the first line of
+/// each clashing spot in the file as the two would merge.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Overlap {
+    pub path: String,
+    pub lines: Vec<usize>,
+}
+
+/// Merge `a` and `b` in memory, touching no folder, and say where they clash. Empty when
+/// they come together cleanly.
+pub fn test_merge(dir: &str, a: &str, b: &str) -> Result<Vec<Overlap>, String> {
+    let out = match git(dir, &["merge-tree", "--write-tree", "--no-messages", a, b]) {
+        Ok(_) => return Ok(Vec::new()),
+        // With clashes git exits 1 and prints the merged tree, then the clashing files.
+        Err(out) => out,
+    };
+    let mut lines = out.lines();
+    let tree = lines.next().unwrap_or("").trim().to_string();
+    if tree.len() < 40 || !tree.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(out);
+    }
+    let mut paths: Vec<String> = lines
+        .filter_map(|l| l.split_once('\t').map(|(_, p)| p.to_string()))
+        .collect();
+    paths.dedup();
+    Ok(paths
+        .into_iter()
+        .map(|path| {
+            let merged =
+                git(dir, &["cat-file", "-p", &format!("{tree}:{path}")]).unwrap_or_default();
+            let lines = merged
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.starts_with("<<<<<<<"))
+                .map(|(i, _)| i + 1)
+                .collect();
+            Overlap { path, lines }
+        })
+        .collect())
+}
+
+/// The tip of a folder's work: its uncommitted changes as a commit nothing points at,
+/// or its HEAD when there are none.
+pub fn work_tip(dir: &str) -> Option<String> {
+    let wip = git(dir, &["stash", "create"]).unwrap_or_default();
+    let wip = wip.trim();
+    if wip.is_empty() {
+        rev(dir, "HEAD")
+    } else {
+        Some(wip.to_string())
     }
 }
 
@@ -3617,6 +3670,45 @@ index 1..2 100644
         for p in [&repo, &remote, &other] {
             let _ = std::fs::remove_dir_all(p);
         }
+    }
+
+    #[test]
+    fn radar_finds_clashes_without_touching_folders() {
+        let (repo, _remote) = with_origin("radar");
+        let dir = repo.to_str().unwrap();
+        let lines: Vec<String> = (1..=20).map(|i| format!("line {i}")).collect();
+        std::fs::write(repo.join("f.txt"), lines.join("\n") + "\n").unwrap();
+        sh(&repo, &["add", "."]);
+        sh(&repo, &["commit", "-qm", "twenty"]);
+        for (branch, text, file) in [
+            ("one", "one's", "f.txt"),
+            ("two", "two's", "f.txt"),
+            ("three", "x", "g.txt"),
+        ] {
+            new_branch(dir, branch, "main").unwrap();
+            switch(dir, branch).unwrap();
+            let mut edited = lines.clone();
+            edited[9] = text.into();
+            std::fs::write(repo.join(file), edited.join("\n") + "\n").unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", branch]);
+            switch(dir, "main").unwrap();
+        }
+        let hit = test_merge(dir, "one", "two").unwrap();
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].path, "f.txt");
+        assert_eq!(hit[0].lines, vec![10]);
+        assert!(test_merge(dir, "one", "three").unwrap().is_empty());
+        assert!(changes(dir).is_empty());
+        // Uncommitted work counts too, and stays where it is.
+        let mut edited = lines.clone();
+        edited[9] = "main's own".into();
+        std::fs::write(repo.join("f.txt"), edited.join("\n") + "\n").unwrap();
+        let tip = work_tip(dir).unwrap();
+        assert_ne!(Some(tip.clone()), rev(dir, "HEAD"));
+        assert_eq!(test_merge(dir, &tip, "one").unwrap()[0].path, "f.txt");
+        assert_eq!(changes(dir).len(), 1);
+        assert!(stashes(dir).is_empty());
     }
 
     #[test]

@@ -75,6 +75,7 @@ impl RunoApp {
             self.git_repo = None;
             return;
         };
+        self.load_radar();
         let known = self.git_repo.as_ref().filter(|r| r.dir == dir);
         let fetched = known.and_then(|r| r.fetched);
         let fetch = fetched.is_none_or(|at| at.elapsed() > FETCH_AFTER);
@@ -163,6 +164,7 @@ impl RunoApp {
                 this.load_branches();
                 this.load_history();
                 this.load_folder();
+                this.load_radar();
                 cx.notify();
             },
         );
