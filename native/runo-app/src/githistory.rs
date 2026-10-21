@@ -424,6 +424,9 @@ impl RunoApp {
 
     /// The History page: the filter, the commit graph, and the picked commit beside it.
     pub(crate) fn git_history_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.git_time_on && !self.demo {
+            return self.time_machine_view(cx);
+        }
         let Some(data) = self.git_history.as_ref() else {
             let text = if self.git_place_dir().is_none() || self.demo {
                 "Pick a project in the top bar to see its history."
@@ -497,6 +500,14 @@ impl RunoApp {
                         !all,
                         false,
                     )),
+            )
+            .child(
+                self.button("git-time-on", "Time machine", false)
+                    .h(px(28.))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_time_machine(true);
+                        cx.notify();
+                    })),
             )
             .when(!self.git_log_filter.path.is_empty(), |el| {
                 el.child(

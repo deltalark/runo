@@ -163,6 +163,7 @@ impl RunoApp {
                 this.refresh();
                 this.load_branches();
                 this.load_history();
+                this.load_time();
                 this.load_folder();
                 this.load_radar();
                 cx.notify();

@@ -2052,6 +2052,8 @@ pub enum Undo {
     Uncommit { head: String },
     /// Put back a part that was thrown away, applying its patch to the folder again.
     Reapply(String),
+    /// Put the folder's files back as they were in this checkpoint.
+    Restore(String),
     /// Several of these, in order.
     Steps(Vec<Undo>),
 }
@@ -2159,6 +2161,9 @@ pub fn undo(point: &UndoPoint) -> Result<(), String> {
                 &[],
                 Some(patch.as_bytes()),
             )?;
+        }
+        Undo::Restore(checkpoint) => {
+            restore(dir, checkpoint, None)?;
         }
         Undo::Steps(steps) => {
             for undo in steps {
@@ -2929,6 +2934,214 @@ pub fn go_back(dir: &str, sha: &str) -> Result<usize, String> {
     let dropped = commits_ahead(dir, "HEAD", sha);
     git(dir, &["reset", "--keep", sha])?;
     Ok(dropped)
+}
+
+/// What kind of moment the time machine shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MomentKind {
+    /// A step git recorded: a commit, a switch, a sync, a go back.
+    Step,
+    /// A snapshot of every file Runo took before an agent's turn.
+    Snapshot,
+}
+
+/// One moment in a folder's past.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Moment {
+    pub kind: MomentKind,
+    /// Seconds since the epoch.
+    pub at: i64,
+    /// What happened, in plain words.
+    pub label: String,
+    /// The commit (or snapshot) the folder was at right after it.
+    pub commit: String,
+    /// The branch the folder was on then; empty when it wasn't on one.
+    pub branch: String,
+}
+
+/// A reflog subject in plain words, or `None` for the in-between steps git records while
+/// it works (a rebase's picks, say).
+fn moment_words(subject: &str) -> Option<String> {
+    let (what, rest) = subject.split_once(": ").unwrap_or((subject, ""));
+    let rest = rest.trim();
+    let quoted = |s: &str| format!("\u{201c}{}\u{201d}", s.lines().next().unwrap_or(""));
+    Some(match what {
+        "commit" => format!("Committed {}", quoted(rest)),
+        "commit (initial)" => format!("First commit, {}", quoted(rest)),
+        "commit (amend)" => format!("Changed the last commit, {}", quoted(rest)),
+        "commit (merge)" => "Finished bringing changes in".into(),
+        "checkout" => match rest
+            .strip_prefix("moving from ")
+            .and_then(|r| r.split_once(" to "))
+        {
+            Some((from, to)) if from == to => return None,
+            Some((from, to)) => format!("Switched from {from} to {to}"),
+            None => "Switched branch".into(),
+        },
+        "reset" => match rest.strip_prefix("moving to ") {
+            Some(to) => format!("Moved back to {}", to.get(..7).unwrap_or(to)),
+            None => "Moved the branch".into(),
+        },
+        "cherry-pick" => format!("Copied {} here", quoted(rest)),
+        "revert" => format!("Took back {}", quoted(rest.trim_start_matches("Revert "))),
+        w if w.starts_with("merge ") => format!("Brought in {}", &w[6..]),
+        w if w.starts_with("pull") => "Synced with GitHub".into(),
+        "rebase (finish)" => "Put your commits on top".into(),
+        w if w.starts_with("rebase") => return None,
+        "branch" => "Made the branch".into(),
+        _ => {
+            let mut c = subject.chars();
+            c.next()?.to_uppercase().chain(c).collect()
+        }
+    })
+}
+
+/// The folder's past, newest first: every step git recorded on HEAD, and the snapshots
+/// in `snapshots` (checkpoint commits) with their labels, up to `limit` steps.
+pub fn moments(dir: &str, snapshots: &[(String, String)], limit: usize) -> Vec<Moment> {
+    let mut out = Vec::new();
+    let log = git(
+        dir,
+        &[
+            "log",
+            "-g",
+            "--date=unix",
+            &format!("-n{limit}"),
+            "--format=%H%x1f%gd%x1f%gs",
+            "HEAD",
+        ],
+    )
+    .unwrap_or_default();
+    // Walking back in time, a switch tells which branch the steps before it were on.
+    let mut branch = current_branch(dir);
+    for line in log.lines() {
+        let mut f = line.split('\x1f');
+        let (Some(commit), Some(selector), Some(subject)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        let at = selector
+            .rsplit('{')
+            .next()
+            .and_then(|t| t.trim_end_matches('}').parse().ok())
+            .unwrap_or(0);
+        let on = branch.clone();
+        if let Some((from, _)) = subject
+            .strip_prefix("checkout: moving from ")
+            .and_then(|r| r.split_once(" to "))
+        {
+            // A sha (detached) is no branch.
+            branch = if from.len() == 40 && from.chars().all(|c| c.is_ascii_hexdigit()) {
+                String::new()
+            } else {
+                from.to_string()
+            };
+        }
+        if let Some(label) = moment_words(subject) {
+            out.push(Moment {
+                kind: MomentKind::Step,
+                at,
+                label,
+                commit: commit.to_string(),
+                branch: on,
+            });
+        }
+    }
+    let shas: Vec<&str> = snapshots.iter().map(|(s, _)| s.as_str()).collect();
+    if !shas.is_empty() {
+        let mut args = vec!["show", "-s", "--format=%H %ct"];
+        args.extend(&shas);
+        let times = git(dir, &args).unwrap_or_default();
+        for line in times.lines() {
+            let Some((sha, at)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some((_, label)) = snapshots.iter().find(|(s, _)| s == sha) else {
+                continue;
+            };
+            out.push(Moment {
+                kind: MomentKind::Snapshot,
+                at: at.trim().parse().unwrap_or(0),
+                label: label.clone(),
+                commit: sha.to_string(),
+                branch: String::new(),
+            });
+        }
+    }
+    out.sort_by_key(|m| std::cmp::Reverse(m.at));
+    out
+}
+
+/// Files that differ between `commit` (a commit or a snapshot) and the folder now.
+pub fn differs_from_now(dir: &str, commit: &str) -> Vec<String> {
+    changed_since(dir, commit)
+}
+
+/// Take the folder back to a moment, safely. A step moves `branch` to its commit: the
+/// checked-out branch keeps uncommitted work, another branch just moves, and a branch
+/// that's gone is made again. A snapshot puts every file back, after taking a snapshot
+/// of now. Returns the words for what happened and how to take it back.
+pub fn travel(dir: &str, moment: &Moment) -> Result<(String, Undo), String> {
+    let short = moment.commit.get(..7).unwrap_or(&moment.commit);
+    match moment.kind {
+        MomentKind::Snapshot => {
+            let now = checkpoint(dir)?;
+            let done = restore(dir, &moment.commit, None)?;
+            let n = done.files.len();
+            let note = match n {
+                0 if !done.moved_head => "The files already match that moment.".to_string(),
+                1 => "Put 1 file back as it was.".to_string(),
+                n => format!("Put {n} files back as they were."),
+            };
+            Ok((note, Undo::Restore(now)))
+        }
+        MomentKind::Step if moment.branch.is_empty() => {
+            Err("The folder wasn't on a branch then. Start a branch from that commit in History instead.".into())
+        }
+        MomentKind::Step if moment.branch == current_branch(dir) => {
+            let head = rev(dir, "HEAD").ok_or("This folder has no commits yet.")?;
+            if head == moment.commit {
+                return Err("The branch is already there.".into());
+            }
+            keep_for_undo(dir, &head);
+            git(dir, &["reset", "--keep", &moment.commit]).map_err(|e| {
+                if e.contains("not uptodate") || e.contains("would be overwritten") {
+                    "Some files you're changing would be overwritten. Commit or set them aside first.".to_string()
+                } else {
+                    e
+                }
+            })?;
+            Ok((
+                format!("Took {} back to {short}.", moment.branch),
+                Undo::Folder {
+                    branch: moment.branch.clone(),
+                    head,
+                },
+            ))
+        }
+        MomentKind::Step => {
+            let name = moment.branch.as_str();
+            let was = rev(dir, &format!("refs/heads/{name}"));
+            if was.as_deref() == Some(moment.commit.as_str()) {
+                return Err(format!("{name} is already there."));
+            }
+            match checked_out_at(dir, name) {
+                Some(at) => {
+                    git(&at, &["reset", "--keep", &moment.commit])?;
+                }
+                None => {
+                    git(dir, &["branch", "-f", name, &moment.commit])?;
+                }
+            }
+            if let Some(was) = &was {
+                keep_for_undo(dir, was);
+            }
+            let note = match was {
+                Some(_) => format!("Took {name} back to {short}."),
+                None => format!("Brought {name} back, at {short}."),
+            };
+            Ok((note, Undo::Branches(vec![(name.to_string(), was)])))
+        }
+    }
 }
 
 /// Work set aside, newest first.
@@ -3974,6 +4187,87 @@ index 1..2 100644
         assert!(std::fs::read_to_string(repo.join("f.txt"))
             .unwrap()
             .contains("added two"));
+    }
+
+    #[test]
+    fn time_machine_goes_back_to_any_moment() {
+        let (repo, _remote) = with_origin("moments");
+        let dir = repo.to_str().unwrap();
+        let commit = |file: &str, text: &str| {
+            std::fs::write(repo.join(file), text).unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", file]);
+        };
+        commit("b.txt", "b\n");
+        let at_b = rev(dir, "HEAD").unwrap();
+        new_branch(dir, "side", "main").unwrap();
+        switch(dir, "side").unwrap();
+        commit("s.txt", "s\n");
+        switch(dir, "main").unwrap();
+        commit("c.txt", "c\n");
+        // A snapshot with a file nobody committed, then the file changes.
+        std::fs::write(repo.join("draft.txt"), "first\n").unwrap();
+        let snap = checkpoint(dir).unwrap();
+        std::fs::write(repo.join("draft.txt"), "second\n").unwrap();
+        delete_branch(dir, "side", true).unwrap();
+
+        let list = moments(dir, &[(snap.clone(), "Before the agent".into())], 50);
+        // Steps in the same second can sort either side of the snapshot.
+        let snapshot = list
+            .iter()
+            .find(|m| m.kind == MomentKind::Snapshot)
+            .unwrap();
+        assert_eq!(snapshot.commit, snap);
+        let labels: Vec<&str> = list.iter().map(|m| m.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Committed \u{201c}c.txt\u{201d}"),
+            "{labels:?}"
+        );
+        assert!(labels.contains(&"Switched from side to main"), "{labels:?}");
+        let on_side = list
+            .iter()
+            .find(|m| m.label == "Committed \u{201c}s.txt\u{201d}")
+            .unwrap();
+        assert_eq!(on_side.branch, "side");
+        let point = |undo: Undo| UndoPoint {
+            dir: dir.to_string(),
+            label: String::new(),
+            undo,
+        };
+
+        // A deleted branch comes back, and Undo removes it again.
+        let (note, undo) = travel(dir, on_side).unwrap();
+        assert!(note.starts_with("Brought side back"), "{note}");
+        assert!(has_branch(dir, "side"));
+        super::undo(&point(undo)).unwrap();
+        assert!(!has_branch(dir, "side"));
+
+        // The checked-out branch goes back and keeps the uncommitted draft.
+        let at_b_moment = list
+            .iter()
+            .find(|m| m.commit == at_b && m.branch == "main")
+            .unwrap();
+        let (_, undo) = travel(dir, at_b_moment).unwrap();
+        assert_eq!(rev(dir, "HEAD").unwrap(), at_b);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
+            "second\n"
+        );
+        super::undo(&point(undo)).unwrap();
+        assert!(repo.join("c.txt").exists());
+
+        // A snapshot puts the files back, and Undo brings now back.
+        assert_eq!(differs_from_now(dir, &snap), vec!["draft.txt"]);
+        let (_, undo) = travel(dir, snapshot).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
+            "first\n"
+        );
+        super::undo(&point(undo)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
+            "second\n"
+        );
     }
 
     #[test]
