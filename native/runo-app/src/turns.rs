@@ -1077,6 +1077,10 @@ impl RunoApp {
 
     /// Results of one-off background commands.
     pub(crate) fn handle_output(&mut self, key: String, result: Result<String, String>) {
+        if key.starts_with("explain:") {
+            self.handle_explain(&key, result);
+            return;
+        }
         if key.starts_with("assistant:") {
             return self.assistant_reply(key, result);
         }

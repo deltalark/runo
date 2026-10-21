@@ -437,6 +437,7 @@ impl RunoApp {
             View::Editor => "a file",
             View::Review => "Review",
             View::Branches => "Git branches",
+            View::GitHistory => "Git history",
             View::Missions => "Missions",
             View::Design => "Design",
             View::Architecture => "Architecture",
