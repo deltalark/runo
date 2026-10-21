@@ -212,7 +212,7 @@ impl RunoApp {
             .gap_2()
             .when(self.cursor == Some(id), |el| {
                 el.bg(tint(c_active()))
-                    .child(shell::accent_bracket(format!("inbox-bracket-{id}")))
+                    .child(shell::accent_bracket(format!("inbox-bracket-{id}"), 12.))
             })
             .child(
                 div()

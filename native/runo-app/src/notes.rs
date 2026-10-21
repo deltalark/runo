@@ -212,8 +212,10 @@ impl RunoApp {
                     .rounded_lg()
                     .cursor_pointer()
                     .when(on, |el| {
-                        el.bg(tint(c_active()))
-                            .child(crate::shell::accent_bracket(format!("notes-mark-{pid}")))
+                        el.bg(tint(c_active())).child(crate::shell::accent_bracket(
+                            format!("notes-mark-{pid}"),
+                            8.,
+                        ))
                     })
                     .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
                     .on_click(cx.listener(move |this, _, window, cx| {
