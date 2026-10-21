@@ -506,7 +506,7 @@ impl RunoApp {
 
     /// Stage or unstage one changed file.
     pub(crate) fn toggle_stage(&mut self, path: &str, staged: bool) {
-        let Some(dir) = self.current().map(|s| s.dir.clone()).filter(|_| !self.demo) else {
+        let Some(dir) = self.current().map(|s| s.dir.clone()) else {
             return;
         };
         let path = path.to_string();
@@ -530,9 +530,6 @@ impl RunoApp {
     /// Commit the session folder's staged changes, or all of them. An empty message
     /// falls back to the session title.
     pub(crate) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some((id, dir, title)) = self
             .current()
             .map(|s| (s.id, s.dir.clone(), s.title.clone()))
@@ -609,7 +606,7 @@ impl RunoApp {
 
     /// Push a session's branch, once the seatbelt has looked at the commits it sends.
     fn push_session(&mut self, id: u64) {
-        let Some(session) = self.state.session(id).filter(|_| !self.demo) else {
+        let Some(session) = self.state.session(id) else {
             return;
         };
         if self.on_base_branch(session) {
@@ -664,9 +661,6 @@ impl RunoApp {
 
     /// Open the Create pull request form, filled from the session and its commits.
     pub(crate) fn open_pr_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(session) = self.current() else {
             return;
         };
@@ -829,7 +823,7 @@ impl RunoApp {
 
     /// Look up the pull request of a session's branch: state, checks and review.
     pub(crate) fn load_pr_status(&mut self, id: u64) {
-        let Some(session) = self.state.session(id).filter(|_| !self.demo) else {
+        let Some(session) = self.state.session(id) else {
             return;
         };
         if session.branch.is_empty() || session.branch == "local folder" {
@@ -1103,7 +1097,7 @@ impl RunoApp {
     /// Fetch, then rebase (or merge) the session branch onto the latest base branch.
     /// Conflicts leave the worktree mid-rebase, for the agent or the person to resolve.
     pub(crate) fn update_from_base(&mut self, rebase: bool) {
-        let Some(session) = self.current().filter(|_| !self.demo) else {
+        let Some(session) = self.current() else {
             return;
         };
         let (id, dir) = (session.id, session.dir.clone());
@@ -1215,7 +1209,7 @@ impl RunoApp {
     /// Merge the session branch into its base branch (after confirmation), then offer
     /// to clean up.
     pub(crate) fn merge_into_base(&mut self, id: u64) {
-        let Some(session) = self.state.session(id).filter(|_| !self.demo) else {
+        let Some(session) = self.state.session(id) else {
             return;
         };
         let Some(project) = self.project_of(session) else {
@@ -1282,7 +1276,7 @@ impl RunoApp {
     /// `force` deletes the branch even with commits the base lacks (a squash-merged PR,
     /// or a race the person decided against).
     pub(crate) fn remove_session_files(&mut self, session: &Session, force: bool) {
-        let Some(project) = self.project_of(session).filter(|_| !self.demo) else {
+        let Some(project) = self.project_of(session) else {
             return;
         };
         let checkpoints: Vec<String> = session

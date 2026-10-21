@@ -438,7 +438,7 @@ impl RunoApp {
     /// message; the routing chip itself stays as it was unless it was the one used.
     fn home_crew_send(&mut self, chip: Chip, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.home.prompt.read(cx).value().trim().to_string();
-        if text.is_empty() || self.demo_guard(cx) {
+        if text.is_empty() {
             return;
         }
         let Some(pid) = self.home_crew() else { return };
@@ -546,7 +546,7 @@ impl RunoApp {
             .cloned();
         let missing = project
             .as_ref()
-            .filter(|p| !self.home_all && !self.demo && !std::path::Path::new(&p.path).is_dir())
+            .filter(|p| !self.home_all && !std::path::Path::new(&p.path).is_dir())
             .map(|p| (p.id, p.path.clone()));
         let no_projects = self.state.projects.is_empty();
         let typed = !self.home.prompt.read(cx).value().trim().is_empty();
@@ -622,7 +622,7 @@ impl RunoApp {
     ) -> AnyElement {
         // Crew or Direct for the project on show, beside its name.
         let mode = project
-            .filter(|_| !self.home_all && !self.demo)
+            .filter(|_| !self.home_all)
             .map(|p| div().w(px(140.)).child(self.crew_mode_switch(p.id, cx)));
         let scope = |label: &'static str, all: bool| {
             let id = if all { "home-all" } else { "home-one" };
@@ -1862,7 +1862,7 @@ impl RunoApp {
 
     /// What Git found in the top bar project's folder, when Home shows one project.
     fn home_git(&self) -> Option<GitNews> {
-        if self.home_all || self.demo {
+        if self.home_all {
             return None;
         }
         let dir = self.git_place_dir()?;

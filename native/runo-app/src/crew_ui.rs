@@ -335,9 +335,6 @@ impl RunoApp {
         origin: Origin,
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
-        if self.demo {
-            return Err("Threads don't start in the demo.".into());
-        }
         let project = self
             .state
             .projects
@@ -715,7 +712,7 @@ impl RunoApp {
 
     /// Apply what threads reported through Runo's tools since the last look.
     pub(crate) fn crew_tick(&mut self, cx: &mut Context<Self>) {
-        if self.demo || !self.state.sessions.iter().any(|s| s.crew.is_some()) {
+        if !self.state.sessions.iter().any(|s| s.crew.is_some()) {
             return;
         }
         let events = crew::take_events(&crew::events_dir(), &mut self.crew.seen);

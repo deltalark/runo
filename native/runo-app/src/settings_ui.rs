@@ -2906,10 +2906,6 @@ impl RunoApp {
         if self.cleanup.scanning || self.cleanup.removing {
             return;
         }
-        if self.demo {
-            self.cleanup.items = Some(Vec::new());
-            return;
-        }
         self.cleanup.scanning = true;
         self.cleanup.confirming = false;
         let (projects, uses) = self.cleanup_inputs();
@@ -2950,7 +2946,7 @@ impl RunoApp {
     fn remove_cleanup(&mut self) {
         self.cleanup.confirming = false;
         let picked = self.picked_cleanup();
-        if picked.is_empty() || self.cleanup.removing || self.demo {
+        if picked.is_empty() || self.cleanup.removing {
             return;
         }
         self.cleanup.removing = true;

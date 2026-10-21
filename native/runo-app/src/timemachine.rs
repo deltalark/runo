@@ -109,7 +109,7 @@ impl RunoApp {
 
     /// Read the folder's moments again, when the time machine is showing.
     pub(crate) fn load_time(&mut self) {
-        if self.demo || !self.git_time_on || self.view != View::GitHistory {
+        if !self.git_time_on || self.view != View::GitHistory {
             return;
         }
         let Some(dir) = self.git_place_dir() else {

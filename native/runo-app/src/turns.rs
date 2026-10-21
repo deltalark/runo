@@ -82,7 +82,6 @@ impl RunoApp {
             self.info = Some((why, std::time::Instant::now()));
             return;
         }
-        let demo = self.demo;
         // Crew's rules and what changed in its threads, or a thread's rules: unseen context.
         let preface = self.crew_preface(id);
         // Notes the person shared with agents open each new conversation in the project.
@@ -135,7 +134,7 @@ impl RunoApp {
         }
         let resume = has;
         let dir = session.dir.clone();
-        let in_git = !demo && git::is_repo(&dir);
+        let in_git = git::is_repo(&dir);
         // Agents that cannot resume their own conversation get it written into the prompt.
         let handoff = std::mem::take(&mut session.handoff);
         // Once a message goes out the switch is final.
@@ -199,7 +198,7 @@ impl RunoApp {
         let agent_session = session.agent_session.clone();
         let sandbox = session.sandbox();
         // A signed-out agent says so before its turn fails, not after.
-        if sandbox.is_none() && !demo && crate::signin::get(&provider) == Some(false) {
+        if sandbox.is_none() && crate::signin::get(&provider) == Some(false) {
             let mut hint = Message::new(Role::System, agent::sign_in_help(&provider));
             hint.meta = "warning".into();
             let at = session.messages.len() - 1;
@@ -213,9 +212,7 @@ impl RunoApp {
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| {
-                !demo && memory_server() && crate::connections::mcp_reachable(sandbox.as_ref())
-            });
+            .filter(|_| memory_server() && crate::connections::mcp_reachable(sandbox.as_ref()));
         // Images inside the session folder go by their place in it, which is the same on
         // a connection; others by their full path.
         let attached: Vec<String> = images
@@ -263,9 +260,7 @@ impl RunoApp {
                 self.started.insert(id, std::time::Instant::now());
                 self.turn_files.remove(&id);
                 // Counted as it starts, so turns running side by side can't pass the limit.
-                if !demo {
-                    self.state.add_turn(&store::today());
-                }
+                self.state.add_turn(&store::today());
                 crate::applog::info(
                     "turn",
                     format!(
@@ -469,9 +464,6 @@ impl RunoApp {
 
     /// Prompts that were still queued when Runo last closed go out now, in order.
     pub(crate) fn send_waiting_queues(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         let ids: Vec<u64> = self
             .state
             .sessions
@@ -495,9 +487,6 @@ impl RunoApp {
 
     /// Send the composer's prompt, or queue it while the agent is busy.
     pub(crate) fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(id) = self.selected else { return };
         let typed = self.prompt.read(cx).value().trim().to_string();
         let playbook = self
@@ -1060,10 +1049,6 @@ impl RunoApp {
         let Some(session) = self.current() else {
             return;
         };
-        if self.demo {
-            self.commit_suggestion = Some("Refine sidebar navigation and nav items".into());
-            return;
-        }
         let patch = git::patch_for_message(&session.dir, 24_000);
         if patch.trim().is_empty() {
             self.fail("turn", "There are no changes to describe.".into());

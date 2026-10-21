@@ -1573,7 +1573,7 @@ impl RunoApp {
         else {
             return;
         };
-        if self.demo || !self.arch.scanning.insert(pid) {
+        if !self.arch.scanning.insert(pid) {
             return;
         }
         self.bg(
@@ -1588,7 +1588,7 @@ impl RunoApp {
 
     /// Write the notes back to their file as they change.
     fn arch_notes_changed(&mut self, cx: &mut Context<Self>) {
-        if self.arch.loading || self.demo {
+        if self.arch.loading {
             return;
         }
         let Some(file) = self.arch.file.clone() else {

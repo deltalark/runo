@@ -691,41 +691,11 @@ impl RunoApp {
         self.view = View::GitHub;
         self.git_tab = View::GitHub;
         self.load_repo();
-        if self.demo {
-            self.gh.prs = vec![GhItem {
-                number: 42,
-                title: "Refine sidebar navigation".into(),
-                url: "https://github.com/example/runo/pull/42".into(),
-                detail: "feature/navigation".into(),
-                author: "you".into(),
-                state: "open".into(),
-            }];
-            self.gh.issues = vec![GhItem {
-                number: 17,
-                title: "Search should match branch names".into(),
-                url: "https://github.com/example/runo/issues/17".into(),
-                detail: "bug".into(),
-                author: "teammate".into(),
-                state: "open".into(),
-            }];
-            self.gh.runs = vec![GhItem {
-                number: 1,
-                title: "Refine sidebar navigation".into(),
-                url: String::new(),
-                detail: "CI · feature/navigation".into(),
-                author: String::new(),
-                state: "success".into(),
-            }];
-            return;
-        }
         self.fetch_github(&ALL_LISTS);
     }
 
     /// Fetch some of the lists for the chosen project in the background.
     pub(crate) fn fetch_github(&mut self, lists: &[&'static str]) {
-        if self.demo {
-            return;
-        }
         let Some(project) = self.gh_project() else {
             return;
         };
@@ -845,9 +815,6 @@ impl RunoApp {
     /// Start a session in a new worktree that works on an issue, or reviews a PR with
     /// the PR's own branch checked out. It runs with the agent picked on the page.
     fn start_from_github(&mut self, task: String, pr: Option<&GhItem>, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(project) = self.gh_project() else {
             return;
         };

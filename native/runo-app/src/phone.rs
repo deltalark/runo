@@ -912,9 +912,6 @@ fn session(base: &Path, id: u64) -> Option<Value> {
 impl RunoApp {
     /// Carry out what the phone asked for, as if it were typed here.
     pub(crate) fn take_phone_requests(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         for request in take(&store::data_dir()) {
             let id = request.session();
             let Some(session) = self.state.session(id) else {

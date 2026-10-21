@@ -194,9 +194,6 @@ impl RunoApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.demo_guard(cx) {
-            return;
-        }
         self.remove_project = Some(RemoveProject {
             id: pid,
             worktrees: false,

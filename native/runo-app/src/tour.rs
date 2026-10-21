@@ -428,7 +428,6 @@ impl RunoApp {
             || !st.browser_asked
             || self.tour.is_some()
             || self.view == View::Settings
-            || self.demo
         {
             return None;
         }

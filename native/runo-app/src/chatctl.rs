@@ -284,7 +284,7 @@ impl RunoApp {
         let Some(cp) = session.messages.get(index).map(|m| m.checkpoint.clone()) else {
             return;
         };
-        if cp.is_empty() || self.demo {
+        if cp.is_empty() {
             self.rewound(id, index, None, text, images, cx);
             return;
         }
@@ -380,9 +380,6 @@ impl RunoApp {
         first: Option<(String, Vec<String>)>,
         cx: &mut Context<Self>,
     ) {
-        if self.demo {
-            return;
-        }
         let Some(src) = self.state.session(id).cloned() else {
             return;
         };

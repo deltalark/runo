@@ -80,9 +80,6 @@ fn split_path(path: &str) -> (String, String) {
 impl RunoApp {
     /// Read the project folder's changes again.
     pub(crate) fn load_folder(&mut self) {
-        if self.demo {
-            return;
-        }
         let Some(dir) = self.git_place_dir() else {
             self.git_folder = None;
             return;

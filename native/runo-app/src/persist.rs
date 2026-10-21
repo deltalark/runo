@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn sessions_get_their_own_files_and_only_changes_are_written() {
         let root = temp("split");
-        let mut state = State::demo();
+        let mut state = State::sample();
         state.sessions[0].opts.insert("b".into(), "2".into());
         state.sessions[0].opts.insert("a".into(), "1".into());
         let mut written = Written::default();
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn deleted_sessions_lose_their_files() {
         let root = temp("delete");
-        let mut state = State::demo();
+        let mut state = State::sample();
         let mut written = Written::default();
         write_all(&root, &mut state, &mut written);
         let gone = state.sessions.remove(0).id;
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn a_session_missing_from_the_index_is_still_found() {
         let root = temp("orphan");
-        let mut state = State::demo();
+        let mut state = State::sample();
         let mut written = Written::default();
         write_all(&root, &mut state, &mut written);
         // A new session's file was written, but Runo stopped before the index was.
@@ -333,8 +333,8 @@ mod tests {
     #[test]
     fn the_writer_waits_for_quiet_then_writes() {
         let root = temp("writer");
-        let mut state = State::demo();
-        queue(&root, State::demo());
+        let mut state = State::sample();
+        queue(&root, State::sample());
         state.sessions[0].title = "Latest".into();
         queue(&root, state);
         flush(Duration::from_secs(5));
