@@ -62,6 +62,7 @@ mod shell;
 mod shellenv;
 mod ship;
 mod signin;
+mod startup;
 mod store;
 mod stream;
 mod terminal;
@@ -1126,6 +1127,7 @@ fn icon(name: IconName, size: f32, color: u32) -> Icon {
 
 impl RunoApp {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        startup::mark("window created");
         caps::refresh();
         // Find MCP servers in every app's config, so shared ones reach the first run.
         std::thread::spawn(|| {
@@ -1243,7 +1245,8 @@ impl RunoApp {
         })
         .detach();
 
-        let mut state = State::load();
+        startup::mark("main view: background loops started");
+        let mut state = startup::time("saved sessions", State::load);
         {
             let mut conns = cx.global::<AppSettings>().connections.clone();
             if connections::migrate(&mut state.sessions, &mut conns) {
@@ -1272,7 +1275,7 @@ impl RunoApp {
                 }
             });
         let project_name = cx.new(|cx| InputState::new(window, cx).placeholder("Project name"));
-        let file_editor = Self::new_file_editor(window, cx);
+        let file_editor = startup::time("file editor", || Self::new_file_editor(window, cx));
         let file_sub = cx.subscribe_in(&file_editor, window, |this, _, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.file_changed(cx);
@@ -1315,9 +1318,9 @@ impl RunoApp {
                 cx.notify();
             }
         });
-        let (design, design_subs) = design::DesignPage::new(window, cx);
-        let (assistant, assistant_subs) = assistant::Assistant::new(window, cx);
-        let (arch, arch_subs) = architecture::ArchPage::new(window, cx);
+        let (design, design_subs) = startup::time("design page", || design::DesignPage::new(window, cx));
+        let (assistant, assistant_subs) = startup::time("assistant", || assistant::Assistant::new(window, cx));
+        let (arch, arch_subs) = startup::time("architecture page", || architecture::ArchPage::new(window, cx));
         let notes_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Write anything worth remembering about this project…")
@@ -1828,6 +1831,7 @@ impl RunoApp {
         cx.set_global(MainApp(cx.entity().downgrade()));
         app.init_github(window, cx);
         app.restore_layout();
+        startup::mark("main view: built");
         // The Browser tab's live page: pick up frames at display rate while it is open.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
@@ -8660,6 +8664,7 @@ impl RunoApp {
 
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let began = startup::frame_begin();
         self.prepare_playbook_run(window, cx);
         self.prepare_playbook_editor(window, cx);
         let st = cx.global::<AppSettings>().clone();
@@ -9405,6 +9410,7 @@ impl Render for RunoApp {
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx))
             .children(self.whats_new_view(cx));
+        startup::frame_end(began, window);
         fade(root, "app-root", 450)
     }
 }
@@ -9536,6 +9542,7 @@ const PANEL_MAX: f32 = 900.;
 const CHAT_MIN: f32 = 600.;
 
 fn main() {
+    startup::begin();
     // `runo --mcp-memory <folder>`: serve the memory tools to an agent, without a window.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--mcp-memory") {
@@ -9566,10 +9573,10 @@ fn main() {
         });
     }
     // Before any thread starts: find agents and Node.js where the person's terminal would.
-    shellenv::init();
+    startup::time("login shell environment", shellenv::init);
     applog::init();
     detach::enable(store::data_dir());
-    let app = application().with_assets(assets::AllAssets);
+    let app = startup::time("application", || application().with_assets(assets::AllAssets));
     // Clicking the Dock icon with the window closed (macOS keeps Runo running) opens it again.
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
@@ -9577,9 +9584,11 @@ fn main() {
         }
     });
     app.run(|cx| {
-        init(cx);
-        load_fonts(cx);
-        let settings = AppSettings::load();
+        startup::mark("event loop running");
+        startup::watch_main_thread(cx);
+        startup::time("component library", || init(cx));
+        startup::time("fonts", || load_fonts(cx));
+        let settings = startup::time("settings", AppSettings::load);
         settings.apply();
         // Before any text is drawn: the renderer reads this once.
         set_font_smoothing(settings.font_smoothing);
@@ -9589,7 +9598,7 @@ fn main() {
         cx.on_action(quit);
         desktop_notify::install(cx);
         cx.set_menus(app_menus());
-        open_main_window(cx);
+        startup::time("main window", || open_main_window(cx));
     });
 }
 
