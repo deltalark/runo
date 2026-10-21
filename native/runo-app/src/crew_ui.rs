@@ -46,6 +46,16 @@ pub(crate) fn thread_status(working: bool, s: &Session) -> &'static str {
 }
 
 impl RunoApp {
+    /// Agents whose command line is installed here.
+    pub(crate) fn installed_agents(&self, cx: &App) -> Vec<&'static str> {
+        let settings = cx.global::<AppSettings>();
+        agent::PROVIDERS
+            .iter()
+            .filter(|p| agent::available(p.bin, &settings.agent(p.id).binary))
+            .map(|p| p.id)
+            .collect()
+    }
+
     /// Project `pid` works through Crew.
     pub(crate) fn crew_mode(&self, pid: u64) -> bool {
         self.state
