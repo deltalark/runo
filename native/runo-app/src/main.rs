@@ -8,10 +8,12 @@ mod archdraw;
 mod architecture;
 mod askbar;
 mod assistant;
+mod branches;
 mod browser;
 mod browser_engine;
 mod caps;
 mod chatctl;
+mod clashes;
 mod cleanup;
 mod cliview;
 mod connections;
@@ -31,7 +33,9 @@ mod fileview;
 mod fixes;
 mod gemini;
 mod git;
+mod githistory;
 mod github;
+mod gitplace;
 mod handoff;
 mod health;
 mod history;
@@ -44,6 +48,7 @@ mod memory_mcp;
 mod modelcheck;
 mod models;
 mod notes;
+mod parts;
 mod pbfile;
 mod pbrunner;
 mod pbshare;
@@ -54,7 +59,9 @@ mod projects;
 mod proof;
 mod proof_ui;
 mod pty;
+mod radar;
 mod review;
+mod reviewable;
 mod schedule;
 mod sessions;
 mod settings;
@@ -66,6 +73,7 @@ mod signin;
 mod store;
 mod stream;
 mod terminal;
+mod timemachine;
 mod tour;
 mod turns;
 mod updater;
@@ -172,6 +180,10 @@ enum View {
     Editor,
     /// Changes waiting to be reviewed and shipped, one session at a time.
     Review,
+    /// The project folder's branches and work set aside.
+    Branches,
+    /// The project folder's commits as a graph.
+    GitHistory,
 }
 
 /// What a quick-open entry does when chosen.
@@ -201,8 +213,66 @@ enum RightTab {
 struct RunoApp {
     state: State,
     demo: bool,
-    /// Git opens on its GitHub tab, the one used last, rather than To ship.
-    git_github: bool,
+    /// The Git tab used last, which Git opens on: Review, Branches or GitHub.
+    git_tab: View,
+    /// The Branches tab's list, the branch picked in it and that branch's commits and files.
+    git_branches: Option<branches::Branches>,
+    git_branch_sel: Option<String>,
+    git_branch_detail: Option<branches::BranchDetail>,
+    /// The Merge dialog, while open.
+    git_merge: Option<branches::MergeForm>,
+    /// The Branches tab's name box, while open, and the box itself.
+    git_naming: Option<branches::Naming>,
+    git_name: Entity<InputState>,
+    /// The History tab's commits, filter and search box, and the picked commit.
+    git_history: Option<githistory::History>,
+    git_log_filter: git::LogFilter,
+    git_log_search: Entity<InputState>,
+    git_commit_sel: Option<String>,
+    git_commit: Option<githistory::Picked>,
+    /// What the agent said each commit did; None while it's still answering.
+    git_explain: HashMap<String, Option<String>>,
+    /// The commit Go back waits on a second click for.
+    git_go_back: Option<String>,
+    /// The project folder's own changes in Changes, whether they're the page shown, the
+    /// file whose parts are shown, and the lines left out of the next commit.
+    git_folder: Option<parts::Folder>,
+    git_folder_open: bool,
+    git_folder_file: Option<String>,
+    git_left_out: parts::LeftOut,
+    /// The folder's commit box, a value waiting to go into it, and the message being
+    /// committed, put back if the commit fails.
+    git_folder_msg: Entity<InputState>,
+    git_folder_msg_set: Option<String>,
+    git_folder_msg_kept: Option<String>,
+    /// The clash page: the file shown, what to keep at each spot (or for a whole file),
+    /// and the agent's version of a file, None while it's writing it.
+    git_clash_file: Option<String>,
+    git_picks: HashMap<(String, usize), clashes::Pick>,
+    git_agent_fix: HashMap<String, Option<String>>,
+    /// Clash radar: pairs of lines of work that change the same lines, and the one shown.
+    git_radar: Option<Vec<radar::Hit>>,
+    git_radar_sel: Option<usize>,
+    /// Make it reviewable: the branch whose review kit is open, and the agent's guides and
+    /// split plans by branch, None while it's writing them.
+    git_kit: Option<String>,
+    git_guides: HashMap<String, Option<String>>,
+    git_splits: HashMap<String, Option<Vec<reviewable::SplitPart>>>,
+    /// Time machine: shown in place of History's commits, the folder's moments, the
+    /// picked one against now, and the moment waiting for a second click to go back to.
+    git_time_on: bool,
+    git_time: Option<(String, Vec<git::Moment>)>,
+    git_moment_sel: Option<usize>,
+    git_moment_files: Option<timemachine::Against>,
+    git_travel: Option<usize>,
+    /// The top bar project's folder as Git sees it, with when the remote was last fetched.
+    git_repo: Option<gitplace::Repo>,
+    /// The last git step taken from the Git place, which Undo takes back for a while.
+    git_undo: Option<(git::UndoPoint, std::time::Instant)>,
+    /// A git step running for the project folder, in words.
+    git_working: Option<String>,
+    /// What the last git step did, shown at the foot of the Git place for a moment.
+    git_toast: Option<(String, std::time::Instant)>,
     selected: Option<u64>,
     view: View,
     right_tab: RightTab,
@@ -1224,7 +1294,10 @@ impl RunoApp {
                         this.refresh();
                         cx.notify();
                     } else if repaint
-                        || (tick && (!this.started.is_empty() || this.info.is_some()))
+                        || (tick
+                            && (!this.started.is_empty()
+                                || this.info.is_some()
+                                || this.git_toast.is_some()))
                         || (ticks.is_multiple_of(5)
                             && this.update_runs.values().any(|r| r.failed.is_none()))
                     {
@@ -1314,6 +1387,18 @@ impl RunoApp {
                 cx.notify();
             }
         });
+        let git_name = cx.new(|cx| InputState::new(window, cx).placeholder("Branch name"));
+        let git_name_sub = cx.subscribe_in(&git_name, window, |this, _, event, _, cx| {
+            this.on_git_name(event, cx);
+        });
+        let git_log_search = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Search commit messages and people"));
+        let git_log_search_sub =
+            cx.subscribe_in(&git_log_search, window, |this, _, event, _, cx| {
+                this.on_git_log_search(event, cx);
+            });
+        let git_folder_msg =
+            cx.new(|cx| InputState::new(window, cx).placeholder("What does this commit do?"));
         let commit_msg = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let commit_sub = cx.subscribe_in(&commit_msg, window, |this, _, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -1424,7 +1509,47 @@ impl RunoApp {
             view: View::Session,
             state,
             demo,
-            git_github: false,
+            git_tab: View::Review,
+            git_branches: None,
+            git_branch_sel: None,
+            git_branch_detail: None,
+            git_merge: None,
+            git_naming: None,
+            git_name: git_name.clone(),
+            git_history: None,
+            git_log_filter: git::LogFilter {
+                all: true,
+                ..Default::default()
+            },
+            git_log_search,
+            git_commit_sel: None,
+            git_commit: None,
+            git_explain: HashMap::new(),
+            git_go_back: None,
+            git_folder: None,
+            git_folder_open: false,
+            git_folder_file: None,
+            git_left_out: Default::default(),
+            git_folder_msg,
+            git_folder_msg_set: None,
+            git_folder_msg_kept: None,
+            git_clash_file: None,
+            git_picks: HashMap::new(),
+            git_agent_fix: HashMap::new(),
+            git_radar: None,
+            git_radar_sel: None,
+            git_kit: None,
+            git_guides: HashMap::new(),
+            git_splits: HashMap::new(),
+            git_time_on: false,
+            git_time: None,
+            git_moment_sel: None,
+            git_moment_files: None,
+            git_travel: None,
+            git_repo: None,
+            git_undo: None,
+            git_working: None,
+            git_toast: None,
             selected,
             right_tab: RightTab::Changes,
             browser_open: false,
@@ -1664,6 +1789,8 @@ impl RunoApp {
                 prompt_sub,
                 settings_search_sub,
                 commit_sub,
+                git_name_sub,
+                git_log_search_sub,
                 rename_sub,
                 note_sub,
             ],
@@ -2700,6 +2827,8 @@ impl RunoApp {
                 View::Notes => self.open_notes(window, cx),
                 View::GitHub => self.load_github(),
                 View::Review => self.open_review(),
+                View::Branches => self.open_branches(),
+                View::GitHistory => self.open_git_history(),
                 _ => self.view = view,
             },
             Jump::Session(id) => self.open_session(id, window, cx),
@@ -2774,7 +2903,13 @@ impl RunoApp {
                 IconName::RotateCcwClock,
                 View::History,
             ),
-            ("Go to Git: To ship", IconName::GitCompare, View::Review),
+            ("Go to Git: Changes", IconName::GitCompare, View::Review),
+            (
+                "Go to Git: History",
+                IconName::GitCommitHorizontal,
+                View::GitHistory,
+            ),
+            ("Go to Git: Branches", IconName::GitBranch, View::Branches),
             ("Go to Git: GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
@@ -8751,7 +8886,7 @@ impl Render for RunoApp {
             View::Notes => self.notes_view(cx),
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
-            View::GitHub | View::Review => self.git_view(cx),
+            View::GitHub | View::Review | View::GitHistory | View::Branches => self.git_view(cx),
             View::Editor => div()
                 .flex_1()
                 .min_w_0()
@@ -8818,6 +8953,13 @@ impl Render for RunoApp {
         {
             self.info = None;
         }
+        if self
+            .git_toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > gitplace::TOAST_FOR)
+        {
+            self.git_toast = None;
+        }
         self.log_notice();
         let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
             (notice.clone(), c_red(), Some(IconName::CircleAlert))
@@ -8845,8 +8987,10 @@ impl Render for RunoApp {
         // The page is an island under the session tabs. Pages with their own list beside
         // the content paint the two layers themselves, so the list is as clear as the
         // sidebar.
-        let page_fill = if matches!(self.view, View::Review | View::GitHub | View::Settings)
-            || (self.view == View::Architecture && self.arch_diagram_open())
+        let page_fill = if matches!(
+            self.view,
+            View::Review | View::GitHistory | View::Branches | View::GitHub | View::Settings
+        ) || (self.view == View::Architecture && self.arch_diagram_open())
             || (self.view == View::Design && self.design_canvas_open())
         {
             rgba(0)
@@ -8939,12 +9083,12 @@ impl Render for RunoApp {
             }))
             // Both land in Git, each on its own tab.
             .on_action(cx.listener(|this, _: &GoReviews, window, cx| {
-                this.git_github = true;
+                this.git_tab = View::GitHub;
                 this.go(Mode::Git, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoReview, window, cx| {
-                this.git_github = false;
+                this.git_tab = View::Review;
                 this.go(Mode::Git, window, cx);
                 cx.notify();
             }))
@@ -9595,7 +9739,7 @@ fn app_menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
-            MenuItem::action("Git: To ship", GoReview),
+            MenuItem::action("Git: Changes", GoReview),
             MenuItem::action("Git: GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
             MenuItem::action("History", GoHistory),

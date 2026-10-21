@@ -433,6 +433,8 @@ impl RunoApp {
             View::GitHub => "GitHub",
             View::Editor => "a file",
             View::Review => "Review",
+            View::Branches => "Git branches",
+            View::GitHistory => "Git history",
             View::Design => "Design",
             View::Architecture => "Architecture",
         };

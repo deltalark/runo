@@ -689,7 +689,8 @@ impl RunoApp {
     /// Show Reviews and fetch PRs, issues and runs for the chosen project.
     pub(crate) fn load_github(&mut self) {
         self.view = View::GitHub;
-        self.git_github = true;
+        self.git_tab = View::GitHub;
+        self.load_repo();
         if self.demo {
             self.gh.prs = vec![GhItem {
                 number: 42,

@@ -897,7 +897,7 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
-            // Git's To ship tab; `go-reviews` opens its GitHub tab.
+            // Git's Changes tab; `go-reviews` opens its GitHub tab.
             Mode::Git => "go-review",
             Mode::Playbooks => "go-playbooks",
             Mode::History => "go-history",
@@ -929,7 +929,7 @@ impl Mode {
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
             View::Automations => Mode::Playbooks,
-            View::Review | View::GitHub => Mode::Git,
+            View::Review | View::GitHistory | View::Branches | View::GitHub => Mode::Git,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
             View::Notes => Mode::Notes,
@@ -1106,8 +1106,12 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
-            Mode::Git if self.git_github => self.load_github(),
-            Mode::Git => self.open_review(),
+            Mode::Git => match self.git_tab {
+                View::GitHub => self.load_github(),
+                View::Branches => self.open_branches(),
+                View::GitHistory => self.open_git_history(),
+                _ => self.open_review(),
+            },
             Mode::Playbooks => self.view = View::Automations,
             Mode::History => self.open_history(cx),
             Mode::Inbox => self.view = View::Inbox,
@@ -1398,8 +1402,7 @@ impl RunoApp {
     pub(crate) fn has_panel(&self, cx: &App) -> bool {
         match self.mode() {
             Mode::Sessions => self.show_sidebar,
-            Mode::Settings => true,
-            Mode::Git => self.view == View::Review,
+            Mode::Git => matches!(self.view, View::Review | View::GitHistory | View::Branches),
             Mode::Design => self
                 .design
                 .project
@@ -1801,6 +1804,16 @@ impl RunoApp {
             .max();
         match (self.mode(), latest) {
             (Mode::Git, _) if self.view == View::GitHub => self.load_github(),
+            (Mode::Git, _) if self.view == View::GitHistory => {
+                self.git_commit_sel = None;
+                self.git_log_filter.path.clear();
+                self.open_git_history();
+            }
+            (Mode::Git, _) if self.view == View::Branches => {
+                self.git_branch_sel = None;
+                self.open_branches();
+            }
+            (Mode::Git, _) => self.load_repo(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
                 self.view = View::Home;
@@ -3475,6 +3488,8 @@ mod tests {
         for (view, mode) in [
             (View::Review, Mode::Git),
             (View::GitHub, Mode::Git),
+            (View::Branches, Mode::Git),
+            (View::GitHistory, Mode::Git),
             (View::History, Mode::History),
             (View::Notes, Mode::Notes),
             (View::Automations, Mode::Playbooks),

@@ -1063,6 +1063,18 @@ impl RunoApp {
 
     /// Results of one-off background commands.
     pub(crate) fn handle_output(&mut self, key: String, result: Result<String, String>) {
+        if key.starts_with("guide:") || key.starts_with("split:") {
+            self.handle_reviewable(&key, result);
+            return;
+        }
+        if key.starts_with("resolve:") {
+            self.handle_resolve(&key, result);
+            return;
+        }
+        if key.starts_with("explain:") {
+            self.handle_explain(&key, result);
+            return;
+        }
         if key.starts_with("assistant:") {
             return self.assistant_reply(key, result);
         }
@@ -1098,6 +1110,7 @@ impl RunoApp {
 
     /// Apply values produced outside of render (they need a window to reach inputs).
     pub(crate) fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_folder_pending(window, cx);
         // Each session keeps its own unsent prompt while another one is on screen.
         if self.draft_for != self.selected {
             let text = self.prompt.read(cx).value().to_string();

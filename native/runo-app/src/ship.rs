@@ -661,6 +661,12 @@ impl RunoApp {
         } else {
             String::new()
         };
+        // A reviewer's guide written for this branch leads the description.
+        let body = match self.git_guides.get(&session.branch) {
+            Some(Some(guide)) if body.is_empty() => guide.clone(),
+            Some(Some(guide)) => format!("{guide}\n\n## Commits\n{body}"),
+            _ => body,
+        };
         let branch = format!("runo/session-{id}");
         self.pr_title
             .update(cx, |i, cx| i.set_value(title, window, cx));
