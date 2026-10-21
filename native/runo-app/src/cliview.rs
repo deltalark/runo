@@ -81,6 +81,9 @@ fn parse_divider(meta: &str) -> Option<(&str, Option<usize>)> {
 /// Why a session can't show its CLI view without losing context, if it can't.
 pub(crate) fn cli_blocker(session: &Session) -> Option<String> {
     let name = agent::provider(&session.provider).name;
+    if session.canvas == crate::crew::CANVAS {
+        return Some("Crew stays in Chat, where Runo reads what it asks for. Its threads open in the CLI like any session.".into());
+    }
     if session.elsewhere() && session.sandbox().is_none() {
         return Some(format!(
             "This session runs on a connection that no longer exists ({}). Move it to this machine to use the CLI.",
@@ -218,6 +221,7 @@ impl RunoApp {
             images: &[],
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
+            thread: 0,
         };
         let mut program = pty::Program {
             bin: if opts.binary.trim().is_empty() {

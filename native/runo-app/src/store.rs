@@ -94,6 +94,9 @@ pub struct Message {
     /// tool call's id). Only meaningful while the turn runs, so it isn't saved.
     #[serde(skip)]
     pub running_steps: Vec<(usize, String)>,
+    /// In a Crew chat: a card drawn with the message, such as the threads it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew: Option<crate::crew::Card>,
 }
 
 /// Token use of one agent turn.
@@ -250,6 +253,7 @@ impl Message {
             note: String::new(),
             failed_steps: Vec::new(),
             running_steps: Vec::new(),
+            crew: None,
         }
     }
 

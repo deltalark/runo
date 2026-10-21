@@ -7,7 +7,9 @@
 //! renamed so the app never reads half a file. Agents with no MCP write the same things as
 //! fenced `runo-…` blocks in their reply, which `TagFilter` takes out of the visible text.
 //!
-//! This file holds the data and the rules; nothing in the app reads events yet.
+//! Crew's own chat is a session too (`CANVAS`), held read-only; it acts by ending a reply
+//! with a `runo-actions` block, which `parse_actions` and `within_limits` check before
+//! anything runs. This file holds the data and the rules; the app side is `crew_ui.rs`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
@@ -67,8 +69,6 @@ pub enum Origin {
     Person,
     /// Crew, answering the person's message with this id.
     Crew { message: u64 },
-    /// A part of this mission.
-    Mission { mission: u64 },
 }
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -496,6 +496,389 @@ pub fn block_event(block: &Tagged) -> Option<EventKind> {
     }
 }
 
+// ---------- Crew's own chat ----------
+
+/// `Session::canvas` of a project's Crew chat: a session like the Design and Architecture
+/// chats, kept out of the session lists and held read-only.
+pub const CANVAS: &str = "crew";
+/// Threads Crew may start in one turn; more wait for the person.
+pub const MAX_NEW_THREADS: usize = 3;
+/// Actions read from one reply; the rest are dropped.
+pub const MAX_ACTIONS: usize = 12;
+/// Turns Crew takes on its own, to answer threads, between two messages from the person.
+pub const MAX_WAKES: u32 = 4;
+
+/// What Crew asks Runo to do, from the `runo-actions` block that ends its reply.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(tag = "do", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)] // the names are the wire format Crew writes
+pub enum Action {
+    /// Start a thread: a new session that works on `brief`.
+    StartThread {
+        title: String,
+        brief: String,
+        /// An agent id such as "codex"; empty for the project's default.
+        #[serde(default)]
+        agent: String,
+        /// Work in its own worktree; unset leaves it to the person's New session default.
+        #[serde(default)]
+        isolated: Option<bool>,
+    },
+    /// Send a thread a message, as its next prompt.
+    MessageThread { thread: u64, text: String },
+    /// Read a thread's latest replies, sent back with Crew's next turn.
+    ReadThread { thread: u64 },
+    /// Mark a thread finished: it leaves Crew's open threads, the session stays.
+    ResolveThread { thread: u64 },
+}
+
+/// A card shown with a message in Crew's chat. Threads are drawn live from the sessions,
+/// so a card shows where each one stands now, not when it was posted.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(tag = "card", rename_all = "snake_case")]
+pub enum Card {
+    /// Threads started together.
+    Started { threads: Vec<u64> },
+    /// Threads Crew asked for over its limit, waiting for the person.
+    Held {
+        actions: Vec<Action>,
+        #[serde(default)]
+        answered: bool,
+    },
+    /// News from one thread: it finished, failed, reported or needs the person.
+    News { thread: u64 },
+}
+
+impl Action {
+    /// The thread it is about, for actions on an existing one.
+    pub fn thread(&self) -> Option<u64> {
+        match self {
+            Action::StartThread { .. } => None,
+            Action::MessageThread { thread, .. }
+            | Action::ReadThread { thread }
+            | Action::ResolveThread { thread } => Some(*thread),
+        }
+    }
+}
+
+/// The actions in a `runo-actions` block, checked and clipped, and what was wrong with
+/// the ones left out. The block may hold one action, a list, or `{"actions": [...]}`.
+/// Nothing here can panic on what an agent writes, and an action that doesn't check out
+/// is never returned.
+pub fn parse_actions(body: &str) -> (Vec<Action>, Vec<String>) {
+    let mut problems = Vec::new();
+    let value: serde_json::Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                Vec::new(),
+                vec![format!("The actions aren't valid JSON: {e}")],
+            )
+        }
+    };
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::Object(mut map) => match map.remove("actions") {
+            Some(serde_json::Value::Array(items)) => items,
+            Some(_) => return (Vec::new(), vec!["\"actions\" must be a list.".into()]),
+            None => vec![serde_json::Value::Object(map)],
+        },
+        _ => {
+            return (
+                Vec::new(),
+                vec!["The actions must be an object or a list.".into()],
+            )
+        }
+    };
+    if items.len() > MAX_ACTIONS {
+        problems.push(format!(
+            "Only the first {MAX_ACTIONS} of {} actions were read.",
+            items.len()
+        ));
+    }
+    let mut out: Vec<Action> = Vec::new();
+    for item in items.into_iter().take(MAX_ACTIONS) {
+        let action = match serde_json::from_value::<Action>(item) {
+            Ok(a) => a,
+            Err(e) => {
+                problems.push(format!("Skipped an action: {e}"));
+                continue;
+            }
+        };
+        let action = match action {
+            Action::StartThread {
+                title,
+                brief,
+                agent,
+                isolated,
+            } => {
+                let title = clip(&title, 80);
+                let brief = clip(&brief, MAX_TEXT);
+                if title.is_empty() || brief.is_empty() {
+                    problems.push("Skipped a thread with no title or brief.".into());
+                    continue;
+                }
+                Action::StartThread {
+                    title,
+                    brief,
+                    agent: clip(&agent, 40).to_ascii_lowercase(),
+                    isolated,
+                }
+            }
+            Action::MessageThread { thread, text } => {
+                let text = clip(&text, MAX_TEXT);
+                if text.is_empty() {
+                    problems.push(format!("Skipped an empty message to thread #{thread}."));
+                    continue;
+                }
+                Action::MessageThread { thread, text }
+            }
+            other => other,
+        };
+        if action.thread() == Some(0) {
+            problems.push("Skipped an action with no thread id.".into());
+            continue;
+        }
+        if !out.contains(&action) {
+            out.push(action);
+        }
+    }
+    (out, problems)
+}
+
+/// Split checked actions into the ones that run now and the ones held for the person:
+/// at most `MAX_NEW_THREADS` new threads, one message per thread, and only threads in
+/// `threads` (this project's) may be named. Returns (run, held, problems).
+pub fn within_limits(
+    actions: Vec<Action>,
+    threads: &[u64],
+) -> (Vec<Action>, Vec<Action>, Vec<String>) {
+    let mut run = Vec::new();
+    let mut held = Vec::new();
+    let mut problems = Vec::new();
+    let mut started = 0;
+    let mut messaged: Vec<u64> = Vec::new();
+    for action in actions {
+        if let Some(t) = action.thread() {
+            if !threads.contains(&t) {
+                problems.push(format!("There's no thread #{t} in this project."));
+                continue;
+            }
+        }
+        match &action {
+            Action::StartThread { .. } => {
+                if started < MAX_NEW_THREADS {
+                    started += 1;
+                    run.push(action);
+                } else {
+                    held.push(action);
+                }
+            }
+            Action::MessageThread { thread, .. } => {
+                if messaged.contains(thread) {
+                    problems.push(format!("Only one message per thread per turn: #{thread}."));
+                } else {
+                    messaged.push(*thread);
+                    run.push(action);
+                }
+            }
+            _ => run.push(action),
+        }
+    }
+    (run, held, problems)
+}
+
+/// The routing chip on Crew's composer.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Chip {
+    /// Crew decides.
+    #[default]
+    Auto,
+    /// Crew answers and starts nothing.
+    Answer,
+    /// Start a thread with the message, without asking Crew.
+    Thread,
+}
+
+impl Chip {
+    pub const ALL: [Chip; 3] = [Chip::Auto, Chip::Answer, Chip::Thread];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Chip::Auto => "Auto",
+            Chip::Answer => "Just answer",
+            Chip::Thread => "New thread",
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            Chip::Auto => "Crew answers, or starts threads when there's work",
+            Chip::Answer => "Crew only answers, and starts nothing",
+            Chip::Thread => "Starts a thread with your message, without Crew",
+        }
+    }
+}
+
+/// Where a message typed in Crew's chat goes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Route {
+    /// To Crew, with a note for this turn when the chip asked for one.
+    Crew { answer_only: bool },
+    /// Straight to a thread named with @, with what follows the name.
+    Thread { id: u64, text: String },
+    /// A new thread with the whole message as its brief.
+    NewThread,
+}
+
+/// Where `text` goes. A message that starts with @ and a thread's title (or `@#12`) goes
+/// to that thread and costs Crew nothing; then the chip decides.
+pub fn route(text: &str, chip: Chip, threads: &[(u64, String)]) -> Route {
+    if let Some(rest) = text.trim_start().strip_prefix('@') {
+        let by_id = rest.strip_prefix('#').and_then(|r| {
+            let digits: String = r.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let id = digits.parse::<u64>().ok()?;
+            threads
+                .iter()
+                .any(|(t, _)| *t == id)
+                .then(|| (id, r[digits.len()..].to_string()))
+        });
+        let by_title = || {
+            threads
+                .iter()
+                .filter(|(_, title)| {
+                    !title.is_empty()
+                        && rest
+                            .get(..title.len())
+                            .is_some_and(|head| head.to_lowercase() == title.to_lowercase())
+                        && rest[title.len()..]
+                            .chars()
+                            .next()
+                            .is_none_or(|c| !c.is_alphanumeric())
+                })
+                .max_by_key(|(_, title)| title.len())
+                .map(|(id, title)| (*id, rest[title.len()..].to_string()))
+        };
+        if let Some((id, after)) = by_id.or_else(by_title) {
+            let text = after.trim_start_matches([':', ',', ' ']).trim().to_string();
+            if !text.is_empty() {
+                return Route::Thread { id, text };
+            }
+        }
+    }
+    match chip {
+        Chip::Auto => Route::Crew { answer_only: false },
+        Chip::Answer => Route::Crew { answer_only: true },
+        Chip::Thread => Route::NewThread,
+    }
+}
+
+/// A short title for a thread started from a message: its first line, cut at a word.
+pub fn title_from(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if line.chars().count() <= 60 {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(60).collect();
+    match cut.rfind(' ') {
+        Some(at) if at > 20 => format!("{}…", &cut[..at]),
+        _ => format!("{cut}…"),
+    }
+}
+
+/// One line about a thread for Crew's board, which starts with `#id ` so changes can be
+/// told apart: "#12 Cove setup [working] 3/5 steps. Last report: …".
+pub fn board_line(id: u64, title: &str, status: &str, info: &ThreadInfo) -> String {
+    let mut line = format!("#{id} {} [{status}]", clip(title, 80));
+    if !info.checklist.is_empty() {
+        let done = info
+            .checklist
+            .iter()
+            .filter(|s| s.mark == Mark::Done)
+            .count();
+        line.push_str(&format!(" {done}/{} steps.", info.checklist.len()));
+    }
+    if let Some(d) = &info.decision {
+        line.push_str(&format!(
+            " Waiting on the person: {}",
+            clip(&d.question, 160)
+        ));
+    }
+    if let Some(r) = info.reports.last() {
+        line.push_str(&format!(" Last report: {}", clip(&r.summary, 240)));
+    }
+    line.replace('\n', " ")
+}
+
+/// What changed on the board since `before` (the board last sent, one line per thread):
+/// the lines that are new or different, and the threads no longer open. Empty when
+/// nothing changed.
+pub fn board_changes(before: &str, now: &[String]) -> String {
+    let key = |l: &str| l.split_whitespace().next().unwrap_or("").to_string();
+    let old: Vec<&str> = before.lines().filter(|l| l.starts_with('#')).collect();
+    let mut out = String::new();
+    for line in now {
+        if !old.contains(&line.as_str()) {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
+    for line in &old {
+        let k = key(line);
+        if !now.iter().any(|n| key(n) == k) {
+            out.push_str(&format!("- {k} is no longer open.\n"));
+        }
+    }
+    out
+}
+
+/// Crew's rules, sent with the first message of its conversation.
+pub fn rules(project: &str, agents: &[(&str, &str)], default_agent: &str) -> String {
+    let roster = agents
+        .iter()
+        .map(|(id, name)| format!("{id} ({name})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r##"## You are Crew
+You run the project "{project}" for the person in this chat. You can read the code here but never change it: threads do the work. A thread is an agent session of its own.
+
+Answer directly when you can: questions, explanations, plans and small lookups need no thread. Start a thread when there is real work: code to change, something to build, fix or investigate at length. Keep replies short and plain.
+
+To act, end your reply with one fenced block like this, and nothing after it:
+
+```runo-actions
+[{{"do":"start_thread","title":"App startup time","brief":"What to do, what done looks like, and anything the thread needs to know.","agent":"","isolated":true}}]
+```
+
+Actions:
+- start_thread: title (2 to 5 words), brief (complete: the thread has not seen this chat), agent (empty for the default, {default_agent}; or one of: {roster}), isolated (true for its own worktree and branch, false to work in the project folder).
+- message_thread: thread (its number), text. It becomes that thread's next prompt.
+- read_thread: thread. Its latest replies come back with the next message.
+- resolve_thread: thread. Use it once its work is merged or no longer needed.
+
+Limits: at most {MAX_NEW_THREADS} new threads and one message per thread per reply. Never start a thread for something you can answer. Say in your reply what you started and why, in a sentence.
+
+Each message may open with a Threads section: what changed in this project's threads since your last turn. Threads report through their own tools; use those reports to answer the person, with links.
+"##
+    )
+}
+
+/// Told to a thread with its first prompt: how it reports back.
+pub fn thread_rules(tools: bool) -> String {
+    let how = if tools {
+        "Use Runo's tools: set_checklist with your plan (update it as steps start and finish), report when you finish or find something the person should know (a few sentences, with links), ask_decision when a choice changes what the person gets or can't be undone, and message_crew to ask Crew for something another thread has."
+    } else {
+        "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with one step per line (- [x] done, - [~] doing, - [ ] to do), ```runo-report with a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
+    };
+    format!(
+        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\n## Your task\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,5 +1129,304 @@ mod tests {
             body: "{".into(),
         };
         assert_eq!(block_event(&junk), None);
+    }
+
+    fn start(title: &str) -> Action {
+        Action::StartThread {
+            title: title.into(),
+            brief: format!("Do {title}"),
+            agent: String::new(),
+            isolated: None,
+        }
+    }
+
+    #[test]
+    fn actions_come_as_one_a_list_or_an_object() {
+        let one = r#"{"do":"start_thread","title":"Startup time","brief":"Measure it","agent":"Codex","isolated":true}"#;
+        let (found, problems) = parse_actions(one);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            found,
+            [Action::StartThread {
+                title: "Startup time".into(),
+                brief: "Measure it".into(),
+                agent: "codex".into(),
+                isolated: Some(true),
+            }]
+        );
+        let list = r#"[{"do":"message_thread","thread":4,"text":"Also the docs"},{"do":"read_thread","thread":4}]"#;
+        assert_eq!(parse_actions(list).0.len(), 2);
+        let wrapped = r#"{"actions":[{"do":"resolve_thread","thread":9}]}"#;
+        assert_eq!(
+            parse_actions(wrapped).0,
+            [Action::ResolveThread { thread: 9 }]
+        );
+    }
+
+    #[test]
+    fn broken_actions_run_nothing_and_say_why() {
+        for bad in [
+            "",
+            "not json",
+            "42",
+            r#"{"actions": 3}"#,
+            r#"{"do":"delete_everything"}"#,
+            r#"{"do":"start_thread","title":"","brief":"x"}"#,
+            r#"{"do":"start_thread","title":"x","brief":"   "}"#,
+            r#"{"do":"message_thread","thread":0,"text":"hi"}"#,
+            r#"{"do":"message_thread","thread":3,"text":""}"#,
+            r#"{"do":"read_thread","thread":-1}"#,
+            r#"{"do":"read_thread","thread":"3"}"#,
+        ] {
+            let (found, problems) = parse_actions(bad);
+            assert!(found.is_empty(), "{bad} gave {found:?}");
+            assert!(!problems.is_empty(), "{bad} said nothing");
+        }
+        // Good ones beside a bad one still run; repeats run once.
+        let mixed =
+            r#"[{"do":"read_thread","thread":2},{"do":"nope"},{"do":"read_thread","thread":2}]"#;
+        let (found, problems) = parse_actions(mixed);
+        assert_eq!(found, [Action::ReadThread { thread: 2 }]);
+        assert_eq!(problems.len(), 1);
+        // Long text is clipped, and no more than MAX_ACTIONS are read.
+        let long = format!(
+            r#"{{"do":"start_thread","title":"{}","brief":"b"}}"#,
+            "t".repeat(500)
+        );
+        match &parse_actions(&long).0[0] {
+            Action::StartThread { title, .. } => assert_eq!(title.chars().count(), 80),
+            other => panic!("{other:?}"),
+        }
+        let many: Vec<String> = (1..=30)
+            .map(|i| format!(r#"{{"do":"read_thread","thread":{i}}}"#))
+            .collect();
+        let (found, problems) = parse_actions(&format!("[{}]", many.join(",")));
+        assert_eq!(found.len(), MAX_ACTIONS);
+        assert!(problems[0].contains("Only the first"));
+    }
+
+    #[test]
+    fn the_action_parser_survives_anything() {
+        // Mangled versions of good blocks: never a panic, and whatever comes back checks out.
+        let seeds = [
+            r#"[{"do":"start_thread","title":"App startup time","brief":"Measure and fix","agent":"","isolated":true}]"#,
+            r#"{"actions":[{"do":"message_thread","thread":12,"text":"Ship it"},{"do":"resolve_thread","thread":3}]}"#,
+        ];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let noise = [
+            '{', '}', '[', ']', '"', ':', ',', '\\', '0', '-', 'é', '\n', ' ', '\u{0}',
+        ];
+        for _ in 0..4000 {
+            let mut text: Vec<char> = seeds[(next() % 2) as usize].chars().collect();
+            for _ in 0..(next() % 6) {
+                let at = (next() as usize) % (text.len() + 1);
+                match next() % 3 {
+                    0 if at < text.len() => {
+                        text.remove(at);
+                    }
+                    1 => text.insert(at, noise[(next() as usize) % noise.len()]),
+                    _ => text.truncate(at),
+                }
+            }
+            let text: String = text.into_iter().collect();
+            let (found, _) = parse_actions(&text);
+            assert!(found.len() <= MAX_ACTIONS);
+            for action in found {
+                match action {
+                    Action::StartThread { title, brief, .. } => {
+                        assert!(!title.trim().is_empty() && !brief.trim().is_empty())
+                    }
+                    Action::MessageThread { thread, text } => {
+                        assert!(thread != 0 && !text.trim().is_empty())
+                    }
+                    other => assert_ne!(other.thread(), Some(0)),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crew_starts_three_threads_and_holds_the_rest() {
+        let ten: Vec<Action> = (0..10).map(|i| start(&format!("Part {i}"))).collect();
+        let (run, held, problems) = within_limits(ten, &[]);
+        assert_eq!(
+            (run.len(), held.len()),
+            (MAX_NEW_THREADS, 10 - MAX_NEW_THREADS)
+        );
+        assert!(problems.is_empty());
+        assert_eq!(run[0], start("Part 0"));
+        assert_eq!(held[0], start(&format!("Part {MAX_NEW_THREADS}")));
+    }
+
+    #[test]
+    fn crew_only_reaches_its_own_threads_once_a_turn() {
+        let actions = vec![
+            Action::MessageThread {
+                thread: 5,
+                text: "a".into(),
+            },
+            Action::MessageThread {
+                thread: 5,
+                text: "b".into(),
+            },
+            Action::MessageThread {
+                thread: 6,
+                text: "c".into(),
+            },
+            Action::ReadThread { thread: 99 },
+            Action::ResolveThread { thread: 6 },
+        ];
+        let (run, held, problems) = within_limits(actions, &[5, 6]);
+        assert!(held.is_empty());
+        assert_eq!(
+            run,
+            [
+                Action::MessageThread {
+                    thread: 5,
+                    text: "a".into()
+                },
+                Action::MessageThread {
+                    thread: 6,
+                    text: "c".into()
+                },
+                Action::ResolveThread { thread: 6 },
+            ]
+        );
+        assert_eq!(problems.len(), 2);
+    }
+
+    #[test]
+    fn messages_go_where_they_are_meant() {
+        let threads = vec![
+            (4, "Cove setup".to_string()),
+            (7, "Cove setup docs".to_string()),
+            (9, "App startup time".to_string()),
+        ];
+        let to = |id: u64, text: &str| Route::Thread {
+            id,
+            text: text.into(),
+        };
+        let crew = Route::Crew { answer_only: false };
+        for (text, chip, want) in [
+            ("What's left on the release?", Chip::Auto, crew.clone()),
+            (
+                "What's left?",
+                Chip::Answer,
+                Route::Crew { answer_only: true },
+            ),
+            ("Fix the login bug", Chip::Thread, Route::NewThread),
+            (
+                "@Cove setup: use the beta image",
+                Chip::Auto,
+                to(4, "use the beta image"),
+            ),
+            (
+                "@cove setup docs add a screenshot",
+                Chip::Auto,
+                to(7, "add a screenshot"),
+            ),
+            (
+                "@App startup time, how far?",
+                Chip::Thread,
+                to(9, "how far?"),
+            ),
+            ("@#9 any news", Chip::Auto, to(9, "any news")),
+            // A mention with nothing after it, an unknown thread, or a name that only
+            // starts the same, goes by the chip.
+            ("@Cove setup", Chip::Auto, crew.clone()),
+            ("@Nobody hello", Chip::Auto, crew.clone()),
+            ("@#3 hello", Chip::Auto, crew.clone()),
+            ("@Cove setupx hello", Chip::Auto, crew.clone()),
+            ("email me@Cove setup", Chip::Auto, crew.clone()),
+            ("@İstanbul hi", Chip::Auto, crew.clone()),
+        ] {
+            assert_eq!(route(text, chip, &threads), want, "{text}");
+        }
+    }
+
+    #[test]
+    fn crew_hears_only_what_changed() {
+        let info = ThreadInfo::default();
+        let a = board_line(4, "Cove setup", "working", &info);
+        let b = board_line(9, "Startup", "done", &info);
+        let first = board_changes("", &[a.clone(), b.clone()]);
+        assert_eq!(first.lines().count(), 2);
+        let before = [a.clone(), b.clone()].join("\n");
+        assert!(board_changes(&before, &[a.clone(), b.clone()]).is_empty());
+        let done = board_line(4, "Cove setup", "done", &info);
+        let changed = board_changes(&before, &[done.clone(), b.clone()]);
+        assert_eq!(changed, format!("- {done}\n"));
+        let gone = board_changes(&before, std::slice::from_ref(&a));
+        assert_eq!(gone, "- #9 is no longer open.\n");
+        // The line carries progress, what waits on the person, and the last report.
+        let mut busy = ThreadInfo {
+            checklist: clean_steps(vec![
+                Step {
+                    text: "Measure".into(),
+                    mark: Mark::Done,
+                },
+                Step {
+                    text: "Fix".into(),
+                    mark: Mark::Doing,
+                },
+            ]),
+            ..Default::default()
+        };
+        busy.reports.push(Report {
+            summary: "Cold start is\n2.1s".into(),
+            links: vec![],
+            at: 1,
+        });
+        let line = board_line(4, "Cove setup", "working", &busy);
+        assert_eq!(
+            line,
+            "#4 Cove setup [working] 1/2 steps. Last report: Cold start is 2.1s"
+        );
+    }
+
+    #[test]
+    fn titles_from_messages_are_short() {
+        assert_eq!(
+            title_from("\n  Fix the login bug\nmore"),
+            "Fix the login bug"
+        );
+        let long = title_from(&"word ".repeat(30));
+        assert!(long.ends_with('…') && long.chars().count() <= 61);
+    }
+
+    #[test]
+    fn rules_tell_crew_how_to_act() {
+        let rules = rules(
+            "runo",
+            &[("claude", "Claude Code"), ("codex", "Codex")],
+            "Claude Code",
+        );
+        assert!(rules.contains("```runo-actions"));
+        assert!(rules.contains("codex (Codex)"));
+        assert!(rules.contains(&format!("at most {MAX_NEW_THREADS} new threads")));
+        // The example in the rules is itself a valid block.
+        let example = rules.split("```runo-actions\n").nth(1).unwrap();
+        let example = example.split("\n```").next().unwrap();
+        assert_eq!(parse_actions(example).0.len(), 1);
+        assert!(thread_rules(true).contains("set_checklist"));
+        assert!(thread_rules(false).contains("```runo-checklist"));
+    }
+
+    #[test]
+    fn cards_save_and_load() {
+        let card = Card::Held {
+            actions: vec![start("Docs")],
+            answered: false,
+        };
+        let text = serde_json::to_string(&card).unwrap();
+        assert_eq!(serde_json::from_str::<Card>(&text).unwrap(), card);
+        let news: Card = serde_json::from_str(r#"{"card":"news","thread":3}"#).unwrap();
+        assert_eq!(news, Card::News { thread: 3 });
     }
 }

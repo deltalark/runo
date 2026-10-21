@@ -1739,6 +1739,23 @@ impl RunoApp {
                     }),
             );
         }
+        // How the person works in the project the top bar shows: through Crew, or directly.
+        if let Some(pid) = current.filter(|_| !self.all_scope()) {
+            list = list.child(div().h(px(1.)).my_1().bg(divider())).child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .v_flex()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("How you work in this project"),
+                    )
+                    .child(self.crew_mode_switch(pid, cx)),
+            );
+        }
         list = list.child(div().h(px(1.)).my_1().bg(divider())).child(
             div()
                 .id("project-add")
