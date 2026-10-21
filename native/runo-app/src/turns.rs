@@ -381,12 +381,6 @@ impl RunoApp {
                 .state
                 .session(id)
                 .is_some_and(|s| s.canvas.is_empty() && !s.cli);
-        // A mission's part is proved even when it changed nothing, and then moves on.
-        let mission = self
-            .state
-            .session(id)
-            .map(|s| s.mission)
-            .unwrap_or_default();
         if let Some((cp, dir)) = checkpoint.filter(|(cp, _)| !cp.is_empty()) {
             self.bg(
                 move || (git::changed_since(&dir, &cp).len(), git::checkpoint(&dir)),
@@ -396,19 +390,11 @@ impl RunoApp {
                         s.snapshot = end;
                     }
                     this.save();
-                    if prove && (files > 0 || mission != 0) {
+                    if prove && files > 0 {
                         this.prove_turn(id, true, cx);
-                    }
-                    if mission != 0 {
-                        this.mission_check(id, cx);
                     }
                 },
             );
-        } else if mission != 0 {
-            if prove {
-                self.prove_turn(id, true, cx);
-            }
-            self.mission_check(id, cx);
         }
         let title = self
             .state
@@ -1094,6 +1080,18 @@ impl RunoApp {
 
     /// Results of one-off background commands.
     pub(crate) fn handle_output(&mut self, key: String, result: Result<String, String>) {
+        if key.starts_with("guide:") || key.starts_with("split:") {
+            self.handle_reviewable(&key, result);
+            return;
+        }
+        if key.starts_with("resolve:") {
+            self.handle_resolve(&key, result);
+            return;
+        }
+        if key.starts_with("explain:") {
+            self.handle_explain(&key, result);
+            return;
+        }
         if key.starts_with("assistant:") {
             return self.assistant_reply(key, result);
         }
@@ -1129,6 +1127,7 @@ impl RunoApp {
 
     /// Apply values produced outside of render (they need a window to reach inputs).
     pub(crate) fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_folder_pending(window, cx);
         // Each session keeps its own unsent prompt while another one is on screen.
         if self.draft_for != self.selected {
             let text = self.prompt.read(cx).value().to_string();

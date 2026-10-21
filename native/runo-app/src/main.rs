@@ -8,10 +8,12 @@ mod archdraw;
 mod architecture;
 mod askbar;
 mod assistant;
+mod branches;
 mod browser;
 mod browser_engine;
 mod caps;
 mod chatctl;
+mod clashes;
 mod cleanup;
 mod cliview;
 mod connections;
@@ -28,12 +30,15 @@ mod design;
 mod designdraw;
 mod desktop_notify;
 mod detach;
+mod explain;
 mod files;
 mod fileview;
 mod fixes;
 mod gemini;
 mod git;
+mod githistory;
 mod github;
+mod gitplace;
 mod handoff;
 mod health;
 mod history;
@@ -43,12 +48,10 @@ mod install;
 mod keymap;
 mod mcp;
 mod memory_mcp;
-mod mission;
-mod mission_ui;
-mod mission_view;
 mod modelcheck;
 mod models;
 mod notes;
+mod parts;
 mod pbfile;
 mod pbrunner;
 mod pbshare;
@@ -59,8 +62,11 @@ mod projects;
 mod proof;
 mod proof_ui;
 mod pty;
+mod radar;
 mod review;
+mod reviewable;
 mod schedule;
+mod seatbelt;
 mod sessions;
 mod settings;
 mod settings_ui;
@@ -71,6 +77,7 @@ mod signin;
 mod store;
 mod stream;
 mod terminal;
+mod timemachine;
 mod tour;
 mod turns;
 mod updater;
@@ -91,7 +98,7 @@ use gpui_kit::*;
 use settings::*;
 use settings_ui::{McpForm, SettingsPage};
 use shell::Mode;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 use store::{Message, Note, Project, Role, Session, State, Status, StepState};
@@ -137,7 +144,6 @@ actions!(
         GoPlaybooks,
         GoReviews,
         GoReview,
-        GoMissions,
         GoHistory,
         GoNotes,
         GoInbox,
@@ -178,8 +184,10 @@ enum View {
     Editor,
     /// Changes waiting to be reviewed and shipped, one session at a time.
     Review,
-    /// Goals planned into parts that several agents work on at once.
-    Missions,
+    /// The project folder's branches and work set aside.
+    Branches,
+    /// The project folder's commits as a graph.
+    GitHistory,
 }
 
 /// What a quick-open entry does when chosen.
@@ -211,8 +219,75 @@ enum RightTab {
 struct RunoApp {
     state: State,
     demo: bool,
-    /// Git opens on its GitHub tab, the one used last, rather than To ship.
-    git_github: bool,
+    /// The Git tab used last, which Git opens on: Review, Branches or GitHub.
+    git_tab: View,
+    /// The Branches tab's list, the branch picked in it and that branch's commits and files.
+    git_branches: Option<branches::Branches>,
+    git_branch_sel: Option<String>,
+    git_branch_detail: Option<branches::BranchDetail>,
+    /// The Merge dialog, while open.
+    git_merge: Option<branches::MergeForm>,
+    /// The Branches tab's name box, while open, and the box itself.
+    git_naming: Option<branches::Naming>,
+    git_name: Entity<InputState>,
+    /// The History tab's commits, filter and search box, and the picked commit.
+    git_history: Option<githistory::History>,
+    git_log_filter: git::LogFilter,
+    git_log_search: Entity<InputState>,
+    git_commit_sel: Option<String>,
+    git_commit: Option<githistory::Picked>,
+    /// What the agent said each commit did; None while it's still answering.
+    git_explain: HashMap<String, Option<String>>,
+    /// The commit Go back waits on a second click for.
+    git_go_back: Option<String>,
+    /// The project folder's own changes in Changes, whether they're the page shown, the
+    /// file whose parts are shown, and the lines left out of the next commit.
+    git_folder: Option<parts::Folder>,
+    git_folder_open: bool,
+    git_folder_file: Option<String>,
+    git_left_out: parts::LeftOut,
+    /// The folder's commit box, a value waiting to go into it, and the message being
+    /// committed, put back if the commit fails.
+    git_folder_msg: Entity<InputState>,
+    git_folder_msg_set: Option<String>,
+    git_folder_msg_kept: Option<String>,
+    /// The clash page: the file shown, what to keep at each spot (or for a whole file),
+    /// and the agent's version of a file, None while it's writing it.
+    git_clash_file: Option<String>,
+    git_picks: HashMap<(String, usize), clashes::Pick>,
+    git_agent_fix: HashMap<String, Option<String>>,
+    /// Clash radar: pairs of lines of work that change the same lines, and the one shown.
+    git_radar: Option<Vec<radar::Hit>>,
+    git_radar_sel: Option<usize>,
+    /// Make it reviewable: the branch whose review kit is open, and the agent's guides and
+    /// split plans by branch, None while it's writing them.
+    git_kit: Option<String>,
+    git_guides: HashMap<String, Option<String>>,
+    git_splits: HashMap<String, Option<Vec<reviewable::SplitPart>>>,
+    /// Time machine: shown in place of History's commits, the folder's moments, the
+    /// picked one against now, and the moment waiting for a second click to go back to.
+    git_time_on: bool,
+    git_time: Option<(String, Vec<git::Moment>)>,
+    git_moment_sel: Option<usize>,
+    git_moment_files: Option<timemachine::Against>,
+    git_travel: Option<usize>,
+    /// Explain: the card at the top of the Git place, whether git's own words are open
+    /// on it, and the puzzling state the person closed the card for.
+    git_banner: Option<explain::Banner>,
+    git_raw_open: bool,
+    git_state_seen: Option<String>,
+    /// Seatbelt: let the next push past it, and the folders already told about sending
+    /// straight to main.
+    git_belt_pass: bool,
+    git_main_ok: HashSet<String>,
+    /// The top bar project's folder as Git sees it, with when the remote was last fetched.
+    git_repo: Option<gitplace::Repo>,
+    /// The last git step taken from the Git place, which Undo takes back for a while.
+    git_undo: Option<(git::UndoPoint, std::time::Instant)>,
+    /// A git step running for the project folder, in words.
+    git_working: Option<String>,
+    /// What the last git step did, shown at the foot of the Git place for a moment.
+    git_toast: Option<(String, std::time::Instant)>,
     selected: Option<u64>,
     view: View,
     right_tab: RightTab,
@@ -465,21 +540,8 @@ struct RunoApp {
     proving: std::collections::HashSet<u64>,
     /// Sessions waiting on a second opinion, with the agent giving it.
     reviewing: HashMap<u64, &'static str>,
-    /// The mission open on the Missions page; none shows the New mission form.
-    mission_open: Option<u64>,
-    mission_goal: Entity<TextareaState>,
-    mission_feedback: Entity<InputState>,
-    mission_form: mission_ui::MissionForm,
     /// Crew's chats and threads while the app runs.
     crew: crew_ui::CrewState,
-    /// Sessions whose mission part should be looked at again, such as after a review.
-    mission_wake: Vec<u64>,
-    /// Missions left running at the last quit were picked up again.
-    missions_resumed: bool,
-    /// The mission whose Delete is waiting to be confirmed.
-    mission_deleting: Option<u64>,
-    /// The activity beside a mission's board is hidden.
-    mission_feed_hidden: bool,
     /// Images attached to each session's unsent prompt.
     attachments: HashMap<u64, Vec<String>>,
     /// Images that go with a new session's first prompt.
@@ -1249,7 +1311,10 @@ impl RunoApp {
                         this.refresh();
                         cx.notify();
                     } else if repaint
-                        || (tick && (!this.started.is_empty() || this.info.is_some()))
+                        || (tick
+                            && (!this.started.is_empty()
+                                || this.info.is_some()
+                                || this.git_toast.is_some()))
                         || (ticks.is_multiple_of(5)
                             && this.update_runs.values().any(|r| r.failed.is_none()))
                     {
@@ -1275,13 +1340,6 @@ impl RunoApp {
         .detach();
 
         let mut state = State::load();
-        {
-            let mut conns = cx.global::<AppSettings>().connections.clone();
-            if connections::migrate(&mut state.sessions, &mut conns) {
-                settings::update(cx, |s| s.connections = conns);
-                state.save();
-            }
-        }
         let demo = state.projects.is_empty();
         if demo {
             state = State::demo();
@@ -1339,6 +1397,18 @@ impl RunoApp {
                 cx.notify();
             }
         });
+        let git_name = cx.new(|cx| InputState::new(window, cx).placeholder("Branch name"));
+        let git_name_sub = cx.subscribe_in(&git_name, window, |this, _, event, _, cx| {
+            this.on_git_name(event, cx);
+        });
+        let git_log_search = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Search commit messages and people"));
+        let git_log_search_sub =
+            cx.subscribe_in(&git_log_search, window, |this, _, event, _, cx| {
+                this.on_git_log_search(event, cx);
+            });
+        let git_folder_msg =
+            cx.new(|cx| InputState::new(window, cx).placeholder("What does this commit do?"));
         let commit_msg = cx.new(|cx| InputState::new(window, cx).placeholder("Commit message"));
         let commit_sub = cx.subscribe_in(&commit_msg, window, |this, _, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
@@ -1449,7 +1519,52 @@ impl RunoApp {
             view: View::Session,
             state,
             demo,
-            git_github: false,
+            git_tab: View::Review,
+            git_branches: None,
+            git_branch_sel: None,
+            git_branch_detail: None,
+            git_merge: None,
+            git_naming: None,
+            git_name: git_name.clone(),
+            git_history: None,
+            git_log_filter: git::LogFilter {
+                all: true,
+                ..Default::default()
+            },
+            git_log_search,
+            git_commit_sel: None,
+            git_commit: None,
+            git_explain: HashMap::new(),
+            git_go_back: None,
+            git_folder: None,
+            git_folder_open: false,
+            git_folder_file: None,
+            git_left_out: Default::default(),
+            git_folder_msg,
+            git_folder_msg_set: None,
+            git_folder_msg_kept: None,
+            git_clash_file: None,
+            git_picks: HashMap::new(),
+            git_agent_fix: HashMap::new(),
+            git_radar: None,
+            git_radar_sel: None,
+            git_kit: None,
+            git_guides: HashMap::new(),
+            git_splits: HashMap::new(),
+            git_time_on: false,
+            git_time: None,
+            git_moment_sel: None,
+            git_moment_files: None,
+            git_travel: None,
+            git_banner: None,
+            git_raw_open: false,
+            git_state_seen: None,
+            git_belt_pass: false,
+            git_main_ok: HashSet::new(),
+            git_repo: None,
+            git_undo: None,
+            git_working: None,
+            git_toast: None,
             selected,
             right_tab: RightTab::Changes,
             browser_open: false,
@@ -1601,24 +1716,7 @@ impl RunoApp {
             turn_files: HashMap::new(),
             proving: Default::default(),
             reviewing: HashMap::new(),
-            mission_open: None,
-            mission_goal: cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .placeholder(
-                        "Describe the goal, such as: Add a dark theme with a switch in Settings, and keep it after a restart",
-                    )
-                    .submit_on_enter(true)
-            }),
-            mission_feedback: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("What should change in the plan? Such as: merge the two UI parts")
-            }),
-            mission_form: Default::default(),
             crew: Default::default(),
-            mission_wake: Vec::new(),
-            missions_resumed: false,
-            mission_deleting: None,
-            mission_feed_hidden: false,
             attachments: HashMap::new(),
             launch_images: HashMap::new(),
             new_context: None,
@@ -1707,6 +1805,8 @@ impl RunoApp {
                 prompt_sub,
                 settings_search_sub,
                 commit_sub,
+                git_name_sub,
+                git_log_search_sub,
                 rename_sub,
                 note_sub,
             ],
@@ -1807,28 +1907,6 @@ impl RunoApp {
                 }
             },
         );
-        // Enter on the plan's feedback plans again; the goal box plans like a prompt sends.
-        let replan_sub = cx.subscribe_in(
-            &app.mission_feedback,
-            window,
-            |this, _, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    if let Some(mid) = this.mission_open {
-                        this.replan(mid, window, cx);
-                    }
-                }
-            },
-        );
-        let goal_sub = cx.subscribe_in(&app.mission_goal, window, |this, _, event, window, cx| {
-            if let InputEvent::PressEnter { shift, secondary } = event {
-                let on_enter = cx.global::<AppSettings>().send_on_enter;
-                if *secondary || (on_enter && !*shift) {
-                    this.plan_mission(window, cx);
-                    cx.notify();
-                }
-            }
-        });
-        app._subscriptions.extend([replan_sub, goal_sub]);
         app._subscriptions.extend([
             branch_sub,
             task_sub,
@@ -1934,7 +2012,6 @@ impl RunoApp {
                     .update(cx, |this, cx| {
                         this.take_playbook_requests(cx);
                         this.take_phone_requests(cx);
-                        this.missions_tick_all(cx);
                         this.crew_tick(cx);
                     })
                     .is_err()
@@ -2578,10 +2655,7 @@ impl RunoApp {
                 }
             }
             Event::Output(key, result) => {
-                if !self.handle_mission_output(&key, &result) {
-                    self.handle_output(key, result);
-                }
-                self.mission_wakes(cx);
+                self.handle_output(key, result);
             }
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
@@ -2790,7 +2864,8 @@ impl RunoApp {
                 View::Notes => self.open_notes(window, cx),
                 View::GitHub => self.load_github(),
                 View::Review => self.open_review(),
-                View::Missions => self.open_missions(cx),
+                View::Branches => self.open_branches(),
+                View::GitHistory => self.open_git_history(),
                 _ => self.view = view,
             },
             Jump::Session(id) => self.open_session(id, window, cx),
@@ -2865,8 +2940,13 @@ impl RunoApp {
                 IconName::RotateCcwClock,
                 View::History,
             ),
-            ("Go to Git: To ship", IconName::GitCompare, View::Review),
-            ("Go to Missions", IconName::Rocket, View::Missions),
+            ("Go to Git: Changes", IconName::GitCompare, View::Review),
+            (
+                "Go to Git: History",
+                IconName::GitCommitHorizontal,
+                View::GitHistory,
+            ),
+            ("Go to Git: Branches", IconName::GitBranch, View::Branches),
             ("Go to Git: GitHub", IconName::GitPullRequest, View::GitHub),
             ("Go to Playbooks", IconName::BookOpen, View::Automations),
             ("Go to Timeline", IconName::Activity, View::Activity),
@@ -3482,8 +3562,6 @@ impl RunoApp {
             branch: branch.clone(),
             dir,
             isolated,
-            mode: String::new(),
-            model: String::new(),
             opts: std::collections::HashMap::from([(
                 "mode".to_string(),
                 cx.global::<AppSettings>().default_mode.clone(),
@@ -3568,10 +3646,7 @@ impl RunoApp {
         if cx.global::<AppSettings>().default_view == "cli"
             && agent::imports_cli_turns(&provider)
             && self.state.session(id).is_some_and(|s| {
-                s.playbook == 0
-                    && s.mission == 0
-                    && s.crew.is_none()
-                    && cliview::cli_blocker(s).is_none()
+                s.playbook == 0 && s.crew.is_none() && cliview::cli_blocker(s).is_none()
             })
         {
             // Context a session was started with goes ahead of the task here too.
@@ -3712,8 +3787,6 @@ impl RunoApp {
             branch,
             dir: past.cwd.clone(),
             isolated: false,
-            mode: String::new(),
-            model: String::new(),
             opts: std::collections::HashMap::from([(
                 "mode".to_string(),
                 cx.global::<AppSettings>().default_mode.clone(),
@@ -5573,40 +5646,6 @@ impl RunoApp {
                     }),
             )
             .child(div().flex_1())
-            // A mission's part or its own session: back to the mission's board.
-            .children(self.mission(session.mission).map(|m| {
-                let mid = m.id;
-                let lead = m.lead == session.id;
-                div()
-                    .id("hdr-mission")
-                    .h(px(26.))
-                    .px_2()
-                    .mr_2()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_subtle())))
-                    .tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(if lead {
-                            "This session lands the mission. Back to its board."
-                        } else {
-                            "This session is one part of a mission. Back to its board."
-                        })
-                        .build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.mission_open = Some(mid);
-                        this.open_missions(cx);
-                        cx.notify();
-                    }))
-                    .child(icon(IconName::Rocket, 12., c_secondary()))
-                    .child("Mission board")
-            }))
             // Asked from a canvas: back to it, where its changes show.
             .children(shell::canvas_of(session).map(|view| {
                 let id = session.id;
@@ -6063,9 +6102,6 @@ impl RunoApp {
                 move |this, i| {
                     if let Some(s) = this.state.session_mut(sid) {
                         let v = values[i].clone();
-                        if id == "mode" {
-                            s.mode.clear();
-                        }
                         if v.is_empty() {
                             s.opts.remove(id);
                             s.opts.insert(id.to_string(), String::new());
@@ -8910,8 +8946,7 @@ impl Render for RunoApp {
             View::Notes => self.notes_view(cx),
             View::Activity => self.activity_view(cx),
             View::Automations => self.automations_view(cx),
-            View::GitHub | View::Review => self.git_view(cx),
-            View::Missions => self.missions_view(cx),
+            View::GitHub | View::Review | View::GitHistory | View::Branches => self.git_view(cx),
             View::Editor => div()
                 .flex_1()
                 .min_w_0()
@@ -8978,6 +9013,13 @@ impl Render for RunoApp {
         {
             self.info = None;
         }
+        if self
+            .git_toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() > gitplace::TOAST_FOR)
+        {
+            self.git_toast = None;
+        }
         self.log_notice();
         let (status, status_color, status_icon) = if let Some(notice) = &self.notice {
             (notice.clone(), c_red(), Some(IconName::CircleAlert))
@@ -9005,8 +9047,10 @@ impl Render for RunoApp {
         // The page is an island under the session tabs. Pages with their own list beside
         // the content paint the two layers themselves, so the list is as clear as the
         // sidebar.
-        let page_fill = if matches!(self.view, View::Review | View::GitHub | View::Settings)
-            || (self.view == View::Architecture && self.arch_diagram_open())
+        let page_fill = if matches!(
+            self.view,
+            View::Review | View::GitHistory | View::Branches | View::GitHub | View::Settings
+        ) || (self.view == View::Architecture && self.arch_diagram_open())
             || (self.view == View::Design && self.design_canvas_open())
         {
             rgba(0)
@@ -9099,17 +9143,13 @@ impl Render for RunoApp {
             }))
             // Both land in Git, each on its own tab.
             .on_action(cx.listener(|this, _: &GoReviews, window, cx| {
-                this.git_github = true;
+                this.git_tab = View::GitHub;
                 this.go(Mode::Git, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoReview, window, cx| {
-                this.git_github = false;
+                this.git_tab = View::Review;
                 this.go(Mode::Git, window, cx);
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &GoMissions, window, cx| {
-                this.go(Mode::Missions, window, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &GoHistory, window, cx| {
@@ -9759,8 +9799,7 @@ fn app_menus() -> Vec<Menu> {
         Menu::new("View").items([
             MenuItem::action("Home", GoHome),
             MenuItem::action("Sessions", GoSessions),
-            MenuItem::action("Git: To ship", GoReview),
-            MenuItem::action("Missions", GoMissions),
+            MenuItem::action("Git: Changes", GoReview),
             MenuItem::action("Git: GitHub", GoReviews),
             MenuItem::action("Playbooks", GoPlaybooks),
             MenuItem::action("History", GoHistory),

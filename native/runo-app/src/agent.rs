@@ -240,7 +240,7 @@ pub struct RunSpec<'a> {
     pub opts: &'a AgentOptions,
     /// Whether the working directory is a git repository.
     pub in_git: bool,
-    /// Claude Code conversation id for this session; empty for sessions saved before ids.
+    /// Claude Code conversation id for this session; empty until it has one.
     pub session_id: &'a str,
     /// Image files attached to the prompt.
     pub images: &'a [String],
