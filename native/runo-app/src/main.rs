@@ -273,6 +273,10 @@ struct RunoApp {
     selected: Option<u64>,
     view: View,
     right_tab: RightTab,
+    /// The Threads tab's finished threads are folded away.
+    threads_done_shut: bool,
+    /// Projects whose finished Crew threads are unfolded in the sidebar.
+    sidebar_done_open: HashSet<u64>,
     /// The Browser is open as a tab beside the session tabs, and whether it is the one shown.
     browser_open: bool,
     browser_main: bool,
@@ -1516,6 +1520,8 @@ impl RunoApp {
             git_toast: None,
             selected,
             right_tab: RightTab::Changes,
+            threads_done_shut: false,
+            sidebar_done_open: HashSet::new(),
             browser_open: false,
             browser_main: false,
             shells: Vec::new(),
@@ -4351,6 +4357,143 @@ impl RunoApp {
             )
     }
 
+    /// A session nested under its parent in the sidebar, Crew or a race: one line with its
+    /// glyph, its name and what it changed. Its branch shows in the session itself.
+    pub(crate) fn child_row(
+        &self,
+        session: &Session,
+        lead: AnyElement,
+        label: String,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let id = session.id;
+        let selected = self.selected == Some(id) && self.view == View::Session;
+        let stats = self.stats.get(&id).copied();
+        let row = div()
+            .id(("child-row", id as usize))
+            .relative()
+            .h(px(26.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .when(self.cursor == Some(id), |el| el.bg(tint(c_selected())))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select(id);
+                cx.notify();
+            }));
+        let row = if selected {
+            row.bg(tint(c_active()))
+                .child(shell::accent_bracket(format!("child-mark-{id}"), 6.))
+        } else {
+            row.hover(|el| el.bg(tint(c_subtle())))
+        };
+        row.child(lead)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(if selected || session.unread {
+                        c_text()
+                    } else {
+                        c_secondary()
+                    }))
+                    .child(label),
+            )
+            .when_some(stats.filter(|s| s.0 > 0), |el, (_, a, r)| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .gap_1()
+                        .text_size(px(11.))
+                        .font_family(self.mono_font.clone())
+                        .child(div().text_color(rgb(c_add())).child(format!("+{a}")))
+                        .child(div().text_color(rgb(c_del())).child(format!("−{r}"))),
+                )
+            })
+    }
+
+    /// Children hang off their parent on a thin guide line.
+    pub(crate) fn child_rail(rows: Vec<AnyElement>) -> Div {
+        div()
+            .ml(px(15.))
+            .mb_1()
+            .pl(px(6.))
+            .border_l_1()
+            .border_color(divider())
+            .v_flex()
+            .gap(px(1.))
+            .children(rows)
+    }
+
+    /// Sessions racing on one task, under one entry named for the task. Opening the entry
+    /// or an agent shows the race strip, where the winner is picked.
+    fn race_group(&self, racers: &[&Session], cx: &mut Context<Self>) -> AnyElement {
+        let first = racers[0].id;
+        let title = crew::shown_title(&racers[0].title);
+        let mut kids: Vec<AnyElement> = Vec::new();
+        for racer in racers {
+            let provider = agent::provider(&racer.provider);
+            let state = match racer.status {
+                Status::Working => {
+                    self.status_dot(Status::Working, ("race-dot", racer.id as usize), 7.)
+                }
+                Status::Done => icon(IconName::Check, 12., c_green()).into_any_element(),
+                Status::Failed => div()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_red()))
+                    .child("failed")
+                    .into_any_element(),
+                _ => div().into_any_element(),
+            };
+            kids.push(
+                self.child_row(
+                    racer,
+                    self.provider_mark(provider, 11.).into_any_element(),
+                    provider.name.to_string(),
+                    cx,
+                )
+                .child(state)
+                .into_any_element(),
+            );
+        }
+        div()
+            .v_flex()
+            .child(
+                div()
+                    .id(("race-row", first as usize))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select(first);
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::Swords, 13., c_amber()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(format!("Race: {title}")),
+                    ),
+            )
+            .child(Self::child_rail(kids))
+            .into_any_element()
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let width = self.sidebar_width;
         let total = self
@@ -4529,9 +4672,29 @@ impl RunoApp {
                 // Sessions sit a step in from their project's name.
                 let mut rows = div().v_flex().gap(px(2.)).mt(px(2.)).mb_1().pl(px(15.));
                 let crew_on = self.crew_mode(pid);
+                // Crew's threads and each race's agents sit under their parent, not in
+                // the list.
+                let threads: Vec<&Session> = if crew_on {
+                    sessions
+                        .iter()
+                        .copied()
+                        .filter(|s| s.crew.as_ref().is_some_and(|i| !i.resolved))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 if crew_on {
                     rows = rows.child(self.crew_row(pid, cx));
+                    if !threads.is_empty() {
+                        rows = rows.child(self.crew_children(pid, &threads, cx));
+                    }
                 }
+                let sessions: Vec<&Session> = sessions
+                    .iter()
+                    .copied()
+                    .filter(|s| !threads.iter().any(|t| t.id == s.id))
+                    .collect();
+                let mut raced: Vec<u64> = Vec::new();
                 if sessions.is_empty() && !crew_on {
                     rows = rows.child(
                         div()
@@ -4543,6 +4706,25 @@ impl RunoApp {
                     );
                 }
                 for (i, session) in sessions.iter().enumerate() {
+                    if session.race != 0 {
+                        if raced.contains(&session.race) {
+                            continue;
+                        }
+                        let racers: Vec<&Session> = sessions
+                            .iter()
+                            .copied()
+                            .filter(|s| s.race == session.race)
+                            .collect();
+                        if racers.len() > 1 {
+                            raced.push(session.race);
+                            rows = rows.child(shell::cascade(
+                                self.race_group(&racers, cx),
+                                format!("race-in-{}", session.race),
+                                i,
+                            ));
+                            continue;
+                        }
+                    }
                     rows = rows.child(shell::cascade(
                         self.session_row(session, cx),
                         format!("session-in-{}", session.id),

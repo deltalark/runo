@@ -19,6 +19,19 @@ pub(crate) fn status_tone(status: &str) -> u32 {
     }
 }
 
+/// "now", "12m", "3h", "2d": how long ago, for a row's corner.
+fn short_age(then: u64, now: u64) -> String {
+    if then == 0 {
+        return String::new();
+    }
+    match now.saturating_sub(then) {
+        0..=59 => "now".into(),
+        s @ 60..=3599 => format!("{}m", s / 60),
+        s @ 3600..=86_399 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
+}
+
 fn small(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(11.5))
@@ -62,7 +75,12 @@ impl RunoApp {
         let on = chat.is_some_and(|c| self.selected == Some(c.id) && self.view == View::Session);
         let working = chat.is_some_and(|c| self.thread_working(c.id));
         let unread = chat.is_some_and(|c| c.unread);
-        let open = self.crew_threads(pid, false).len();
+        let threads = self.crew_threads(pid, false);
+        let open = threads.len();
+        let waiting = threads
+            .iter()
+            .filter(|t| thread_status(self.thread_working(t.id), t) == "needs you")
+            .count();
         div()
             .id(("crew-row", pid as usize))
             .relative()
@@ -94,8 +112,98 @@ impl RunoApp {
             .when(unread && !working, |el| {
                 el.child(div().size(px(7.)).rounded_full().bg(rgb(c_blue())))
             })
-            .when(open > 0, |el| el.child(small(format!("{open}"))))
+            .when(waiting > 0, |el| {
+                el.child(
+                    div()
+                        .px(px(7.))
+                        .rounded_full()
+                        .bg(rgba((c_amber() << 8) | 0x28))
+                        .text_size(px(10.5))
+                        .text_color(rgb(c_amber()))
+                        .child(format!("{waiting} needs you")),
+                )
+            })
+            .when(open > 0 && waiting == 0, |el| {
+                el.child(small(format!("{open}")))
+            })
             .into_any_element()
+    }
+
+    /// Crew's open threads under its row in the sidebar, each on one line. Finished ones
+    /// fold into a single "N done" row until it is opened.
+    pub(crate) fn crew_children(
+        &self,
+        pid: u64,
+        threads: &[&Session],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let unfolded = self.sidebar_done_open.contains(&pid);
+        let mut open: Vec<AnyElement> = Vec::new();
+        let mut finished: Vec<AnyElement> = Vec::new();
+        for t in threads {
+            let status = thread_status(self.thread_working(t.id), t);
+            // The open thread stays in view even once finished.
+            let done = status == "done" && self.selected != Some(t.id);
+            let row = self
+                .child_row(
+                    t,
+                    self.thread_glyph(t.id, status, "side"),
+                    crew::shown_title(&t.title),
+                    cx,
+                )
+                .into_any_element();
+            if done {
+                finished.push(row);
+            } else {
+                open.push(row);
+            }
+        }
+        let n = finished.len();
+        if n > 0 {
+            open.push(
+                div()
+                    .id(("crew-done-fold", pid as usize))
+                    .h(px(24.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(rgb(c_muted()))
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.sidebar_done_open.remove(&pid) {
+                            this.sidebar_done_open.insert(pid);
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(icon(IconName::Check, 12., c_green())),
+                    )
+                    .child(div().flex_1().child(format!("{n} done")))
+                    .child(icon(
+                        if unfolded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        },
+                        11.,
+                        c_muted(),
+                    ))
+                    .into_any_element(),
+            );
+            if unfolded {
+                open.extend(finished);
+            }
+        }
+        Self::child_rail(open).into_any_element()
     }
 
     /// Crew or Direct for project `pid`, as a two-way switch.
@@ -120,94 +228,157 @@ impl RunoApp {
             .into_any_element()
     }
 
-    /// One thread as a compact live card: where it stands, its checklist and its last word.
-    pub(crate) fn thread_card(&self, thread: u64, key: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// The glyph before a thread's title: a check once done, the working pulse, or a dot
+    /// in its status colour.
+    pub(crate) fn thread_glyph(&self, thread: u64, status: &str, key: &str) -> AnyElement {
+        let slot = div().w(px(14.)).flex_none().flex().justify_center();
+        match status {
+            "done" | "resolved" => slot.child(icon(IconName::Check, 12., c_green())),
+            "working" => slot.child(self.status_dot(
+                Status::Working,
+                SharedString::from(format!("thread-dot-{key}-{thread}")),
+                7.,
+            )),
+            _ => slot.child(
+                div()
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(rgb(status_tone(status))),
+            ),
+        }
+        .into_any_element()
+    }
+
+    /// One thread as a borderless row: its glyph, title, agent and how far along or how
+    /// long ago, then one line under it: the decision it waits on with its answers, the
+    /// step it is on, or what it came to. `note` takes the place of that line.
+    pub(crate) fn thread_card(
+        &self,
+        thread: u64,
+        key: &str,
+        note: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(s) = self.state.session(thread) else {
             return div()
-                .px_3()
-                .py_2()
-                .rounded_lg()
-                .border_1()
-                .border_color(divider())
+                .px_2()
+                .py_1()
                 .child(small("This thread was deleted."))
                 .into_any_element();
         };
         let status = thread_status(self.thread_working(thread), s);
         let info = s.crew.clone().unwrap_or_default();
+        let finished = matches!(status, "done" | "resolved");
+        let steps = info.checklist.len();
         let done = info
             .checklist
             .iter()
             .filter(|st| st.mark == Mark::Done)
             .count();
-        let now = info
-            .checklist
-            .iter()
-            .find(|st| st.mark == Mark::Doing)
-            .map(|st| st.text.clone());
-        let last = info
-            .decision
-            .as_ref()
-            .map(|d| d.question.clone())
-            .or_else(|| info.reports.last().map(|r| r.summary.clone()))
-            .or(now);
+        let meta = if status == "working" && steps > 0 {
+            format!("{done}/{steps}")
+        } else if status == "failed" {
+            "failed".into()
+        } else {
+            info.reports
+                .last()
+                .map(|r| short_age(r.at, crate::workspace::unix_now()))
+                .unwrap_or_default()
+        };
+        let decision = info.decision.clone();
+        let line = note.or_else(|| match status {
+            "needs you" => decision.as_ref().map(|d| crew::plain(&d.question)),
+            "working" => info
+                .checklist
+                .iter()
+                .find(|st| st.mark == Mark::Doing)
+                .map(|st| crew::plain(&st.text)),
+            _ => crew::outcome(&info),
+        });
+        let selected = self.selected == Some(thread) && self.view == View::Session;
         let provider = agent::provider(&s.provider);
         let id = SharedString::from(format!("thread-card-{key}-{thread}"));
-        div()
-            .id(id)
-            .px_3()
-            .py_2()
+        let row = div()
+            .id(id.clone())
+            .relative()
+            .px_2()
+            .py(px(6.))
             .v_flex()
-            .gap_1()
+            .gap(px(3.))
             .rounded_lg()
-            .border_1()
-            .border_color(divider())
-            .bg(tint(c_subtle()))
             .cursor_pointer()
-            .hover(|el| el.border_color(rgb(c_border())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select(thread);
                 cx.notify();
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .size(px(7.))
+            }));
+        let row = if selected {
+            row.bg(tint(c_active()))
+                .child(shell::accent_bracket(format!("{id}-mark"), 8.))
+        } else {
+            shell::hover_wash(row, format!("{id}-wash"), tint(c_subtle()), 8.)
+        };
+        row.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(self.thread_glyph(thread, status, key))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(13.))
+                        .when(finished, |el| el.text_color(rgb(c_secondary())))
+                        .when(!finished, |el| el.font_weight(FontWeight::MEDIUM))
+                        .child(crew::shown_title(&s.title)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(rgb(provider.color))
+                        .child(provider.mark),
+                )
+                .when(!meta.is_empty(), |el| {
+                    el.child(
+                        small(meta)
                             .flex_none()
-                            .rounded_full()
-                            .bg(rgb(status_tone(status))),
+                            .text_color(rgb(if status == "failed" {
+                                c_red()
+                            } else {
+                                c_muted()
+                            })),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(s.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(provider.color))
-                            .child(provider.mark),
-                    )
-                    .child(small(status)),
-            )
-            .when(!info.checklist.is_empty(), |el| {
-                el.child(small(format!("{done} of {} steps", info.checklist.len())))
-            })
-            .children(last.map(|text| {
+                }),
+        )
+        .children(line.filter(|l| !l.is_empty()).map(|text| {
+            div()
+                .pl(px(22.))
+                .text_size(px(12.))
+                .text_color(rgb(c_secondary()))
+                .when(status == "needs you", |el| el.line_clamp(2))
+                .when(status != "needs you", |el| el.truncate())
+                .child(text)
+        }))
+        .when_some(decision.filter(|_| status == "needs you"), |el, d| {
+            el.child(
                 div()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .line_clamp(2)
-                    .child(text)
-            }))
-            .into_any_element()
+                    .pl(px(22.))
+                    .pt_1()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .children(self.decision_chips(
+                        "thread-row-choice",
+                        thread as usize,
+                        thread,
+                        &d,
+                        cx,
+                    )),
+            )
+        })
+        .into_any_element()
     }
 
     /// A card drawn with message `index` of Crew's chat `chat`.
@@ -228,18 +399,35 @@ impl RunoApp {
             .child(icon(CREW_ICON, 12., c_muted()))
             .child(message.text.clone());
         let body = match card {
-            Card::Started { threads } => div().v_flex().gap_2().child(line).children(
-                threads
-                    .iter()
-                    .map(|t| self.thread_card(*t, &format!("m{index}"), cx)),
+            Card::Started { threads } => div().v_flex().gap_2().child(line).child(
+                div()
+                    .p_1()
+                    .v_flex()
+                    .rounded_lg()
+                    .bg(tint(c_subtle()))
+                    .children(
+                        threads
+                            .iter()
+                            .map(|t| self.thread_card(*t, &format!("m{index}"), None, cx)),
+                    ),
             ),
+            // The news is the row's line, so the thread shows once, with what happened.
             Card::News { thread } => {
                 let thread = *thread;
-                div().v_flex().gap_2().child(line).child(self.thread_card(
-                    thread,
-                    &format!("m{index}"),
-                    cx,
-                ))
+                let title = self
+                    .state
+                    .session(thread)
+                    .map(|s| s.title.clone())
+                    .unwrap_or_default();
+                let news = crew::plain(
+                    message
+                        .text
+                        .strip_prefix(title.as_str())
+                        .map_or(message.text.as_str(), |rest| {
+                            rest.trim_start_matches([':', '.', ' '])
+                        }),
+                );
+                div().child(self.thread_card(thread, &format!("m{index}"), Some(news), cx))
             }
             Card::Held { actions, answered } => {
                 let titles: Vec<String> = actions
@@ -474,7 +662,7 @@ impl RunoApp {
             ("Done", "done"),
             ("Other", ""),
         ];
-        let mut list = div().v_flex().gap_3().p_3();
+        let mut list = div().v_flex().gap_2().p_2();
         let mut shown: Vec<u64> = Vec::new();
         for (title, status) in groups {
             let members: Vec<u64> = threads
@@ -489,22 +677,48 @@ impl RunoApp {
                 continue;
             }
             shown.extend(&members);
+            // Finished threads fold away, so what is still open stays in view.
+            let foldable = status == "done";
+            let shut = foldable && self.threads_done_shut;
             list = list.child(
                 div()
                     .v_flex()
-                    .gap_2()
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .id(SharedString::from(format!("threads-group-{status}")))
+                            .px_2()
+                            .pt_2()
+                            .pb_1()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(10.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(c_muted()))
-                            .child(format!("{} {}", title.to_uppercase(), members.len())),
+                            .child(title.to_uppercase())
+                            .child(div().opacity(0.8).child(format!("{}", members.len())))
+                            .when(foldable, |el| {
+                                el.cursor_pointer()
+                                    .child(div().flex_1())
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::NORMAL)
+                                            .hover(|el| el.text_color(rgb(c_secondary())))
+                                            .child(if shut { "Show" } else { "Hide" }),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.threads_done_shut = !this.threads_done_shut;
+                                        cx.notify();
+                                    }))
+                            }),
                     )
-                    .children(
-                        members
-                            .into_iter()
-                            .map(|t| self.thread_card(t, "panel", cx)),
-                    ),
+                    .when(!shut, |el| {
+                        el.children(
+                            members
+                                .into_iter()
+                                .map(|t| self.thread_card(t, "panel", None, cx)),
+                        )
+                    }),
             );
         }
         div()
