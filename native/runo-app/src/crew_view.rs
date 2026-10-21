@@ -32,6 +32,9 @@ fn short_age(then: u64, now: u64) -> String {
     }
 }
 
+/// How many finished threads the Threads tab lists before "Show all".
+const DONE_SHOWN: usize = 5;
+
 fn small(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(11.5))
@@ -249,6 +252,44 @@ impl RunoApp {
         .into_any_element()
     }
 
+    /// What a finished thread changed, as a chip: the pull request it opened, its diff,
+    /// or "No changes".
+    fn thread_result(&self, thread: u64, info: &crew::ThreadInfo) -> AnyElement {
+        let chip = || {
+            div()
+                .flex_none()
+                .px(px(7.))
+                .rounded_full()
+                .bg(tint(c_subtle()))
+                .text_size(px(11.))
+        };
+        let pr = info
+            .reports
+            .iter()
+            .rev()
+            .flat_map(|r| r.links.iter())
+            .find_map(|l| crew::pr_number(l));
+        if let Some(n) = pr {
+            return chip()
+                .text_color(rgb(c_blue()))
+                .child(format!("PR #{n}"))
+                .into_any_element();
+        }
+        match self.stats.get(&thread).copied().filter(|s| s.0 > 0) {
+            Some((_, a, r)) => chip()
+                .flex()
+                .gap_1()
+                .font_family(self.mono_font.clone())
+                .child(div().text_color(rgb(c_add())).child(format!("+{a}")))
+                .child(div().text_color(rgb(c_del())).child(format!("−{r}")))
+                .into_any_element(),
+            None => chip()
+                .text_color(rgb(c_muted()))
+                .child("No changes")
+                .into_any_element(),
+        }
+    }
+
     /// One thread as a borderless row: its glyph, title, agent and how far along or how
     /// long ago, then one line under it: the decision it waits on with its answers, the
     /// step it is on, or what it came to. `note` takes the place of that line.
@@ -296,6 +337,9 @@ impl RunoApp {
             _ => crew::outcome(&info),
         });
         let selected = self.selected == Some(thread) && self.view == View::Session;
+        // A finished row says what changed with a chip; its outcome shows when it is open.
+        let result = finished.then(|| self.thread_result(thread, &info));
+        let line = if finished && !selected { None } else { line };
         let provider = agent::provider(&s.provider);
         let id = SharedString::from(format!("thread-card-{key}-{thread}"));
         let row = div()
@@ -333,13 +377,16 @@ impl RunoApp {
                         .when(!finished, |el| el.font_weight(FontWeight::MEDIUM))
                         .child(crew::shown_title(&s.title)),
                 )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(11.))
-                        .text_color(rgb(provider.color))
-                        .child(provider.mark),
-                )
+                .when(result.is_none(), |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(rgb(provider.color))
+                            .child(provider.mark),
+                    )
+                })
+                .children(result)
                 .when(!meta.is_empty(), |el| {
                     el.child(
                         small(meta)
@@ -357,8 +404,8 @@ impl RunoApp {
                 .pl(px(22.))
                 .text_size(px(12.))
                 .text_color(rgb(c_secondary()))
-                .when(status == "needs you", |el| el.line_clamp(2))
-                .when(status != "needs you", |el| el.truncate())
+                .when(status == "needs you" || finished, |el| el.line_clamp(2))
+                .when(status != "needs you" && !finished, |el| el.truncate())
                 .child(text)
         }))
         .when_some(decision.filter(|_| status == "needs you"), |el, d| {
@@ -381,6 +428,23 @@ impl RunoApp {
         .into_any_element()
     }
 
+    /// Whether message `index` of Crew's chat is news about a thread an earlier card
+    /// already shows. Those cards are live, so the thread shows once.
+    pub(crate) fn crew_news_repeats(&self, chat: &Session, index: usize) -> bool {
+        let Some(Card::News { thread }) = chat.messages.get(index).and_then(|m| m.crew.as_ref())
+        else {
+            return false;
+        };
+        chat.messages[..index]
+            .iter()
+            .filter_map(|m| m.crew.as_ref())
+            .any(|c| match c {
+                Card::Started { threads } => threads.contains(thread),
+                Card::News { thread: t } => t == thread,
+                Card::Held { .. } => false,
+            })
+    }
+
     /// A card drawn with message `index` of Crew's chat `chat`.
     pub(crate) fn crew_card(
         &self,
@@ -399,18 +463,38 @@ impl RunoApp {
             .child(icon(CREW_ICON, 12., c_muted()))
             .child(message.text.clone());
         let body = match card {
-            Card::Started { threads } => div().v_flex().gap_2().child(line).child(
-                div()
-                    .p_1()
-                    .v_flex()
-                    .rounded_lg()
-                    .bg(tint(c_subtle()))
-                    .children(
-                        threads
-                            .iter()
-                            .map(|t| self.thread_card(*t, &format!("m{index}"), None, cx)),
-                    ),
-            ),
+            Card::Started { threads } => div()
+                .v_flex()
+                .gap_2()
+                .child(line.child({
+                    let finished = threads
+                        .iter()
+                        .filter_map(|t| self.state.session(*t))
+                        .filter(|t| {
+                            matches!(
+                                thread_status(self.thread_working(t.id), t),
+                                "done" | "resolved"
+                            )
+                        })
+                        .count();
+                    div().text_color(rgb(c_muted())).child(match finished {
+                        0 => String::new(),
+                        n if n == threads.len() => "· all finished".into(),
+                        n => format!("· {n} of {} finished", threads.len()),
+                    })
+                }))
+                .child(
+                    div()
+                        .p_1()
+                        .v_flex()
+                        .rounded_lg()
+                        .bg(tint(c_subtle()))
+                        .children(
+                            threads
+                                .iter()
+                                .map(|t| self.thread_card(*t, &format!("m{index}"), None, cx)),
+                        ),
+                ),
             // The news is the row's line, so the thread shows once, with what happened.
             Card::News { thread } => {
                 let thread = *thread;
@@ -427,7 +511,15 @@ impl RunoApp {
                             rest.trim_start_matches([':', '.', ' '])
                         }),
                 );
-                div().child(self.thread_card(thread, &format!("m{index}"), Some(news), cx))
+                // Once finished, the row's chip and outcome say more than "finished."
+                let done = self.state.session(thread).is_some_and(|s| {
+                    matches!(
+                        thread_status(self.thread_working(thread), s),
+                        "done" | "resolved"
+                    )
+                });
+                let news = (!done).then_some(news);
+                div().child(self.thread_card(thread, &format!("m{index}"), news, cx))
             }
             Card::Held { actions, answered } => {
                 let titles: Vec<String> = actions
@@ -665,18 +757,45 @@ impl RunoApp {
         let mut list = div().v_flex().gap_2().p_2();
         let mut shown: Vec<u64> = Vec::new();
         for (title, status) in groups {
-            let members: Vec<u64> = threads
+            let mut members: Vec<&Session> = threads
                 .iter()
+                .copied()
                 .filter(|t| !shown.contains(&t.id))
                 .filter(|t| {
                     status.is_empty() || thread_status(self.thread_working(t.id), t) == status
                 })
-                .map(|t| t.id)
                 .collect();
             if members.is_empty() {
                 continue;
             }
-            shown.extend(&members);
+            shown.extend(members.iter().map(|t| t.id));
+            // The latest finished first: by its last report, else by when it started.
+            members.sort_by_key(|t| {
+                std::cmp::Reverse((
+                    t.crew
+                        .as_ref()
+                        .and_then(|i| i.reports.last())
+                        .map_or(0, |r| r.at),
+                    t.id,
+                ))
+            });
+            let count = members.len();
+            let mut members: Vec<u64> = members.into_iter().map(|t| t.id).collect();
+            // Past the latest few, finished threads wait behind "Show all", except the one
+            // that is open.
+            let hidden = if status == "done" && !self.threads_done_all && count > DONE_SHOWN {
+                let keep: Vec<u64> = members
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, t)| *i < DONE_SHOWN || self.selected == Some(**t))
+                    .map(|(_, t)| *t)
+                    .collect();
+                let n = count - keep.len();
+                members = keep;
+                n
+            } else {
+                0
+            };
             // Finished threads fold away, so what is still open stays in view.
             let foldable = status == "done";
             let shut = foldable && self.threads_done_shut;
@@ -696,7 +815,7 @@ impl RunoApp {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(c_muted()))
                             .child(title.to_uppercase())
-                            .child(div().opacity(0.8).child(format!("{}", members.len())))
+                            .child(div().opacity(0.8).child(format!("{count}")))
                             .when(foldable, |el| {
                                 el.cursor_pointer()
                                     .child(div().flex_1())
@@ -718,6 +837,30 @@ impl RunoApp {
                                 .into_iter()
                                 .map(|t| self.thread_card(t, "panel", None, cx)),
                         )
+                        .when(hidden > 0, |el| {
+                            el.child(
+                                div()
+                                    .id("threads-show-all")
+                                    .px_2()
+                                    .py(px(6.))
+                                    .flex()
+                                    .gap_1()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(c_muted()))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.threads_done_all = true;
+                                        cx.notify();
+                                    }))
+                                    .child(format!("{hidden} more ·"))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(c_blue()))
+                                            .hover(|el| el.underline())
+                                            .child("Show all"),
+                                    ),
+                            )
+                        })
                     }),
             );
         }
