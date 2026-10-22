@@ -257,7 +257,7 @@ pub fn fall_back(turn: &Path, fallback: &[String], cwd: &str, out: &Out, why: &s
     let Some((program, args)) = fallback.split_first() else {
         note(
             out,
-            json!({ "error": format!("The agent couldn't start a session: {why}.") }),
+            json!({ "error": format!("The agent couldn't start: {}.", why.trim_end_matches('.')) }),
         );
         return 1;
     };
