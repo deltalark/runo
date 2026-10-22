@@ -13,7 +13,9 @@ take it all the way to ship, without leaving one native app.
 </p>
 
 <p>
-<a href="https://github.com/deltalark/runo/releases/latest"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
+<a href="https://github.com/deltalark/runo/releases/latest"><img src="https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
+<a href="https://github.com/deltalark/runo/releases/latest"><img src="https://img.shields.io/badge/Linux-e95420?style=for-the-badge&logo=linux&logoColor=white" alt="Download for Linux" /></a>
+<a href="https://github.com/deltalark/runo/releases/latest"><img src="https://img.shields.io/badge/Windows-0078d4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" /></a>
 &nbsp;
 <a href="#run-from-source"><img src="https://img.shields.io/badge/Build_from_source-b7410e?style=for-the-badge&logo=rust&logoColor=white" alt="Build from source" /></a>
 &nbsp;
@@ -27,14 +29,16 @@ take it all the way to ship, without leaving one native app.
 <img src="https://img.shields.io/badge/built%20with-pure%20Rust-b7410e?logo=rust&logoColor=white" alt="Pure Rust" />
 <img src="https://img.shields.io/badge/no-Electron-47848f?logo=electron&logoColor=white" alt="No Electron" />
 <img src="https://img.shields.io/badge/agents-10_supported-2ea44f" alt="10 agents supported" />
-<img src="https://img.shields.io/badge/platform-macOS-lightgrey?logo=apple" alt="macOS" />
+<img src="https://img.shields.io/badge/platform-macOS_%7C_Linux_%7C_Windows-lightgrey" alt="macOS, Linux and Windows" />
 <img src="https://img.shields.io/badge/status-early-orange" alt="Status: early" />
 </p>
 
 <p>
 <a href="#why-runo"><b>Why Runo</b></a> ·
 <a href="#whats-new"><b>What's new</b></a> ·
+<a href="#crew-one-chat-that-runs-the-work"><b>Crew</b></a> ·
 <a href="#features"><b>Features</b></a> ·
+<a href="#the-git-place"><b>Git</b></a> ·
 <a href="#design-and-architecture"><b>Design</b></a> ·
 <a href="#supported-agents"><b>Agents</b></a> ·
 <a href="#getting-started"><b>Get started</b></a> ·
@@ -52,14 +56,14 @@ take it all the way to ship, without leaving one native app.
 
 ## Why Runo
 
-Coding agents are good at working on their own, but juggling several of them across terminal tabs gets messy fast, and reading every diff to find out whether the work is any good doesn't scale. Runo gives each agent its own session and its own isolated copy of the code, checks what it did, and puts everything you need to steer, review and ship in one place.
+Coding agents are good at working on their own, but juggling several of them across terminal tabs gets messy fast, and reading every diff to find out whether the work is any good doesn't scale. Runo gives each agent its own session and its own isolated copy of the code, lets **Crew** hand out the work and keep track of it, checks what every turn did, and puts everything you need to steer, review and ship in one place.
 
 <table>
 <tr>
 <td width="33%" valign="top">
 
 ### ⚡ Native and fast
-Pure Rust, with no Electron and no web view behind the interface. It starts instantly and stays light while many agents run.
+Pure Rust, with no Electron and no web view behind the interface, on macOS, Linux and Windows. It starts instantly and stays light while many agents run.
 
 </td>
 <td width="33%" valign="top">
@@ -105,7 +109,7 @@ Models, effort levels and permission modes are read from each installed CLI, so 
 <td width="33%" valign="top">
 
 ### ✋ Always in control
-Approve permissions, plans and questions from any session or your phone, undo any turn, and cap spending, turns and tokens.
+Approve permissions, plans and questions from any session or your phone, undo any turn or git step, and cap spending, turns and tokens.
 
 </td>
 </tr>
@@ -114,18 +118,19 @@ Approve permissions, plans and questions from any session or your phone, undo an
 ## What's new
 
 > [!TIP]
-> **✅ Proof of done** just landed. Your own checks run after every turn, failures go back to the agent, and another vendor's agent can give a second opinion. See the [changelog](CHANGELOG.md) for everything else.
+> **Runo 0.2.0** is out, and it now runs on **Linux and Windows** as well as macOS. It also brings **Crew**, the **Git place** and **Proof of done**. See the [changelog](CHANGELOG.md) for everything else.
 
 <table>
 <tr>
 <td width="55%" valign="top">
 
-### ✅ Proof of done
+### ✨ In 0.2.0
 
-Each project lists its checks (tests, lint, typecheck, build), suggested from its `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml` or `Makefile`. They run after every turn that changes files, and a card under the reply shows the verdict with the end of any failing output.
-
-- **Fix it** sends the failures back to the agent, or let Runo do it on its own for 1, 2, 3 or 5 rounds. It stops when the same failure comes back.
-- **Second opinion** asks an agent from another vendor to review the turn's diff read-only. Its comments land as diff notes, ready for **Send notes**.
+- **🐧 Linux and 🪟 Windows builds.** A `.deb` and a tarball for x86_64 and arm64 Linux, and `Runo.exe` for 64-bit Windows, beside the Mac app.
+- **🧭 Crew.** One chat per project that answers you and starts threads for the work, each in its own worktree, reporting back with a checklist.
+- **🌳 The Git place.** Sync, commit line by line, a history graph with a time machine, branches, clash radar and Undo for every step.
+- **✅ Proof of done.** Your tests, lint and build run after every turn. Failures go back to the agent, and another vendor's agent can give a second opinion.
+- **🎛️ Settings as a Control Center**, a Tokyo Night dark theme, glass on every page, turn and token limits, and Cove servers set up over SSH in a few clicks.
 
 </td>
 <td width="45%" valign="top">
@@ -136,6 +141,15 @@ Each project lists its checks (tests, lint, typecheck, build), suggested from it
 </tr>
 </table>
 
+## Crew: one chat that runs the work
+
+Each project works one of two ways. In **Direct** you start and run sessions yourself. In **Crew** you talk to one chat for the project, and Crew answers what it can and starts **threads** for the rest. Pick the way when you add a project, or switch any time from the project menu.
+
+- **Threads are real sessions.** Each one gets Crew's brief, its own worktree and branch, and the agent you choose. It keeps a checklist and reports back, so Crew's chat shows one live card per thread with what it changed (`PR #148`, `+2 −1` or *No changes*).
+- **You stay in charge.** When a thread needs a decision it shows in the corner, in the Inbox and on Home, with the answers as chips. Crew starts at most three threads at once, and it only reads the project; it never changes code itself.
+- **Talk to any thread.** The chip over the composer sends a message to Crew (**Auto**), gets just an answer, or starts a **New thread** straight away. Type `@` and a thread's name to message that thread directly.
+- **Home starts it all.** "What should Crew take on?" sends your goal to Crew, and Home lists what Crew said last, the decisions waiting on you and every thread.
+
 ## Features
 
 ### Sessions and worktrees
@@ -145,7 +159,8 @@ Each project lists its checks (tests, lint, typecheck, build), suggested from it
 - **Projects and sessions.** Add any local folder, or clone one from a URL, and start sessions on it. The sidebar groups sessions under each project, on a rail in the project's color, with live status dots, unread markers and `+/-` line counts. Group them by status instead when you'd rather see what needs you.
 - **Isolated worktrees.** A session can run in its own branch and folder under `.runo-worktrees/`, branched from the base you pick and named after the task (such as `runo/fix-login-redirect`), or right in your checkout. A setup command runs in each new worktree before the agent starts, and git-ignored files listed in `.worktreeinclude` (such as `.env`) are copied in. **Clean up** in Settings finds worktrees and branches no session uses any more.
 - **Race several agents.** Send one task to several agents at once, each in its own worktree, compare the results and keep the best one.
-- **Home, Inbox and tabs.** Home shows what every project is doing, the Inbox lists every agent waiting on a permission, plan or question with the answers inline, and open sessions stay in tabs you can drag into order.
+- **Home, Inbox and tabs.** Home is one prompt to start work from that also searches sessions, projects, playbooks and past conversations as you type, with what's waiting and the sessions to pick up again. The Inbox lists every agent waiting on a permission, plan or question with the answers inline, and open sessions stay in tabs you can drag into order.
+- **A tidy rail.** Home, Sessions and Git sit on the rail, with the current project's Design and Architecture under its badge. Playbooks, History and Notes live in the ⋯ menu; pin any of them back in **Settings → General → Rail**.
 - **Find anything.** The Sessions page searches titles, branches, projects and past conversations, with filters for project, agent and status. **History** lists past Claude Code and Codex conversations on this machine, and opening one resumes that exact conversation.
 
 ### Talking to agents
@@ -155,7 +170,7 @@ Each project lists its checks (tests, lint, typecheck, build), suggested from it
 - **Approve from anywhere.** Permission requests, questions and plans from any session pop up in the corner, so you can answer without leaving what you're doing. Claude Code's permission requests arrive while the turn runs and it carries on as soon as you answer.
 - **Undo, Keep or Review each turn.** Runo checkpoints the worktree before every turn, so you can roll back a turn that went wrong with one click.
 - **Context control.** `/compact` shrinks a long conversation and `/clear` starts fresh. Fork a session from any turn with the files as they were then, or edit and resend a sent message.
-- **Usage and limits.** Tokens, cost and context per turn and per session, with Claude Code's and Codex's plan usage in the status bar. Stop an agent that goes quiet, cap spending, turns and tokens per session and per day, and cap how many agents run at once.
+- **Usage and limits.** Tokens, cost and context per turn and per session, with Claude Code's and Codex's plan usage in the status bar. In **Settings → Safety**, stop an agent that goes quiet, cap spending, turns and tokens per session and per day, and cap how many agents run at once.
 - **Fixes, not error messages.** A turn that fails because the agent is signed out, the model isn't available or the CLI is too old offers the fix right under it: sign in, retry with a model that works, or update the CLI.
 
 <table>
@@ -191,13 +206,23 @@ Every session has two views of the same conversation. **Chat** is Runo's own int
 
 ### Review and ship
 
-- **Review page.** Every session whose agent stopped with changed files, in one list (<kbd>⌘</kbd> <kbd>3</kbd>). Pick one to see its changes and commit, push, open a pull request or merge.
-- **Changes.** Real `git` status and diffs for each session, with stage, discard, commit, push and **Create PR** buttons. **Merge PR** uses a method the repository allows (merge, squash or rebase), and turns on auto-merge while checks are still running.
+- **Proof of done.** Each project lists its checks (tests, lint, typecheck, build), suggested from its `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml` or `Makefile`. They run after every turn that changes files, and a card under the reply shows the verdict. **Fix it** sends failures back to the agent, or Runo does it on its own for up to 5 rounds, and **Second opinion** has another vendor's agent review the diff read-only, leaving diff notes.
+- **Changes.** Real `git` status and diffs for each session, with stage, discard, commit, push and **Create PR** buttons. **Review and ship** takes a finished session's work into the Git place to commit, push and open a pull request. **Merge PR** uses a method the repository allows (merge, squash or rebase), and turns on auto-merge while checks are still running.
 - **Diff notes.** Click any diff line, leave a note, and send all notes back to the agent as one follow-up.
 - **Files.** Browse and edit the worktree, with syntax highlighting, rendered Markdown, images and CSV tables.
 - **Terminal.** A real interactive shell (PTY) in the session's folder, with several tabs per session, your saved commands as one-click buttons, and the agent's own command output.
-- **Browser.** A live, interactive page from a Chromium-based browser on your Mac (your default one when it's Chromium-based, or the one you pick in Settings), embedded in the session. Before a page is open it lists the dev servers running on your machine, and for a session on a connection the ones running there, which it forwards to your machine when you open them.
-- **GitHub.** Pull requests, issues and Actions runs for the project through the `gh` CLI, with one-click "review this PR" sessions whose review you confirm and post, line comments included.
+- **Browser.** A live, interactive page from a Chromium-based browser on your computer (your default one when it's Chromium-based, or the one you pick in Settings), opened in its own tab. Before a page is open it lists the dev servers running on your machine, and for a session on a connection the ones running there, which it forwards to your machine when you open them.
+
+## The Git place
+
+**Git** on the rail (<kbd>⌘</kbd> <kbd>3</kbd>) works on the project folder itself, in four tabs, and says what every step did in plain words. A sync, switch, merge or go back can be taken back with **Undo** for a while afterwards.
+
+- **Changes.** Every session with work waiting, one at a time, beside your folder's own changes. Tick what to commit file by file or line by line; a line you leave out stays in your folder for later.
+- **History.** The commits as a graph. Pick one to ask the agent what it did, go back to it, branch from it, undo it, copy it to another branch or mark it as a release. The **time machine** lists every step the folder took and every snapshot taken before an agent's turn, by day, so you can go back to any moment.
+- **Branches.** Switch, rename, merge, send or delete branches, and bring back work you set aside. **Clash radar** test-merges every session's work, your folder and the main branch in memory and lists the pairs that change the same lines, long before anyone merges. **Make it reviewable** has an agent write a reviewer's guide, or split a big branch into a stack of small pull requests.
+- **Clashes.** When a sync or merge stops on clashes, keep yours, theirs or both at each spot, or let an agent write a version that keeps both sides' intent. Calling it off puts everything back.
+- **Seatbelt.** Before anything is pushed, Runo looks for passwords, tokens, key files, `.env` files and leftover clash markers and asks first; while you commit it points out huge files and debugging leftovers.
+- **GitHub** (<kbd>⌘</kbd> <kbd>4</kbd>). Pull requests, issues and Actions runs for the project through the `gh` CLI, with one-click "review this PR" sessions whose review you confirm and post, line comments included.
 
 ## Design and Architecture
 
@@ -246,7 +271,7 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 - **Install from anywhere.** Paste a GitHub repo, a link to one file, a local folder or the clipboard into **Install**. Runo lists what it found, marks new and updated playbooks, and shows what each one asks permission to do before you install it. **Update** checks the source again later.
 - **Inputs.** Write `{{area}}` in the instructions and Runo asks for it before the run, with a default for scheduled runs.
 - **Permissions.** A playbook says whether it may edit files, run commands or use the network, and Runo holds every turn of its session to that in the way each agent allows: plan mode for read-only, turning off shell or web tools, Codex's sandbox without network. Where an agent can't be held to a limit, the card and the run form say so. Approving a read-only playbook's plan asks before allowing edits.
-- **Schedules.** Scheduled runs use the project's default connection and its setup command, skip a run while the last one is still going, note runs missed while Runo was closed, and keep the last few sessions (set in Settings → Chat). Each card shows its recent runs and any failure. Turn on **Run while Runo is closed** to have a background job (launchd on macOS, a systemd user timer on Linux, Task Scheduler on Windows) run due playbooks every 5 minutes while Runo isn't open.
+- **Schedules.** Scheduled runs use the project's default connection and its setup command, skip a run while the last one is still going, note runs missed while Runo was closed, and keep the last few sessions (set in Settings → Agents → Chat). Each card shows its recent runs and any failure. Turn on **Run while Runo is closed** to have a background job (launchd on macOS, a systemd user timer on Linux, Task Scheduler on Windows) run due playbooks every 5 minutes while Runo isn't open.
 - **Agents can start playbooks**, and Runo asks you first (on by default). An agent in plan mode can't start one that edits or runs commands.
 
 </details>
@@ -256,7 +281,7 @@ Save a task once and run it in any project: from the Playbooks page, from Quick 
 - **Project notes.** Keep each project's commands, decisions and gotchas in Markdown, saved as you type, with Write, Split and Preview views, an outline and search across projects. Turn on **Share with agents** and every new session in that project starts with the notes.
 - **Session memory.** Runo ships a small MCP server that lets any agent read the session memory, search earlier sessions in the project and save notes, instead of having the whole history pasted into every prompt.
 - **Shared MCP servers.** Runo finds the MCP servers configured in every app on your computer, and you can share any of them with all agents, not just the one it was set up for.
-- **Runo's own servers.** Add servers to Runo's own list in Settings → MCP and every agent's sessions get them. Cursor, Gemini CLI and Droid read them from their project config file, which Runo fills in for each turn, keeps out of git and tidies afterwards; Grok has no project-level MCP config, so it gets none.
+- **Runo's own servers.** Add servers to Runo's own list in **Settings → Agents → MCP** and every agent's sessions get them. Cursor, Gemini CLI and Droid read them from their project config file, which Runo fills in for each turn, keeps out of git and tidies afterwards; Grok has no project-level MCP config, so it gets none.
 - **Hooks and skills.** See the Claude Code hooks and skills that apply to a project, open them in Runo's editor, and start a new skill.
 
 ## Made to feel at home
@@ -279,14 +304,15 @@ See which agent CLIs are installed, every copy on your machine and their version
 </table>
 
 - **Quick open** with <kbd>⌘</kbd> <kbd>K</kbd> to jump to any session, file, project or command, and <kbd>⌘</kbd> <kbd>N</kbd> for a new session.
-- **Your own shortcuts.** In **Settings → Keybindings**, click a shortcut and press the new keys. Runo warns you when the keys are already taken, and you can reset one or all of them.
-- **Light and dark themes**, accent colors, colorblind-friendly diff colors, and an optional glass look.
+- **Your own shortcuts.** In **Settings → Keys**, click a shortcut and press the new keys. Runo warns you when the keys are already taken, and you can reset one or all of them.
+- **Light and Tokyo Night dark themes**, accent colors, colorblind-friendly diff colors, and an optional glass look (Subtle, Frosted or Clear) over a blurred desktop.
+- **Settings as a Control Center.** Settings opens on an overview with a card per area (look, agents, connections, safety, phone, worktrees and keys) showing what's set and what needs you.
 - **It remembers.** Your layout, open tabs and panels come back after a restart, and local agent turns keep running when Runo closes or crashes.
 - **A one-minute tour** on first launch that you can replay any time, and **right-click menus** everywhere.
 
 ## Supported agents
 
-Runo detects each CLI on your `PATH` and shows its version in **Settings → Providers**.
+Runo detects each CLI on your `PATH` and shows its version in **Settings → Agents**.
 
 | Agent | Command | | Agent | Command |
 | --- | --- | --- | --- | --- |
@@ -302,14 +328,23 @@ See [provider setup](docs/providers.md) for details.
 
 ### Download
 
-Builds for Apple silicon and Intel Macs are on the [Releases](https://github.com/deltalark/runo/releases) page. Open the disk image and drag Runo to Applications. Runo checks there for newer versions and offers to download them; nothing installs on its own.
+Get the latest build from the [Releases](https://github.com/deltalark/runo/releases/latest) page:
+
+| Platform | Download | Install |
+| --- | --- | --- |
+| 🍎 **macOS** (Apple silicon and Intel) | `Runo-<version>-macos-arm64.dmg` or `-x86_64.dmg` | Open the disk image and drag Runo to Applications. |
+| 🐧 **Linux** (x86_64 and arm64) | `Runo-<version>-linux-<arch>.deb` or `.tar.gz` | `sudo apt install ./Runo-<version>-linux-<arch>.deb`, or unpack the tarball and run `Runo`. |
+| 🪟 **Windows** (64-bit) | `Runo-<version>-windows-x86_64.zip` | Unzip and run `Runo.exe`. The build isn't signed yet, so SmartScreen asks the first time (More info → Run anyway). |
+
+Runo checks for newer versions and offers the download for your platform; nothing installs on its own. Shortcuts in this README use <kbd>⌘</kbd>; on Linux and Windows press <kbd>Ctrl</kbd> instead.
 
 ### Requirements
 
-- macOS (Windows and Linux builds are also targeted, but macOS is the primary platform today)
+- macOS, Linux (X11 or Wayland) or Windows 10 and 11
 - `git`
 - At least one agent CLI from the table above, installed and signed in
-- Optional: the [GitHub CLI](https://cli.github.com) (`gh`) for pull requests, issues and Actions, and Chrome, Edge, Brave, Arc or another Chromium-based browser for the Browser tab
+- Optional: the [GitHub CLI](https://cli.github.com) (`gh`) for pull requests, issues and Actions, and Chrome, Edge, Brave, Arc or another Chromium-based browser for the Browser tab (on Linux and Windows the Design canvas draws its screens with it too)
+- Optional: [Cove](https://github.com/deltalark/cove) for VMs, on a Mac or on your own server
 - To build from source: a recent stable [Rust toolchain](https://rustup.rs)
 
 ### Run from source
@@ -333,7 +368,7 @@ On Linux the same command makes a `.deb`, and on Windows the icon is built into 
 
 ### Where Runo keeps its data
 
-Projects are stored in `~/.runo/state.json`, each session in its own file under `~/.runo/sessions`, and settings in `~/.runo/settings.json`. A log for each launch and any crash reports are in `~/.runo/logs`; after a crash, Runo offers to show or report it on the next start. Set `RUNO_HOME` to move them all.
+Projects are stored in `~/.runo/state.json` (`%USERPROFILE%\.runo` on Windows), each session in its own file under `~/.runo/sessions`, and settings in `~/.runo/settings.json`. A log for each launch and any crash reports are in `~/.runo/logs`; after a crash, Runo offers to show or report it on the next start. Set `RUNO_HOME` to move them all.
 
 ## Connections: run anywhere
 
@@ -344,8 +379,8 @@ A **connection** is a place a session can run besides your own machine. Add them
 | Connection | What it is | Where the files are |
 | --- | --- | --- |
 | 💻 **This machine** | The agent runs directly on your computer. | Your worktree. |
-| 📦 **Cove on this machine** | Each session gets its own Linux VM from [Cove](https://github.com/deltalark/cove). | Shared into the VM at the same path, so moving is instant. |
-| ☁️ **Cove server** | Cove on your VPS or a big box, by URL and API key. | A copy on the server, synced every turn. |
+| 📦 **Cove on this machine** | Each session gets its own Linux VM from [Cove](https://github.com/deltalark/cove), on a Mac. | Shared into the VM at the same path, so moving is instant. |
+| ☁️ **Cove server** | Cove on your VPS or a big box, set up from Runo over SSH. | A copy on the server, synced every turn. |
 | 🔐 **SSH server** | Any Linux or macOS machine you can `ssh` into. | A copy under `~/runo-work`, synced every turn. |
 
 ### How moving works
@@ -393,7 +428,7 @@ On a Cove server or an SSH server, the agent runs **detached** from your compute
 - **Dropped connections** are handled the same way: Runo reconnects and carries on from the last line it showed, while the agent keeps going.
 - **Stop** still stops it: Runo ends the agent's processes there, then brings back what it did so far.
 - **Your keys** reach that machine in a script only its owner can read, and the script deletes itself as soon as it starts.
-- **Approvals.** Claude Code asks for permission mid-turn through Runo's MCP relay, and the turn waits while you answer in the corner card or the Inbox: **Allow once**, **Always allow** or **Deny**. While Runo is closed or this machine is asleep, the request waits on the server until Runo reconnects and shows it, or until the wait in Settings → Chat runs out (5 minutes by default). Unanswered, the turn stops at that command and the permission card offers to allow it and retry; turn that off in Settings → Connections to let the agent carry on without it.
+- **Approvals.** Claude Code asks for permission mid-turn through Runo's MCP relay, and the turn waits while you answer in the corner card or the Inbox: **Allow once**, **Always allow** or **Deny**. While Runo is closed or this machine is asleep, the request waits on the server until Runo reconnects and shows it, or until the wait in Settings → Agents → Chat runs out (5 minutes by default). Unanswered, the turn stops at that command and the permission card offers to allow it and retry; turn that off in Settings → Connections to let the agent carry on without it.
 - **A turn that never starts**, because the machine rebooted before it ran, ends after a few minutes with a message instead of waiting forever.
 
 Runo also stops keeping your computer awake while only remote turns are running. Cove on this machine runs alongside your computer, so it pauses when the computer does; use a Cove server or an SSH server for work that should go on without it.
@@ -412,7 +447,7 @@ Runo's MCP server works in every session, in Cove VMs and on servers too: the ag
 
 - **SSH:** add an SSH server and type a host from your `~/.ssh/config` (or `user@host`). Runo uses your SSH agent and config, shares one login between the agent, terminals and syncs, and never turns off host key checks. **Test** shows what it found: the OS, git and the agent CLIs.
 - **Cove on this machine:** install Cove (see its [install guide](https://github.com/deltalark/cove#install)) and Runo offers a Cove VM under **Runs on** on its own. Set the VM's CPUs, memory, network (on or off) and idle stop in Settings.
-- **Cove on a server:** install Cove on the server, run `cove key` there, then add a Cove connection in Runo with the server's URL and that key.
+- **Cove on a server:** add a Cove connection with the server's SSH login (`user@host`) and press **Set up**: Runo checks the server, installs or updates Cove, pairs with it and keeps its own SSH tunnel to it. Or install Cove yourself, run `cove pair` there and add the server's URL and pairing code. Sign agents in once per server with **Sign in** next to each agent, and every VM there uses that login.
 
 Agent CLIs are installed on the connection on first use, with npm (into a private Node.js when the machine has none) or the vendor's script, and kept at the version you run here. Signing in:
 
@@ -426,7 +461,7 @@ Deleting a session deletes its VM or its copies on every connection it ran on, a
 
 ## On your phone
 
-The phone bridge serves a small, token-protected API that a phone app uses to follow every session and answer it: allow or deny a permission request, approve a plan, answer an agent's questions, send a follow-up or stop a run. Turn it on in **Settings → Phone**, where each phone gets its own pairing code and can be removed on its own, or run `runo --phone`. It listens on your Tailscale address, or only on this computer without one, unless you choose to open it to your local network. See [docs/phone-bridge.md](docs/phone-bridge.md). The mobile app itself is coming next.
+The phone bridge serves a small, token-protected API that a phone app uses to follow every session and answer it: allow or deny a permission request, approve a plan, answer an agent's questions, send a follow-up or stop a run. Turn it on in **Settings → Connections → Phone**, where each phone gets its own pairing code and can be removed on its own, or run `runo --phone`. It listens on your Tailscale address, or only on this computer without one, unless you choose to open it to your local network. See [docs/phone-bridge.md](docs/phone-bridge.md). The mobile app itself is coming next.
 
 ## Learn more
 
@@ -437,7 +472,7 @@ The phone bridge serves a small, token-protected API that a phone app uses to fo
 
 ## Status
 
-Runo is early and moving quickly. Expect rough edges, and please [open an issue](https://github.com/deltalark/runo/issues) when you hit one.
+Runo is early and moving quickly. Version 0.2.0 is the first release for Linux and Windows, so expect those to be a little rougher than macOS for now. Expect rough edges, and please [open an issue](https://github.com/deltalark/runo/issues) when you hit one.
 
 ## Contributing
 
