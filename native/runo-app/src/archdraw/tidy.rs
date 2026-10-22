@@ -15,6 +15,22 @@ const GAP_ALONG: f32 = 88.;
 const GAP_CHANNEL: f32 = 26.;
 /// Room between separate groups of connected boxes.
 const GAP_GROUPS: f32 = 120.;
+/// Boxes a layer holds before it may wrap.
+const ROW_MIN: usize = 5;
+
+/// What else shapes a layered layout beyond the connectors.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Shaping<'a> {
+    /// A tier per box: a box sits no higher than its tier, and where connectors go round
+    /// in a circle, the one going up the tiers is the one drawn against the flow. Boxes
+    /// with a tier but no connectors take their place in their tier instead of a grid at
+    /// the end.
+    pub rank: Option<&'a HashMap<String, usize>>,
+    /// Width over height to aim for: long layers wrap into more rows and separate groups
+    /// are packed in rows, so a big diagram stays close to this shape instead of one long
+    /// strip. None lays everything out in one line, as wide as it comes.
+    pub aspect: Option<f32>,
+}
 
 /// A layered layout: callers above (or left of) what they call, boxes in each layer ordered
 /// so as few connectors as possible cross, connectors that skip layers given a channel of
@@ -27,11 +43,27 @@ pub(crate) fn layered(
     origin: Pt,
     horizontal: bool,
 ) -> HashMap<String, Pt> {
+    layered_with(ids, sizes, links, origin, horizontal, Shaping::default())
+}
+
+/// `layered`, shaped by tiers and an aim for the overall shape.
+pub(crate) fn layered_with(
+    ids: &[String],
+    sizes: &HashMap<String, Pt>,
+    links: &[(String, String)],
+    origin: Pt,
+    horizontal: bool,
+    shaping: Shaping,
+) -> HashMap<String, Pt> {
     let n = ids.len();
     let index: HashMap<&str, usize> = ids
         .iter()
         .enumerate()
         .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    let rank: Vec<Option<usize>> = ids
+        .iter()
+        .map(|id| shaping.rank.and_then(|r| r.get(id).copied()))
         .collect();
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for (a, b) in links {
@@ -45,7 +77,8 @@ pub(crate) fn layered(
     let across = |v: usize| if horizontal { size(v).1 } else { size(v).0 };
     let along = |v: usize| if horizontal { size(v).0 } else { size(v).1 };
 
-    // Groups of boxes joined by connectors.
+    // Groups of boxes joined by connectors. Boxes with a tier are all one group, so each
+    // takes its place in its tier.
     let mut root: Vec<usize> = (0..n).collect();
     fn find(root: &mut [usize], v: usize) -> usize {
         let mut r = v;
@@ -60,11 +93,18 @@ pub(crate) fn layered(
         }
         r
     }
-    for &(a, b) in &edges {
-        let (ra, rb) = (find(&mut root, a), find(&mut root, b));
+    let join = |root: &mut Vec<usize>, a: usize, b: usize| {
+        let (ra, rb) = (find(root, a), find(root, b));
         if ra != rb {
             root[ra] = rb;
         }
+    };
+    for &(a, b) in &edges {
+        join(&mut root, a, b);
+    }
+    let ranked: Vec<usize> = (0..n).filter(|&v| rank[v].is_some()).collect();
+    for w in ranked.windows(2) {
+        join(&mut root, w[0], w[1]);
     }
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for v in 0..n {
@@ -84,27 +124,84 @@ pub(crate) fn layered(
             (origin.0 + a, origin.1 + l)
         }
     };
-    let mut out = HashMap::new();
-    let mut cursor = 0.;
+    // How wide (across the layers) the whole should be, from the room the boxes take.
+    let room: f32 = (0..n)
+        .map(|v| (across(v) + GAP_ACROSS) * (along(v) + GAP_ALONG))
+        .sum();
+    let aim = shaping.aspect.map(|a| {
+        let a = if horizontal { 1. / a } else { a };
+        let widest = (0..n).map(across).fold(0., f32::max);
+        // A row of a few boxes never wraps: a short row reads better than a stack.
+        let mut each: Vec<f32> = (0..n).map(across).collect();
+        each.sort_by(f32::total_cmp);
+        let few = each
+            .get(n / 2)
+            .map_or(0., |m| (m + GAP_ACROSS) * ROW_MIN as f32);
+        (room * a).sqrt().max(widest).max(few)
+    });
+    // Each group laid out on its own, then placed: side by side, or packed in rows no
+    // wider than the aim.
+    let mut laid: Vec<(HashMap<usize, Pt>, f32, f32)> = Vec::new();
     for g in &groups {
         let inner: Vec<(usize, usize)> = edges
             .iter()
             .copied()
             .filter(|(a, b)| g.contains(a) && g.contains(b))
             .collect();
-        let (pos, width) = layered_group(g, &inner, &across, &along);
-        for (v, (a, l)) in pos {
-            out.insert(ids[v].clone(), place(cursor + a, l));
+        let ranks: Vec<Option<usize>> = g.iter().map(|&v| rank[v]).collect();
+        let (mut pos, mut width, bands) = layered_group(g, &inner, &across, &along, &ranks, aim);
+        // Far longer than the aim allows: fold the layers into rows. Not when one layer
+        // is most of the length, as a big boundary is: folding only puts what comes
+        // before it beside it, and the flow no longer reads one way.
+        if let (Some(aim), Some(a)) = (aim, shaping.aspect) {
+            let a = if horizontal { 1. / a } else { a };
+            let length = bands.last().map_or(0., |b| b.start + b.thick);
+            let thickest = bands.iter().map(|b| b.thick).fold(0., f32::max);
+            if bands.len() > 2 && length > 1.3 * aim.max(width) / a && thickest < 0.4 * length {
+                (pos, width) = fold(&pos, &bands, &across, aim.max(width));
+            }
         }
-        cursor += width + GAP_GROUPS;
+        let length = pos.iter().map(|(&v, p)| p.1 + along(v)).fold(0., f32::max);
+        laid.push((pos, width, length));
     }
-    // Boxes on their own: a grid, roughly square.
+    let mut out = HashMap::new();
+    let (mut a0, mut l0, mut row_len) = (0f32, 0f32, 0f32);
+    let mut cursor = 0f32;
+    for (pos, width, length) in laid {
+        if let Some(aim) = aim {
+            if a0 > 0. && a0 + width > aim {
+                a0 = 0.;
+                l0 += row_len + GAP_GROUPS;
+                row_len = 0.;
+            }
+        } else {
+            a0 = cursor;
+        }
+        for (v, (a, l)) in pos {
+            out.insert(ids[v].clone(), place(a0 + a, l0 + l));
+        }
+        a0 += width + GAP_GROUPS;
+        cursor = a0;
+        row_len = row_len.max(length);
+    }
+    // Boxes on their own: a grid, roughly square, after the groups (below them when
+    // packing in rows).
     let lone: Vec<usize> = lone.into_iter().flatten().collect();
     if !lone.is_empty() {
-        let cols = ((lone.len() as f32).sqrt().ceil() as usize).max(1);
-        let mut l = 0.;
+        let (start_a, mut l) = if aim.is_some() && !out.is_empty() {
+            (0., l0 + row_len + GAP_GROUPS)
+        } else {
+            (cursor, 0.)
+        };
+        let cols = match aim {
+            Some(aim) => {
+                let w = lone.iter().map(|&v| across(v)).fold(0., f32::max) + GAP_ACROSS;
+                ((aim / w) as usize).clamp(1, lone.len())
+            }
+            None => ((lone.len() as f32).sqrt().ceil() as usize).max(1),
+        };
         for row in lone.chunks(cols) {
-            let mut a = cursor;
+            let mut a = start_a;
             let thick = row.iter().map(|&v| along(v)).fold(0., f32::max);
             for &v in row {
                 out.insert(ids[v].clone(), place(a, l));
@@ -123,7 +220,9 @@ fn layered_group(
     edges: &[(usize, usize)],
     across: &dyn Fn(usize) -> f32,
     along: &dyn Fn(usize) -> f32,
-) -> (HashMap<usize, Pt>, f32) {
+    ranks: &[Option<usize>],
+    aim: Option<f32>,
+) -> (HashMap<usize, Pt>, f32, Vec<Band>) {
     let m = nodes.len();
     let local: HashMap<usize, usize> = nodes.iter().enumerate().map(|(i, &v)| (v, i)).collect();
     let mut out_e: Vec<Vec<usize>> = vec![Vec::new(); m];
@@ -139,8 +238,9 @@ fn layered_group(
     // boxes nothing points at so they end up on top.
     let mut state = vec![0u8; m];
     let mut dag: Vec<Vec<usize>> = vec![Vec::new(); m];
-    let mut starts: Vec<usize> = (0..m).filter(|&v| indeg0[v] == 0).collect();
-    starts.extend((0..m).filter(|&v| indeg0[v] != 0));
+    // Lower tiers first, so the links a cycle loses are the ones going up the tiers.
+    let mut starts: Vec<usize> = (0..m).collect();
+    starts.sort_by_key(|&v| (ranks[v].unwrap_or(0), indeg0[v] != 0));
     for s in starts {
         if state[s] != 0 {
             continue;
@@ -208,6 +308,49 @@ fn layered_group(
         if ins[v].is_empty() && !dag[v].is_empty() {
             let lowest = dag[v].iter().map(|&w| layer[w]).min().unwrap_or(1);
             layer[v] = lowest.saturating_sub(1).max(layer[v]);
+        }
+    }
+    // Tiers: each box no higher than its tier, and still below what calls it.
+    let mut tiers: Vec<usize> = ranks.iter().flatten().copied().collect();
+    tiers.sort_unstable();
+    tiers.dedup();
+    if !tiers.is_empty() {
+        for &v in &topo {
+            let floor = ranks[v]
+                .and_then(|r| tiers.iter().position(|&t| t == r))
+                .unwrap_or(0);
+            let below = ins[v].iter().map(|&u| layer[u] + 1).max().unwrap_or(0);
+            layer[v] = layer[v].max(floor).max(below);
+        }
+    }
+    // Layers wider than the aim wrap: the boxes with the fewest connectors move to a new
+    // layer under it, and everything further down moves down one.
+    if let Some(aim) = aim {
+        let mut li = 0;
+        while li <= layer.iter().copied().max().unwrap_or(0) && li < 4 * m {
+            let mut here: Vec<usize> = (0..m).filter(|&v| layer[v] == li).collect();
+            let width = |vs: &[usize]| {
+                vs.iter().map(|&v| across(nodes[v])).sum::<f32>()
+                    + GAP_ACROSS * vs.len().saturating_sub(1) as f32
+            };
+            if here.len() > 1 && width(&here) > aim {
+                let links = |v: usize| ins[v].len() + dag[v].len();
+                here.sort_by_key(|&v| (std::cmp::Reverse(links(v)), v));
+                let mut keep = 1;
+                while keep < here.len() && width(&here[..keep + 1]) <= aim {
+                    keep += 1;
+                }
+                let spill: Vec<usize> = here[keep..].to_vec();
+                for l in layer.iter_mut() {
+                    if *l > li {
+                        *l += 1;
+                    }
+                }
+                for v in spill {
+                    layer[v] = li + 1;
+                }
+            }
+            li += 1;
         }
     }
     let depth = layer.iter().copied().max().unwrap_or(0) + 1;
@@ -414,25 +557,104 @@ fn layered_group(
     // Along: layers stacked, each as thick as its biggest box, with more room where many
     // connectors pass between two layers.
     let mut out = HashMap::new();
+    let mut bands = Vec::new();
     let mut main = 0.;
-    for (li, l) in layers.iter().enumerate() {
+    for l in &layers {
         let thick = l
             .iter()
             .filter(|&&it| is_box(it))
             .map(|&it| along(nodes[it]))
             .fold(0., f32::max);
+        let mut held = Vec::new();
         for &it in l {
             if is_box(it) {
                 let v = nodes[it];
                 let a = x[it] - across(v) / 2. - lo;
                 out.insert(v, (a, main + (thick - along(v)) / 2.));
+                held.push(v);
             }
         }
+        if !held.is_empty() {
+            bands.push(Band {
+                boxes: held,
+                start: main,
+                thick,
+            });
+        }
         let between = l.iter().map(|&it| downs[it].len()).sum::<usize>();
-        let _ = li;
         main += thick + GAP_ALONG + (between.min(12) as f32) * 4.;
     }
-    (out, (hi - lo).max(0.))
+    (out, (hi - lo).max(0.), bands)
+}
+
+/// One layer of a laid out group: its boxes, where it starts along the flow and how thick
+/// it is.
+struct Band {
+    boxes: Vec<usize>,
+    start: f32,
+    thick: f32,
+}
+
+/// Fold a group's layers into rows no wider than `aim`, the way text wraps: layers that
+/// fit side by side share a row, and the flow carries on from one to the next. Returns
+/// the new places and the group's width.
+fn fold(
+    pos: &HashMap<usize, Pt>,
+    bands: &[Band],
+    across: &dyn Fn(usize) -> f32,
+    aim: f32,
+) -> (HashMap<usize, Pt>, f32) {
+    let extent = |b: &Band| {
+        let lo = b
+            .boxes
+            .iter()
+            .map(|v| pos[v].0)
+            .fold(f32::INFINITY, f32::min);
+        let hi = b
+            .boxes
+            .iter()
+            .map(|&v| pos[&v].0 + across(v))
+            .fold(f32::NEG_INFINITY, f32::max);
+        (lo, hi)
+    };
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut used = 0.;
+    for (i, b) in bands.iter().enumerate() {
+        let (lo, hi) = extent(b);
+        let w = hi - lo;
+        let row = rows.last_mut().expect("a row");
+        if !row.is_empty() && used + GAP_GROUPS + w > aim {
+            rows.push(vec![i]);
+            used = w;
+        } else {
+            if !row.is_empty() {
+                used += GAP_GROUPS;
+            }
+            row.push(i);
+            used += w;
+        }
+    }
+    let mut out = HashMap::new();
+    let (mut top, mut width) = (0f32, 0f32);
+    for row in rows {
+        let thick = row.iter().map(|&i| bands[i].thick).fold(0., f32::max);
+        let mut cursor = 0.;
+        for i in row {
+            let b = &bands[i];
+            let (lo, hi) = extent(b);
+            for &v in &b.boxes {
+                let (a, l) = pos[&v];
+                out.insert(
+                    v,
+                    (cursor + a - lo, top + (thick - b.thick) / 2. + l - b.start),
+                );
+            }
+            cursor += hi - lo + GAP_GROUPS;
+        }
+        width = width.max(cursor - GAP_GROUPS);
+        top += thick + GAP_ALONG;
+    }
+    (out, width.max(0.))
 }
 
 /// Crossings between every pair of neighbouring layers.

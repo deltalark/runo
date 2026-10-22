@@ -1,0 +1,3 @@
+[project]
+name = "invoice-run"
+dependencies = ["psycopg2", "boto3"]

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Folders never read for the map: build output, dependencies and tool state.
-const SKIP_DIRS: [&str; 14] = [
+const SKIP_DIRS: [&str; 16] = [
     "node_modules",
     "target",
     "dist",
@@ -23,6 +23,9 @@ const SKIP_DIRS: [&str; 14] = [
     "site-packages",
     "third_party",
     "worktrees",
+    // Test inputs are examples, not the project.
+    "fixtures",
+    "testdata",
 ];
 
 /// Files read at most, so a huge repository still maps quickly.
@@ -70,6 +73,8 @@ pub(crate) struct ProjectMap {
     pub partial: bool,
     /// Folders holding Runo's own design screens and diagrams, left out of the code.
     pub runo: Vec<String>,
+    /// What the project runs, from Docker Compose, Terraform, ECS and Copilot files.
+    pub infra: crate::archdraw::infra::Infra,
 }
 
 /// The language of a source file, by extension.
@@ -931,6 +936,11 @@ pub(crate) fn scan(root: &Path) -> ProjectMap {
             modules,
         });
     }
+    let project = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    map.infra = crate::archdraw::infra::read(root, &files, &project);
     // Without a manifest, the project is mapped by its files and what they load: a
     // plain site, scripts or a folder of sources.
     if map.packages.is_empty() {
