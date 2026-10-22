@@ -58,6 +58,7 @@ mod modelcheck;
 mod models;
 mod notes;
 mod parts;
+mod pattern;
 mod pbfile;
 mod pbrunner;
 mod pbshare;
@@ -9622,6 +9623,8 @@ impl Render for RunoApp {
             .text_color(rgb(c_text()))
             .text_size(px(13.))
             .font_family(cx.theme().font_family.clone())
+            .children(pattern::backdrop())
+            .children(pattern::under())
             .child(self.top_bar(cx))
             .child(
                 div()
@@ -9659,6 +9662,8 @@ impl Render for RunoApp {
                     .items_center()
                     .justify_between()
                     .bg(settings::frame())
+                    .relative()
+                    .child(pattern::chrome())
                     .text_size(px(11.5))
                     .gap_4()
                     .child(fade(
@@ -9803,6 +9808,7 @@ impl Render for RunoApp {
                             ),
                     ),
             )
+            .children(pattern::wash())
             .when(self.view == View::NewSession, |el| {
                 el.child(self.new_session_modal(f32::from(window.viewport_size().height) - 96., cx))
             })

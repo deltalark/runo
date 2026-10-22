@@ -267,6 +267,34 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         )
 }
 
+/// The pattern on the rail's shade, round the open tab, which is cut from the sheet.
+fn rail_pattern() -> AnyElement {
+    canvas(
+        |_, _, _| (),
+        |b, _, window, _| {
+            if crate::pattern::current() == crate::pattern::Pattern::Off {
+                return;
+            }
+            let rail = b;
+            let mut areas = vec![rail];
+            if let Some(t) = TAB_CUT.get() {
+                let (top, bottom) = (t.origin.y - px(RAIL_R), t.bottom() + px(RAIL_R));
+                areas = vec![
+                    Bounds::from_corners(rail.origin, point(rail.right(), top)),
+                    Bounds::from_corners(point(rail.left(), bottom), rail.bottom_right()),
+                    Bounds::from_corners(point(rail.left(), top), point(t.left(), bottom)),
+                ];
+            }
+            crate::pattern::paint(&areas, crate::pattern::FRAME, window);
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .into_any_element()
+}
+
 /// The rail's own fill: the sheet under the whole column, then the rail's shade over it
 /// as one path, its whole column less the tab and the curves into it. Where the shade's
 /// edge is antialiased it blends into the sheet beneath, never into the desktop, so the
@@ -729,7 +757,11 @@ pub(crate) fn add_button(id: impl Into<ElementId>) -> Stateful<Div> {
 
 /// A strip of the frame's grey, such as the gutter between two islands.
 pub(crate) fn gutter() -> Div {
-    div().flex_none().bg(settings::frame())
+    div()
+        .flex_none()
+        .bg(settings::frame())
+        .relative()
+        .child(crate::pattern::chrome())
 }
 
 /// A card on an island: a borderless step lighter than the page, so groups read by
@@ -1498,6 +1530,7 @@ impl RunoApp {
             .child(rail_fill(
                 TAB_SHEET.get().unwrap_or_else(|| pane(c_sheet())),
             ))
+            .child(rail_pattern())
             .child(work)
             .child(self.project_group(cx))
             .child(div().flex_1())
@@ -2041,6 +2074,8 @@ impl RunoApp {
             .pr_2()
             // The frame's grey, the same as the rail and the gutters between islands.
             .bg(settings::frame())
+            .relative()
+            .child(crate::pattern::chrome())
             .window_control_area(WindowControlArea::Drag)
             // Three zones: the two sides share what the search box leaves, so the box
             // sits in the middle of the window on every page instead of moving with the
