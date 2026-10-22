@@ -172,7 +172,7 @@ const IDEAS: [(IconName, &str); 4] = [
 ];
 
 /// The greeting for this time of day.
-fn greeting() -> &'static str {
+pub(crate) fn greeting() -> &'static str {
     match chrono::Local::now().hour() {
         5..=11 => "Good morning.",
         12..=17 => "Good afternoon.",

@@ -55,10 +55,14 @@ pub(crate) enum Action {
         key: String,
         value: serde_json::Value,
     },
+    /// Keep a preference or fact for later chats, in the current project.
+    Remember { note: String },
+    /// Drop something remembered.
+    Forget { note: String },
 }
 
 /// What became of an action card.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) enum Outcome {
     Ready,
     Done(String),
@@ -345,6 +349,31 @@ impl RunoApp {
                 };
                 change(IconName::Settings, title, detail)
             }
+            Action::Remember { note } => {
+                if note.trim().is_empty() {
+                    return Err("There's nothing to remember.".into());
+                }
+                let project = self.assistant_project_name();
+                change(
+                    IconName::Brain,
+                    "Remember this".into(),
+                    if project.is_empty() {
+                        format!("\"{}\"", excerpt(note, 90))
+                    } else {
+                        format!("\"{}\" · in {project}", excerpt(note, 80))
+                    },
+                )
+            }
+            Action::Forget { note } => {
+                if !self.assistant.kept.notes.iter().any(|n| n.text == *note) {
+                    return Err("I don't remember that.".into());
+                }
+                change(
+                    IconName::Eraser,
+                    "Forget this".into(),
+                    format!("\"{}\"", excerpt(note, 90)),
+                )
+            }
         })
     }
 
@@ -437,6 +466,12 @@ impl RunoApp {
                         s.default_provider = agent::PROVIDERS[i].id.to_string()
                     }
                 });
+            }
+            Action::Remember { note } => {
+                self.assistant_remember(&note)?;
+            }
+            Action::Forget { note } => {
+                self.assistant_forget(&note)?;
             }
         }
         cx.notify();
