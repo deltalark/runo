@@ -1068,26 +1068,23 @@ pub fn readable_error(line: &str) -> String {
     }
 }
 
-/// The command inside Codex's `bash -lc '…'` wrapper.
+/// The command inside the shell wrapper Codex runs it in, such as `bash -lc '…'` or
+/// `/bin/zsh -lc …` on macOS.
 fn shell_body(command: &str) -> String {
-    for prefix in [
-        "bash -lc ",
-        "/bin/bash -lc ",
-        "sh -c ",
-        "/bin/sh -c ",
-        "zsh -lc ",
-    ] {
-        if let Some(rest) = command.strip_prefix(prefix) {
-            let rest = rest.trim();
-            return rest
-                .strip_prefix('\'')
-                .and_then(|r| r.strip_suffix('\''))
-                .or_else(|| rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')))
-                .unwrap_or(rest)
-                .to_string();
-        }
+    let mut words = command.splitn(3, ' ');
+    let (Some(shell), Some(flag), Some(rest)) = (words.next(), words.next(), words.next()) else {
+        return command.to_string();
+    };
+    let name = shell.rsplit('/').next().unwrap_or(shell);
+    if !matches!(name, "bash" | "sh" | "zsh") || !matches!(flag, "-c" | "-lc") {
+        return command.to_string();
     }
-    command.to_string()
+    let rest = rest.trim();
+    rest.strip_prefix('\'')
+        .and_then(|r| r.strip_suffix('\''))
+        .or_else(|| rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')))
+        .unwrap_or(rest)
+        .to_string()
 }
 
 fn duration(ms: u64) -> String {
@@ -1718,6 +1715,19 @@ mod tests {
             panic!("{opencode:?}")
         };
         assert_eq!(step.state, crate::harness::StepState::Failed);
+    }
+
+    #[test]
+    fn codex_commands_lose_their_shell_wrapper() {
+        assert_eq!(shell_body("bash -lc 'cargo test'"), "cargo test");
+        assert_eq!(shell_body("/bin/zsh -lc ls"), "ls");
+        assert_eq!(
+            shell_body("/bin/zsh -lc 'ls /nonexistent'"),
+            "ls /nonexistent"
+        );
+        assert_eq!(shell_body("/bin/sh -c \"make\""), "make");
+        assert_eq!(shell_body("python -c 'x'"), "python -c 'x'");
+        assert_eq!(shell_body("ls"), "ls");
     }
 
     #[test]
