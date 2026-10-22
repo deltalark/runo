@@ -1,0 +1,117 @@
+# Every night, installs the newest release of every agent in the manifest and runs
+# `Runo --check-agents`: the version, whether each CLI's help still mentions the flags
+# Runo waits on, and whether its protocol (ACP, Codex's app server, Pi's RPC mode)
+# still answers the opening handshake. Nothing signs in and no model runs, so it costs
+# no tokens. The report is compared with the night before (kept on the agent-registry
+# release); a regression opens or updates the "Agent compatibility" issue, and the
+# issue closes once a night comes back clean.
+name: Agent compatibility
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: agent-compat
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MANIFEST: native/runo-app/src/agents.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libfontconfig-dev libfreetype-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shm0-dev libxcb-xkb-dev \
+            libwayland-dev libvulkan-dev
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build Runo
+        run: cargo build -p runo
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Each agent the way the manifest installs it on Linux: its npm package, or its
+      # vendor's script. One that fails to install shows as not installed.
+      - name: Install the newest agents
+        run: |
+          python3 - > installs.sh <<'PY'
+          import json, os, shlex
+          for a in json.load(open(os.environ["MANIFEST"]))["agents"]:
+              how = a.get("install", {})
+              if how.get("npm"):
+                  print(f"npm install -g {shlex.quote(how['npm'])} || echo '::warning::{a['id']} did not install'")
+              elif how.get("unix"):
+                  print(f"( {how['unix']} ) || echo '::warning::{a['id']} did not install'")
+          PY
+          cat installs.sh
+          bash installs.sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.grok/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.factory/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the last report
+        run: gh release download agent-registry -p compat.json -O last.json 2>/dev/null || echo '{"agents":[]}' > last.json
+
+      - name: Check every agent
+        id: check
+        run: |
+          set +e
+          target/debug/Runo --check-agents --report compat.json --since last.json > summary.md
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          cat summary.md
+
+      - name: Keep the report for tomorrow
+        if: github.ref == 'refs/heads/main'
+        run: |
+          gh release view agent-registry >/dev/null 2>&1 || gh release create agent-registry \
+            --title "Agent registry" --prerelease --latest=false \
+            --notes "Signed agent manifests that Runo downloads. Not a Runo release."
+          gh release upload agent-registry compat.json --clobber
+
+      - name: Report a problem
+        if: steps.check.outputs.code != '0' && github.ref == 'refs/heads/main'
+        run: |
+          {
+            echo "The nightly check found agents that no longer match Runo's manifest."
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            cat summary.md
+          } > body.md
+          gh label create agent-compat --color d93f0b --description "Agent CLIs that drifted from Runo's manifest" 2>/dev/null || true
+          issue=$(gh issue list --label agent-compat --state open --json number --jq '.[0].number')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file body.md
+          else
+            gh issue create --title "Agent compatibility" --label agent-compat --body-file body.md
+          fi
+
+      - name: Close a fixed problem
+        if: steps.check.outputs.code == '0' && github.ref == 'refs/heads/main'
+        run: |
+          issue=$(gh issue list --label agent-compat --state open --json number --jq '.[0].number')
+          if [ -n "$issue" ]; then
+            gh issue close "$issue" --comment "Tonight's check is clean: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi

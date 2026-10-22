@@ -22,6 +22,7 @@ mod chatctl;
 mod clashes;
 mod cleanup;
 mod cliview;
+mod compat;
 mod connections;
 mod connections_ui;
 mod copies;
@@ -9965,6 +9966,11 @@ fn main() {
     // detached from the window (see harness::host).
     if args.get(1).map(String::as_str) == Some("--agent-host") {
         std::process::exit(harness::host::main(&args[2..]));
+    }
+    // `runo --check-agents [--report <file>] [--since <file>]`: how the installed agent
+    // CLIs match the manifest, for the nightly compatibility check (see compat).
+    if args.get(1).map(String::as_str) == Some("--check-agents") {
+        std::process::exit(compat::main(&args[2..]));
     }
     // `runo --events <session>`: print a session's event log, one JSON line per event.
     if args.get(1).map(String::as_str) == Some("--events") {

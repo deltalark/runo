@@ -157,7 +157,8 @@ pub struct AgentSpec {
     /// Arguments that run the agent over ACP: the first whose `when` the help mentions.
     #[serde(default)]
     pub acp: Vec<Args>,
-    /// Arguments that run the agent over its own RPC mode (Pi).
+    /// Arguments that run the agent over its own protocol: Codex's app server, Pi's RPC
+    /// mode.
     #[serde(default)]
     pub rpc: Vec<Args>,
     #[serde(default)]
