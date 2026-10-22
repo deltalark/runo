@@ -8,6 +8,7 @@
 //! the guide alone. It is off until turned on in Settings > General.
 
 use super::*;
+use crate::agent_pick::AgentPick;
 use crate::assistant_act::{Action, Outcome, MAX_ACTIONS};
 use std::sync::OnceLock;
 
@@ -132,6 +133,9 @@ const AGENT_STARTERS: [&str; 4] = [
     "Race Claude Code and Codex on a task",
     "How do I share a playbook?",
 ];
+
+/// How long an answer may take before it is stopped.
+const ANSWER_LIMIT: Duration = Duration::from_secs(120);
 
 /// How many earlier messages go to the agent with each question.
 const HISTORY_SENT: usize = 6;
@@ -330,6 +334,10 @@ pub(crate) struct Assistant {
     scroll: ScrollHandle,
     /// Whether the pointer is over the mark in the corner, and since when.
     hover: Option<(bool, std::time::Instant)>,
+    /// The answer so far, while the agent writes it.
+    streamed: String,
+    /// Stops the agent writing the answer.
+    stopper: Option<agent::Stopper>,
 }
 
 impl Assistant {
@@ -358,6 +366,8 @@ impl Assistant {
                 answerer: "",
                 scroll: ScrollHandle::new(),
                 hover: None,
+                streamed: String::new(),
+                stopper: None,
             },
             subs,
         )
@@ -454,12 +464,34 @@ fn split_reply(reply: &str) -> (String, Option<String>, Vec<Action>) {
     (lines.join("\n").trim().to_string(), open, actions)
 }
 
+/// The agent that answers: the one chosen in Settings, or the default agent.
+pub(crate) fn assistant_provider(st: &AppSettings) -> usize {
+    let id = if st.assistant_agent.is_empty() {
+        &st.default_provider
+    } else {
+        &st.assistant_agent
+    };
+    agent::PROVIDERS
+        .iter()
+        .position(|p| p.id == id)
+        .unwrap_or(0)
+}
+
+/// The model it answers on: the one chosen in Settings, or a small, fast one where Runo
+/// knows one.
+pub(crate) fn assistant_model(st: &AppSettings, provider: &str) -> String {
+    match st.assistant_model.as_str() {
+        "" if provider == "claude" => "haiku".to_string(),
+        m => m.to_string(),
+    }
+}
+
 impl RunoApp {
     /// Whether an agent answers, so the assistant knows the app's state and can act.
-    pub(crate) fn assistant_acts(cx: &App) -> bool {
+    pub(crate) fn assistant_acts(&self, cx: &App) -> bool {
         let st = cx.global::<AppSettings>();
-        st.assistant_answers == "agent"
-            && agent::installed(agent::provider(&st.default_provider).bin)
+        let p = &agent::PROVIDERS[assistant_provider(st)];
+        st.assistant_answers == "agent" && agent::available(p.bin, &st.agent(p.id).binary)
     }
 
     pub(crate) fn assistant_enabled(cx: &App) -> bool {
@@ -591,12 +623,13 @@ impl RunoApp {
             open: None,
         });
         self.assistant.scroll.scroll_to_bottom();
-        let st = cx.global::<AppSettings>();
-        let provider = agent::provider(&st.default_provider);
-        if !Self::assistant_acts(cx) {
+        if !self.assistant_acts(cx) {
             self.answer_from_guide(&found, None);
             return;
         }
+        let st = cx.global::<AppSettings>();
+        let provider = &agent::PROVIDERS[assistant_provider(st)];
+        let model = assistant_model(st, provider.id);
         self.assistant.answerer = provider.name;
         let articles: Vec<&Article> = if found.is_empty() {
             guide().iter().take(ARTICLES_SENT).collect()
@@ -612,19 +645,56 @@ impl RunoApp {
             cx,
         );
         let configured = st.agent(provider.id).binary;
-        let mut command = agent::ask_command(provider.id, &configured, &text);
-        // A small, fast model is plenty for a how-to answer.
-        if provider.id == "claude" {
-            let args: Vec<_> = command.get_args().map(|a| a.to_owned()).collect();
-            command = std::process::Command::new(command.get_program());
-            command.args(["--model", "haiku"]).args(args);
-        }
         let dir = store::data_dir().join("assistant");
         let _ = std::fs::create_dir_all(&dir);
+        let dir = dir.to_string_lossy().to_string();
+        let (command, parser) = if provider.id == "claude" {
+            // Its reply streams in as it is written.
+            let bin = if configured.trim().is_empty() {
+                provider.bin
+            } else {
+                configured.trim()
+            };
+            let mut command = std::process::Command::new(bin);
+            command
+                .args(["--model", &model, "-p", "--output-format", "stream-json"])
+                .args(["--verbose", "--include-partial-messages"])
+                .args(["--permission-mode", "plan", "--", &text]);
+            let parser = stream::Parser::Claude(stream::ClaudeStream::new(&dir));
+            (command, Some(parser))
+        } else {
+            (
+                agent::ask_command_on(provider.id, &configured, &text, &model),
+                None,
+            )
+        };
         self.assistant.asked += 1;
         let key = format!("assistant:{}", self.assistant.asked);
         self.assistant.asking = Some(key.clone());
-        agent::oneshot(key, command, &dir.to_string_lossy(), self.tx.clone());
+        self.assistant.streamed.clear();
+        self.assistant.stopper = Some(agent::oneshot_streamed(
+            key,
+            command,
+            &dir,
+            parser,
+            ANSWER_LIMIT,
+            self.tx.clone(),
+        ));
+    }
+
+    /// More of the answer being written arrived.
+    pub(crate) fn assistant_partial(&mut self, key: String, text: String) {
+        if self.assistant.asking.as_ref() == Some(&key) {
+            self.assistant.streamed = text;
+            self.assistant.scroll.scroll_to_bottom();
+        }
+    }
+
+    /// Stop the agent writing the answer; what it wrote so far stays as the answer.
+    fn assistant_stop(&mut self) {
+        if let Some(stopper) = self.assistant.stopper.take() {
+            stopper.stop();
+        }
     }
 
     /// The best matching article as the answer. Its `{shortcut}` tags are filled in when
@@ -663,6 +733,8 @@ impl RunoApp {
             return;
         }
         self.assistant.asking = None;
+        self.assistant.stopper = None;
+        self.assistant.streamed.clear();
         let question = self
             .assistant
             .chat
@@ -938,7 +1010,7 @@ impl RunoApp {
                     .text_color(rgb(if thinking { pose(mood).1 } else { c_muted() }))
                     .child(if thinking {
                         "Thinking…"
-                    } else if Self::assistant_acts(cx) {
+                    } else if self.assistant_acts(cx) {
                         "Ask, or tell me what to do"
                     } else {
                         "Ask how to do anything in Runo"
@@ -949,8 +1021,10 @@ impl RunoApp {
                 el.child(
                     self.ghost_button("assistant-clear", IconName::RotateCcw, "New chat")
                         .on_click(cx.listener(|this, _, _, cx| {
+                            this.assistant_stop();
                             this.assistant.chat.clear();
                             this.assistant.asking = None;
+                            this.assistant.streamed.clear();
                             cx.notify();
                         })),
                 )
@@ -983,7 +1057,7 @@ impl RunoApp {
             .py_3()
             .v_flex()
             .gap_3();
-        let acts = Self::assistant_acts(cx);
+        let acts = self.assistant_acts(cx);
         if self.assistant.chat.is_empty() {
             body = body
                 .child(
@@ -1105,17 +1179,71 @@ impl RunoApp {
             body = body.child(answer);
         }
         if self.assistant.asking.is_some() {
-            body = body.child(thinking_line());
+            let (so_far, _, _) = split_reply(&self.assistant.streamed);
+            if !so_far.is_empty() {
+                body = body.child(
+                    div().text_size(px(12.5)).child(
+                        TextView::markdown("assistant-streaming", with_live_keys(&so_far, cx))
+                            .selectable(true),
+                    ),
+                );
+            }
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(thinking_line(if so_far.is_empty() {
+                        "Looking it up"
+                    } else {
+                        "Writing"
+                    }))
+                    .child(
+                        div()
+                            .id("assistant-stop")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py(px(3.))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+                            .child(icon(IconName::CircleStop, 12., c_muted()))
+                            .child("Stop")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.assistant_stop();
+                                cx.notify();
+                            })),
+                    ),
+            );
         }
 
-        let answers = if acts {
+        // Which agent answers, on which model, as chosen in Settings; or the guide.
+        let answers = {
             let st = cx.global::<AppSettings>();
-            format!(
-                "Answers with {}",
-                agent::provider(&st.default_provider).name
-            )
-        } else {
-            "Answers from the guide".to_string()
+            if st.assistant_answers == "agent" {
+                let i = assistant_provider(st);
+                let name = agent::PROVIDERS[i].name;
+                if acts {
+                    let model = assistant_model(st, agent::PROVIDERS[i].id);
+                    let label = if model == "haiku" {
+                        Some("Haiku".to_string())
+                    } else {
+                        AgentPick::model_label(i, &model)
+                    };
+                    match label {
+                        Some(label) => format!("Answers with {name} · {label}"),
+                        None => format!("Answers with {name}"),
+                    }
+                } else {
+                    format!("{name} isn't installed; answering from the guide")
+                }
+            } else {
+                "Answers from the guide".to_string()
+            }
         };
         let footer = div()
             .px_4()
@@ -1126,6 +1254,7 @@ impl RunoApp {
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .justify_between()
                     .text_size(px(11.))
                     .text_color(rgb(c_muted()))
@@ -1548,7 +1677,7 @@ fn header_mark(mood: Mood) -> AnyElement {
 
 /// While the agent works on an answer: the line it always showed, and a caret in the
 /// accent that blinks after it.
-fn thinking_line() -> AnyElement {
+fn thinking_line(label: &'static str) -> AnyElement {
     let caret = div()
         .w(px(6.))
         .h(px(13.))
@@ -1572,7 +1701,7 @@ fn thinking_line() -> AnyElement {
         .gap(px(5.))
         .text_size(px(12.5))
         .text_color(rgb(c_muted()))
-        .child("Looking it up")
+        .child(label)
         .child(caret)
         .into_any_element()
 }

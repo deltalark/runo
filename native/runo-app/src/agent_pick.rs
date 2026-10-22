@@ -31,7 +31,7 @@ impl AgentPick {
     }
 
     /// A model's name as the menu and chip show it.
-    fn model_label(agent: usize, model: &str) -> Option<String> {
+    pub(crate) fn model_label(agent: usize, model: &str) -> Option<String> {
         if model.is_empty() {
             return None;
         }
@@ -46,7 +46,7 @@ impl AgentPick {
     }
 
     /// The model choices an agent offers, its default first.
-    fn models(agent: usize) -> Vec<caps::Choice> {
+    pub(crate) fn models(agent: usize) -> Vec<caps::Choice> {
         let p = &agent::PROVIDERS[agent];
         caps::controls(p.id, &HashMap::new())
             .into_iter()

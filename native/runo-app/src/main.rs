@@ -2668,6 +2668,7 @@ impl RunoApp {
             Event::Output(key, result) => {
                 self.handle_output(key, result);
             }
+            Event::Partial(key, text) => self.assistant_partial(key, text),
             // A shell printed or exited; repaint it.
             Event::Pty(id) => {
                 self.cli_exited(id);

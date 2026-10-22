@@ -1049,6 +1049,8 @@ pub enum Event {
     Done(Target, bool),
     /// Result of a one-off background command, by the key it was started with.
     Output(String, Result<String, String>),
+    /// The reply so far of a command started with `oneshot_streamed`, by its key.
+    Partial(String, String),
     /// An interactive shell has new output, or exited.
     Pty(u64),
 }
@@ -1076,6 +1078,128 @@ pub fn oneshot(key: String, mut command: Command, dir: &str, tx: Sender<Event>) 
         };
         let _ = tx.send(Event::Output(key, result));
     });
+}
+
+/// Stops a run started with `oneshot_streamed`.
+#[derive(Clone)]
+pub struct Stopper(std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>);
+
+impl Stopper {
+    /// Stop the run; what it said so far still arrives as its result.
+    pub fn stop(&self) {
+        if let Some(child) = self.0.lock().ok().as_mut().and_then(|c| c.as_mut()) {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// Like `oneshot`, but the reply arrives as it is written: `Event::Partial` with the text
+/// so far, at most every `PARTIAL_EVERY`, then `Event::Output` with all of it. `parser`
+/// reads the CLI's structured output (only its reply text is kept); without one, stdout is
+/// the reply. The run is killed after `limit`.
+pub fn oneshot_streamed(
+    key: String,
+    mut command: Command,
+    dir: &str,
+    mut parser: Option<crate::stream::Parser>,
+    limit: std::time::Duration,
+    tx: Sender<Event>,
+) -> Stopper {
+    use std::io::BufRead;
+    const PARTIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(60);
+    command
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let stopper = Stopper(slot.clone());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let program = command.get_program().to_owned();
+            let _ = tx.send(Event::Output(
+                key,
+                Err(format!("could not start {program:?}: {error}")),
+            ));
+            return stopper;
+        }
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    if let Ok(mut s) = slot.lock() {
+        *s = Some(child);
+    }
+    // Past the limit, stop it as the person would.
+    let watchdog = stopper.clone();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = done.clone();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while start.elapsed() < limit {
+            if finished.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        watchdog.stop();
+    });
+    std::thread::spawn(move || {
+        let err = std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = stderr {
+                let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
+            }
+            text
+        });
+        let mut reply = String::new();
+        let mut failure = None;
+        let mut sent = std::time::Instant::now();
+        if let Some(out) = stdout {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                match parser.as_mut() {
+                    Some(p) => {
+                        for update in p.feed(&line) {
+                            match update {
+                                crate::stream::Update::Text(t) => reply.push_str(&t),
+                                crate::stream::Update::Error(e) => failure = Some(e),
+                                _ => {}
+                            }
+                        }
+                    }
+                    None => {
+                        reply.push_str(&line);
+                        reply.push('\n');
+                    }
+                }
+                if sent.elapsed() >= PARTIAL_EVERY && !reply.trim().is_empty() {
+                    sent = std::time::Instant::now();
+                    let _ = tx.send(Event::Partial(key.clone(), reply.clone()));
+                }
+            }
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let status = slot
+            .lock()
+            .ok()
+            .and_then(|mut c| c.take())
+            .and_then(|mut c| c.wait().ok());
+        let err = err.join().unwrap_or_default();
+        let reply = reply.trim().to_string();
+        let result = match (status, failure) {
+            (_, Some(e)) if reply.is_empty() => Err(e),
+            (Some(s), _) if s.success() => Ok(reply),
+            // Stopped or failed partway: what it said so far is still the answer.
+            _ if !reply.is_empty() => Ok(reply),
+            _ => Err(if err.trim().is_empty() {
+                "it stopped without answering".to_string()
+            } else {
+                err.trim().to_string()
+            }),
+        };
+        let _ = tx.send(Event::Output(key, result));
+    });
+    stopper
 }
 
 /// Like `oneshot`, but the command is killed after `limit` and reported as an error.
@@ -1361,42 +1485,56 @@ pub fn waits_for_sign_in(line: &str) -> bool {
 /// A plain, one-shot run of an agent CLI with a prompt, for small jobs such as
 /// writing a commit message. Read-only where the CLI supports it.
 pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Command {
+    ask_command_on(provider, configured_bin, prompt, "")
+}
+
+/// The flag an agent's one-shot ask takes a model with, if it takes one.
+pub fn ask_model_flag(provider: &str) -> Option<&'static str> {
+    match provider {
+        "claude" | "copilot" => Some("--model"),
+        "amp" => None,
+        _ => Some("-m"),
+    }
+}
+
+/// `ask_command` on `model`; empty leaves the agent on its own default.
+pub fn ask_command_on(provider: &str, configured_bin: &str, prompt: &str, model: &str) -> Command {
     let bin = if configured_bin.trim().is_empty() {
         self::provider(provider).bin
     } else {
         configured_bin.trim()
     };
     let mut command = Command::new(bin);
+    let model_args: Vec<&str> = match ask_model_flag(provider) {
+        Some(flag) if !model.trim().is_empty() => vec![flag, model.trim()],
+        _ => Vec::new(),
+    };
     match provider {
         "codex" => {
-            command.args([
-                "exec",
-                "--sandbox",
-                "read-only",
-                "--skip-git-repo-check",
-                prompt,
-            ]);
+            command.args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"]);
+            command.args(&model_args).arg(prompt);
         }
         "opencode" => {
-            command.args(["run", prompt]);
+            command.arg("run").args(&model_args).arg(prompt);
         }
         "cursor" => {
             command.args(["-p", "--output-format", "text"]);
             command.args(cursor_trust());
             command.args(cursor_mode("ask"));
-            command.arg(prompt);
+            command.args(&model_args).arg(prompt);
         }
         "amp" => {
             command.args(["-x", prompt]);
         }
         "droid" => {
-            command.args(["exec", prompt]);
+            command.arg("exec").args(&model_args).arg(prompt);
         }
         "claude" => {
-            command.args(["-p", "--permission-mode", "plan", "--", prompt]);
+            command.args(["-p", "--permission-mode", "plan"]);
+            command.args(&model_args).args(["--", prompt]);
         }
         _ => {
-            command.args(["-p", prompt]);
+            command.args(&model_args).args(["-p", prompt]);
         }
     }
     command
@@ -1714,7 +1852,7 @@ mod tests {
                     assert!(ok);
                     break;
                 }
-                Event::Output(..) | Event::Pty(_) => {}
+                Event::Output(..) | Event::Partial(..) | Event::Pty(_) => {}
             }
         }
         lines.sort();
@@ -1883,7 +2021,7 @@ mod arg_tests {
                     assert!(!ok);
                     break;
                 }
-                Event::Output(..) | Event::Pty(_) => unreachable!(),
+                Event::Output(..) | Event::Partial(..) | Event::Pty(_) => unreachable!(),
             }
         }
         assert_eq!(out[0], "env=from-env");
@@ -2358,6 +2496,35 @@ mod arg_tests {
             file_servers(&remote).is_empty(),
             "no local programs elsewhere"
         );
+    }
+
+    #[test]
+    fn asks_take_a_model_before_the_prompt() {
+        let args = |provider: &str, model: &str| -> Vec<String> {
+            ask_command_on(provider, "", "why?", model)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args("claude", "haiku"),
+            [
+                "-p",
+                "--permission-mode",
+                "plan",
+                "--model",
+                "haiku",
+                "--",
+                "why?"
+            ]
+        );
+        let codex = args("codex", "gpt-5-mini");
+        assert_eq!(codex[0], "exec");
+        assert!(codex.ends_with(&["-m".into(), "gpt-5-mini".into(), "why?".into()]));
+        assert_eq!(args("gemini", "flash"), ["-m", "flash", "-p", "why?"]);
+        // No model leaves each ask as it always was.
+        assert_eq!(args("gemini", ""), ["-p", "why?"]);
+        assert_eq!(args("amp", "anything"), ["-x", "why?"]);
     }
 
     #[test]
