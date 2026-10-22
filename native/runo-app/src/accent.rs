@@ -114,7 +114,7 @@ impl Rim {
     /// Paints the light at each lit corner, `hover` of the way to its hovered look: one
     /// unbroken stroke round the corner and on along the outline either side, through
     /// any curves it meets, in the accent at the corner and fading to nothing `fade`
-    /// along (or halfway to the next lit corner, or at the outline's end), over a faint
+    /// along (or under a third of the way to the next lit corner, so a gap stays dark between them, or at the outline's end), over a faint
     /// wider glow.
     pub fn paint(self, hover: f32, window: &mut Window) {
         // The outline as a dense polyline, each turn cut fine enough to read as a curve,
@@ -190,25 +190,28 @@ impl Rim {
         let fade = 34. + 18. * hover;
         let color = color(hover);
         let count = lit.len();
+        // How much of the way between two lit corners each one's light may take, so the
+        // middle of the edge between them stays dark.
+        const SHARE: f32 = 0.3;
         for (n, &(a, b)) in lit.iter().enumerate() {
             let (sa, sb) = (at[a], at[b]);
-            // How far the light may run back and on: `fade`, but no further than halfway
-            // to the lit corner beside it, or the outline's end.
+            // How far the light may run back and on: `fade`, but no further than `SHARE`
+            // of the way to the lit corner beside it, or the outline's end.
             let back = match (n, self.closed) {
                 (0, false) => sa,
                 (0, true) => {
                     let (_, pb) = lit[count - 1];
-                    (sa - (at[pb] - total)) / 2.
+                    (sa - (at[pb] - total)) * SHARE
                 }
-                _ => (sa - at[lit[n - 1].1]) / 2.,
+                _ => (sa - at[lit[n - 1].1]) * SHARE,
             };
             let on = match (n + 1 == count, self.closed) {
                 (true, false) => total - sb,
                 (true, true) => {
                     let (na, _) = lit[0];
-                    (at[na] + total - sb) / 2.
+                    (at[na] + total - sb) * SHARE
                 }
-                _ => (at[lit[n + 1].0] - sb) / 2.,
+                _ => (at[lit[n + 1].0] - sb) * SHARE,
             };
             let (back, on) = (fade.min(back), fade.min(on));
             // gpui's gradients don't follow a bent path, so the fade is built from
