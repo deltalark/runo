@@ -79,13 +79,15 @@ pub(crate) fn accent_bracket(key: impl Into<SharedString>, radius: f32) -> AnyEl
     bracket(key.into(), radius, true)
 }
 
-/// The accent for a row whose right side runs on into what sits beside it, and so has no
-/// corner there to mark: one bracket down its left edge, round both corners, like "(".
-fn accent_bracket_left(key: impl Into<SharedString>, radius: f32) -> AnyElement {
+/// The accent for a row fused to the page beside it (see `row_fuse`), which has no
+/// bottom-right corner of its own: the same top-left hook, and a bottom-right one that
+/// runs along the bottom edge and down the curve where the row flows into the page.
+/// Drawn over the fuse, whose right side is the list's edge.
+fn fused_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
     bracket(key.into(), radius, false)
 }
 
-fn bracket(key: SharedString, radius: f32, corners: bool) -> AnyElement {
+fn bracket(key: SharedString, radius: f32, own_corner: bool) -> AnyElement {
     let hover_key = key.clone();
     div()
         .absolute()
@@ -98,24 +100,24 @@ fn bracket(key: SharedString, radius: f32, corners: bool) -> AnyElement {
                     let (x0, x1, y0, y1) = (b.origin.x, b.right(), b.origin.y, b.bottom());
                     let r = px(radius).min((y1 - y0) / 2.);
                     // Along the middle of a 2px edge inside the outline. `i` is that inset
-                    // and `rc` the corner's radius there.
+                    // and `rc` the corner's radius there. Each hook runs `reach` past its
+                    // corner along the top or bottom, and `down` along the side, never
+                    // more than halfway.
                     let (i, rc) = (px(1.), r - px(1.));
+                    let side = ((y1 - y0) / 2. - i - rc).max(px(0.));
+                    let (reach, down) = (px(9. + 6. * hover), px(5. + 4. * hover).min(side));
                     let at = |x: Pixels, y: Pixels| point(x, y);
                     let mut f = PathBuilder::stroke(px(2.));
-                    if corners {
-                        // Each hook runs `reach` past its corner along both edges, never
-                        // more than halfway down the side.
-                        let side = ((y1 - y0) / 2. - i - rc).max(px(0.));
-                        let (reach, down) = (px(9. + 6. * hover), px(5. + 4. * hover).min(side));
-                        f.move_to(at(x0 + i, y0 + i + rc + down));
-                        f.line_to(at(x0 + i, y0 + i + rc));
-                        turn(
-                            &mut f,
-                            at(x0 + i, y0 + i + rc),
-                            at(x0 + i, y0 + i),
-                            at(x0 + i + rc, y0 + i),
-                        );
-                        f.line_to(at(x0 + i + rc + reach, y0 + i));
+                    f.move_to(at(x0 + i, y0 + i + rc + down));
+                    f.line_to(at(x0 + i, y0 + i + rc));
+                    turn(
+                        &mut f,
+                        at(x0 + i, y0 + i + rc),
+                        at(x0 + i, y0 + i),
+                        at(x0 + i + rc, y0 + i),
+                    );
+                    f.line_to(at(x0 + i + rc + reach, y0 + i));
+                    if own_corner {
                         f.move_to(at(x1 - i, y1 - i - rc - down));
                         f.line_to(at(x1 - i, y1 - i - rc));
                         turn(
@@ -126,25 +128,17 @@ fn bracket(key: SharedString, radius: f32, corners: bool) -> AnyElement {
                         );
                         f.line_to(at(x1 - i - rc - reach, y1 - i));
                     } else {
-                        // Down the left edge, round both corners and on along the top and
-                        // bottom by `tail`.
-                        let (x, tail) = (x0 + i, px(6. * hover));
-                        f.move_to(at(x + rc + tail, y0 + i));
-                        f.line_to(at(x + rc, y0 + i));
+                        // The fuse's curve turns outwards, from its bottom edge down into
+                        // the list's edge at `x1`, so inside it the radius is `r + i`.
+                        let ro = r + i;
+                        f.move_to(at(x1 - r - reach, y1 - i));
+                        f.line_to(at(x1 + i - ro, y1 - i));
                         turn(
                             &mut f,
-                            at(x + rc, y0 + i),
-                            at(x, y0 + i),
-                            at(x, y0 + i + rc),
+                            at(x1 + i - ro, y1 - i),
+                            at(x1 + i, y1 - i),
+                            at(x1 + i, y1 - i + ro),
                         );
-                        f.line_to(at(x, y1 - i - rc));
-                        turn(
-                            &mut f,
-                            at(x, y1 - i - rc),
-                            at(x, y1 - i),
-                            at(x + rc, y1 - i),
-                        );
-                        f.line_to(at(x + rc + tail, y1 - i));
                     }
                     if let Ok(path) = f.build() {
                         window.paint_path(path, accent::color(hover));
@@ -395,7 +389,7 @@ fn rail_icon(glyph: IconName, on: bool) -> AnyElement {
 
 /// A list's selected row joined to the page beside the list: a fill in the page's colour
 /// from the row out to the list's edge, with the list curving into it above and below,
-/// the same way the rail's tab joins the list, and a short accent rule on its left edge.
+/// the same way the rail's tab joins the list, and the accent's hooks at its corners.
 /// `reach` is how far the list's edge is past the row's right side. It slides in from the
 /// page when the row is picked. A child of the row, which must be `relative` and draw it
 /// first, under its content.
@@ -413,7 +407,7 @@ pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
         .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
         .child(inner_curve(page, true, FUSE_R).top(px(-FUSE_R)))
         .child(inner_curve(page, false, FUSE_R).bottom(px(-FUSE_R)))
-        .child(accent_bracket_left(format!("{key}-rule"), FUSE_R))
+        .child(fused_bracket(format!("{key}-rule"), FUSE_R))
         .animated(
             ElementId::Name(key),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
