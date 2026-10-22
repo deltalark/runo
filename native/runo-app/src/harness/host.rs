@@ -284,9 +284,18 @@ mod tests {
         let turn = temp("steer");
         send(&turn, "first").unwrap();
         let t = turn.clone();
-        let host = std::thread::spawn(move || run(&t, "sh", &sh(ECHO), IDLE));
-        // The agent is still on the first message.
-        std::thread::sleep(Duration::from_millis(100));
+        // An agent that takes a while over each message.
+        let slow = ECHO.replace("sleep 0.3", "sleep 1.5");
+        let host = std::thread::spawn(move || run(&t, "sh", &sh(&slow), IDLE));
+        // Sent once the agent is working on the first message, however slow the machine.
+        let start = std::time::Instant::now();
+        while !std::fs::read_to_string(turn.join("out")).is_ok_and(|o| o.contains("first")) {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "the agent never started"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         send(&turn, "second").unwrap();
         assert_eq!(host.join().unwrap(), 0);
         let out = std::fs::read_to_string(turn.join("out")).unwrap();
