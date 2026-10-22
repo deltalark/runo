@@ -118,7 +118,7 @@ const SOURCES: &[(&str, &str)] = &[
 ];
 
 /// Questions offered when the panel opens with nothing asked yet.
-const STARTERS: [&str; 4] = [
+pub(crate) const STARTERS: [&str; 4] = [
     "How do I race Claude Code and Codex on one task?",
     "How do I keep an agent running after I close my laptop?",
     "How do I share a playbook?",
@@ -127,7 +127,7 @@ const STARTERS: [&str; 4] = [
 
 /// Offered instead when an agent answers, which also knows what is happening in the app
 /// and can do things in it.
-const AGENT_STARTERS: [&str; 4] = [
+pub(crate) const AGENT_STARTERS: [&str; 4] = [
     "What needs me right now?",
     "How are my running agents doing?",
     "Race Claude Code and Codex on a task",
@@ -1478,7 +1478,7 @@ impl RunoApp {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mood {
+pub(crate) enum Mood {
     Idle,
     Listening,
     Thinking,
@@ -1682,13 +1682,13 @@ fn mark_with(mood: Mood, size: f32, bars: Bars, badge: Option<usize>, running: b
 
 const VIOLET: u32 = 0xa78bfa;
 /// The violet Home's prompt ring turns into.
-const RING_VIOLET: u32 = 0x8b5cf6;
+pub(crate) const RING_VIOLET: u32 = 0x8b5cf6;
 /// How long the light takes to run once round the mark's edge; thinking runs it three
 /// times as fast.
 const RUN_MS: f32 = 4200.;
 
 /// `color` at opacity `a`.
-fn glow(color: u32, a: f32) -> Rgba {
+pub(crate) fn glow(color: u32, a: f32) -> Rgba {
     rgba((color << 8) | (a.clamp(0., 1.) * 255.).round() as u32)
 }
 
@@ -1827,15 +1827,20 @@ fn lit_mark(mood: Mood, size: f32, bars: Bars, run: Option<f32>, swell: f32) -> 
 /// The mark in the panel's header, with the light running round it while the panel is
 /// open.
 fn header_mark(mood: Mood) -> AnyElement {
+    live_mark_sized(mood, 24.)
+}
+
+/// Runo's mark at `size`, its light running round while `mood` is lively.
+pub(crate) fn live_mark_sized(mood: Mood, size: f32) -> AnyElement {
     if !anim_on() {
-        return lit_mark(mood, 24., pose(mood).0, None, 0.);
+        return lit_mark(mood, size, pose(mood).0, None, 0.);
     }
     div()
-        .size(px(24.))
+        .size(px(size))
         .with_animation(
-            ElementId::Name(format!("assistant-header-mark-{mood:?}").into()),
+            ElementId::Name(format!("assistant-header-mark-{mood:?}-{size}").into()),
             Animation::new(Duration::from_millis(1400)).repeat(),
-            move |el, _| el.child(lit_mark(mood, 24., pose(mood).0, Some(turn(mood)), 0.)),
+            move |el, _| el.child(lit_mark(mood, size, pose(mood).0, Some(turn(mood)), 0.)),
         )
         .into_any_element()
 }

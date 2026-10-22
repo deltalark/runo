@@ -17,13 +17,21 @@ pub(crate) const ROWS: usize = 8;
 pub(crate) struct Row {
     pub id: u64,
     pub title: String,
-    /// What it is doing and where: "Waiting on you · Claude · api".
-    pub line: String,
+    pub project: String,
+    pub branch: String,
+    /// The agent's name, glyph and colour, for its badge.
+    pub agent: &'static str,
+    pub mark: &'static str,
+    pub color: u32,
     pub dot: Dot,
-    /// Shown when the row is opened: agent and branch, status, last reply, changes, cost.
-    pub detail: Vec<String>,
-    /// The permission it waits on: "Claude wants to run `cargo test`".
-    pub approval: Option<String>,
+    /// "Waiting on you", "Failed", "Finished", or how long it has run: "12m".
+    pub status: String,
+    /// The first line of its last reply.
+    pub last: Option<String>,
+    /// "4 files changed · $0.86".
+    pub facts: String,
+    /// The permission it waits on: "Claude wants to run" and the command, if any.
+    pub approval: Option<(String, Option<String>)>,
     /// Its agent runs on this machine and can be stopped.
     pub stoppable: bool,
 }
@@ -51,6 +59,8 @@ pub(crate) struct Snapshot {
     pub more_working: usize,
     /// Idle sessions with changes to review.
     pub review: usize,
+    pub running: usize,
+    pub needs_you: usize,
     /// No window is open: the panel only offers to open one.
     pub closed: bool,
 }
@@ -64,6 +74,7 @@ pub(crate) enum Go {
     Inbox,
     Sessions,
     Review,
+    Settings,
     OpenRuno,
 }
 
@@ -98,6 +109,17 @@ fn first_line(text: &str, max: usize) -> String {
         format!("{}…", line.chars().take(max).collect::<String>().trim_end())
     } else {
         line.to_string()
+    }
+}
+
+/// "run `cargo test`" as ("run", Some("cargo test")); text without a code span stays whole.
+fn split_code(what: &str) -> (String, Option<String>) {
+    match what.split_once('`') {
+        Some((verb, rest)) => (
+            verb.trim().to_string(),
+            Some(rest.trim_end_matches('`').to_string()),
+        ),
+        None => (what.to_string(), None),
     }
 }
 
@@ -162,45 +184,27 @@ impl RunoApp {
             more_working: working.len().saturating_sub(ROWS),
             working: working.into_iter().take(ROWS).collect(),
             review: counts.review,
+            running: counts.running,
+            needs_you: counts.needs_you,
             closed: false,
         }
     }
 
     fn menubar_row(&self, s: &Session, dot: Dot, status: String) -> Row {
-        let agent = agent::provider(&s.provider).name;
+        let provider = agent::provider(&s.provider);
         let project = self
             .state
             .projects
             .iter()
             .find(|p| p.id == s.project_id)
-            .map(|p| p.name.as_str())
-            .unwrap_or("");
-        let mut line = vec![status.clone(), agent.to_string()];
-        if !project.is_empty() {
-            line.push(project.to_string());
-        }
-
-        let mut head = vec![agent.to_string()];
-        if let Some(model) = s.opts.get("model").filter(|m| !m.is_empty()) {
-            head.push(model.clone());
-        }
-        if !s.branch.is_empty() {
-            head.push(format!("branch {}", s.branch));
-        }
-        let mut detail = vec![head.join(" · ")];
-        detail.push(match dot {
-            Dot::Working if status == "just now" => "Started just now".into(),
-            Dot::Working => format!("Working for {status}"),
-            _ => status,
-        });
-        if let Some(reply) = s
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let last = s
             .messages
             .iter()
             .rev()
             .find(|m| m.role == Role::Agent && !m.text.trim().is_empty())
-        {
-            detail.push(format!("“{}”", first_line(&reply.text, 60)));
-        }
+            .map(|m| first_line(&m.text, 80));
         let mut facts = Vec::new();
         if let Some((files, _, _)) = self.stats.get(&s.id).filter(|st| st.0 > 0) {
             facts.push(format!(
@@ -212,21 +216,23 @@ impl RunoApp {
         if cents >= 0.5 {
             facts.push(format!("${:.2}", cents / 100.));
         }
-        if !facts.is_empty() {
-            detail.push(facts.join(" · "));
-        }
+        let approval = self.approval_for(s.id).map(|r| {
+            let (verb, code) = split_code(&approvals::describe(&r.tool, &r.input));
+            (format!("{} wants to {verb}", provider.name), code)
+        });
         Row {
             id: s.id,
             title: s.title.clone(),
-            line: line.join(" · "),
+            project,
+            branch: s.branch.clone(),
+            agent: provider.name,
+            mark: provider.mark,
+            color: provider.color,
             dot,
-            detail,
-            approval: self.approval_for(s.id).map(|r| {
-                format!(
-                    "{agent} wants to {}",
-                    approvals::describe(&r.tool, &r.input)
-                )
-            }),
+            status,
+            last,
+            facts: facts.join(" · "),
+            approval,
             stoppable: self.handles.contains_key(&Target::Session(s.id)),
         }
     }
@@ -243,6 +249,7 @@ impl RunoApp {
             Go::Inbox => self.go(Mode::Inbox, window, cx),
             Go::Sessions => self.view = View::AllSessions,
             Go::Review => self.go(Mode::Home, window, cx),
+            Go::Settings => self.open_settings(),
             Go::OpenRuno => {}
         }
         cx.notify();
@@ -662,6 +669,18 @@ mod tests {
         );
         assert_eq!(first_line("abcdef", 3), "abc…");
         assert_eq!(first_line("", 3), "");
+    }
+
+    #[test]
+    fn commands_come_out_of_their_code_span() {
+        assert_eq!(
+            split_code("run `cargo test -p runo`"),
+            ("run".to_string(), Some("cargo test -p runo".to_string()))
+        );
+        assert_eq!(
+            split_code("edit src/main.rs"),
+            ("edit src/main.rs".to_string(), None)
+        );
     }
 
     #[test]
