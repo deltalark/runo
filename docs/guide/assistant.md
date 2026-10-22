@@ -35,7 +35,7 @@ While the assistant is closed, the mark speaks up when something is ready for yo
 
 Choose which agent answers, and its model, in **Settings → General → Runo assistant** (**Assistant agent** and **Assistant model**). The agent starts out the same as your default agent for new sessions, and the model starts on a fast default (Haiku on Claude). The line under the input shows which one is answering.
 
-A new chat opens on a briefing: what needs you, what's running, what's ready to review, today's spend, the clash radar and what it remembers. Click a tile to go there. The expand button in the header turns the panel into the command deck, a bigger view in the middle of the window; click outside it to put it back in the corner.
+A new chat opens on a briefing: what needs you, what's running, what's ready to review, an estimate of today's spend, the clash radar and what it remembers. Click a tile to go there. The expand button in the header turns the panel into the command deck, a bigger view in the middle of the window; click outside it to put it back in the corner.
 
 Chats are kept between restarts. Today's chat reopens where you left it, and a new day starts on the briefing. The clock button in the header lists earlier chats to pick up or delete, and everything it remembers, each with **×** to forget it. When you say something like "always use worktrees for Codex", it can offer a card to remember that, and it follows what it remembers in every chat in that project.
 

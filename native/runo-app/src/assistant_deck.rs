@@ -51,7 +51,12 @@ impl RunoApp {
             })
         };
         let clashes = self.git_radar.as_ref().map_or(0, |h| h.len());
-        let spend = self.counts().spend_today;
+        let spend = self
+            .state
+            .spend
+            .get(&store::today())
+            .copied()
+            .unwrap_or_default();
         let mut tiles = vec![
             Tile {
                 label: "Needs you",
@@ -87,9 +92,9 @@ impl RunoApp {
                 go: open("review"),
             },
             Tile {
-                label: "Spent today",
+                label: "Est. spend today",
                 value: format!("${:.2}", spend / 100.0),
-                detail: "Reported by your agents".into(),
+                detail: "An estimate from what your agents report".into(),
                 lit: None,
                 go: None,
             },
