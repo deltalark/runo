@@ -90,6 +90,8 @@ pub struct AppSettings {
     pub glass: String,
     /// Cards, menus and dialogs are translucent too.
     pub glass_cards: bool,
+    /// Background pattern, by id from `pattern::Pattern`: "off", "dots", "blueprint"…
+    pub pattern: String,
     /// Interface font: "bundled" (Runo's own, tuned for sharp small text) or "system".
     pub font: String,
     /// The status bar's Usage popover shows every limit window, not just the closest one.
@@ -204,6 +206,7 @@ impl Default for AppSettings {
             theme: "dark".into(),
             color_theme: "runo".into(),
             accent: "indigo".into(),
+            pattern: "off".into(),
             diff_colors: "default".into(),
             animations: true,
             notifications: true,
@@ -335,6 +338,7 @@ impl AppSettings {
         ANIMATIONS.store(self.animations, Ordering::Relaxed);
         GLASS.store(glass_alpha(&self.glass), Ordering::Relaxed);
         GLASS_CARDS.store(self.glass_cards, Ordering::Relaxed);
+        crate::pattern::set(&self.pattern);
         MEMORY_SERVER.store(self.memory_server, Ordering::Relaxed);
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
