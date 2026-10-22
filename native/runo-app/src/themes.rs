@@ -1,6 +1,7 @@
-//! Colour themes, picked under Settings > Appearance: one for dark mode and one for light
-//! mode. Each maps an editor theme onto Runo's colour tokens; the `c_*` functions in
-//! `settings.rs` read the one in use.
+//! Colour themes, picked under Settings > Appearance. A theme pairs a light and a dark
+//! palette, and the Light / Dark / System switch picks between them. Each palette maps an
+//! editor theme onto Runo's colour tokens; the `c_*` functions in `settings.rs` read the
+//! one in use.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -8,7 +9,6 @@ use crate::settings::mix;
 
 pub struct Palette {
     pub id: &'static str,
-    pub name: &'static str,
     /// The page: the editor background in the source theme.
     pub canvas: u32,
     pub sidebar: u32,
@@ -57,10 +57,9 @@ impl Palette {
     }
 }
 
-pub const DARK: [Palette; 9] = [
+const DARK: [Palette; 9] = [
     Palette {
         id: "tokyo-night",
-        name: "Tokyo Night (default)",
         canvas: 0x1a1b26,
         sidebar: 0x16161e,
         rail: 0x111118,
@@ -85,7 +84,6 @@ pub const DARK: [Palette; 9] = [
     },
     Palette {
         id: "tokyo-night-storm",
-        name: "Tokyo Night Storm",
         canvas: 0x24283b,
         sidebar: 0x1f2335,
         rail: 0x1b1e2e,
@@ -110,7 +108,6 @@ pub const DARK: [Palette; 9] = [
     },
     Palette {
         id: "catppuccin-mocha",
-        name: "Catppuccin Mocha",
         canvas: 0x1e1e2e,
         sidebar: 0x181825,
         rail: 0x11111b,
@@ -135,7 +132,6 @@ pub const DARK: [Palette; 9] = [
     },
     Palette {
         id: "catppuccin-macchiato",
-        name: "Catppuccin Macchiato",
         canvas: 0x24273a,
         sidebar: 0x1e2030,
         rail: 0x181926,
@@ -160,7 +156,6 @@ pub const DARK: [Palette; 9] = [
     },
     Palette {
         id: "catppuccin-frappe",
-        name: "Catppuccin Frappé",
         canvas: 0x303446,
         sidebar: 0x292c3c,
         rail: 0x232634,
@@ -185,7 +180,6 @@ pub const DARK: [Palette; 9] = [
     },
     Palette {
         id: "ayu-dark",
-        name: "Ayu Dark",
         canvas: 0x0d1017,
         sidebar: 0x0b0e14,
         rail: 0x080a0f,
@@ -210,7 +204,6 @@ pub const DARK: [Palette; 9] = [
     },
     Palette {
         id: "ayu-mirage",
-        name: "Ayu Mirage",
         canvas: 0x242936,
         sidebar: 0x1f2430,
         rail: 0x1a1f29,
@@ -235,7 +228,6 @@ pub const DARK: [Palette; 9] = [
     },
     Palette {
         id: "night-owl",
-        name: "Night Owl",
         canvas: 0x011627,
         sidebar: 0x01111d,
         rail: 0x010d17,
@@ -260,7 +252,6 @@ pub const DARK: [Palette; 9] = [
     },
     Palette {
         id: "one-dark",
-        name: "One Dark",
         canvas: 0x282c34,
         sidebar: 0x21252b,
         rail: 0x1b1d23,
@@ -285,10 +276,9 @@ pub const DARK: [Palette; 9] = [
     },
 ];
 
-pub const LIGHT: [Palette; 5] = [
+const LIGHT: [Palette; 6] = [
     Palette {
         id: "runo",
-        name: "Runo (default)",
         canvas: 0xffffff,
         sidebar: 0xf7f7f8,
         rail: 0xe4e4e8,
@@ -313,7 +303,6 @@ pub const LIGHT: [Palette; 5] = [
     },
     Palette {
         id: "catppuccin-latte",
-        name: "Catppuccin Latte",
         canvas: 0xeff1f5,
         sidebar: 0xe6e9ef,
         rail: 0xdce0e8,
@@ -338,7 +327,6 @@ pub const LIGHT: [Palette; 5] = [
     },
     Palette {
         id: "tokyo-night-day",
-        name: "Tokyo Night Day",
         canvas: 0xe1e2e7,
         sidebar: 0xd0d5e3,
         rail: 0xc1c9df,
@@ -363,7 +351,6 @@ pub const LIGHT: [Palette; 5] = [
     },
     Palette {
         id: "ayu-light",
-        name: "Ayu Light",
         canvas: 0xfcfcfc,
         sidebar: 0xf3f4f5,
         rail: 0xe7eaed,
@@ -388,7 +375,6 @@ pub const LIGHT: [Palette; 5] = [
     },
     Palette {
         id: "light-owl",
-        name: "Light Owl",
         canvas: 0xfbfbfb,
         sidebar: 0xf0f0f0,
         rail: 0xe4e4e4,
@@ -411,27 +397,124 @@ pub const LIGHT: [Palette; 5] = [
             0x989fb1, 0xde3d3b, 0x08916a, 0xdaaa01, 0x288ed7, 0xd6438a, 0x2aa298, 0xf0f0f0,
         ],
     },
+    Palette {
+        id: "one-light",
+        canvas: 0xfafafa,
+        sidebar: 0xf0f0f1,
+        rail: 0xe5e5e6,
+        sheet: 0xf3f3f4,
+        subtle: 0xf0f0f1,
+        border: 0xdbdbdc,
+        active: 0xe5e5e6,
+        raised: 0xffffff,
+        term_bg: 0xf0f0f1,
+        text: 0x383a42,
+        secondary: 0x696c77,
+        muted: 0xa0a1a7,
+        green: 0x50a14f,
+        amber: 0xc18401,
+        red: 0xe45649,
+        accent: Some(0x4078f2),
+        glass: None,
+        ansi: [
+            0x383a42, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xa0a1a7,
+            0x696c77, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xfafafa,
+        ],
+    },
 ];
 
-static DARK_PICK: AtomicU8 = AtomicU8::new(0);
-static LIGHT_PICK: AtomicU8 = AtomicU8::new(0);
-
-/// Pick the themes by id; an unknown id falls back to the first in its list.
-pub fn set(dark: &str, light: &str) {
-    DARK_PICK.store(index(&DARK, dark) as u8, Ordering::Relaxed);
-    LIGHT_PICK.store(index(&LIGHT, light) as u8, Ordering::Relaxed);
+pub struct Theme {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// Palette ids in `LIGHT` and `DARK`. A theme without its own light version borrows
+    /// its family's.
+    light: &'static str,
+    dark: &'static str,
 }
 
-fn index(list: &[Palette], id: &str) -> usize {
-    list.iter().position(|p| p.id == id).unwrap_or(0)
+/// The themes offered in Settings; the first is the default.
+pub const THEMES: [Theme; 10] = [
+    Theme {
+        id: "runo",
+        name: "Runo (default)",
+        light: "runo",
+        dark: "tokyo-night",
+    },
+    Theme {
+        id: "tokyo-night",
+        name: "Tokyo Night",
+        light: "tokyo-night-day",
+        dark: "tokyo-night",
+    },
+    Theme {
+        id: "tokyo-night-storm",
+        name: "Tokyo Night Storm",
+        light: "tokyo-night-day",
+        dark: "tokyo-night-storm",
+    },
+    Theme {
+        id: "catppuccin",
+        name: "Catppuccin (Latte, Mocha)",
+        light: "catppuccin-latte",
+        dark: "catppuccin-mocha",
+    },
+    Theme {
+        id: "catppuccin-macchiato",
+        name: "Catppuccin Macchiato",
+        light: "catppuccin-latte",
+        dark: "catppuccin-macchiato",
+    },
+    Theme {
+        id: "catppuccin-frappe",
+        name: "Catppuccin Frappé",
+        light: "catppuccin-latte",
+        dark: "catppuccin-frappe",
+    },
+    Theme {
+        id: "ayu",
+        name: "Ayu",
+        light: "ayu-light",
+        dark: "ayu-dark",
+    },
+    Theme {
+        id: "ayu-mirage",
+        name: "Ayu Mirage",
+        light: "ayu-light",
+        dark: "ayu-mirage",
+    },
+    Theme {
+        id: "night-owl",
+        name: "Night Owl",
+        light: "light-owl",
+        dark: "night-owl",
+    },
+    Theme {
+        id: "one",
+        name: "One (Light, Dark)",
+        light: "one-light",
+        dark: "one-dark",
+    },
+];
+
+static PICK: AtomicU8 = AtomicU8::new(0);
+
+/// Pick the theme by id; an unknown id falls back to the default.
+pub fn set(id: &str) {
+    let i = THEMES.iter().position(|t| t.id == id).unwrap_or(0);
+    PICK.store(i as u8, Ordering::Relaxed);
 }
 
-/// The theme for dark or light mode.
+fn palette(list: &'static [Palette], id: &str) -> &'static Palette {
+    list.iter().find(|p| p.id == id).unwrap_or(&list[0])
+}
+
+/// The picked theme's palette for dark or light mode.
 pub fn get(dark: bool) -> &'static Palette {
+    let theme = &THEMES[PICK.load(Ordering::Relaxed) as usize];
     if dark {
-        &DARK[DARK_PICK.load(Ordering::Relaxed) as usize]
+        palette(&DARK, theme.dark)
     } else {
-        &LIGHT[LIGHT_PICK.load(Ordering::Relaxed) as usize]
+        palette(&LIGHT, theme.light)
     }
 }
 
@@ -488,10 +571,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_ids_fall_back() {
-        assert_eq!(DARK[index(&DARK, "nope")].id, "tokyo-night");
-        assert_eq!(LIGHT[index(&LIGHT, "nope")].id, "runo");
-        assert_eq!(DARK[index(&DARK, "night-owl")].id, "night-owl");
-        assert_eq!(LIGHT[index(&LIGHT, "ayu-light")].id, "ayu-light");
+    fn every_theme_names_real_palettes() {
+        for t in &THEMES {
+            assert!(DARK.iter().any(|p| p.id == t.dark), "{} dark", t.id);
+            assert!(LIGHT.iter().any(|p| p.id == t.light), "{} light", t.id);
+        }
+        let mut ids: Vec<_> = THEMES.iter().map(|t| t.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), THEMES.len());
     }
 }

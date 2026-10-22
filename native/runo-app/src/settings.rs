@@ -62,10 +62,8 @@ impl AgentOptions {
 pub struct AppSettings {
     pub agents: HashMap<String, AgentOptions>,
     pub theme: String,
-    /// The colour theme dark mode uses, by id from `themes::DARK`.
-    pub dark_theme: String,
-    /// The colour theme light mode uses, by id from `themes::LIGHT`.
-    pub light_theme: String,
+    /// The colour theme, by id from `themes::THEMES`; it has a light and a dark version.
+    pub color_theme: String,
     pub accent: String,
     pub diff_colors: String,
     pub animations: bool,
@@ -196,8 +194,7 @@ impl Default for AppSettings {
             agents: HashMap::new(),
             usage_detailed: false,
             theme: "dark".into(),
-            dark_theme: "tokyo-night".into(),
-            light_theme: "runo".into(),
+            color_theme: "runo".into(),
             accent: "indigo".into(),
             diff_colors: "default".into(),
             animations: true,
@@ -314,7 +311,7 @@ impl AppSettings {
             .map(|a| a.2)
             .unwrap_or(ACCENTS[0].2);
         ACCENT.store(accent, Ordering::Relaxed);
-        crate::themes::set(&self.dark_theme, &self.light_theme);
+        crate::themes::set(&self.color_theme);
         DIFF.store(
             match self.diff_colors.as_str() {
                 "colorblind" => 1,
