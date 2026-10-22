@@ -170,6 +170,8 @@ pub struct AppSettings {
     pub assistant: bool,
     /// Who writes its answers: "agent" (the default agent on a fast model) or "guide".
     pub assistant_answers: String,
+    /// Show Runo in the macOS menu bar with what agents are doing.
+    pub menu_bar: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -250,6 +252,7 @@ impl Default for AppSettings {
             phone_everywhere: false,
             assistant: false,
             assistant_answers: "agent".into(),
+            menu_bar: true,
         }
     }
 }
