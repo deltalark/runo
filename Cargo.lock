@@ -5726,6 +5726,7 @@ dependencies = [
  "objc2-web-kit",
  "portable-pty",
  "qrcode",
+ "raw-window-handle",
  "resvg 0.45.1",
  "roxmltree 0.21.1",
  "serde",
