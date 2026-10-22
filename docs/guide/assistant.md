@@ -19,6 +19,6 @@ Each offer is a card that says exactly what it will do; nothing happens until yo
 
 Answers stream in as they are written; **Stop** keeps what is there so far.
 
-Pick which agent answers, and its model, from the chip under the input; **Default** is a fast model where Runo knows one. The same choice is under **Settings → General → Runo assistant → Assistant agent**, where it starts out the same as your default agent for new sessions.
+Choose which agent answers, and its model, in **Settings → General → Runo assistant** (**Assistant agent** and **Assistant model**). The agent starts out the same as your default agent for new sessions, and the model starts on a fast default (Haiku on Claude). The line under the input shows which one is answering.
 
 Turn it on or off in **Settings → General → Runo assistant**. With **Guide only** it answers from this guide without an agent and can't see or do anything in the app.

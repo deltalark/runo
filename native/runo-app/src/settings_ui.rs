@@ -394,6 +394,28 @@ fn assistant_agents(st: &AppSettings) -> Vec<(String, String)> {
     out
 }
 
+/// The models the assistant's agent offers. The first means the agent's default, or on
+/// Claude, a fast small model.
+fn assistant_models(st: &AppSettings) -> Vec<(String, String)> {
+    let i = crate::assistant::assistant_provider(st);
+    let first = if agent::PROVIDERS[i].id == "claude" {
+        "Fast default · Haiku"
+    } else {
+        "Default"
+    };
+    let mut out = vec![(String::new(), first.to_string())];
+    out.extend(
+        crate::agent_pick::AgentPick::models(i)
+            .into_iter()
+            .filter(|c| !c.value.is_empty())
+            .map(|c| (c.value, c.label)),
+    );
+    if !st.assistant_model.is_empty() && !out.iter().any(|(v, _)| *v == st.assistant_model) {
+        out.push((st.assistant_model.clone(), st.assistant_model.clone()));
+    }
+    out
+}
+
 fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
     items
         .iter()
@@ -751,10 +773,11 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("Getting started", "A one-minute walk through the window and what each part does.", vec![
                 row("Welcome tour", "Highlights each part of Runo with a short explanation. Also in the palette as Take the tour.", Ctl::Button("Take the tour".into(), Rc::new(|this, _| this.start_tour()))),
             ]),
-            section("Runo assistant", "A Runo mark in the corner of the window that answers questions about Runo from its built-in guide. It never changes anything.", vec![
+            section("Runo assistant", "A Runo mark in the corner of the window that answers questions about Runo from its built-in guide and what's happening in the app, and asks before changing anything.", vec![
                 switch_row("Show the Runo assistant", "Click the mark or press the Ask Runo shortcut, then ask how to do something. Off, the mark is hidden.", st.assistant, |s, v| s.assistant = v),
                 row("Answers with", "An agent writes answers from the guide and what's happening in the app, and can offer to do things for you; it counts toward usage. Guide only answers offline with the best matching article.", Ctl::Dropdown(options(&[("agent", "An agent"), ("guide", "Guide only")]), st.assistant_answers.clone(), Rc::new(|s, v| s.assistant_answers = v))),
-                row("Assistant agent", "Which agent answers. Pick its model from the chip under the assistant's input.", Ctl::Dropdown(assistant_agents(st), st.assistant_agent.clone(), Rc::new(|s, v| { if s.assistant_agent != v { s.assistant_model.clear(); } s.assistant_agent = v; }))),
+                row("Assistant agent", "Which agent answers the assistant's questions.", Ctl::Dropdown(assistant_agents(st), st.assistant_agent.clone(), Rc::new(|s, v| { if s.assistant_agent != v { s.assistant_model.clear(); } s.assistant_agent = v; }))),
+                row("Assistant model", "The model it answers on. A small, fast one keeps answers quick and cheap.", Ctl::Dropdown(assistant_models(st), st.assistant_model.clone(), Rc::new(|s, v| s.assistant_model = v))),
             ]),
             section("Browser", "Show pages in the Browser tab with a headless copy of a Chromium-based browser on this machine (Chrome, Edge, Brave, Arc, Vivaldi, Opera and others), using its own profile.", vec![
                 switch_row("Built-in browser", "Adds the Browser tab: open your dev server beside the conversation and click and type in it. Off, the tab is hidden.", st.browser_enabled, |s, v| s.browser_enabled = v),

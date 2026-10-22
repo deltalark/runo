@@ -337,8 +337,6 @@ pub(crate) struct Assistant {
     streamed: String,
     /// Stops the agent writing the answer.
     stopper: Option<agent::Stopper>,
-    /// The agent that answers, and its model.
-    pick: AgentPick,
 }
 
 impl Assistant {
@@ -369,7 +367,6 @@ impl Assistant {
                 hover: None,
                 streamed: String::new(),
                 stopper: None,
-                pick: AgentPick::new(cx),
             },
             subs,
         )
@@ -466,46 +463,34 @@ fn split_reply(reply: &str) -> (String, Option<String>, Vec<Action>) {
     (lines.join("\n").trim().to_string(), open, actions)
 }
 
+/// The agent that answers: the one chosen in Settings, or the default agent.
+pub(crate) fn assistant_provider(st: &AppSettings) -> usize {
+    let id = if st.assistant_agent.is_empty() {
+        &st.default_provider
+    } else {
+        &st.assistant_agent
+    };
+    agent::PROVIDERS
+        .iter()
+        .position(|p| p.id == id)
+        .unwrap_or(0)
+}
+
+/// The model it answers on: the one chosen in Settings, or a small, fast one where Runo
+/// knows one.
+pub(crate) fn assistant_model(st: &AppSettings, provider: &str) -> String {
+    match st.assistant_model.as_str() {
+        "" if provider == "claude" => "haiku".to_string(),
+        m => m.to_string(),
+    }
+}
+
 impl RunoApp {
     /// Whether an agent answers, so the assistant knows the app's state and can act.
     pub(crate) fn assistant_acts(&self, cx: &App) -> bool {
         let st = cx.global::<AppSettings>();
-        let p = &agent::PROVIDERS[self.assistant.pick.agent];
+        let p = &agent::PROVIDERS[assistant_provider(st)];
         st.assistant_answers == "agent" && agent::available(p.bin, &st.agent(p.id).binary)
-    }
-
-    /// Point the agent picker at the agent and model chosen in Settings.
-    fn assistant_load_pick(&mut self, cx: &App) {
-        let st = cx.global::<AppSettings>();
-        let id = if st.assistant_agent.is_empty() {
-            &st.default_provider
-        } else {
-            &st.assistant_agent
-        };
-        if let Some(i) = agent::PROVIDERS.iter().position(|p| p.id == id) {
-            self.assistant.pick.agent = i;
-        }
-        self.assistant.pick.model = st.assistant_model.clone();
-    }
-
-    /// Keep what the picker shows as the assistant's agent and model. The default agent
-    /// on its fast model is kept as "the default", so it follows a later change of
-    /// default agent.
-    fn assistant_save_pick(&mut self, cx: &mut Context<Self>) {
-        let st = cx.global::<AppSettings>();
-        let id = agent::PROVIDERS[self.assistant.pick.agent].id;
-        let model = self.assistant.pick.model.clone();
-        let agent = if id == st.default_provider && model.is_empty() {
-            String::new()
-        } else {
-            id.to_string()
-        };
-        if st.assistant_agent != agent || st.assistant_model != model {
-            settings::update(cx, move |s| {
-                s.assistant_agent = agent;
-                s.assistant_model = model;
-            });
-        }
     }
 
     pub(crate) fn assistant_enabled(cx: &App) -> bool {
@@ -527,7 +512,6 @@ impl RunoApp {
         }
         self.assistant.open = !self.assistant.open;
         if self.assistant.open {
-            self.assistant_load_pick(cx);
             if self.view == View::Settings {
                 self.view = View::Home;
             }
@@ -540,8 +524,6 @@ impl RunoApp {
 
     pub(crate) fn close_assistant(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.assistant.open = false;
-        self.assistant.pick.open = false;
-        self.assistant_save_pick(cx);
         window.focus(&self.focus, cx);
     }
 
@@ -635,15 +617,9 @@ impl RunoApp {
             self.answer_from_guide(&found, None);
             return;
         }
-        self.assistant.pick.open = false;
-        self.assistant_save_pick(cx);
         let st = cx.global::<AppSettings>();
-        let provider = &agent::PROVIDERS[self.assistant.pick.agent];
-        // Unless one is picked, a small, fast model where Runo knows one.
-        let model = match self.assistant.pick.model.as_str() {
-            "" if provider.id == "claude" => "haiku".to_string(),
-            m => m.to_string(),
-        };
+        let provider = &agent::PROVIDERS[assistant_provider(st)];
+        let model = assistant_model(st, provider.id);
         self.assistant.answerer = provider.name;
         let articles: Vec<&Article> = if found.is_empty() {
             guide().iter().take(ARTICLES_SENT).collect()
@@ -1235,42 +1211,29 @@ impl RunoApp {
             );
         }
 
-        // Which agent answers, on which model, with its picker; or the guide.
-        let answers: AnyElement = if cx.global::<AppSettings>().assistant_answers == "agent" {
-            let pick = &self.assistant.pick;
-            div()
-                .relative()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(pick.chip("assistant", cx, |t: &mut Self| &mut t.assistant.pick))
-                .when(!acts, |el| {
-                    el.child("isn't installed; answering from the guide")
-                })
-                .children(
-                    pick.menu("assistant", "", cx, |t: &mut Self| &mut t.assistant.pick)
-                        .map(|menu| {
-                            div().absolute().bottom(px(28.)).left_0().child(
-                                deferred(
-                                    anchored()
-                                        .anchor(Anchor::BottomLeft)
-                                        .snap_to_window_with_margin(px(8.))
-                                        .child(
-                                            div()
-                                                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                                                    this.assistant.pick.open = false;
-                                                    cx.notify();
-                                                }))
-                                                .child(menu),
-                                        ),
-                                )
-                                .with_priority(1),
-                            )
-                        }),
-                )
-                .into_any_element()
-        } else {
-            div().child("Answers from the guide").into_any_element()
+        // Which agent answers, on which model, as chosen in Settings; or the guide.
+        let answers = {
+            let st = cx.global::<AppSettings>();
+            if st.assistant_answers == "agent" {
+                let i = assistant_provider(st);
+                let name = agent::PROVIDERS[i].name;
+                if acts {
+                    let model = assistant_model(st, agent::PROVIDERS[i].id);
+                    let label = if model == "haiku" {
+                        Some("Haiku".to_string())
+                    } else {
+                        AgentPick::model_label(i, &model)
+                    };
+                    match label {
+                        Some(label) => format!("Answers with {name} · {label}"),
+                        None => format!("Answers with {name}"),
+                    }
+                } else {
+                    format!("{name} isn't installed; answering from the guide")
+                }
+            } else {
+                "Answers from the guide".to_string()
+            }
         };
         let footer = div()
             .px_4()
