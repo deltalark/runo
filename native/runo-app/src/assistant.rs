@@ -619,7 +619,7 @@ impl RunoApp {
                 Self::status_label(session.status).to_lowercase()
             ));
         }
-        parts.push(format!("{} agents running", self.started.len()));
+        parts.push(format!("{} agents running", self.turns.len()));
         parts.join("; ")
     }
 
@@ -1917,7 +1917,7 @@ impl RunoApp {
     /// person, the session's branch and the clashes the radar found. Only what is already
     /// in memory, so drawing it never runs git.
     fn assistant_telemetry(&self) -> Div {
-        let running = self.started.len();
+        let running = self.turns.len();
         let waiting = self.approvals.len() + self.waiting_sessions().len();
         let mut row = div().flex().flex_wrap().gap_1().child(readout(
             (running > 0).then_some(c_green()),

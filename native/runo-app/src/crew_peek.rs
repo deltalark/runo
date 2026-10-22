@@ -121,7 +121,11 @@ impl RunoApp {
             list = list.child(peek_message(thread, i, message));
         }
         if working {
-            let since = self.started.get(&thread).map(|t| elapsed(t.elapsed()));
+            let since = self
+                .turns
+                .get(&thread)
+                .map(|t| &t.started)
+                .map(|t| elapsed(t.elapsed()));
             list = list.child(div().text_size(px(12.5)).child(working_indicator(since)));
         }
         let queued = session.queue.len();

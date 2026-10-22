@@ -261,28 +261,17 @@ impl RunoApp {
                 session.status = Status::Working;
                 session.remote_turn =
                     matches!(sandbox, Some(crate::connections::Sandbox::Remote(_)));
-                match stream::Parser::for_provider(&provider, &dir) {
-                    Some(parser) => self.streams.insert(id, parser),
-                    None => self.streams.remove(&id),
-                };
                 let turn = session
                     .messages
                     .iter()
                     .rposition(|m| m.role == Role::User)
                     .unwrap_or(0);
                 let model = sel.get("model").map(String::as_str).unwrap_or("");
-                self.logs.insert(
+                self.turns.insert(
                     id,
-                    crate::harness::log::TurnLog::start(
-                        crate::harness::log::root(),
-                        id,
-                        turn,
-                        &provider,
-                        model,
-                    ),
+                    crate::harness::turn::Turn::start(id, &provider, &dir, turn, model),
                 );
                 self.handles.insert(Target::Session(id), handle);
-                self.started.insert(id, std::time::Instant::now());
                 self.turn_files.remove(&id);
                 // Counted as it starts, so turns running side by side can't pass the limit.
                 self.state.add_turn(&store::today());
@@ -323,8 +312,10 @@ impl RunoApp {
     /// The CLI is waiting for a browser sign-in, which never completes without a terminal:
     /// stop the run and say how to sign in.
     pub(crate) fn sign_in_wait(&mut self, id: u64, line: &str) {
-        if !self.signed_out.insert(id) {
-            return;
+        if let Some(turn) = self.turns.get_mut(&id) {
+            if std::mem::replace(&mut turn.signed_out, true) {
+                return;
+            }
         }
         self.stderr.entry(id).or_default().push(line.to_string());
         if let Some(handle) = self.handles.get(&Target::Session(id)) {
@@ -1258,7 +1249,7 @@ impl RunoApp {
         // A turn on a connection doesn't need this machine awake.
         let want = cx_keep_awake()
             && self
-                .started
+                .turns
                 .keys()
                 .any(|id| self.state.session(*id).is_some_and(|s| !s.remote_turn));
         match (&mut self.awake, want) {

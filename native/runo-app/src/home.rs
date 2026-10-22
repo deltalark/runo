@@ -1702,9 +1702,12 @@ impl RunoApp {
             ),
             Some(Bucket::Running) => (
                 c_blue(),
-                self.started.get(&id).map_or("Working".to_string(), |t| {
-                    format!("Working  ·  {}", elapsed(t.elapsed()))
-                }),
+                self.turns
+                    .get(&id)
+                    .map(|t| &t.started)
+                    .map_or("Working".to_string(), |t| {
+                        format!("Working  ·  {}", elapsed(t.elapsed()))
+                    }),
             ),
             Some(Bucket::Review) => (c_green(), "Ready to review".to_string()),
             _ => (

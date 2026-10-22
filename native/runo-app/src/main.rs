@@ -412,10 +412,8 @@ struct RunoApp {
     chat_scroll: ScrollHandle,
     /// Recent error output of each session's run, for failure messages and the log.
     stderr: HashMap<u64, Vec<String>>,
-    /// Parsers for runs that print JSON rather than plain text.
-    streams: HashMap<u64, stream::Parser>,
-    /// Each running turn's event log, by session.
-    logs: HashMap<u64, harness::log::TurnLog>,
+    /// Each session's running turn: its parser, event log, start time and how it stands.
+    turns: HashMap<u64, harness::turn::Turn>,
     search: Entity<InputState>,
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
@@ -557,14 +555,6 @@ struct RunoApp {
     focus: FocusHandle,
     /// Last window-width class seen, so the panel auto-hides once when the window narrows.
     panel_wide: Option<bool>,
-    /// When each running agent started, for the elapsed-time label.
-    started: HashMap<u64, std::time::Instant>,
-    /// Sessions the user asked to stop, so their exit is not reported as an error.
-    stopping: std::collections::HashSet<u64>,
-    /// Runs stopped because their CLI waited for a browser sign-in.
-    signed_out: std::collections::HashSet<u64>,
-    /// Sessions whose agent reported an error in its output this turn.
-    stream_failed: std::collections::HashSet<u64>,
     /// Files changed by each session's latest turn, once it finished (for Undo / Keep).
     turn_files: HashMap<u64, usize>,
     /// Sessions whose checks are running after their last turn.
@@ -1306,9 +1296,7 @@ impl RunoApp {
                         this.scan_ports();
                     }
                     let watching = this.view == View::Session
-                        && this
-                            .selected
-                            .is_some_and(|id| this.started.contains_key(&id));
+                        && this.selected.is_some_and(|id| this.turns.contains_key(&id));
                     let on_session = this.view == View::Session && this.selected.is_some();
                     if pr_check && on_session {
                         if let Some(id) = this.selected {
@@ -1327,7 +1315,7 @@ impl RunoApp {
                         cx.notify();
                     } else if repaint
                         || (tick
-                            && (!this.started.is_empty()
+                            && (!this.turns.is_empty()
                                 || this.info.is_some()
                                 || this.git_toast.is_some()))
                         || (ticks.is_multiple_of(5)
@@ -1674,8 +1662,7 @@ impl RunoApp {
             tx,
             chat_scroll: ScrollHandle::new(),
             stderr: HashMap::new(),
-            streams: HashMap::new(),
-            logs: HashMap::new(),
+            turns: HashMap::new(),
             search,
             prompt,
             new_task: cx.new(|cx| {
@@ -1748,10 +1735,6 @@ impl RunoApp {
             show_panel: true,
             focus: cx.focus_handle(),
             panel_wide: None,
-            started: HashMap::new(),
-            stopping: Default::default(),
-            signed_out: Default::default(),
-            stream_failed: Default::default(),
             turn_files: HashMap::new(),
             proving: Default::default(),
             reviewing: HashMap::new(),
@@ -2344,27 +2327,10 @@ impl RunoApp {
                 if agent::waits_for_sign_in(&line) {
                     self.sign_in_wait(id, &line);
                 }
-                if self.streams.contains_key(&id) {
-                    if let (Some(log), Some(s)) = (self.logs.get(&id), self.state.session(id)) {
-                        harness::record::line(&s.provider, id, log.turn(), &line);
-                    }
-                }
-                let updates = match self.streams.get_mut(&id) {
-                    Some(parser) => parser.feed(&line),
-                    None => vec![AgentEvent::Text(line)],
+                let (updates, plain) = match self.turns.get_mut(&id) {
+                    Some(turn) => (turn.feed(&line), turn.plain()),
+                    None => (vec![AgentEvent::Text(line)], true),
                 };
-                let plain = !self.streams.contains_key(&id);
-                if let Some(log) = self.logs.get_mut(&id) {
-                    for update in &updates {
-                        match update {
-                            // Plain output is kept line by line.
-                            AgentEvent::Text(text) if plain => {
-                                log.record(&AgentEvent::Text(format!("{text}\n")))
-                            }
-                            other => log.record(other),
-                        }
-                    }
-                }
                 // Crew's chat and its threads have Runo's blocks taken out as they stream.
                 // Crew never proposes a plan to approve: one it writes is its reply.
                 let crew_chat = self
@@ -2398,99 +2364,14 @@ impl RunoApp {
                     })
                     .filter(|m| !m.is_empty());
                 if let Some(session) = self.state.session_mut(id) {
-                    for update in updates {
-                        if !matches!(session.messages.last(), Some(m) if m.role == Role::Agent) {
-                            session.messages.push(Message::new(Role::Agent, ""));
-                        }
-                        let Some(m) = session.messages.last_mut() else {
-                            continue;
-                        };
-                        match update {
-                            AgentEvent::Text(text) => {
-                                if plain && !m.text.is_empty() {
-                                    m.text.push('\n');
-                                }
-                                m.text.push_str(&text);
-                            }
-                            AgentEvent::Tool(mut step) => {
-                                step.started = Some(std::time::Instant::now());
-                                m.steps.push(step);
-                            }
-                            AgentEvent::ToolDone { id, ok, .. } => {
-                                // The step may sit in an earlier reply when an error
-                                // message came between.
-                                for m in session.messages.iter_mut().rev() {
-                                    if m.finish_step(&id, ok) {
-                                        break;
-                                    }
-                                }
-                            }
-                            // Written to the log by whoever starts and ends the turn.
-                            AgentEvent::TurnStarted { .. } | AgentEvent::TurnEnded { .. } => {}
-                            AgentEvent::Summary(summary) => {
-                                m.meta = match &model {
-                                    Some(model) => format!("{model} · {summary}"),
-                                    None => summary,
-                                }
-                            }
-                            AgentEvent::Error(error) => {
-                                applog::warn(
-                                    "agent",
-                                    format!(
-                                        "session #{id} ({}): the agent reported an error: {}",
-                                        session.provider,
-                                        applog::gist(&error)
-                                    ),
-                                );
-                                self.stream_failed.insert(id);
-                                session.messages.push(Message::new(Role::System, error))
-                            }
-                            AgentEvent::Notice(text) => {
-                                let turn = session
-                                    .messages
-                                    .iter()
-                                    .rposition(|m| m.role == Role::User)
-                                    .unwrap_or(0);
-                                let seen = session.messages[turn..]
-                                    .iter()
-                                    .any(|m| m.meta == "warning" && m.text == text);
-                                if !seen {
-                                    applog::warn(
-                                        "agent",
-                                        format!(
-                                            "session #{id} ({}): {}",
-                                            session.provider,
-                                            applog::gist(&text)
-                                        ),
-                                    );
-                                    // Ahead of the reply, which carries on below it.
-                                    let mut warning = Message::new(Role::System, text);
-                                    warning.meta = "warning".into();
-                                    let at = session.messages.len() - 1;
-                                    session.messages.insert(at, warning);
-                                }
-                            }
-                            AgentEvent::Usage(usage) => m.usage = usage,
-                            AgentEvent::Denied(tools) => {
-                                m.denied =
-                                    tools.into_iter().filter(|t| !refused.contains(t)).collect()
-                            }
-                            AgentEvent::Plan(plan) => m.plan = plan,
-                            AgentEvent::Questions(questions) => m.questions = questions,
-                            AgentEvent::Conversation(conversation) => {
-                                session.agent_session = conversation
-                            }
-                            // A thread's checklist follows the agent's own todo list too, so
-                            // steps it ticks off there show without a second report.
-                            AgentEvent::Todos(steps) => {
-                                if session.canvas != crew::CANVAS {
-                                    if let Some(info) = session.crew.as_mut() {
-                                        let kind =
-                                            crew::EventKind::Checklist { steps, title: None };
-                                        crew::apply(info, &kind, 0);
-                                    }
-                                }
-                            }
+                    let cx = harness::apply::Context {
+                        plain,
+                        refused: &refused,
+                        model,
+                    };
+                    if harness::apply::apply(session, updates, &cx) {
+                        if let Some(turn) = self.turns.get_mut(&id) {
+                            turn.failed = true;
                         }
                     }
                 }
@@ -2528,13 +2409,12 @@ impl RunoApp {
             Event::Done(Target::Session(id), ok) => {
                 // Taken here so a stopped run that still exits cleanly doesn't leave the
                 // flag behind for the next real failure.
-                let stopped = self.stopping.remove(&id);
-                let took = self.started.get(&id).map(|start| start.elapsed());
+                let turn = self.turns.remove(&id);
+                let stopped = turn.as_ref().is_some_and(|t| t.stopping);
+                let took = turn.as_ref().map(|t| t.started.elapsed());
                 self.handles.remove(&Target::Session(id));
-                self.streams.remove(&id);
-                let log = self.logs.remove(&id);
                 self.end_approvals(id);
-                if let Some(start) = self.started.remove(&id) {
+                if let Some(start) = turn.as_ref().map(|t| t.started) {
                     let since =
                         std::time::SystemTime::now() - start.elapsed() - Duration::from_secs(2);
                     self.find_copilot_session(id, since);
@@ -2555,9 +2435,9 @@ impl RunoApp {
                     .map(|l| alerts::clean_line(&l))
                     .filter(|l| !l.starts_with(connections::WARNING))
                     .collect();
-                let signed_out = self.signed_out.remove(&id);
+                let signed_out = turn.as_ref().is_some_and(|t| t.signed_out);
                 // Some CLIs report a failed turn in their output and still exit cleanly.
-                let reported = self.stream_failed.remove(&id);
+                let reported = turn.as_ref().is_some_and(|t| t.failed);
                 let mut hold = false;
                 let sync_warning = self.sync_warning(id);
                 if let Some(session) = self.state.session_mut(id) {
@@ -2725,8 +2605,8 @@ impl RunoApp {
                     .state
                     .session(id)
                     .is_some_and(|s| s.status == Status::Done);
-                if let Some(mut log) = log {
-                    log.end(ok);
+                if let Some(turn) = turn {
+                    turn.end(ok);
                 }
                 self.log_turn_end(id, ok, stopped, hold, took, &all);
                 self.finish_turn(id, ok, stopped, hold, cx);
@@ -2873,7 +2753,9 @@ impl RunoApp {
     /// Stop a session's agent, and everything it started.
     pub(crate) fn stop_session(&mut self, id: u64) {
         if let Some(handle) = self.handles.get(&Target::Session(id)) {
-            self.stopping.insert(id);
+            if let Some(turn) = self.turns.get_mut(&id) {
+                turn.stopping = true;
+            }
             handle.kill();
         }
     }
@@ -4036,7 +3918,7 @@ impl RunoApp {
         self.prune_shells();
         self.tabs.retain(|t| *t != id);
         self.stats.remove(&id);
-        self.started.remove(&id);
+        self.turns.remove(&id);
         self.pending_start.remove(&id);
         self.preparing.remove(&id);
         self.pr_status.remove(&id);
@@ -4316,7 +4198,7 @@ impl RunoApp {
             .get("model")
             .filter(|m| !m.is_empty())
             .cloned();
-        let when = match self.started.get(&id) {
+        let when = match self.turns.get(&id).map(|t| &t.started) {
             Some(t) if working => elapsed(t.elapsed()),
             _ => session
                 .messages
@@ -6102,7 +5984,11 @@ impl RunoApp {
         }
         // While the agent works, the chat ends with what it is doing and for how long.
         if working && !self.pending_start.contains_key(&id) {
-            let since = self.started.get(&id).map(|start| elapsed(start.elapsed()));
+            let since = self
+                .turns
+                .get(&id)
+                .map(|t| &t.started)
+                .map(|start| elapsed(start.elapsed()));
             list = list.child(
                 div()
                     .flex()
@@ -9398,7 +9284,7 @@ impl Render for RunoApp {
         } else {
             (String::new(), c_muted(), None)
         };
-        let running = self.started.len();
+        let running = self.turns.len();
         let (where_name, where_color, _) = self.runs_on();
         let summary = match self.state.sessions.len() {
             0 => String::new(),

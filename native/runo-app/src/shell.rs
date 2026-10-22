@@ -1244,7 +1244,7 @@ impl RunoApp {
 
     /// Whether the session's agent is running now.
     pub(crate) fn is_running(&self, s: &Session) -> bool {
-        self.started.contains_key(&s.id)
+        self.turns.contains_key(&s.id)
             || s.status == Status::Working
             || self.handles.contains_key(&Target::Session(s.id))
     }
@@ -2002,8 +2002,9 @@ impl RunoApp {
             let id = s.id;
             let provider = agent::provider(&s.provider);
             let when = self
-                .started
+                .turns
                 .get(&id)
+                .map(|t| &t.started)
                 .map_or("Working".to_string(), |t| elapsed(t.elapsed()));
             list = list.child(
                 div()
