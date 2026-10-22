@@ -69,14 +69,23 @@ fn inner_curve(fill: Rgba, top: bool, r: f32) -> Div {
     )
 }
 
-/// The one touch of accent on a selected row: a thin bracket in the accent inside the
-/// row's left edge that follows its rounded corners, like "(". `radius` is the row's own
-/// corner radius, so the bracket sits on the row's outline, the way an open tab's does.
-/// It draws in once the row has landed, and while the row is hovered it reaches a little
-/// way along the top and bottom edges and brightens (see `accent`). A child of the row,
-/// which must be `relative`.
+/// The one touch of accent on a selected row: two thin hooks in the accent, one round the
+/// row's top-left corner and one round its bottom-right, following its rounded outline
+/// like the corners of the app icon. `radius` is the row's own corner radius, so the
+/// hooks sit on the row's outline, the way an open tab's bracket does. They draw in once
+/// the row has landed, and while the row is hovered they reach a little further along
+/// the edges and brighten (see `accent`). A child of the row, which must be `relative`.
 pub(crate) fn accent_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
-    let key: SharedString = key.into();
+    bracket(key.into(), radius, true)
+}
+
+/// The accent for a row whose right side runs on into what sits beside it, and so has no
+/// corner there to mark: one bracket down its left edge, round both corners, like "(".
+fn accent_bracket_left(key: impl Into<SharedString>, radius: f32) -> AnyElement {
+    bracket(key.into(), radius, false)
+}
+
+fn bracket(key: SharedString, radius: f32, corners: bool) -> AnyElement {
     let hover_key = key.clone();
     div()
         .absolute()
@@ -86,29 +95,57 @@ pub(crate) fn accent_bracket(key: impl Into<SharedString>, radius: f32) -> AnyEl
                 |_, _, _| (),
                 move |b, _, window, _| {
                     let hover = accent::hover(&hover_key, b, window);
-                    let (x0, y0, y1) = (b.origin.x, b.origin.y, b.bottom());
+                    let (x0, x1, y0, y1) = (b.origin.x, b.right(), b.origin.y, b.bottom());
                     let r = px(radius).min((y1 - y0) / 2.);
-                    // Down the middle of a 2px edge inside the outline, round both
-                    // corners and on along the edges by `tail`.
-                    let (x, i, rc, tail) = (x0 + px(1.), px(1.), r - px(1.), px(6. * hover));
+                    // Along the middle of a 2px edge inside the outline. `i` is that inset
+                    // and `rc` the corner's radius there.
+                    let (i, rc) = (px(1.), r - px(1.));
                     let at = |x: Pixels, y: Pixels| point(x, y);
                     let mut f = PathBuilder::stroke(px(2.));
-                    f.move_to(at(x + rc + tail, y0 + i));
-                    f.line_to(at(x + rc, y0 + i));
-                    turn(
-                        &mut f,
-                        at(x + rc, y0 + i),
-                        at(x, y0 + i),
-                        at(x, y0 + i + rc),
-                    );
-                    f.line_to(at(x, y1 - i - rc));
-                    turn(
-                        &mut f,
-                        at(x, y1 - i - rc),
-                        at(x, y1 - i),
-                        at(x + rc, y1 - i),
-                    );
-                    f.line_to(at(x + rc + tail, y1 - i));
+                    if corners {
+                        // Each hook runs `reach` past its corner along both edges, never
+                        // more than halfway down the side.
+                        let side = ((y1 - y0) / 2. - i - rc).max(px(0.));
+                        let (reach, down) = (px(9. + 6. * hover), px(5. + 4. * hover).min(side));
+                        f.move_to(at(x0 + i, y0 + i + rc + down));
+                        f.line_to(at(x0 + i, y0 + i + rc));
+                        turn(
+                            &mut f,
+                            at(x0 + i, y0 + i + rc),
+                            at(x0 + i, y0 + i),
+                            at(x0 + i + rc, y0 + i),
+                        );
+                        f.line_to(at(x0 + i + rc + reach, y0 + i));
+                        f.move_to(at(x1 - i, y1 - i - rc - down));
+                        f.line_to(at(x1 - i, y1 - i - rc));
+                        turn(
+                            &mut f,
+                            at(x1 - i, y1 - i - rc),
+                            at(x1 - i, y1 - i),
+                            at(x1 - i - rc, y1 - i),
+                        );
+                        f.line_to(at(x1 - i - rc - reach, y1 - i));
+                    } else {
+                        // Down the left edge, round both corners and on along the top and
+                        // bottom by `tail`.
+                        let (x, tail) = (x0 + i, px(6. * hover));
+                        f.move_to(at(x + rc + tail, y0 + i));
+                        f.line_to(at(x + rc, y0 + i));
+                        turn(
+                            &mut f,
+                            at(x + rc, y0 + i),
+                            at(x, y0 + i),
+                            at(x, y0 + i + rc),
+                        );
+                        f.line_to(at(x, y1 - i - rc));
+                        turn(
+                            &mut f,
+                            at(x, y1 - i - rc),
+                            at(x, y1 - i),
+                            at(x + rc, y1 - i),
+                        );
+                        f.line_to(at(x + rc + tail, y1 - i));
+                    }
                     if let Ok(path) = f.build() {
                         window.paint_path(path, accent::color(hover));
                     }
@@ -376,7 +413,7 @@ pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
         .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
         .child(inner_curve(page, true, FUSE_R).top(px(-FUSE_R)))
         .child(inner_curve(page, false, FUSE_R).bottom(px(-FUSE_R)))
-        .child(accent_bracket(format!("{key}-rule"), FUSE_R))
+        .child(accent_bracket_left(format!("{key}-rule"), FUSE_R))
         .animated(
             ElementId::Name(key),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
