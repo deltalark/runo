@@ -249,7 +249,11 @@ fn start_server() -> SetupStatus {
     const LABEL: &str = "com.deltalark.cove";
     let plist = std::env::var_os("HOME")
         .map(|h| Path::new(&h).join(format!("Library/LaunchAgents/{LABEL}.plist")));
+    #[cfg(unix)]
     let uid = unsafe { libc::getuid() };
+    // launchd is macOS only; elsewhere the plist never exists.
+    #[cfg(not(unix))]
+    let uid = 0;
     let started = if plist.as_ref().is_some_and(|p| p.is_file()) {
         let target = format!("gui/{uid}/{LABEL}");
         let kick = Command::new("launchctl")
@@ -264,16 +268,18 @@ fn start_server() -> SetupStatus {
                 .is_ok_and(|o| o.status.success())
         })
     } else if let Some(bin) = binary() {
-        use std::os::unix::process::CommandExt;
-        Command::new(bin)
-            .arg("serve")
+        let mut cmd = Command::new(bin);
+        cmd.arg("serve")
             .env("PATH", tool_path())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0)
-            .spawn()
-            .is_ok()
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd.spawn().is_ok()
     } else {
         false
     };
