@@ -23,6 +23,7 @@ mod copies;
 mod cove;
 mod coveserver;
 mod crew;
+mod crew_peek;
 mod crew_ui;
 mod crew_view;
 mod ctxmenu;
@@ -278,6 +279,11 @@ struct RunoApp {
     right_tab: RightTab,
     /// The Threads tab's finished threads are folded away.
     threads_done_shut: bool,
+    /// The Crew thread open in the Threads tab, beside Crew's chat.
+    peek: Option<u64>,
+    peek_scroll: ScrollHandle,
+    /// What the person writes to the thread open in the Threads tab.
+    peek_prompt: Entity<TextareaState>,
     /// The Threads tab lists every finished thread, not only the latest few.
     threads_done_all: bool,
     /// Projects whose finished Crew threads are unfolded in the sidebar.
@@ -1412,6 +1418,24 @@ impl RunoApp {
                 .placeholder("What would you like to change?")
                 .submit_on_enter(true)
         });
+        let peek_prompt = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Message this thread…")
+                .submit_on_enter(true)
+        });
+        let peek_sub = cx.subscribe_in(&peek_prompt, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { shift, secondary } = event {
+                let send = if cx.global::<AppSettings>().send_on_enter {
+                    !*shift
+                } else {
+                    *secondary
+                };
+                if send {
+                    this.send_peek(window, cx);
+                }
+            }
+            cx.notify();
+        });
         let prompt_sub = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| {
             let on_enter = cx.global::<AppSettings>().send_on_enter;
             let send = match event {
@@ -1529,6 +1553,9 @@ impl RunoApp {
             selected,
             right_tab: RightTab::Changes,
             threads_done_shut: false,
+            peek: None,
+            peek_scroll: ScrollHandle::new(),
+            peek_prompt,
             threads_done_all: false,
             sidebar_done_open: HashSet::new(),
             browser_open: false,
@@ -1768,6 +1795,7 @@ impl RunoApp {
             diff_expanded: Default::default(),
             _subscriptions: vec![
                 search_sub,
+                peek_sub,
                 prompt_sub,
                 settings_search_sub,
                 commit_sub,
@@ -2386,6 +2414,9 @@ impl RunoApp {
                 }
                 if self.selected == Some(id) && autoscroll() {
                     self.chat_scroll.scroll_to_bottom();
+                }
+                if self.peek == Some(id) && autoscroll() {
+                    self.peek_scroll.scroll_to_bottom();
                 }
             }
             Event::Err(Target::Session(id), line) => {
@@ -5636,7 +5667,7 @@ impl RunoApp {
                     .child(format!("Started {}", first.time)),
             );
         }
-        if let Some(strip) = self.thread_strip(session, cx) {
+        if let Some(strip) = self.thread_strip(session, false, cx) {
             list = list.child(strip);
         }
         for (i, message) in session.messages.iter().enumerate() {
