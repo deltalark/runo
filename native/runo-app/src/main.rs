@@ -9,6 +9,7 @@ mod archdraw;
 mod architecture;
 mod askbar;
 mod assistant;
+mod assistant_act;
 mod branches;
 mod browser;
 mod browser_engine;
