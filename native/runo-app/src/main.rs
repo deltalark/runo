@@ -5,6 +5,7 @@ mod agentcmds;
 mod alerts;
 mod applog;
 mod approvals;
+mod arcade;
 mod archdraw;
 mod architecture;
 mod askbar;
@@ -185,6 +186,7 @@ enum Jump {
     Session(u64),
     File(String),
     Tour,
+    Arcade,
     /// Run a playbook in the current project.
     Playbook(u64),
     /// Switch the top bar to a project.
@@ -458,6 +460,11 @@ struct RunoApp {
     ctx_menu: Option<(Point<Pixels>, ctxmenu::CtxTarget)>,
     /// The first-run tour's current step.
     tour: Option<usize>,
+    /// The Arcade's games, made the first time it opens and kept so a round can resume;
+    /// whether it is showing; and how many agents were working when it opened.
+    arcade: Option<Entity<arcade::Arcade>>,
+    arcade_open: bool,
+    arcade_waiting: usize,
     /// Where the tour's highlighted parts are drawn this frame, and where they were last frame.
     anchors: tour::Anchors,
     tour_rects: HashMap<&'static str, Bounds<Pixels>>,
@@ -1690,6 +1697,9 @@ impl RunoApp {
             switch_preview: false,
             ctx_menu: None,
             tour: (!cx.global::<AppSettings>().tour_seen).then_some(0),
+            arcade: None,
+            arcade_open: false,
+            arcade_waiting: 0,
             anchors: Default::default(),
             tour_rects: HashMap::new(),
             race_mode: false,
@@ -2872,6 +2882,7 @@ impl RunoApp {
         match jump {
             Jump::Action => {}
             Jump::Tour => self.start_tour(),
+            Jump::Arcade => self.open_arcade(window, cx),
             Jump::Playbook(id) => {
                 let here = self.current_project();
                 self.run_playbook(id, here, cx);
@@ -2992,6 +3003,13 @@ impl RunoApp {
                 .keywords(["welcome", "help", "guide", "onboarding"]),
         );
         command_jumps.push(Jump::Tour);
+        commands = commands.item(
+            CommandItem::new()
+                .label("Open the Arcade")
+                .icon(IconName::Gamepad2)
+                .keywords(["game", "play", "break", "snake", "2048", "flappy", "spark"]),
+        );
+        command_jumps.push(Jump::Arcade);
         if Self::assistant_enabled(cx) {
             commands = commands.item(
                 CommandItem::new()
@@ -6027,7 +6045,15 @@ impl RunoApp {
         // While the agent works, the chat ends with what it is doing and for how long.
         if working && !self.pending_start.contains_key(&id) {
             let since = self.started.get(&id).map(|start| elapsed(start.elapsed()));
-            list = list.child(div().text_size(px(13.)).child(working_indicator(since)));
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_size(px(13.))
+                    .child(working_indicator(since))
+                    .child(self.arcade_chip(cx)),
+            );
         }
         list
     }
@@ -9479,6 +9505,8 @@ impl Render for RunoApp {
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if this.tour.is_some() {
                     this.end_tour(cx);
+                } else if this.arcade_open {
+                    this.close_arcade(window, cx);
                 } else if this.remove_copy.is_some() {
                     this.remove_copy = None;
                 } else if this.install_confirm.is_some() {
@@ -9828,6 +9856,7 @@ impl Render for RunoApp {
             .children(self.delete_session_modal(cx))
             .children(self.playbook_run_form(cx))
             .children(self.playbook_ask_modal(cx))
+            .children(self.arcade_view(cx))
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx))
             .children(self.whats_new_view(cx));
