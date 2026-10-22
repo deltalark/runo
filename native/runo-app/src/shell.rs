@@ -79,10 +79,9 @@ pub(crate) fn accent_bracket(key: impl Into<SharedString>, radius: f32) -> AnyEl
     bracket(key.into(), radius, true)
 }
 
-/// The accent for a row fused to the page beside it (see `row_fuse`), which has no
-/// bottom-right corner of its own: the same top-left hook, and a bottom-right one that
-/// runs along the bottom edge and down the curve where the row flows into the page.
-/// Drawn over the fuse, whose right side is the list's edge.
+/// The accent for a row fused to the page beside it (see `row_fuse`). Its right side
+/// runs on into the page, so it owns only its left corners, and a hook goes only round a
+/// corner that is wholly the row's: one round the top-left and one round the bottom-left.
 fn fused_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
     bracket(key.into(), radius, false)
 }
@@ -128,17 +127,17 @@ fn bracket(key: SharedString, radius: f32, own_corner: bool) -> AnyElement {
                         );
                         f.line_to(at(x1 - i - rc - reach, y1 - i));
                     } else {
-                        // The fuse's curve turns outwards, from its bottom edge down into
-                        // the list's edge at `x1`, so inside it the radius is `r + i`.
-                        let ro = r + i;
-                        f.move_to(at(x1 - r - reach, y1 - i));
-                        f.line_to(at(x1 + i - ro, y1 - i));
+                        // A fused row's right side runs on into the page, so its second
+                        // hook goes round its own bottom-left corner instead.
+                        f.move_to(at(x0 + i, y1 - i - rc - down));
+                        f.line_to(at(x0 + i, y1 - i - rc));
                         turn(
                             &mut f,
-                            at(x1 + i - ro, y1 - i),
-                            at(x1 + i, y1 - i),
-                            at(x1 + i, y1 - i + ro),
+                            at(x0 + i, y1 - i - rc),
+                            at(x0 + i, y1 - i),
+                            at(x0 + i + rc, y1 - i),
                         );
+                        f.line_to(at(x0 + i + rc + reach, y1 - i));
                     }
                     if let Ok(path) = f.build() {
                         window.paint_path(path, accent::color(hover));
@@ -240,9 +239,9 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         .right(px(-reach))
         .h(px(height))
         .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
-        // The accent bracket on the tab's leading corner, as on every open tab: up the
-        // middle of a 2px edge inside the tab's outline and round its top corner,
-        // reaching further along both edges while the tab is hovered.
+        // The accent's hooks round the tab's own two corners, top-left and bottom-left (its
+        // right side runs on into the sheet): along the middle of a 2px edge inside the
+        // tab's outline, reaching further along both edges while the tab is hovered.
         .child({
             let hover_key = SharedString::from(format!("rail-hover-{key}"));
             div()
@@ -254,17 +253,19 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
                         move |b, _, window, _| {
                             let hover = accent::hover(&hover_key, b, window);
                             let (x0, y0) = (b.origin.x + px(1.), b.origin.y + px(1.));
+                            let y1 = b.bottom() - px(1.);
                             let end = px(FUSE_R + 1. + 6. * hover);
                             let rc = px(FUSE_R - 1.);
-                            let line = |f: &mut PathBuilder| {
-                                let at = |x: Pixels, y: Pixels| point(x, y);
-                                f.move_to(at(x0, y0 + end));
-                                f.line_to(at(x0, y0 + rc));
-                                turn(f, at(x0, y0 + rc), at(x0, y0), at(x0 + rc, y0));
-                                f.line_to(at(x0 + end, y0));
-                            };
+                            let at = |x: Pixels, y: Pixels| point(x, y);
                             let mut f = PathBuilder::stroke(px(2.));
-                            line(&mut f);
+                            f.move_to(at(x0, y0 + end));
+                            f.line_to(at(x0, y0 + rc));
+                            turn(&mut f, at(x0, y0 + rc), at(x0, y0), at(x0 + rc, y0));
+                            f.line_to(at(x0 + end, y0));
+                            f.move_to(at(x0, y1 - end));
+                            f.line_to(at(x0, y1 - rc));
+                            turn(&mut f, at(x0, y1 - rc), at(x0, y1), at(x0 + rc, y1));
+                            f.line_to(at(x0 + end, y1));
                             if let Ok(path) = f.build() {
                                 window.paint_path(path, accent::color(hover));
                             }
@@ -522,7 +523,7 @@ pub(crate) fn strip_cut(strip: &'static str) -> AnyElement {
 
 /// The fill of a strip of tabs over an island: the frame's grey across the strip, less
 /// the open tab, which is the island's own colour and flows into it with curves on both
-/// sides, and the accent bracket on its leading corner. The grey and the tab are two
+/// sides, and the accent's hooks round its two top corners. The grey and the tab are two
 /// paths that never overlap, so the join looks the same in every glass style. A child
 /// of the strip, which must be `relative`, added first so it sits under the tabs.
 pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
@@ -579,9 +580,10 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                         window.paint_path(path, frame);
                     }
                     let Some(t) = cut else { return };
-                    let (x0, y0) = (t.origin.x, t.origin.y.max(top));
-                    // The bracket: up the tab's left edge and round its top corner,
-                    // reaching further along both while the tab is hovered.
+                    let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
+                    // The accent's hooks round the tab's own two corners, top-left and
+                    // top-right (its foot runs on into the island), reaching further along
+                    // both edges while the tab is hovered.
                     let hover = accent::hover(&SharedString::from(strip), t, window);
                     let (i, reach) = (px(1.), px(9. + 6. * hover));
                     let line = |f: &mut PathBuilder| {
@@ -594,6 +596,15 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                             at(x0 + tr, y0 + i),
                         );
                         f.line_to(at(x0 + tr + reach, y0 + i));
+                        f.move_to(at(x1 - i, y0 + tr + reach));
+                        f.line_to(at(x1 - i, y0 + tr));
+                        turn(
+                            f,
+                            at(x1 - i, y0 + tr),
+                            at(x1 - i, y0 + i),
+                            at(x1 - tr, y0 + i),
+                        );
+                        f.line_to(at(x1 - tr - reach, y0 + i));
                     };
                     let mut f = PathBuilder::stroke(px(2.));
                     line(&mut f);
