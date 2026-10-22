@@ -278,6 +278,14 @@ impl RunoApp {
                         .map_or(session.messages.len(), |i| i + 1);
                     session.messages.truncate(start);
                     session.messages.push(Message::now(Role::Agent, ""));
+                    self.logs.insert(
+                        id,
+                        crate::harness::log::TurnLog::resume(
+                            crate::harness::log::root(),
+                            id,
+                            start.saturating_sub(1),
+                        ),
+                    );
                     if let Some(parser) =
                         stream::Parser::for_provider(&session.provider, &session.dir)
                     {

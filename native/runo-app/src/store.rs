@@ -35,21 +35,17 @@ impl Status {
     }
 }
 
-/// How a tool step in an agent turn stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StepState {
-    Running,
-    Done,
-    Failed,
-}
+pub use crate::harness::{StepState, ToolStep};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub text: String,
-    /// Completed tool steps shown above the reply (e.g. "Explored 8 files").
-    #[serde(default)]
-    pub steps: Vec<String>,
+    /// Agent turns: the tool calls shown above the reply, such as "Read src/main.rs",
+    /// each with its kind and how it stands. Sessions saved when steps were plain labels
+    /// load those as finished steps.
+    #[serde(default, deserialize_with = "steps_or_labels")]
+    pub steps: Vec<ToolStep>,
     #[serde(default)]
     pub time: String,
     /// Run summary shown under the reply, such as "12s · 3 turns · $0.04".
@@ -91,13 +87,6 @@ pub struct Message {
     /// User turns run from a playbook: what the person typed with it, if anything.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
-    /// Agent turns: steps (by index into `steps`) whose tool reported an error.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub failed_steps: Vec<usize>,
-    /// Agent turns: steps still waiting for their result, as (index into `steps`, the
-    /// tool call's id). Only meaningful while the turn runs, so it isn't saved.
-    #[serde(skip)]
-    pub running_steps: Vec<(usize, String)>,
     /// In a Crew chat: a card drawn with the message, such as the threads it started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crew: Option<crate::crew::Card>,
@@ -250,6 +239,23 @@ impl Session {
     }
 }
 
+/// Steps as saved now, or as the plain labels sessions were saved with before.
+fn steps_or_labels<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ToolStep>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Label(String),
+        Step(ToolStep),
+    }
+    Ok(Vec::<Saved>::deserialize(d)?
+        .into_iter()
+        .map(|s| match s {
+            Saved::Label(label) => ToolStep::done(label),
+            Saved::Step(step) => step,
+        })
+        .collect())
+}
+
 impl Message {
     pub fn new(role: Role, text: impl Into<String>) -> Self {
         Self {
@@ -269,8 +275,6 @@ impl Message {
             questions: Vec::new(),
             playbook: String::new(),
             note: String::new(),
-            failed_steps: Vec::new(),
-            running_steps: Vec::new(),
             crew: None,
         }
     }
@@ -278,26 +282,40 @@ impl Message {
     /// Where step `i` stands, for its icon: still running (only while the turn is live),
     /// failed, or done.
     pub fn step_state(&self, i: usize, live: bool) -> StepState {
-        if live && self.running_steps.iter().any(|(j, _)| *j == i) {
-            StepState::Running
-        } else if self.failed_steps.contains(&i) {
-            StepState::Failed
-        } else {
-            StepState::Done
+        match self.steps.get(i).map(|s| s.state) {
+            Some(StepState::Running) if !live => StepState::Done,
+            Some(state) => state,
+            None => StepState::Done,
         }
     }
 
-    /// A started step's result arrived: it is no longer running, and is marked failed
-    /// when its tool reported an error. Returns false when no step has that id.
+    /// A running step's result arrived: it is no longer running, and is marked failed
+    /// when its tool reported an error. Returns false when no running step has that id.
     pub fn finish_step(&mut self, id: &str, ok: bool) -> bool {
-        let Some(at) = self.running_steps.iter().position(|(_, s)| s == id) else {
+        let Some(step) = self
+            .steps
+            .iter_mut()
+            .rev()
+            .find(|s| s.state == StepState::Running && s.id == id)
+        else {
             return false;
         };
-        let (i, _) = self.running_steps.remove(at);
-        if !ok && !self.failed_steps.contains(&i) {
-            self.failed_steps.push(i);
-        }
+        step.finish(ok);
         true
+    }
+
+    /// The turn is over: steps whose result never came are taken as done.
+    pub fn settle_steps(&mut self) {
+        for step in &mut self.steps {
+            if step.state == StepState::Running {
+                step.finish(true);
+            }
+        }
+    }
+
+    /// The steps' labels, oldest first.
+    pub fn step_labels(&self) -> impl Iterator<Item = &str> {
+        self.steps.iter().map(|s| s.label.as_str())
     }
 
     /// A message stamped with the current local time, for the conversation header.
@@ -1471,8 +1489,10 @@ pub(crate) mod tests {
     #[test]
     fn steps_run_until_finished_and_keep_failures() {
         let mut m = Message::new(Role::Agent, "");
-        m.steps = vec!["Ran sleep 60".into(), "Ran false".into()];
-        m.running_steps = vec![(0, "a".into()), (1, "b".into())];
+        m.steps = vec![
+            ToolStep::running("a", "Bash", "Ran sleep 60"),
+            ToolStep::running("b", "Bash", "Ran false"),
+        ];
         assert_eq!(m.step_state(0, true), StepState::Running);
         assert_eq!(
             m.step_state(0, false),
@@ -1485,8 +1505,30 @@ pub(crate) mod tests {
         assert!(m.finish_step("a", true));
         assert_eq!(m.step_state(0, true), StepState::Done);
         let saved: Message = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
-        assert_eq!(saved.failed_steps, [1]);
-        assert!(saved.running_steps.is_empty());
+        assert_eq!(saved.step_state(1, false), StepState::Failed);
+        assert_eq!(saved.steps[0].kind, crate::harness::ToolKind::Shell);
+    }
+
+    #[test]
+    fn unfinished_steps_settle_as_done_when_the_turn_ends() {
+        let mut m = Message::new(Role::Agent, "");
+        m.steps = vec![ToolStep::running("a", "Bash", "Ran sleep 60")];
+        m.settle_steps();
+        assert_eq!(m.steps[0].state, StepState::Done);
+        assert!(!m.finish_step("a", false), "nothing is left running");
+    }
+
+    #[test]
+    fn steps_saved_as_plain_labels_still_load() {
+        let saved = r#"{"role":"Agent","text":"ok","steps":["Read a.rs",
+            {"label":"Ran false","kind":"shell","state":"failed"}],"failed_steps":[1]}"#;
+        let m: Message = serde_json::from_str(saved).unwrap();
+        assert_eq!(
+            m.step_labels().collect::<Vec<_>>(),
+            ["Read a.rs", "Ran false"]
+        );
+        assert_eq!(m.step_state(0, false), StepState::Done);
+        assert_eq!(m.step_state(1, false), StepState::Failed);
     }
 
     #[test]

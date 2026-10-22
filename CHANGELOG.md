@@ -18,6 +18,11 @@ All notable changes to Runo are documented here.
 - Runo keeps running in the menu bar: with it on, ⌘Q and closing the window hide Runo and its Dock icon while agents keep working, and Quit Runo in the panel quits. Turn it off under Settings > General > Alerts.
 - Dot matrix, a background for the window. A fine grid of dots lies on the frame round your work (the top bar, the rail, the gutters and the status bar), warming into your accent toward the top-left corner. With glass on it shows through the sidebars and panels too, like dotted glass. It follows the colour theme and accent. Turn it on in Settings > Appearance > Background.
 
+### Changed
+
+- Steps from Codex, Cursor, Gemini and Copilot now show as running until they finish, and a step whose tool failed is marked with a cross, as Claude's already were. Each step also records what kind of work it was and how long it took.
+- Every turn is kept in a log beside its session (`sessions/<id>/events.jsonl`): the reply text, each tool call with the end of its output, token use and how the turn ended. A turn picked up again after Runo restarts isn't logged twice. `Runo --events <session id>` prints a session's log.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

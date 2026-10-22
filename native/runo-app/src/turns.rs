@@ -265,6 +265,22 @@ impl RunoApp {
                     Some(parser) => self.streams.insert(id, parser),
                     None => self.streams.remove(&id),
                 };
+                let turn = session
+                    .messages
+                    .iter()
+                    .rposition(|m| m.role == Role::User)
+                    .unwrap_or(0);
+                let model = sel.get("model").map(String::as_str).unwrap_or("");
+                self.logs.insert(
+                    id,
+                    crate::harness::log::TurnLog::start(
+                        crate::harness::log::root(),
+                        id,
+                        turn,
+                        &provider,
+                        model,
+                    ),
+                );
                 self.handles.insert(Target::Session(id), handle);
                 self.started.insert(id, std::time::Instant::now());
                 self.turn_files.remove(&id);

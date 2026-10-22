@@ -2,6 +2,7 @@
 //! Claude Code keeps `~/.claude/projects/<folder>/<session-id>.jsonl` and Codex keeps
 //! `~/.codex/sessions/YYYY/MM/DD/rollout-…-<session-id>.jsonl`.
 
+use crate::harness::ToolStep;
 use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -361,11 +362,9 @@ pub fn turns(provider: &str, text: &str) -> Vec<crate::store::Message> {
                         match block["type"].as_str().unwrap_or("") {
                             "text" => add_text(&mut out[i], block["text"].as_str().unwrap_or("")),
                             "tool_use" => {
-                                let label = step_label(
-                                    block["name"].as_str().unwrap_or("a tool"),
-                                    &block["input"],
-                                );
-                                out[i].steps.push(label);
+                                let name = block["name"].as_str().unwrap_or("a tool");
+                                let label = step_label(name, &block["input"]);
+                                out[i].steps.push(ToolStep::of(name, label));
                             }
                             _ => {}
                         }
@@ -409,7 +408,9 @@ pub fn turns(provider: &str, text: &str) -> Vec<crate::store::Message> {
                         .as_str()
                         .and_then(|a| serde_json::from_str::<Value>(a).ok())
                         .unwrap_or_else(|| payload["action"].clone());
-                    out[i].steps.push(step_label(name, &input));
+                    out[i]
+                        .steps
+                        .push(ToolStep::of(name, step_label(name, &input)));
                 }
                 _ => {}
             }
@@ -463,7 +464,10 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!((m[0].role, m[0].text.as_str()), (Role::User, "Add a test"));
         assert_eq!(m[1].text, "Adding it.\n\nDone.");
-        assert_eq!(m[1].steps, vec!["Edited src/lib.rs", "Ran cargo test"]);
+        assert_eq!(
+            m[1].step_labels().collect::<Vec<_>>(),
+            ["Edited src/lib.rs", "Ran cargo test"]
+        );
         assert_eq!((m[1].usage.input, m[1].usage.output), (3, 7));
         let codex = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context></environment_context>"}]}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"List files"}]}}
@@ -473,7 +477,7 @@ mod tests {
         let m = turns("codex", codex);
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].text, "List files");
-        assert_eq!(m[1].steps, vec!["Ran ls -a"]);
+        assert_eq!(m[1].step_labels().collect::<Vec<_>>(), ["Ran ls -a"]);
         assert_eq!(m[1].text, "Two files.");
     }
 

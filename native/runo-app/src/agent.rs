@@ -1161,8 +1161,8 @@ pub fn oneshot_streamed(
                     Some(p) => {
                         for update in p.feed(&line) {
                             match update {
-                                crate::stream::Update::Text(t) => reply.push_str(&t),
-                                crate::stream::Update::Error(e) => failure = Some(e),
+                                crate::harness::AgentEvent::Text(t) => reply.push_str(&t),
+                                crate::harness::AgentEvent::Error(e) => failure = Some(e),
                                 _ => {}
                             }
                         }

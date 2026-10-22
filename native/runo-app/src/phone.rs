@@ -889,7 +889,9 @@ fn session(base: &Path, id: u64) -> Option<Value> {
             // A playbook's message holds the whole prompt; the phone shows its name.
             "text": if m.playbook.is_empty() { m.text.clone() } else { m.note.clone() },
             "playbook": m.playbook,
-            "steps": m.steps,
+            "steps": m.step_labels().collect::<Vec<_>>(),
+            // Beside each label: "running", "done" or "failed".
+            "step_states": m.steps.iter().map(|s| s.state).collect::<Vec<_>>(),
             "time": m.time,
             "meta": m.meta,
             "plan": m.plan,

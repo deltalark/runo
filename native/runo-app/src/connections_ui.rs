@@ -603,6 +603,15 @@ impl RunoApp {
                     {
                         *m = Message::now(Role::Agent, "");
                     }
+                    let turn = session
+                        .messages
+                        .iter()
+                        .rposition(|m| m.role == Role::User)
+                        .unwrap_or(0);
+                    self.logs.insert(
+                        id,
+                        crate::harness::log::TurnLog::resume(crate::harness::log::root(), id, turn),
+                    );
                     if let Some(parser) = stream::Parser::for_provider(&provider, &dir) {
                         self.streams.insert(id, parser);
                     }
