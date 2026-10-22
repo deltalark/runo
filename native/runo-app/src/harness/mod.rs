@@ -5,12 +5,14 @@
 
 pub mod acp;
 pub mod apply;
+pub mod codex;
 pub mod event;
 #[cfg(test)]
 mod fixtures;
 pub mod host;
 pub mod log;
 pub mod record;
+pub mod rpc;
 pub mod turn;
 
 pub use event::{AgentEvent, StepState, ToolKind, ToolStep};

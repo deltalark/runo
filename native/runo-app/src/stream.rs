@@ -16,6 +16,8 @@ pub enum Parser {
     Json(Box<JsonStream>),
     /// An ACP session's output (see `harness::acp`).
     Acp(Box<crate::harness::acp::AcpStream>),
+    /// A Codex app-server turn's output (see `harness::codex`).
+    Codex(Box<crate::harness::codex::CodexAppStream>),
 }
 
 impl Parser {
@@ -38,6 +40,7 @@ impl Parser {
             Parser::Claude(p) => p.feed(line),
             Parser::Json(p) => p.feed(line),
             Parser::Acp(p) => p.feed(line),
+            Parser::Codex(p) => p.feed(line),
         }
     }
 }

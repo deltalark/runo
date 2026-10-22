@@ -32,6 +32,10 @@ pub fn main(args: &[String]) -> i32 {
     if program == "--acp" {
         return super::acp::main(Path::new(turn));
     }
+    // Codex's app server, likewise.
+    if program == "--codex" {
+        return super::codex::main(Path::new(turn));
+    }
     run(Path::new(turn), program, &args[3..], IDLE)
 }
 

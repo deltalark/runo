@@ -19,13 +19,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use super::rpc::{self, Agent, HostLines, Message, Out, Reply};
 use super::{AgentEvent, ToolKind, ToolStep};
 use crate::stream::Parser;
 
@@ -98,234 +95,106 @@ pub fn main(turn: &Path) -> i32 {
 
 /// Run the turn: an ACP session when the agent can open one, else the fallback.
 fn run(turn: &Path, config: &Config) -> i32 {
-    let Ok(out) = std::fs::File::create(turn.join("out")) else {
+    let Some(out) = rpc::create_out(turn) else {
         return 1;
     };
-    let out = Arc::new(Mutex::new(out));
     match session(turn, config, &out) {
         Ok(code) => code,
-        Err(why) => fall_back(turn, config, &out, &why),
+        Err(why) => rpc::fall_back(turn, &config.fallback, &config.cwd, &out, &why),
     }
 }
 
-/// One line for `out`, from the host itself.
-fn note(out: &Mutex<std::fs::File>, line: Value) {
-    write_line(out, &json!({ "runo": line }).to_string());
-}
-
-fn write_line(out: &Mutex<std::fs::File>, line: &str) {
-    if let Ok(mut out) = out.lock() {
-        let _ = writeln!(out, "{line}");
-        let _ = out.flush();
-    }
-}
-
-/// The JSON-RPC side of the agent: its input, and the next request id.
-struct Rpc {
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
-    next: u64,
-}
-
-impl Rpc {
-    fn request(&mut self, method: &str, params: Value) -> u64 {
-        let id = self.next;
-        self.next += 1;
-        send(
-            &self.stdin,
-            &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
-        );
-        id
-    }
-}
-
-fn send(stdin: &Mutex<Option<ChildStdin>>, message: &Value) {
-    if let Ok(mut stdin) = stdin.lock() {
-        if let Some(pipe) = stdin.as_mut() {
-            let _ = writeln!(pipe, "{message}").and_then(|_| pipe.flush());
-        }
-    }
-}
-
-fn respond(stdin: &Mutex<Option<ChildStdin>>, id: &Value, result: Value) {
-    send(
-        stdin,
-        &json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-    );
-}
-
-fn respond_error(stdin: &Mutex<Option<ChildStdin>>, id: &Value, code: i64, message: &str) {
-    send(
-        stdin,
-        &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
-    );
-}
-
-/// How the agent answered a request.
-enum Reply {
-    Result(Value),
-    Error(String),
-    /// It exited first.
-    Gone,
-    TimedOut,
-}
-
-/// The running session: the agent, what it can do, and where its output goes.
-struct Session<'a> {
-    rpc: Rpc,
-    lines: Receiver<String>,
-    out: &'a Arc<Mutex<std::fs::File>>,
+/// Handles what the agent sends besides answers: its notifications go to `out` (except
+/// while a reloaded conversation replays its history), its requests are answered.
+struct Handler<'a> {
+    out: &'a Out,
     config: &'a Config,
-    /// `session/update`s are dropped while a reloaded conversation replays its history.
     quiet: bool,
 }
 
-impl Session<'_> {
-    /// Wait for the answer to request `id`, handling whatever else the agent sends.
-    fn wait(&mut self, id: u64, limit: Option<Duration>) -> Reply {
-        let start = Instant::now();
-        loop {
-            let left = match limit {
-                Some(limit) => match limit.checked_sub(start.elapsed()) {
-                    Some(left) => left,
-                    None => return Reply::TimedOut,
-                },
-                None => Duration::from_secs(3600),
-            };
-            let line = match self.lines.recv_timeout(left) {
-                Ok(line) => line,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return Reply::Gone,
-            };
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let method = message["method"].as_str();
-            match (method, message.get("id")) {
-                // A request from the agent.
-                (Some(method), Some(rid)) => {
-                    write_line(self.out, &line);
-                    self.handle(method, rid.clone(), &message["params"]);
+impl Handler<'_> {
+    fn on(&self, agent: &mut Agent, message: Message) {
+        match message {
+            Message::Notification { line, .. } => {
+                if !self.quiet {
+                    rpc::write_line(self.out, &line);
                 }
-                // A notification.
-                (Some(_), None) => {
-                    if !self.quiet {
-                        write_line(self.out, &line);
-                    }
-                }
-                // A response.
-                (None, Some(rid)) if rid.as_u64() == Some(id) => {
-                    if let Some(error) = message.get("error") {
-                        return Reply::Error(
-                            error["message"]
-                                .as_str()
-                                .map(str::to_string)
-                                .unwrap_or_else(|| error.to_string()),
-                        );
-                    }
-                    return Reply::Result(message["result"].clone());
-                }
-                _ => {}
             }
+            Message::Request {
+                method,
+                id,
+                params,
+                line,
+            } => {
+                rpc::write_line(self.out, &line);
+                self.handle(agent, &method, id, &params);
+            }
+            _ => {}
         }
     }
 
     /// Answer a request from the agent.
-    fn handle(&mut self, method: &str, id: Value, params: &Value) {
-        let stdin = self.rpc.stdin.clone();
+    fn handle(&self, agent: &Agent, method: &str, id: Value, params: &Value) {
+        let input = agent.input.clone();
         match method {
-            "session/request_permission" => {
-                let params = params.clone();
-                let config = self.config.clone();
-                match decide(&config.mode, &params) {
-                    Decision::Pick(option) => respond(&stdin, &id, selected(&option)),
-                    // The person may take minutes; the session carries on reading meanwhile.
-                    Decision::Ask => {
-                        std::thread::spawn(move || {
-                            let result = ask_person(&config, &params);
-                            respond(&stdin, &id, result);
-                        });
-                    }
+            "session/request_permission" => match decide(&self.config.mode, params) {
+                Decision::Pick(option) => rpc::respond(&input, &id, selected(&option)),
+                // The person may take minutes; the session carries on reading meanwhile.
+                Decision::Ask => {
+                    let (params, cwd) = (params.clone(), self.config.cwd.clone());
+                    std::thread::spawn(move || {
+                        let result = ask_person(&cwd, &params);
+                        rpc::respond(&input, &id, result);
+                    });
                 }
-            }
+            },
             "fs/read_text_file" => match read_file(params) {
-                Ok(content) => respond(&stdin, &id, json!({ "content": content })),
-                Err(e) => respond_error(&stdin, &id, -32603, &e),
+                Ok(content) => rpc::respond(&input, &id, json!({ "content": content })),
+                Err(e) => rpc::respond_error(&input, &id, -32603, &e),
             },
             "fs/write_text_file" => match write_file(&self.config.cwd, params) {
-                Ok(()) => respond(&stdin, &id, Value::Null),
-                Err(e) => respond_error(&stdin, &id, -32603, &e),
+                Ok(()) => rpc::respond(&input, &id, Value::Null),
+                Err(e) => rpc::respond_error(&input, &id, -32603, &e),
             },
-            _ => respond_error(&stdin, &id, -32601, "Runo doesn't offer this"),
+            _ => rpc::respond_error(&input, &id, -32601, "Runo doesn't offer this"),
         }
+    }
+
+    fn wait(&mut self, agent: &mut Agent, id: u64, limit: Option<Duration>) -> Reply {
+        agent.wait(id, limit, &mut |agent, message| self.on(agent, message))
     }
 }
 
 /// Open the session and run the prompts. `Err` means no session could be opened, so
 /// nothing was sent yet and the fallback can run instead.
-fn session(turn: &Path, config: &Config, out: &Arc<Mutex<std::fs::File>>) -> Result<i32, String> {
+fn session(turn: &Path, config: &Config, out: &Out) -> Result<i32, String> {
     let (program, args) = config
         .command
         .split_first()
         .ok_or("the agent has no ACP command")?;
-    let err = std::fs::File::create(turn.join("err")).map_err(|e| e.to_string())?;
-    let mut child = Command::new(program)
-        .args(args)
-        .current_dir(&config.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(err))
-        .spawn()
-        .map_err(|e| format!("couldn't start {program}: {e}"))?;
-    let stdin = Arc::new(Mutex::new(child.stdin.take()));
-    let (tx, lines) = mpsc::channel();
-    if let Some(stdout) = child.stdout.take() {
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-    }
-    let mut s = Session {
-        rpc: Rpc { stdin, next: 0 },
-        lines,
+    let mut agent = Agent::spawn(turn, program, args, &config.cwd)?;
+    let mut handler = Handler {
         out,
         config,
         quiet: false,
     };
-    let opened = open(&mut s);
-    let sid = match opened {
+    let sid = match open(&mut agent, &mut handler) {
         Ok(sid) => sid,
         Err(why) => {
-            let _ = child.kill();
-            let _ = child.wait();
+            agent.kill();
             return Err(why);
         }
     };
-    note(out, json!({ "session": sid }));
-    let failed = prompts(turn, &mut s, &sid);
-    // The input closes and the agent exits; one that lingers is stopped.
-    s.rpc.stdin.lock().map(|mut s| s.take()).ok();
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => break,
-            Ok(None) if start.elapsed() > Duration::from_secs(5) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-        }
-    }
+    rpc::note(out, json!({ "session": sid }));
+    let failed = prompts(turn, &mut agent, &mut handler, &sid);
+    agent.close();
     Ok(if failed { 1 } else { 0 })
 }
 
 /// Initialize and open the conversation, set its mode and model. Returns its id.
-fn open(s: &mut Session) -> Result<String, String> {
-    let id = s.rpc.request(
+fn open(agent: &mut Agent, h: &mut Handler) -> Result<String, String> {
+    let config = h.config;
+    let id = agent.request(
         "initialize",
         json!({
             "protocolVersion": 1,
@@ -336,15 +205,14 @@ fn open(s: &mut Session) -> Result<String, String> {
             "clientInfo": { "name": "Runo", "version": env!("CARGO_PKG_VERSION") },
         }),
     );
-    let init = match s.wait(id, Some(START)) {
+    let init = match h.wait(agent, id, Some(START)) {
         Reply::Result(init) => init,
         Reply::Error(e) => return Err(format!("it refused to start a session: {e}")),
         Reply::Gone => return Err("it exited before starting a session".into()),
         Reply::TimedOut => return Err("it didn't answer".into()),
     };
     let caps = &init["agentCapabilities"];
-    let servers: Vec<Value> = s
-        .config
+    let servers: Vec<Value> = config
         .servers
         .iter()
         .filter(|server| match server["type"].as_str() {
@@ -356,32 +224,32 @@ fn open(s: &mut Session) -> Result<String, String> {
         .collect();
     let mut sid = String::new();
     let mut opened = Value::Null;
-    if !s.config.session.is_empty() && caps["loadSession"] == true {
-        s.quiet = true;
-        let id = s.rpc.request(
+    if !config.session.is_empty() && caps["loadSession"] == true {
+        h.quiet = true;
+        let id = agent.request(
             "session/load",
-            json!({ "sessionId": s.config.session, "cwd": s.config.cwd, "mcpServers": servers }),
+            json!({ "sessionId": config.session, "cwd": config.cwd, "mcpServers": servers }),
         );
-        let reply = s.wait(id, Some(START));
-        s.quiet = false;
+        let reply = h.wait(agent, id, Some(START));
+        h.quiet = false;
         match reply {
             Reply::Result(result) => {
-                sid = s.config.session.clone();
+                sid = config.session.clone();
                 opened = result;
             }
             Reply::Gone => return Err("it exited while opening the conversation".into()),
-            _ => note(
-                s.out,
+            _ => rpc::note(
+                h.out,
                 json!({ "notice": "The agent couldn't pick up the conversation, so this turn starts a new one." }),
             ),
         }
     }
     if sid.is_empty() {
-        let id = s.rpc.request(
+        let id = agent.request(
             "session/new",
-            json!({ "cwd": s.config.cwd, "mcpServers": servers }),
+            json!({ "cwd": config.cwd, "mcpServers": servers }),
         );
-        match s.wait(id, Some(START)) {
+        match h.wait(agent, id, Some(START)) {
             Reply::Result(result) => {
                 sid = result["sessionId"].as_str().unwrap_or_default().to_string();
                 opened = result;
@@ -394,30 +262,30 @@ fn open(s: &mut Session) -> Result<String, String> {
             return Err("it started a session without an id".into());
         }
     }
-    if let Some(mode) = pick_mode(&s.config.mode, &opened["modes"]) {
-        let id = s.rpc.request(
+    if let Some(mode) = pick_mode(&config.mode, &opened["modes"]) {
+        let id = agent.request(
             "session/set_mode",
             json!({ "sessionId": sid, "modeId": mode }),
         );
-        s.wait(id, Some(Duration::from_secs(20)));
+        h.wait(agent, id, Some(Duration::from_secs(20)));
     }
-    if !s.config.model.is_empty() {
-        match pick_model(&s.config.model, &opened["models"]) {
+    if !config.model.is_empty() {
+        match pick_model(&config.model, &opened["models"]) {
             Some(model) => {
-                let id = s.rpc.request(
+                let id = agent.request(
                     "session/set_model",
                     json!({ "sessionId": sid, "modelId": model }),
                 );
-                if let Reply::Error(e) = s.wait(id, Some(Duration::from_secs(20))) {
-                    note(
-                        s.out,
+                if let Reply::Error(e) = h.wait(agent, id, Some(Duration::from_secs(20))) {
+                    rpc::note(
+                        h.out,
                         json!({ "notice": format!("The agent kept its own model: {e}") }),
                     );
                 }
             }
-            None => note(
-                s.out,
-                json!({ "notice": format!("{} isn't one of the agent's models here, so it used its default.", s.config.model) }),
+            None => rpc::note(
+                h.out,
+                json!({ "notice": format!("{} isn't one of the agent's models here, so it used its default.", config.model) }),
             ),
         }
     }
@@ -426,7 +294,7 @@ fn open(s: &mut Session) -> Result<String, String> {
 
 /// Send each prompt in `in`, one after another, until none is left. Returns true when
 /// a prompt failed.
-fn prompts(turn: &Path, s: &mut Session, sid: &str) -> bool {
+fn prompts(turn: &Path, agent: &mut Agent, h: &mut Handler, sid: &str) -> bool {
     let path = turn.join("in");
     let mut offset = 0u64;
     let mut waiting: std::collections::VecDeque<String> = Default::default();
@@ -441,87 +309,36 @@ fn prompts(turn: &Path, s: &mut Session, sid: &str) -> bool {
                 std::thread::sleep(Duration::from_millis(100));
                 waiting.extend(super::host::new_lines(&path, &mut offset));
             }
-            if waiting.is_empty() {
-                return failed;
-            }
         }
         let Some(line) = waiting.pop_front() else {
             return failed;
         };
-        let text = serde_json::from_str::<Value>(&line)
-            .ok()
-            .and_then(|v| v["message"]["content"].as_str().map(str::to_string))
-            .unwrap_or(line);
-        let id = s.rpc.request(
+        let id = agent.request(
             "session/prompt",
-            json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": text }] }),
+            json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": rpc::prompt_text(&line) }] }),
         );
         sent += 1;
         let _ = std::fs::write(turn.join("sent"), sent.to_string());
-        match s.wait(id, None) {
+        match h.wait(agent, id, None) {
             Reply::Result(result) => {
                 let stop = result["stopReason"].as_str().unwrap_or("end_turn");
-                note(s.out, json!({ "done": stop }));
+                rpc::note(h.out, json!({ "done": stop }));
                 if stop == "refusal" {
                     failed = true;
                 }
             }
             Reply::Error(e) => {
-                note(s.out, json!({ "error": e }));
+                rpc::note(h.out, json!({ "error": e }));
                 failed = true;
             }
             Reply::Gone => {
-                note(
-                    s.out,
+                rpc::note(
+                    h.out,
                     json!({ "error": "The agent exited in the middle of its turn." }),
                 );
                 return true;
             }
             Reply::TimedOut => {}
-        }
-    }
-}
-
-/// Run the print-mode command instead, with its output in `out` as usual.
-fn fall_back(turn: &Path, config: &Config, out: &Arc<Mutex<std::fs::File>>, why: &str) -> i32 {
-    let Some((program, args)) = config.fallback.split_first() else {
-        note(
-            out,
-            json!({ "error": format!("The agent couldn't start a session: {why}.") }),
-        );
-        return 1;
-    };
-    note(out, json!({ "fallback": why }));
-    // The first message is the prompt in the fallback command.
-    let _ = std::fs::write(turn.join("sent"), "1");
-    let err = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(turn.join("err"));
-    let out_file = match out.lock() {
-        Ok(file) => file.try_clone(),
-        Err(_) => return 1,
-    };
-    let Ok(out_file) = out_file else {
-        return 1;
-    };
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(&config.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(out_file));
-    if let Ok(err) = err {
-        command.stderr(Stdio::from(err));
-    }
-    match command.status() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            note(
-                out,
-                json!({ "error": format!("Runo could not start {program}: {e}") }),
-            );
-            127
         }
     }
 }
@@ -577,7 +394,7 @@ fn selected(option: &str) -> Value {
 }
 
 /// Ask the person in Runo and turn the answer into the agent's option.
-fn ask_person(config: &Config, params: &Value) -> Value {
+fn ask_person(cwd: &str, params: &Value) -> Value {
     let call = &params["toolCall"];
     let tool = call["title"]
         .as_str()
@@ -586,7 +403,7 @@ fn ask_person(config: &Config, params: &Value) -> Value {
         .unwrap_or("a tool");
     let input = call.get("rawInput").cloned().unwrap_or_else(|| json!({}));
     let base = crate::approvals::folder();
-    let answer = crate::approvals::ask(&base, &config.cwd, tool, &input, crate::approvals::wait());
+    let answer = crate::approvals::ask(&base, cwd, tool, &input, crate::approvals::wait());
     let options = params["options"].as_array().cloned().unwrap_or_default();
     let allowed = matches!(answer, crate::approvals::Answer::Allow { .. });
     match option_of(&options, allowed) {
@@ -693,59 +510,29 @@ fn inside(folder: &Path, path: &Path) -> bool {
 /// Reads an ACP turn's `out`: the agent's `session/update`s and the host's own lines.
 /// After a fallback, the lines are the print-mode run's, read by its own parser.
 pub struct AcpStream {
-    fallback: Option<Parser>,
-    falling_back: bool,
-    named: bool,
+    host: HostLines,
 }
 
 impl AcpStream {
     /// `fallback` reads the print-mode output (`None` for plain text).
     pub fn new(fallback: Option<Parser>) -> AcpStream {
         AcpStream {
-            fallback,
-            falling_back: false,
-            named: false,
+            host: HostLines::new(fallback),
         }
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        if self.falling_back {
-            return match self.fallback.as_mut() {
-                Some(parser) => parser.feed(line),
-                None => vec![AgentEvent::Text(format!("{line}\n"))],
-            };
+        let message = serde_json::from_str::<Value>(line.trim()).ok();
+        if let Some(events) = self.host.feed(line, message.as_ref()) {
+            return events;
         }
-        let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+        let Some(message) = message else {
             return vec![];
         };
-        if let Some(runo) = message.get("runo") {
-            return self.own(runo);
-        }
         if message["method"] == "session/update" {
             return update(&message["params"]["update"]);
         }
-        vec![]
-    }
-
-    fn own(&mut self, line: &Value) -> Vec<AgentEvent> {
-        if let Some(sid) = line["session"].as_str() {
-            if self.named {
-                return vec![];
-            }
-            self.named = true;
-            return vec![AgentEvent::Conversation(sid.to_string())];
-        }
-        if let Some(text) = line["notice"].as_str() {
-            return vec![AgentEvent::Notice(text.to_string())];
-        }
-        if let Some(text) = line["error"].as_str() {
-            return vec![AgentEvent::Error(text.to_string())];
-        }
-        if line.get("fallback").is_some() {
-            self.falling_back = true;
-            return vec![];
-        }
-        match line["done"].as_str() {
+        match message["runo"]["done"].as_str() {
             Some("max_tokens") => vec![AgentEvent::Notice(
                 "The agent stopped at the model's output limit.".into(),
             )],
@@ -990,6 +777,7 @@ mod tests {
 #[cfg(all(test, unix))]
 mod host_tests {
     use super::*;
+    use std::process::Command;
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("runo-acp-{name}-{}", std::process::id()));
