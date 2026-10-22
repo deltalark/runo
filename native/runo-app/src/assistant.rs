@@ -1,10 +1,14 @@
 //! The Runo assistant: a mark in the corner of the window that answers questions about
-//! Runo. It reads a short guide built into the app (`docs/guide`, one article per feature)
-//! and the person's default agent on a fast model writes the answer from it. It never
-//! changes anything; an answer can only offer to take the person to the right place.
-//! It is off until turned on in Settings > General.
+//! Runo and what is happening in it. It reads a short guide built into the app
+//! (`docs/guide`, one article per feature) and a snapshot of the app's state, and the
+//! person's default agent on a fast model writes the answer. The answer can offer actions
+//! (start or race agents, run a playbook, answer a permission request, message or stop a
+//! session, go somewhere, change a few settings), each a card the person runs with a click
+//! (see `assistant_act`); nothing changes until they do. With Guide only, it answers from
+//! the guide alone. It is off until turned on in Settings > General.
 
 use super::*;
+use crate::assistant_act::{Action, Outcome, MAX_ACTIONS};
 use std::sync::OnceLock;
 
 /// The guide, embedded so it always matches this build and works offline.
@@ -118,6 +122,18 @@ const STARTERS: [&str; 4] = [
     "How do I share a playbook?",
     "How do I undo what the agent just did?",
 ];
+
+/// Offered instead when an agent answers, which also knows what is happening in the app
+/// and can do things in it.
+const AGENT_STARTERS: [&str; 4] = [
+    "What needs me right now?",
+    "How are my running agents doing?",
+    "Race Claude Code and Codex on a task",
+    "How do I share a playbook?",
+];
+
+/// How many earlier messages go to the agent with each question.
+const HISTORY_SENT: usize = 6;
 
 /// How many articles go to the agent with each question.
 const ARTICLES_SENT: usize = 4;
@@ -244,7 +260,7 @@ fn with_live_keys(text: &str, cx: &App) -> String {
 }
 
 /// Where an article's `open:` value leads.
-fn jump_for(open: &str) -> Option<Jump> {
+pub(crate) fn jump_for(open: &str) -> Option<Jump> {
     if let Some(page) = open.strip_prefix("settings:") {
         return SettingsPage::pages()
             .find(|p| p.label().eq_ignore_ascii_case(page))
@@ -267,7 +283,7 @@ fn jump_for(open: &str) -> Option<Jump> {
 }
 
 /// The label of an article's "Take me there" button.
-fn open_label(open: &str) -> String {
+pub(crate) fn open_label(open: &str) -> String {
     if let Some(page) = open.strip_prefix("settings:") {
         let name = SettingsPage::pages()
             .find(|p| p.label().eq_ignore_ascii_case(page))
@@ -292,6 +308,8 @@ fn open_label(open: &str) -> String {
 
 pub(crate) struct Msg {
     you: bool,
+    /// What the answer offers to do, and what became of each.
+    actions: Vec<(Action, Outcome)>,
     text: String,
     /// The guide articles the answer came from.
     sources: Vec<&'static str>,
@@ -345,20 +363,56 @@ impl Assistant {
     }
 }
 
-/// The prompt the answering agent gets: the guide articles that match, what is on screen,
-/// and how to answer.
-fn prompt(question: &str, articles: &[&Article], context: &str, cx: &App) -> String {
+/// How the answering agent offers to do something, and what it can offer.
+const ACTIONS_HELP: &str = "You can also act in Runo. To offer an action, add a line that starts \
+with ACTION: followed by one JSON object on the same line. The person sees each action as a card \
+and runs it with a click, so also say in your text what you're offering. Offer at most 3, and \
+only when the person asks for something to be done or one clearly helps. Use only the session \
+ids, request ids, agent ids, project and playbook names in the state above. The actions:\n\
+ACTION: {\"do\":\"start\",\"task\":\"...\",\"agent\":\"codex\",\"isolated\":true,\"project\":\"...\"} \
+start one agent on a task; agent, isolated (own worktree, the default) and project are optional\n\
+ACTION: {\"do\":\"race\",\"task\":\"...\",\"agents\":[\"claude\",\"codex\"]} several agents on \
+the same task, each in its own worktree\n\
+ACTION: {\"do\":\"playbook\",\"name\":\"...\"} run a playbook\n\
+ACTION: {\"do\":\"send\",\"session\":12,\"text\":\"...\"} send a message to a session's agent\n\
+ACTION: {\"do\":\"stop\",\"session\":12} stop a running agent\n\
+ACTION: {\"do\":\"approve\",\"request\":\"id\"} or {\"do\":\"deny\",\"request\":\"id\"} answer a \
+permission request once\n\
+ACTION: {\"do\":\"session\",\"id\":12} open a session\n\
+ACTION: {\"do\":\"project\",\"name\":\"...\"} switch project\n\
+ACTION: {\"do\":\"open\",\"place\":\"inbox\"} go to home, inbox, sessions, review, git-history, \
+branches, github, playbooks, history, new-session, tour or settings:<page>\n\
+ACTION: {\"do\":\"setting\",\"key\":\"theme\",\"value\":\"dark\"} keys: theme (light, dark, \
+system), animations (true or false), default_agent (an agent id)\n";
+
+/// The prompt the answering agent gets: what is happening in the app, what is on screen,
+/// the guide articles that match, how to answer, and what it can offer to do.
+fn prompt(
+    question: &str,
+    articles: &[&Article],
+    context: &str,
+    state: &str,
+    history: &str,
+    cx: &App,
+) -> String {
     let titles: Vec<&str> = guide().iter().map(|a| a.title.as_str()).collect();
     let mut text = String::from(
-        "You are the help assistant inside Runo, a desktop app that runs coding agents side by \
-         side. Answer the person's question about using Runo from the guide below only. Reply \
-         in a few short sentences or numbered steps, plain Markdown, no headings. Name buttons \
-         and settings exactly as the guide does. If the guide doesn't cover it, say so in one \
-         sentence and suggest the closest article. Don't run tools or look at files. On the last \
-         line, write OPEN: and the id of the one article whose place in the app would help \
-         most, or OPEN: none.\n\n",
+        "You are Runo's assistant, inside Runo, a desktop app that runs coding agents side by \
+         side. You answer how to use Runo from the guide below, and what is happening in the app \
+         from the state below, and you can offer to do things in it. Reply in a few short \
+         sentences or numbered steps, plain Markdown, no headings. Name buttons and settings \
+         exactly as the guide does, and sessions by their title. If neither the guide nor the \
+         state covers it, say so in one sentence. Don't run tools or look at files. On the last \
+         line, write OPEN: and the id of the one guide article whose place in the app would \
+         help most, or OPEN: none.\n\n",
     );
     text.push_str(&format!("What is on screen now: {context}\n\n"));
+    text.push_str(&format!("State of the app now:\n{state}\n"));
+    text.push_str(ACTIONS_HELP);
+    text.push('\n');
+    if !history.is_empty() {
+        text.push_str(&format!("The conversation so far:\n{history}\n"));
+    }
     for a in articles {
         text.push_str(&format!(
             "## {} (id: {})\n{}\n\n",
@@ -374,12 +428,20 @@ fn prompt(question: &str, articles: &[&Article], context: &str, cx: &App) -> Str
     text
 }
 
-/// The agent's reply without its `OPEN:` line, and the article id that line named.
-fn split_reply(reply: &str) -> (String, Option<String>) {
+/// The agent's reply without its `OPEN:` and `ACTION:` lines, the article id the first
+/// named, and the actions the others offer.
+fn split_reply(reply: &str) -> (String, Option<String>, Vec<Action>) {
     let mut open = None;
+    let mut actions = Vec::new();
     let mut lines: Vec<&str> = Vec::new();
     for line in reply.trim().lines() {
-        if let Some(id) = line.trim().strip_prefix("OPEN:") {
+        if line.trim().starts_with("ACTION:") {
+            if let Some(a) = assistant_act::parse(line) {
+                if actions.len() < MAX_ACTIONS && !actions.contains(&a) {
+                    actions.push(a);
+                }
+            }
+        } else if let Some(id) = line.trim().strip_prefix("OPEN:") {
             let id = id.trim().trim_matches('`');
             if id != "none" && !id.is_empty() {
                 open = Some(id.to_string());
@@ -388,10 +450,17 @@ fn split_reply(reply: &str) -> (String, Option<String>) {
             lines.push(line);
         }
     }
-    (lines.join("\n").trim().to_string(), open)
+    (lines.join("\n").trim().to_string(), open, actions)
 }
 
 impl RunoApp {
+    /// Whether an agent answers, so the assistant knows the app's state and can act.
+    pub(crate) fn assistant_acts(cx: &App) -> bool {
+        let st = cx.global::<AppSettings>();
+        st.assistant_answers == "agent"
+            && agent::installed(agent::provider(&st.default_provider).bin)
+    }
+
     pub(crate) fn assistant_enabled(cx: &App) -> bool {
         cx.global::<AppSettings>().assistant
     }
@@ -469,6 +538,35 @@ impl RunoApp {
         parts.join("; ")
     }
 
+    /// The last few exchanges before the question just asked, so a follow-up like "do
+    /// that" or "and the other one?" makes sense.
+    fn assistant_history(&self) -> String {
+        let chat = &self.assistant.chat;
+        let earlier = &chat[..chat.len().saturating_sub(1)];
+        earlier
+            .iter()
+            .rev()
+            .take(HISTORY_SENT)
+            .rev()
+            .map(|m| {
+                let text: String = m.text.chars().take(600).collect();
+                let mut line = format!("{}: {}", if m.you { "Person" } else { "You" }, text);
+                // What it offered, and what the person did with it.
+                for (action, outcome) in &m.actions {
+                    let what = match outcome {
+                        Outcome::Ready => "not run yet".to_string(),
+                        Outcome::Done(_) => "the person ran it".to_string(),
+                        Outcome::Failed(why) => format!("it failed: {why}"),
+                        Outcome::Dismissed => "the person dismissed it".to_string(),
+                    };
+                    line.push_str(&format!("\n  (offered {action:?}; {what})"));
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Answer `question`: from the agent when one is set to answer, otherwise from the guide.
     pub(crate) fn ask_runo(&mut self, question: String, cx: &mut Context<Self>) {
         if self.assistant.asking.is_some() {
@@ -477,6 +575,7 @@ impl RunoApp {
         let found = search(&question);
         self.assistant.chat.push(Msg {
             you: true,
+            actions: Vec::new(),
             text: question.clone(),
             sources: Vec::new(),
             open: None,
@@ -484,8 +583,7 @@ impl RunoApp {
         self.assistant.scroll.scroll_to_bottom();
         let st = cx.global::<AppSettings>();
         let provider = agent::provider(&st.default_provider);
-        let use_agent = st.assistant_answers == "agent" && agent::installed(provider.bin);
-        if !use_agent {
+        if !Self::assistant_acts(cx) {
             self.answer_from_guide(&found, None);
             return;
         }
@@ -495,7 +593,14 @@ impl RunoApp {
         } else {
             found.iter().take(ARTICLES_SENT).copied().collect()
         };
-        let text = prompt(&question, &articles, &self.assistant_context(), cx);
+        let text = prompt(
+            &question,
+            &articles,
+            &self.assistant_context(),
+            &self.assistant_snapshot(cx),
+            &self.assistant_history(),
+            cx,
+        );
         let configured = st.agent(provider.id).binary;
         let mut command = agent::ask_command(provider.id, &configured, &text);
         // A small, fast model is plenty for a how-to answer.
@@ -518,6 +623,7 @@ impl RunoApp {
         let msg = match found.first() {
             Some(a) => Msg {
                 you: false,
+                actions: Vec::new(),
                 text: format!(
                     "{}**{}**\n\n{}",
                     note.map(|n| format!("{n}\n\n")).unwrap_or_default(),
@@ -529,6 +635,7 @@ impl RunoApp {
             },
             None => Msg {
                 you: false,
+                actions: Vec::new(),
                 text: "I couldn't find that in the guide. Try asking about sessions, worktrees, \
                        racing agents, reviewing changes, playbooks or connections."
                     .into(),
@@ -557,7 +664,7 @@ impl RunoApp {
         let found = search(&question);
         match result {
             Ok(reply) if !reply.trim().is_empty() => {
-                let (text, open_id) = split_reply(&reply);
+                let (text, open_id, offered) = split_reply(&reply);
                 let opened = open_id.as_deref().and_then(article);
                 let mut sources: Vec<&'static str> = found.iter().take(2).map(|a| a.id).collect();
                 if let Some(a) = opened {
@@ -565,8 +672,11 @@ impl RunoApp {
                         sources.insert(0, a.id);
                     }
                 }
+                // A card that can't be done says why, rather than vanishing.
+                let actions = offered.into_iter().map(|a| (a, Outcome::Ready)).collect();
                 self.assistant.chat.push(Msg {
                     you: false,
+                    actions,
                     text,
                     sources,
                     open: opened
@@ -585,6 +695,163 @@ impl RunoApp {
                 );
             }
         }
+    }
+
+    /// Run answer `i`'s action `j`, once.
+    fn assistant_run(&mut self, i: usize, j: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = self
+            .assistant
+            .chat
+            .get(i)
+            .and_then(|m| m.actions.get(j))
+            .filter(|(_, o)| *o == Outcome::Ready)
+            .map(|(a, _)| a.clone())
+        else {
+            return;
+        };
+        let outcome = match self.run_action(&action, window, cx) {
+            Ok(done) => Outcome::Done(done),
+            Err(why) => Outcome::Failed(why),
+        };
+        if let Some(slot) = self
+            .assistant
+            .chat
+            .get_mut(i)
+            .and_then(|m| m.actions.get_mut(j))
+        {
+            slot.1 = outcome;
+        }
+        cx.notify();
+    }
+
+    /// One thing an answer offers to do, as a card: what it does, written from Runo's own
+    /// state, and a button to do it. Once run, it says how that went.
+    fn assistant_action(
+        &self,
+        i: usize,
+        j: usize,
+        action: &Action,
+        outcome: &Outcome,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = i * MAX_ACTIONS + j;
+        let card = self.action_card(action, cx);
+        let (icon_name, title, detail, changes) = match &card {
+            Ok(c) => (c.icon, c.title.clone(), c.detail.clone(), c.changes),
+            Err(why) => (
+                IconName::CircleAlert,
+                "Can't do this now".into(),
+                why.clone(),
+                false,
+            ),
+        };
+        let tone = match outcome {
+            Outcome::Done(_) => c_green(),
+            Outcome::Failed(_) => c_red(),
+            _ if card.is_err() => c_muted(),
+            _ => c_blue(),
+        };
+        let end: AnyElement = match outcome {
+            Outcome::Ready if card.is_ok() => div()
+                .flex()
+                .gap_1()
+                .child(
+                    self.ghost_button_sized(("assistant-dismiss", id), IconName::X, "Dismiss", 28.)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(slot) = this
+                                .assistant
+                                .chat
+                                .get_mut(i)
+                                .and_then(|m| m.actions.get_mut(j))
+                            {
+                                slot.1 = Outcome::Dismissed;
+                            }
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.button(
+                        ("assistant-run", id),
+                        if changes { "Run" } else { "Go" },
+                        true,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.assistant_run(i, j, window, cx);
+                    })),
+                )
+                .into_any_element(),
+            Outcome::Done(_) => icon(IconName::CircleCheck, 15., c_green()).into_any_element(),
+            Outcome::Failed(_) => icon(IconName::CircleX, 15., c_red()).into_any_element(),
+            Outcome::Dismissed => div()
+                .text_size(px(11.))
+                .text_color(rgb(c_muted()))
+                .child("Dismissed")
+                .into_any_element(),
+            Outcome::Ready => div().into_any_element(),
+        };
+        let note = match outcome {
+            Outcome::Failed(why) => Some(why.clone()),
+            _ => None,
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded_lg()
+            .border_1()
+            .border_color(if matches!(outcome, Outcome::Ready) && card.is_ok() {
+                glow(tone, 0.45)
+            } else {
+                divider()
+            })
+            .bg(rgb(c_raised()))
+            .when(
+                matches!(outcome, Outcome::Dismissed) || card.is_err(),
+                |el| el.opacity(0.6),
+            )
+            .child(
+                div()
+                    .size(px(26.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.))
+                    .bg(glow(tone, 0.12))
+                    .child(icon(icon_name, 13., tone)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .when(!detail.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_muted()))
+                                .child(detail),
+                        )
+                    })
+                    .when_some(note, |el, why| {
+                        el.child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_red()))
+                                .child(why),
+                        )
+                    }),
+            )
+            .child(end)
+            .into_any_element()
     }
 
     fn assistant_follow(&mut self, open: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -661,6 +928,8 @@ impl RunoApp {
                     .text_color(rgb(if thinking { pose(mood).1 } else { c_muted() }))
                     .child(if thinking {
                         "Thinking…"
+                    } else if Self::assistant_acts(cx) {
+                        "Ask, or tell me what to do"
                     } else {
                         "Ask how to do anything in Runo"
                     }),
@@ -704,6 +973,7 @@ impl RunoApp {
             .py_3()
             .v_flex()
             .gap_3();
+        let acts = Self::assistant_acts(cx);
         if self.assistant.chat.is_empty() {
             body = body
                 .child(
@@ -717,7 +987,11 @@ impl RunoApp {
                         .text_size(px(12.5))
                         .line_height(px(18.))
                         .text_color(rgb(c_secondary()))
-                        .child("I know Runo's features from its built-in guide. Ask how to do something and I'll explain it and take you there."),
+                        .child(if acts {
+                            "I know Runo's features and what's happening in it. Ask how to do something, what needs you, or tell me what to do; I'll ask before changing anything."
+                        } else {
+                            "I know Runo's features from its built-in guide. Ask how to do something and I'll explain it and take you there."
+                        }),
                 )
                 .child(
                     div()
@@ -726,7 +1000,8 @@ impl RunoApp {
                         .text_color(rgb(c_muted()))
                         .child("TRY ASKING"),
                 );
-            for (i, q) in STARTERS.iter().enumerate() {
+            let starters: &'static [&str] = if acts { &AGENT_STARTERS } else { &STARTERS };
+            for (i, q) in starters.iter().enumerate() {
                 body = body.child(
                     div()
                         .id(("assistant-starter", i))
@@ -777,6 +1052,9 @@ impl RunoApp {
                     .selectable(true),
                 ),
             );
+            for (j, (action, outcome)) in m.actions.iter().enumerate() {
+                answer = answer.child(self.assistant_action(i, j, action, outcome, cx));
+            }
             if !m.sources.is_empty() {
                 let mut chips = div().flex().flex_wrap().gap_1();
                 for id in &m.sources {
@@ -796,7 +1074,12 @@ impl RunoApp {
                 }
                 answer = answer.child(chips);
             }
-            if let Some(open) = m.open.clone().filter(|o| jump_for(o).is_some()) {
+            // Cards say where they go themselves; "Take me there" is for answers without.
+            if let Some(open) = m
+                .open
+                .clone()
+                .filter(|o| m.actions.is_empty() && jump_for(o).is_some())
+            {
                 let label = open_label(&open);
                 answer = answer.child(
                     div()
@@ -815,14 +1098,12 @@ impl RunoApp {
             body = body.child(thinking_line());
         }
 
-        let st = cx.global::<AppSettings>();
-        let answers = if st.assistant_answers == "agent" {
-            let provider = agent::provider(&st.default_provider);
-            if agent::installed(provider.bin) {
-                format!("Answers with {}", provider.name)
-            } else {
-                "Answers from the guide".to_string()
-            }
+        let answers = if acts {
+            let st = cx.global::<AppSettings>();
+            format!(
+                "Answers with {}",
+                agent::provider(&st.default_provider).name
+            )
         } else {
             "Answers from the guide".to_string()
         };
@@ -839,7 +1120,11 @@ impl RunoApp {
                     .text_size(px(11.))
                     .text_color(rgb(c_muted()))
                     .child(answers)
-                    .child("Never changes anything"),
+                    .child(if acts {
+                        "Asks before changing anything"
+                    } else {
+                        "Never changes anything"
+                    }),
             );
 
         // The ring Home's prompt wears: a gradient a hair larger than the panel, the
@@ -1464,10 +1749,10 @@ mod tests {
 
     #[test]
     fn reply_open_line_is_taken_off() {
-        let (text, open) = split_reply("Use a race.\n\nOPEN: race-agents");
+        let (text, open, _) = split_reply("Use a race.\n\nOPEN: race-agents");
         assert_eq!(text, "Use a race.");
         assert_eq!(open.as_deref(), Some("race-agents"));
-        let (_, none) = split_reply("Not covered.\nOPEN: none");
+        let (_, none, _) = split_reply("Not covered.\nOPEN: none");
         assert!(none.is_none());
     }
 
@@ -1490,6 +1775,51 @@ mod tests {
             assert!((0. ..=w).contains(&at.0) && (0. ..=w).contains(&at.1));
             last = at;
         }
+    }
+
+    #[test]
+    fn reply_actions_are_taken_off_and_capped() {
+        let reply = "Racing them now.\n\
+            ACTION: {\"do\":\"race\",\"task\":\"fix\",\"agents\":[\"claude\",\"codex\"]}\n\
+            ACTION: {\"do\":\"race\",\"task\":\"fix\",\"agents\":[\"claude\",\"codex\"]}\n\
+            ACTION: {\"do\":\"stop\",\"session\":1}\n\
+            ACTION: {\"do\":\"stop\",\"session\":2}\n\
+            ACTION: {\"do\":\"stop\",\"session\":3}\n\
+            ACTION: {\"do\":\"rm -rf\"}\n\
+            OPEN: race-agents";
+        let (text, open, actions) = split_reply(reply);
+        assert_eq!(text, "Racing them now.");
+        assert_eq!(open.as_deref(), Some("race-agents"));
+        // The repeat is dropped, the unknown one ignored, and no more than three kept.
+        assert_eq!(actions.len(), MAX_ACTIONS);
+        assert!(matches!(actions[0], Action::Race { .. }));
+        assert_eq!(actions[2], Action::Stop { session: 2 });
+    }
+
+    #[test]
+    fn every_place_the_agent_is_told_of_exists() {
+        for place in [
+            "home",
+            "inbox",
+            "sessions",
+            "review",
+            "git-history",
+            "branches",
+            "github",
+            "playbooks",
+            "history",
+            "new-session",
+            "tour",
+            "settings:general",
+        ] {
+            assert!(ACTIONS_HELP.contains(place.split(':').next().unwrap()));
+            assert!(jump_for(place).is_some(), "{place} leads nowhere");
+        }
+    }
+
+    #[test]
+    fn agent_starters_are_questions_it_can_take() {
+        assert!(!search(AGENT_STARTERS[3]).is_empty());
     }
 
     #[test]
