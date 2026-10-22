@@ -8,6 +8,10 @@ All notable changes to Runo are documented here.
 
 - Runo in the macOS menu bar. A glyph by the clock counts the sessions that need you, or the agents working when nothing does, with a dot while something waits on you. Its menu lists what needs you and what's working, with each session's agent, project and running time; hover one for its branch, last reply, changes and cost, and to open it. Ask Runo… opens the assistant, and New session…, Open Runo and Quit are there too. Turn it off in Settings > General > Alerts.
 
+### Changed
+
+- A chat opened from the Chats menu on the Architecture or Design canvas now slides in from the right as a panel floating over the canvas, instead of leaving it. Read what the agent did, ask it more from the panel's composer, open it as a full chat, or close it to get back to the diagram. An ask from the canvas's AI bar while the panel is open shows up in it.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added

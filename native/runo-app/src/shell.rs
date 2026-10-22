@@ -3269,6 +3269,9 @@ pub(crate) fn canvas_of(s: &Session) -> Option<View> {
     }
 }
 
+/// Width of the chat floating over a canvas.
+const CANVAS_CHAT_W: f32 = 440.;
+
 pub(crate) fn canvas_title(view: View) -> &'static str {
     match view {
         View::Design => "Design",
@@ -3333,6 +3336,7 @@ impl RunoApp {
             let provider = agent::PROVIDERS[agent].id;
             let opts = cx.global::<AppSettings>().agent(provider);
             self.start_agent(id, task.to_string(), &opts);
+            self.follow_in_canvas_chat(id, view);
             self.save();
             return;
         }
@@ -3361,6 +3365,26 @@ impl RunoApp {
         if matches!(self.view, View::NewSession) {
             self.view = view;
         }
+        let started = self
+            .state
+            .sessions
+            .iter()
+            .rev()
+            .find(|s| s.id > before && s.project_id == pid && s.canvas == name);
+        if let Some(id) = started.map(|s| s.id) {
+            self.follow_in_canvas_chat(id, view);
+        }
+    }
+
+    /// With a chat open over the canvas, an ask from the canvas shows in it: the panel
+    /// turns to the chat the ask went to.
+    fn follow_in_canvas_chat(&mut self, id: u64, view: View) {
+        if self.canvas_chat.is_none() || self.view != view {
+            return;
+        }
+        self.select(id);
+        self.view = view;
+        self.canvas_chat = Some(id);
     }
 
     /// The agent and model a canvas's last chat used, for its AI bar to start on.
@@ -3393,6 +3417,145 @@ impl RunoApp {
         self.view = view;
         self.save();
         window.focus(&self.focus, cx);
+    }
+
+    /// What a canvas chat is up to, in a few words: working, waiting on the person, or
+    /// how many asks it has had.
+    fn canvas_chat_state(&self, s: &Session) -> String {
+        if self.is_running(s) {
+            "Working".to_string()
+        } else if self.need(s).is_some() {
+            "Needs you".to_string()
+        } else {
+            let turns = s.messages.iter().filter(|m| m.role == Role::User).count();
+            match turns {
+                1 => "1 ask".to_string(),
+                n => format!("{n} asks"),
+            }
+        }
+    }
+
+    /// Open a chat asked from a canvas in the panel floating over that canvas, so the
+    /// canvas stays in view while the chat is read or asked more.
+    pub(crate) fn open_canvas_chat(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self.view;
+        self.select(id);
+        // `select` turns to the session's page; the canvas stays and the chat floats over it.
+        self.view = view;
+        self.canvas_chat = Some(id);
+        self.chat_scroll.scroll_to_bottom();
+        self.prompt.update(cx, |p, cx| p.focus(window, cx));
+    }
+
+    /// The chat open over a canvas: it slides in from the right over the canvas's edge,
+    /// with the conversation and the composer to ask more, and closes back to the canvas.
+    /// `inset` is its distance from the top, right and bottom of the canvas area.
+    pub(crate) fn canvas_chat_panel(
+        &self,
+        pid: u64,
+        view: View,
+        inset: (f32, f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // The composer always talks to the selected session, so the panel shows only while
+        // the chat in it is the one selected.
+        let id = self.canvas_chat.filter(|id| self.selected == Some(*id))?;
+        let session = self
+            .state
+            .session(id)
+            .filter(|s| s.project_id == pid && !s.archived && canvas_of(s) == Some(view))?;
+        let provider = agent::provider(&session.provider);
+        let working = self.handles.contains_key(&Target::Session(id));
+        let header =
+            div()
+                .flex_none()
+                .h(px(48.))
+                .pl_4()
+                .pr_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_b_1()
+                .border_color(divider())
+                .child(self.provider_mark(provider, 14.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .v_flex()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(session.title.clone()),
+                        )
+                        .child(div().text_size(px(11.5)).text_color(rgb(c_muted())).child(
+                            format!("{} · {}", provider.name, self.canvas_chat_state(session)),
+                        )),
+                )
+                .child(
+                    self.ghost_button(
+                        "canvas-chat-full",
+                        IconName::Maximize2,
+                        "Open as a full chat",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.canvas_chat = None;
+                        this.select(id);
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.ghost_button("canvas-chat-close", IconName::X, "Close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.canvas_chat = None;
+                            cx.notify();
+                        })),
+                );
+        let body = div()
+            .id("canvas-chat-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.chat_scroll)
+            .child(self.chat_list(session, working, true, cx));
+        let (top, right, bottom) = inset;
+        Some(
+            div()
+                .id("canvas-chat-panel")
+                .absolute()
+                .top(px(top))
+                .right(px(right))
+                .bottom(px(bottom))
+                .w(px(CANVAS_CHAT_W))
+                .max_w(relative(0.9))
+                .v_flex()
+                .rounded_xl()
+                .border_1()
+                .border_color(float_edge())
+                .bg(float(c_canvas()))
+                .shadow_2xl()
+                .occlude()
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(header)
+                .child(body)
+                .child(self.composer(provider, working, cx))
+                // It slides in from the right edge, settling as it fades in.
+                .animated(
+                    "canvas-chat-in",
+                    Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()),
+                    move |el, d| {
+                        el.opacity(d)
+                            .right(px(right - (CANVAS_CHAT_W + right) * (1. - d)))
+                    },
+                ),
+        )
     }
 
     /// The agent chats asked from a canvas of project `pid`, newest first.
@@ -3431,24 +3594,15 @@ impl RunoApp {
                 .text_color(rgb(c_muted()))
                 .whitespace_normal()
                 .child(format!(
-                    "Agents asked from the {} canvas. Open one to read its chat or ask it more.",
+                    "Agents asked from the {} canvas. Open one to read its chat or ask it more over the canvas.",
                     canvas_title(view)
                 )),
         );
         for s in &sessions {
             let id = s.id;
             let p = agent::provider(&s.provider);
-            let state = if self.is_running(s) {
-                "Working".to_string()
-            } else if self.need(s).is_some() {
-                "Needs you".to_string()
-            } else {
-                let turns = s.messages.iter().filter(|m| m.role == Role::User).count();
-                match turns {
-                    1 => "1 ask".to_string(),
-                    n => format!("{n} asks"),
-                }
-            };
+            let state = self.canvas_chat_state(s);
+            let shown = self.canvas_chat == Some(id);
             list = list.child(
                 div()
                     .id(("canvas-chat", id as usize))
@@ -3459,10 +3613,10 @@ impl RunoApp {
                     .gap_2()
                     .rounded_md()
                     .cursor_pointer()
+                    .when(shown, |el| el.bg(tint(c_subtle())))
                     .hover(|el| el.bg(tint(c_active())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.menu = None;
-                        this.select(id);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_canvas_chat(id, window, cx);
                         cx.notify();
                     }))
                     .child(

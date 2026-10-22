@@ -2264,7 +2264,18 @@ impl RunoApp {
             )
             .child(
                 shell::island(
-                    div().size_full().flex().child(editor),
+                    div()
+                        .size_full()
+                        .relative()
+                        .flex()
+                        .child(editor)
+                        // A chat opened from the Chats menu floats over the canvas's right.
+                        .children(self.canvas_chat_panel(
+                            pid,
+                            View::Architecture,
+                            (8., 8., 8.),
+                            cx,
+                        )),
                     rgba(0),
                     [true, false, false, false],
                 )
