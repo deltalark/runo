@@ -1,10 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-<defs><linearGradient id="t" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#232327"/><stop offset="1" stop-color="#0E0E10"/></linearGradient><linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.04"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.08"/></linearGradient><linearGradient id="rb" gradientUnits="userSpaceOnUse" x1="140" y1="560" x2="560" y2="140"><stop offset="0" stop-color="#34D399"/><stop offset="0.3" stop-color="#22D3EE"/><stop offset="0.55" stop-color="#6366F1"/><stop offset="0.8" stop-color="#A855F7"/><stop offset="1" stop-color="#F472B6"/></linearGradient></defs>
-<rect x="100" y="100" width="824" height="824" rx="186" fill="url(#t)"/>
-<rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="url(#rim)" stroke-width="3"/>
-<path d="M164,456 L164,286 A122,122 0 0 1 286,164 L436,164" fill="none" stroke="url(#rb)" stroke-width="30" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><defs><linearGradient id="t" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#232327"/><stop offset="1" stop-color="#0E0E10"/></linearGradient>
+<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.04"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.08"/></linearGradient>
+<linearGradient id="rb" gradientUnits="userSpaceOnUse" x1="164" y1="860" x2="860" y2="164"><stop offset="0" stop-color="#34D399"/><stop offset="0.25" stop-color="#22D3EE"/><stop offset="0.5" stop-color="#6366F1"/><stop offset="0.75" stop-color="#A855F7"/><stop offset="1" stop-color="#F472B6"/></linearGradient></defs><rect x="100" y="100" width="824" height="824" rx="186" fill="url(#t)"/>
+<rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="url(#rim)" stroke-width="3"/><path d="M164,456 L164,286 A122,122 0 0 1 286,164 L456,164" fill="none" stroke="url(#rb)" stroke-width="30" stroke-linecap="round"/><path d="M860,568 L860,738 A122,122 0 0 1 738,860 L568,860" fill="none" stroke="url(#rb)" stroke-width="30" stroke-linecap="round"/>
 <g stroke-linecap="round" stroke-width="72">
-<line x1="300" y1="392" x2="600" y2="392" stroke="#FAFAFA" stroke-opacity="0.35"/>
-<line x1="424" y1="512" x2="724" y2="512" stroke="#FAFAFA"/>
-<line x1="352" y1="632" x2="560" y2="632" stroke="#FAFAFA" stroke-opacity="0.6"/></g>
-</svg>
+<line x1="336" y1="392" x2="600" y2="392" stroke="#FAFAFA" stroke-opacity="0.35"/>
+<line x1="424" y1="512" x2="688" y2="512" stroke="#FAFAFA"/>
+<line x1="336" y1="632" x2="552" y2="632" stroke="#FAFAFA" stroke-opacity="0.6"/></g></svg>
