@@ -466,6 +466,8 @@ struct RunoApp {
     sidebar_width: f32,
     /// The sidebar's edge is being dragged.
     resizing_sidebar: bool,
+    /// The sidebar lists only what needs the person, in place of every project.
+    needs_filter: bool,
     /// Width of the right panel (Changes, Files, terminal), dragged from its left edge.
     panel_width: f32,
     resizing_panel: bool,
@@ -1461,6 +1463,7 @@ impl RunoApp {
             ctx_index: None,
             sidebar_width: SIDEBAR_WIDTH,
             resizing_sidebar: false,
+            needs_filter: false,
             panel_width: PANEL_WIDTH,
             resizing_panel: false,
             panel_auto_hidden: false,
@@ -4094,8 +4097,8 @@ impl RunoApp {
 
     // ---------- sidebar ----------
 
-    /// One choice in the sidebar's segmented row under its header: a place the list
-    /// opens, lit while it is open, with a count where it helps.
+    /// One choice in the sidebar's segmented row under its header. All and Isolated open
+    /// their places; Needs you narrows the list itself, so its rows open in place.
     fn nav_segment(
         &self,
         id: &'static str,
@@ -4104,11 +4107,12 @@ impl RunoApp {
         view: View,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // The list under the filter always holds every session, so "All" stays lit
-        // unless one of the narrower places is open.
+        // The list under the filter holds every session unless Needs you narrows it, so
+        // "All" stays lit unless one of the narrower choices is on.
         let on = match view {
-            View::AllSessions => !matches!(self.view, View::Worktrees | View::Inbox),
-            _ => self.view == view,
+            View::Inbox => self.needs_filter,
+            View::AllSessions => !self.needs_filter && self.view != View::Worktrees,
+            _ => !self.needs_filter && self.view == view,
         };
         // Each choice is as wide as its label and count, and the spare room is shared,
         // so a three-figure count widens "Needs you" instead of squeezing its neighbours.
@@ -4116,7 +4120,17 @@ impl RunoApp {
             .flex_auto()
             .px(px(8.))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.view = view;
+                match view {
+                    View::Inbox => this.needs_filter = true,
+                    // Leaving Needs you for All only widens the list again; the open
+                    // session stays open.
+                    View::AllSessions if this.needs_filter => this.needs_filter = false,
+                    _ => {
+                        this.needs_filter = false;
+                        this.view = view;
+                    }
+                }
+                this.cursor = None;
                 cx.notify();
             }))
             .child(label)
@@ -4182,7 +4196,7 @@ impl RunoApp {
             .then(|| session.branch.clone());
         // The selected row joins the open session beside the list. Rows sit 8px in from
         // the list's edge under a project, 4px when grouped by status.
-        let reach = if cx.global::<AppSettings>().group_by_status {
+        let reach = if cx.global::<AppSettings>().group_by_status || self.needs_filter {
             4.
         } else {
             8.
@@ -4764,7 +4778,9 @@ impl RunoApp {
             }
             projects = projects.child(group);
         }
-        if cx.global::<AppSettings>().group_by_status {
+        if self.needs_filter {
+            projects = self.needs_groups(&filter, cx);
+        } else if cx.global::<AppSettings>().group_by_status {
             projects = self.status_groups(&filter, cx);
         }
         div()
