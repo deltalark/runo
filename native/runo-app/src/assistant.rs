@@ -119,7 +119,7 @@ const SOURCES: &[(&str, &str)] = &[
 ];
 
 /// Questions offered when the panel opens with nothing asked yet.
-const STARTERS: [&str; 4] = [
+pub(crate) const STARTERS: [&str; 4] = [
     "How do I race Claude Code and Codex on one task?",
     "How do I keep an agent running after I close my laptop?",
     "How do I share a playbook?",
@@ -128,7 +128,7 @@ const STARTERS: [&str; 4] = [
 
 /// Offered instead when an agent answers, which also knows what is happening in the app
 /// and can do things in it.
-const AGENT_STARTERS: [&str; 4] = [
+pub(crate) const AGENT_STARTERS: [&str; 4] = [
     "What needs me right now?",
     "How are my running agents doing?",
     "Race Claude Code and Codex on a task",
@@ -572,15 +572,6 @@ impl RunoApp {
             window.focus(&self.focus, cx);
         }
         cx.notify();
-    }
-
-    /// Open the assistant with the cursor in its box, as Ask Runo in the menu bar does.
-    pub(crate) fn open_assistant(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.assistant.open {
-            self.assistant.input.update(cx, |i, cx| i.focus(window, cx));
-        } else {
-            self.toggle_assistant(window, cx);
-        }
     }
 
     pub(crate) fn close_assistant(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1096,6 +1087,124 @@ impl RunoApp {
         Some(layer.into_any_element())
     }
 
+    /// The chat and the answer being written, for this panel and the menu bar's.
+    pub(crate) fn assistant_messages(&self, cx: &mut Context<Self>) -> Vec<Div> {
+        let mut out = Vec::new();
+        let chat = &self.assistant.chat;
+        for (i, m) in chat.iter().enumerate() {
+            if m.you {
+                out.push(
+                    div().flex().justify_end().child(
+                        div()
+                            .max_w(px(300.))
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(c_active()))
+                            .text_size(px(12.5))
+                            .line_height(px(18.))
+                            .child(m.text.clone()),
+                    ),
+                );
+                continue;
+            }
+            let mut answer = div().v_flex().gap_2().child(
+                div().text_size(px(12.5)).child(
+                    TextView::markdown(
+                        SharedString::from(format!("assistant-answer-{i}")),
+                        with_live_keys(&m.text, cx),
+                    )
+                    .selectable(true),
+                ),
+            );
+            for (j, (action, outcome)) in m.actions.iter().enumerate() {
+                answer = answer.child(self.assistant_action(i, j, action, outcome, cx));
+            }
+            if !m.sources.is_empty() {
+                let mut chips = div().flex().flex_wrap().gap_1();
+                for id in &m.sources {
+                    if let Some(a) = article(id) {
+                        chips = chips.child(
+                            div()
+                                .px(px(7.))
+                                .py(px(2.))
+                                .rounded_md()
+                                .border_1()
+                                .border_color(divider())
+                                .text_size(px(11.))
+                                .text_color(rgb(c_muted()))
+                                .child(format!("Guide: {}", a.title)),
+                        );
+                    }
+                }
+                answer = answer.child(chips);
+            }
+            // Cards say where they go themselves; "Take me there" is for answers without.
+            if let Some(open) = m
+                .open
+                .clone()
+                .filter(|o| m.actions.is_empty() && jump_for(o).is_some())
+            {
+                let label = open_label(&open);
+                answer = answer.child(
+                    div()
+                        .flex()
+                        .child(self.button(("assistant-open", i), label, true).on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.assistant_follow(&open, window, cx);
+                                cx.notify();
+                            }),
+                        )),
+                );
+            }
+            out.push(answer);
+        }
+        if self.assistant.asking.is_some() && !self.assistant.chats_open {
+            let (so_far, _, _) = split_reply(&self.assistant.streamed);
+            if !so_far.is_empty() {
+                out.push(
+                    div().text_size(px(12.5)).child(
+                        TextView::markdown("assistant-streaming", with_live_keys(&so_far, cx))
+                            .selectable(true),
+                    ),
+                );
+            }
+            out.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(thinking_line(if so_far.is_empty() {
+                        "Looking it up"
+                    } else {
+                        "Writing"
+                    }))
+                    .child(
+                        div()
+                            .id("assistant-stop")
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .py(px(3.))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
+                            .child(icon(IconName::CircleStop, 12., c_muted()))
+                            .child("Stop")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.assistant_stop();
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+
+        out
+    }
+
     fn assistant_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let thinking = self.assistant.asking.is_some();
         let mood = if thinking {
@@ -1247,120 +1356,8 @@ impl RunoApp {
                 );
             }
         }
-        let chat: &[Msg] = if self.assistant.chats_open {
-            &[]
-        } else {
-            &self.assistant.chat
-        };
-        for (i, m) in chat.iter().enumerate() {
-            if m.you {
-                body = body.child(
-                    div().flex().justify_end().child(
-                        div()
-                            .max_w(px(300.))
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(rgb(c_active()))
-                            .text_size(px(12.5))
-                            .line_height(px(18.))
-                            .child(m.text.clone()),
-                    ),
-                );
-                continue;
-            }
-            let mut answer = div().v_flex().gap_2().child(
-                div().text_size(px(12.5)).child(
-                    TextView::markdown(
-                        SharedString::from(format!("assistant-answer-{i}")),
-                        with_live_keys(&m.text, cx),
-                    )
-                    .selectable(true),
-                ),
-            );
-            for (j, (action, outcome)) in m.actions.iter().enumerate() {
-                answer = answer.child(self.assistant_action(i, j, action, outcome, cx));
-            }
-            if !m.sources.is_empty() {
-                let mut chips = div().flex().flex_wrap().gap_1();
-                for id in &m.sources {
-                    if let Some(a) = article(id) {
-                        chips = chips.child(
-                            div()
-                                .px(px(7.))
-                                .py(px(2.))
-                                .rounded_md()
-                                .border_1()
-                                .border_color(divider())
-                                .text_size(px(11.))
-                                .text_color(rgb(c_muted()))
-                                .child(format!("Guide: {}", a.title)),
-                        );
-                    }
-                }
-                answer = answer.child(chips);
-            }
-            // Cards say where they go themselves; "Take me there" is for answers without.
-            if let Some(open) = m
-                .open
-                .clone()
-                .filter(|o| m.actions.is_empty() && jump_for(o).is_some())
-            {
-                let label = open_label(&open);
-                answer = answer.child(
-                    div()
-                        .flex()
-                        .child(self.button(("assistant-open", i), label, true).on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.assistant_follow(&open, window, cx);
-                                cx.notify();
-                            }),
-                        )),
-                );
-            }
-            body = body.child(answer);
-        }
-        if self.assistant.asking.is_some() && !self.assistant.chats_open {
-            let (so_far, _, _) = split_reply(&self.assistant.streamed);
-            if !so_far.is_empty() {
-                body = body.child(
-                    div().text_size(px(12.5)).child(
-                        TextView::markdown("assistant-streaming", with_live_keys(&so_far, cx))
-                            .selectable(true),
-                    ),
-                );
-            }
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(thinking_line(if so_far.is_empty() {
-                        "Looking it up"
-                    } else {
-                        "Writing"
-                    }))
-                    .child(
-                        div()
-                            .id("assistant-stop")
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .py(px(3.))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_size(px(11.5))
-                            .text_color(rgb(c_muted()))
-                            .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
-                            .child(icon(IconName::CircleStop, 12., c_muted()))
-                            .child("Stop")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.assistant_stop();
-                                cx.notify();
-                            })),
-                    ),
-            );
+        if !self.assistant.chats_open {
+            body = body.children(self.assistant_messages(cx));
         }
 
         // Which agent answers, on which model, as chosen in Settings; or the guide.
@@ -1485,7 +1482,7 @@ impl RunoApp {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mood {
+pub(crate) enum Mood {
     Idle,
     Listening,
     Thinking,
@@ -1689,13 +1686,13 @@ fn mark_with(mood: Mood, size: f32, bars: Bars, badge: Option<usize>, running: b
 
 const VIOLET: u32 = 0xa78bfa;
 /// The violet Home's prompt ring turns into.
-const RING_VIOLET: u32 = 0x8b5cf6;
+pub(crate) const RING_VIOLET: u32 = 0x8b5cf6;
 /// How long the light takes to run once round the mark's edge; thinking runs it three
 /// times as fast.
 const RUN_MS: f32 = 4200.;
 
 /// `color` at opacity `a`.
-fn glow(color: u32, a: f32) -> Rgba {
+pub(crate) fn glow(color: u32, a: f32) -> Rgba {
     rgba((color << 8) | (a.clamp(0., 1.) * 255.).round() as u32)
 }
 
@@ -1834,15 +1831,20 @@ fn lit_mark(mood: Mood, size: f32, bars: Bars, run: Option<f32>, swell: f32) -> 
 /// The mark in the panel's header, with the light running round it while the panel is
 /// open.
 fn header_mark(mood: Mood) -> AnyElement {
+    live_mark_sized(mood, 24.)
+}
+
+/// Runo's mark at `size`, its light running round while `mood` is lively.
+pub(crate) fn live_mark_sized(mood: Mood, size: f32) -> AnyElement {
     if !anim_on() {
-        return lit_mark(mood, 24., pose(mood).0, None, 0.);
+        return lit_mark(mood, size, pose(mood).0, None, 0.);
     }
     div()
-        .size(px(24.))
+        .size(px(size))
         .with_animation(
-            ElementId::Name(format!("assistant-header-mark-{mood:?}").into()),
+            ElementId::Name(format!("assistant-header-mark-{mood:?}-{size}").into()),
             Animation::new(Duration::from_millis(1400)).repeat(),
-            move |el, _| el.child(lit_mark(mood, 24., pose(mood).0, Some(turn(mood)), 0.)),
+            move |el, _| el.child(lit_mark(mood, size, pose(mood).0, Some(turn(mood)), 0.)),
         )
         .into_any_element()
 }

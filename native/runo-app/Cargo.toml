@@ -79,6 +79,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-foundation = "0.3"
 # Database passwords live in the Keychain.
 security-framework = "3"
+# The menu bar panel finds its own NSWindow to hang it under the glyph.
+raw-window-handle = "0.6"
 # The design canvas draws its screens with WebKit, the engine built into macOS.
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "std",
