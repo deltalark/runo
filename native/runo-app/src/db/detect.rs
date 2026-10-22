@@ -323,7 +323,7 @@ impl<'a> Finder<'a> {
     fn env_files(&mut self, dir: &Path) {
         for file in ENV_FILES {
             let path = dir.join(file);
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Ok(text) = read_small(&path) else {
                 continue;
             };
             let shown = rel(self.root, &path);
@@ -374,7 +374,7 @@ impl<'a> Finder<'a> {
     fn compose(&mut self, dir: &Path) {
         for file in COMPOSE_FILES {
             let path = dir.join(file);
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Ok(text) = read_small(&path) else {
                 continue;
             };
             let shown = rel(self.root, &path);
@@ -464,7 +464,7 @@ impl<'a> Finder<'a> {
 
     fn prisma(&mut self, dir: &Path) {
         for path in [dir.join("prisma/schema.prisma"), dir.join("schema.prisma")] {
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Ok(text) = read_small(&path) else {
                 continue;
             };
             let shown = rel(self.root, &path);
@@ -501,7 +501,7 @@ impl<'a> Finder<'a> {
             "drizzle.config.mjs",
         ] {
             let path = dir.join(file);
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Ok(text) = read_small(&path) else {
                 continue;
             };
             let shown = rel(self.root, &path);
@@ -543,7 +543,7 @@ impl<'a> Finder<'a> {
                 if sqlite && item.kind == Kind::Sqlite {
                     let from_env = ENV_FILES
                         .iter()
-                        .filter_map(|f| std::fs::read_to_string(dir.join(f)).ok())
+                        .filter_map(|f| read_small(dir.join(f)).ok())
                         .flat_map(|t| parse_env(&t))
                         .rfind(|(k, _)| k == var);
                     if let Some((_, value)) = from_env {
@@ -569,7 +569,7 @@ impl<'a> Finder<'a> {
 
     fn rails(&mut self, dir: &Path) {
         let path = dir.join("config/database.yml");
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(text) = read_small(&path) else {
             return;
         };
         let shown = rel(self.root, &path);
@@ -656,6 +656,9 @@ impl<'a> Finder<'a> {
                 {
                     continue;
                 }
+                if t.is_symlink() && inside(self.root, &path).is_err() {
+                    continue;
+                }
                 let shown = rel(self.root, &path);
                 self.add(Found {
                     key: format!("file:{shown}"),
@@ -672,9 +675,44 @@ impl<'a> Finder<'a> {
     }
 }
 
+/// Config files bigger than this aren't read: no real one is, and a huge or endless
+/// file (a pipe, a device) would hold up the scan.
+const READ_MAX: u64 = 1 << 20;
+
+/// A config file's text, if it's an ordinary file of a sensible size.
+fn read_small(path: impl AsRef<Path>) -> std::io::Result<String> {
+    let path = path.as_ref();
+    let meta = std::fs::metadata(path)?;
+    if !meta.is_file() || meta.len() > READ_MAX {
+        return Err(std::io::Error::other("not a small file"));
+    }
+    std::fs::read_to_string(path)
+}
+
+/// `path` with links and `..` resolved, if that's still inside the project at `root`.
+/// A project's files decide what Runo offers to open, so a link or a `../../` there
+/// mustn't reach the person's other files (a browser's cookies, a mail database).
+pub(crate) fn inside(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let real_root = root.canonicalize().map_err(|e| e.to_string())?;
+    let real = path
+        .canonicalize()
+        .map_err(|_| format!("There's no file at {}.", path.display()))?;
+    if real.starts_with(&real_root) {
+        Ok(real)
+    } else {
+        Err(format!(
+            "The project's files point at {}, outside the project folder, so Runo won't open it from there. If you mean to, add it with Add a connection.",
+            real.display()
+        ))
+    }
+}
+
 /// Whether the file starts with SQLite's header.
 pub(crate) fn is_sqlite(path: &Path) -> bool {
     use std::io::Read;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
     let mut head = [0u8; 16];
     std::fs::File::open(path)
         .and_then(|mut f| f.read_exact(&mut head))
@@ -964,5 +1002,34 @@ mod tests {
         assert_eq!(published(long.get("p"), 5432), Some(5441));
         let none = yamlish::parse("p:\n  - \"5432\"\n");
         assert_eq!(published(none.get("p"), 5432), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_and_dots_never_lead_out_of_the_project() {
+        let dir = project(&[("README", "a")]);
+        let outside = dir.with_extension("elsewhere.db");
+        std::fs::write(&outside, b"SQLite format 3\0 and more").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("cookies.db")).unwrap();
+        std::fs::write(dir.join("app.db"), b"SQLite format 3\0 and more").unwrap();
+        assert!(inside(&dir, &dir.join("app.db")).is_ok());
+        assert!(inside(&dir, &dir.join("cookies.db")).is_err());
+        assert!(inside(&dir, &dir.join("../").join(outside.file_name().unwrap())).is_err());
+        let found = find(&dir);
+        assert!(found.iter().any(|f| f.name == "app.db"));
+        assert!(!found.iter().any(|f| f.name == "cookies.db"));
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn huge_config_files_are_skipped() {
+        let dir = project(&[("notes.txt", "x")]);
+        let big = format!(
+            "DATABASE_URL=postgres://u@localhost/app\n{}",
+            "#".repeat(2 << 20)
+        );
+        std::fs::write(dir.join(".env"), big).unwrap();
+        assert!(read_small(dir.join(".env")).is_err());
+        assert!(find(&dir).iter().all(|f| f.kind == Kind::Sqlite));
     }
 }

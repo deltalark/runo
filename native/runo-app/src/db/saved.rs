@@ -46,6 +46,42 @@ fn folder() -> PathBuf {
     crate::store::data_dir().join("data")
 }
 
+/// Make Runo's data folder, readable only by the person.
+fn make_folder() -> std::io::Result<PathBuf> {
+    let dir = folder();
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir)?;
+    Ok(dir)
+}
+
+/// Write `text` to `path` so that only the person can ever read it: a new file is
+/// created with that mode (not loosened then tightened) and moved into place, so a reader
+/// never sees it half written or open to others.
+pub(crate) fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    make_folder()?;
+    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&tmp)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
+}
+
 fn file() -> PathBuf {
     folder().join("connections.json")
 }
@@ -58,9 +94,8 @@ pub(crate) fn load() -> Vec<Saved> {
 }
 
 pub(crate) fn store(all: &[Saved]) -> std::io::Result<()> {
-    std::fs::create_dir_all(folder())?;
     let text = serde_json::to_string_pretty(all).unwrap_or_else(|_| "[]".into());
-    std::fs::write(file(), text)
+    write_private(&file(), &text)
 }
 
 /// A query kept under a name, for one connection.
@@ -85,9 +120,8 @@ pub(crate) fn load_queries() -> Vec<SavedQuery> {
 }
 
 pub(crate) fn store_queries(all: &[SavedQuery]) -> std::io::Result<()> {
-    std::fs::create_dir_all(folder())?;
     let text = serde_json::to_string_pretty(all).unwrap_or_else(|_| "[]".into());
-    std::fs::write(queries_file(), text)
+    write_private(&queries_file(), &text)
 }
 
 /// One thing an agent ran on a database, kept so the person can see it in the Data place.
@@ -116,12 +150,12 @@ const ACTIVITY_MAX: u64 = 1 << 20;
 /// Add a line to the activity log, which only the person can read.
 pub(crate) fn log_activity(entry: &Activity) {
     let path = activity_file();
-    let _ = std::fs::create_dir_all(folder());
+    let _ = make_folder();
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > ACTIVITY_MAX) {
         if let Ok(text) = std::fs::read_to_string(&path) {
             let keep: Vec<&str> = text.lines().collect();
             let half = keep[keep.len() / 2..].join("\n");
-            let _ = std::fs::write(&path, half + "\n");
+            let _ = write_private(&path, &(half + "\n"));
         }
     }
     let mut options = std::fs::OpenOptions::new();
@@ -263,16 +297,21 @@ pub(crate) fn target(saved: &Saved, root: &Path) -> Result<String, String> {
         Source::Found { key } => {
             let mut found = detect::find(root);
             found.extend(detect::open_ports(&found));
-            found
-                .into_iter()
-                .find(|f| &f.key == key)
-                .map(|f| f.target)
-                .ok_or_else(|| {
-                    format!(
-                        "It isn't in the project's files any more (it came from {}).",
-                        key.split(':').nth(1).unwrap_or(key)
-                    )
-                })
+            let found = found.into_iter().find(|f| &f.key == key);
+            if let Some(f) = found.as_ref().filter(|f| f.kind == Kind::Sqlite) {
+                let path = f
+                    .target
+                    .trim_start_matches("sqlite:")
+                    .trim_start_matches("file:");
+                return detect::inside(root, Path::new(path))
+                    .map(|p| p.to_string_lossy().to_string());
+            }
+            found.map(|f| f.target).ok_or_else(|| {
+                format!(
+                    "It isn't in the project's files any more (it came from {}).",
+                    key.split(':').nth(1).unwrap_or(key)
+                )
+            })
         }
     }
 }
@@ -320,16 +359,11 @@ fn secrets() -> std::collections::BTreeMap<String, String> {
 
 #[cfg(not(target_os = "macos"))]
 fn write_secrets(all: &std::collections::BTreeMap<String, String>) -> Result<(), String> {
-    std::fs::create_dir_all(folder()).map_err(|e| e.to_string())?;
-    let path = secrets_file();
-    std::fs::write(&path, serde_json::to_string(all).unwrap_or_default())
-        .map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    write_private(
+        &secrets_file(),
+        &serde_json::to_string(all).unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -382,5 +416,23 @@ mod tests {
         assert_eq!(prod.env, Env::Prod);
         assert!(from_typed(7, "not a url").is_err());
         let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_files_are_only_ever_the_persons() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("runo-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        TEST_DIR.with_borrow_mut(|d| *d = Some(dir.clone()));
+        store_queries(&[]).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&queries_file()), 0o600);
+        // Writing again replaces the file whole, still private.
+        store_queries(&[]).unwrap();
+        assert_eq!(mode(&queries_file()), 0o600);
+        TEST_DIR.with_borrow_mut(|d| *d = None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

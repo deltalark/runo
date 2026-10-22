@@ -8,7 +8,7 @@ use super::engine::{
     table_ref, tls, where_sql, Session, TlsCheck,
 };
 use super::{mask, sensitive_name, Browse, Cell, CellKind, Column, Kind, Rows, Table};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
 use std::time::Instant;
@@ -26,43 +26,65 @@ const READS_SQLITE: [&str; 4] = ["select", "with", "values", "explain"];
 
 /// Functions that act outside the transaction, or on the server itself, so rolling back
 /// wouldn't undo them: stopping other sessions, reading the server's files, holding locks
-/// past the transaction, reaching other databases, changing settings.
-const BLOCKED: [&str; 34] = [
+/// past the transaction, reaching other databases or the network, running SQL passed as
+/// text, changing settings or statistics.
+const BLOCKED: [&str; 26] = [
     "pg_terminate_backend",
     "pg_cancel_backend",
+    "pg_signal_backend",
     "pg_reload_conf",
     "pg_rotate_logfile",
     "pg_promote",
     "pg_switch_wal",
-    "pg_create_restore_point",
-    "pg_logical_emit_message",
-    "pg_read_file",
-    "pg_read_binary_file",
-    "pg_ls_dir",
+    "pg_notify",
     "pg_stat_file",
-    "pg_ls_logdir",
-    "pg_ls_waldir",
-    "pg_ls_tmpdir",
-    "lo_import",
-    "lo_export",
-    "lo_from_bytea",
-    "lo_put",
-    "lo_create",
-    "lo_unlink",
-    "dblink",
-    "dblink_exec",
-    "dblink_connect",
-    "dblink_send_query",
+    "pg_file_write",
+    "pg_file_rename",
+    "pg_file_unlink",
+    "pg_log_backend_memory_contexts",
+    "pg_import_system_collations",
     "set_config",
-    "pg_advisory_lock",
-    "pg_advisory_lock_shared",
-    "pg_try_advisory_lock",
-    "pg_try_advisory_lock_shared",
+    "query_to_xml",
+    "query_to_xmlschema",
+    "query_to_xml_and_xmlschema",
+    "cursor_to_xml",
+    "cursor_to_xmlschema",
+    "txid_current",
+    "pg_current_xact_id",
     "load_extension",
     "readfile",
     "writefile",
     "fts3_tokenizer",
 ];
+
+/// Families of such functions, by how their names start: files and large objects,
+/// other servers (dblink, the http and pg_net extensions), locks, replication and
+/// backups, statistics resets.
+const BLOCKED_PREFIXES: [&str; 18] = [
+    "pg_read_",
+    "pg_ls_",
+    "lo_",
+    "dblink",
+    "http",
+    "net.",
+    "pg_advisory_",
+    "pg_try_advisory_",
+    "pg_stat_reset",
+    "pg_create_",
+    "pg_drop_",
+    "pg_replication_",
+    "pg_logical_",
+    "pg_copy_",
+    "pg_wal_replay_",
+    "pg_backup_",
+    "pg_start_backup",
+    "pg_stop_backup",
+];
+
+/// Whether calling `name` is refused.
+fn blocked(name: &str) -> bool {
+    BLOCKED.contains(&name) || BLOCKED_PREFIXES.iter().any(|p| name.starts_with(p))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 enum Tok {
@@ -192,33 +214,104 @@ pub(crate) fn check(kind: Kind, sql: &str) -> Result<String, String> {
     if statements.next().is_some() {
         return Err("Run one statement at a time. Runo runs a single statement, so nothing can slip past its read-only check.".into());
     }
-    let first = statement
+    let words: Vec<(usize, &str)> = statement
         .iter()
-        .find_map(|(t, _)| match t {
-            Tok::Word(w) => Some(w.as_str()),
+        .enumerate()
+        .filter_map(|(i, (t, _))| match t {
+            Tok::Word(w) => Some((i, w.as_str())),
             _ => None,
         })
-        .unwrap_or("");
+        .collect();
+    let first = words.first().map_or("", |(_, w)| *w);
     let reads: &[&str] = match kind {
         Kind::Postgres => &READS_PG,
         _ => &READS_SQLITE,
     };
-    if !reads.contains(&first) {
-        return Err(format!(
+    let refuse = |word: &str| {
+        format!(
             "Runo only runs statements that read here: {}. A statement starting with {} could change something.",
             reads
                 .iter()
                 .map(|r| r.to_uppercase())
                 .collect::<Vec<_>>()
                 .join(", "),
-            first.to_uppercase()
-        ));
+            word.to_uppercase()
+        )
+    };
+    if !reads.contains(&first) {
+        return Err(refuse(first));
+    }
+    // EXPLAIN ANALYZE runs what it explains, so that has to read too.
+    if first == "explain" {
+        let options = ["analyze", "analyse", "verbose", "query", "plan"];
+        let inner = statement
+            .iter()
+            .skip(1)
+            .scan(0i32, |depth, (t, _)| {
+                let before = *depth;
+                match t {
+                    Tok::Punct('(') => *depth += 1,
+                    Tok::Punct(')') => *depth -= 1,
+                    _ => {}
+                }
+                Some((before, t))
+            })
+            .find_map(|(depth, t)| match t {
+                Tok::Word(w) if depth == 0 && !options.contains(&w.as_str()) => Some(w.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        if !reads.contains(&inner) || matches!(inner, "explain" | "show") {
+            return Err(refuse(inner));
+        }
+    }
+    for (n, &(i, w)) in words.iter().enumerate() {
+        let after = |k: usize| words.get(n + k).map_or("", |(_, w)| *w);
+        let before = i.checked_sub(1).map(|j| &statement[j].0);
+        // A write inside WITH: `WITH gone AS (DELETE FROM … RETURNING *) SELECT …`.
+        if matches!(w, "insert" | "update" | "delete" | "merge" | "truncate")
+            && before == Some(&Tok::Punct('('))
+        {
+            return Err(format!(
+                "That statement has {} inside it, which writes. Runo only runs statements that read.",
+                w.to_uppercase()
+            ));
+        }
+        // SELECT … INTO makes a table.
+        if w == "into" {
+            return Err("SELECT … INTO creates a table, so Runo doesn't run it.".into());
+        }
+        // Row locks would hold up the app's own writes.
+        if w == "for" && matches!(after(1), "update" | "share" | "no" | "key") {
+            return Err("FOR UPDATE and FOR SHARE lock rows, so Runo doesn't run them.".into());
+        }
+        // U&"\0070g_…" spells a name in escapes, which would hide it from the checks
+        // below.
+        if w == "u"
+            && matches!(statement.get(i + 1), Some((Tok::Punct('&'), end)) if *end == statement[i].1 + 1)
+        {
+            return Err(
+                "Names written with U& escapes aren't run here. Write the name plainly.".into(),
+            );
+        }
     }
     for pair in statement.windows(2) {
         if let (Tok::Word(name), Tok::Punct('(')) = (&pair[0].0, &pair[1].0) {
-            if BLOCKED.contains(&name.as_str()) {
+            if blocked(name) {
                 return Err(format!(
                     "{name}() acts outside the read-only transaction, so Runo doesn't run it."
+                ));
+            }
+        }
+    }
+    // Schema-qualified calls of the network extensions: `net.http_get(…)`.
+    for triple in statement.windows(4) {
+        if let (Tok::Word(schema), Tok::Punct('.'), Tok::Word(name), Tok::Punct('(')) =
+            (&triple[0].0, &triple[1].0, &triple[2].0, &triple[3].0)
+        {
+            if blocked(&format!("{schema}.{name}")) {
+                return Err(format!(
+                    "{schema}.{name}() reaches outside the database, so Runo doesn't run it."
                 ));
             }
         }
@@ -233,6 +326,51 @@ pub(crate) struct Ran {
     pub rows: Rows,
     /// Each column's type, as the database names it.
     pub types: Vec<String>,
+    /// The table column each result column comes straight from, when it does: (table,
+    /// column). An expression has none.
+    pub origins: Vec<Option<(String, String)>>,
+    /// Columns whose values stay masked (see `hidden_columns`).
+    pub hidden: Vec<bool>,
+}
+
+/// Which of a result's columns to mask. Going by the result's own column names alone, a
+/// rename (`email AS contact`) or an expression (`upper(email)`) would show what the table
+/// hides, so a column is masked when it comes from a hidden column, has a hidden column's
+/// name, or is text worked out from a statement that reads a table with hidden columns.
+/// Numbers and true/false from such expressions (counts, lengths) still show.
+pub(crate) fn hidden_columns(ran: &Ran, sql: &str, tables: &[Table]) -> Vec<bool> {
+    let words: HashSet<String> = tokens(sql)
+        .into_iter()
+        .filter_map(|(t, _)| match t {
+            Tok::Word(w) => Some(w),
+            _ => None,
+        })
+        .collect();
+    let touches = tables
+        .iter()
+        .filter(|t| words.contains(&t.name.to_lowercase()))
+        .any(|t| t.columns.iter().any(|c| c.sensitive()));
+    ran.rows
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            if sensitive_name(name) {
+                return true;
+            }
+            match ran.origins.get(i).cloned().flatten() {
+                Some((_, column)) => sensitive_name(&column),
+                None => {
+                    touches
+                        && !ran.rows.rows.iter().all(|r| {
+                            r.get(i).is_none_or(|c| {
+                                matches!(c.kind, CellKind::Null | CellKind::Number | CellKind::Bool)
+                            })
+                        })
+                }
+            }
+        })
+        .collect()
 }
 
 /// Stops a statement that is running on a session, from another thread.
@@ -255,7 +393,7 @@ impl Canceller {
 }
 
 /// Run `f` inside a read-only transaction and roll it back, whatever happened.
-fn read_only<T>(
+pub(super) fn read_only<T>(
     client: &mut postgres::Client,
     f: impl FnOnce(&mut postgres::Client) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -726,7 +864,13 @@ fn pg_run(client: &mut postgres::Client, sql: &str, limit: usize) -> Result<Ran,
         .iter()
         .map(|c| c.type_().name().to_string())
         .collect();
+    let sources: Vec<Option<(u32, i16)>> = statement
+        .columns()
+        .iter()
+        .map(|c| c.table_oid().zip(c.column_id()).filter(|(t, _)| *t != 0))
+        .collect();
     drop(statement);
+    let origins = pg_origins(client, &sources)?;
     let messages = read_only(client, |c| {
         if cursor_kind(sql) {
             c.batch_execute(&format!("DECLARE runo_query NO SCROLL CURSOR FOR {sql}"))
@@ -743,7 +887,87 @@ fn pg_run(client: &mut postgres::Client, sql: &str, limit: usize) -> Result<Ran,
     if rows.columns.is_empty() {
         rows.columns = names;
     }
-    Ok(Ran { rows, types })
+    Ok(Ran {
+        rows,
+        types,
+        origins,
+        hidden: Vec::new(),
+    })
+}
+
+/// The table and column behind each (table oid, column number) the server reported.
+fn pg_origins(
+    client: &mut postgres::Client,
+    sources: &[Option<(u32, i16)>],
+) -> Result<Vec<Option<(String, String)>>, String> {
+    let pairs: Vec<String> = sources
+        .iter()
+        .flatten()
+        .map(|(t, c)| format!("({t}::oid, {c}::int2)"))
+        .collect();
+    if pairs.is_empty() {
+        return Ok(vec![None; sources.len()]);
+    }
+    let rows = pg_rows(
+        client,
+        &format!(
+            "SELECT a.attrelid::int8::text, a.attnum::text, c.relname, a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid WHERE (a.attrelid, a.attnum) IN ({})",
+            pairs.join(", ")
+        ),
+    )?;
+    let found: HashMap<(u32, i16), (String, String)> = rows
+        .into_iter()
+        .filter_map(|r| {
+            let t = r.first()?.as_ref()?.parse().ok()?;
+            let c = r.get(1)?.as_ref()?.parse().ok()?;
+            Some(((t, c), (r.get(2)?.clone()?, r.get(3)?.clone()?)))
+        })
+        .collect();
+    Ok(sources
+        .iter()
+        .map(|s| s.and_then(|k| found.get(&k).cloned()))
+        .collect())
+}
+
+/// The table and column behind each of a SQLite statement's result columns, from
+/// SQLite's column metadata (compiled into the bundled library).
+fn sqlite_origins(conn: &rusqlite::Connection, sql: &str) -> Vec<Option<(String, String)>> {
+    use rusqlite::ffi;
+    use std::ffi::{CStr, CString};
+    let Ok(text) = CString::new(sql) else {
+        return Vec::new();
+    };
+    let text_of = |p: *const std::os::raw::c_char| {
+        // SAFETY: SQLite returns null or a NUL-terminated string that lives as long
+        // as the statement, which is finalized only after these are copied.
+        (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+    };
+    let mut out = Vec::new();
+    // SAFETY: the handle belongs to `conn`, borrowed for the whole call, and the
+    // statement prepared here is finalized before returning.
+    unsafe {
+        let mut stmt = std::ptr::null_mut();
+        let rc = ffi::sqlite3_prepare_v2(
+            conn.handle(),
+            text.as_ptr(),
+            -1,
+            &mut stmt,
+            std::ptr::null_mut(),
+        );
+        if rc != ffi::SQLITE_OK || stmt.is_null() {
+            if !stmt.is_null() {
+                ffi::sqlite3_finalize(stmt);
+            }
+            return Vec::new();
+        }
+        for i in 0..ffi::sqlite3_column_count(stmt) {
+            let table = text_of(ffi::sqlite3_column_table_name(stmt, i));
+            let column = text_of(ffi::sqlite3_column_origin_name(stmt, i));
+            out.push(table.zip(column));
+        }
+        ffi::sqlite3_finalize(stmt);
+    }
+    out
 }
 
 fn sqlite_run(conn: &rusqlite::Connection, sql: &str, limit: usize) -> Result<Ran, String> {
@@ -778,6 +1002,8 @@ fn sqlite_run(conn: &rusqlite::Connection, sql: &str, limit: usize) -> Result<Ra
         }
     }
     Ok(Ran {
+        origins: sqlite_origins(conn, sql),
+        hidden: Vec::new(),
         types: columns.iter().map(|(_, t)| t.clone()).collect(),
         rows: Rows {
             columns: columns.into_iter().map(|(n, _)| n).collect(),
@@ -824,6 +1050,47 @@ mod tests {
         assert!(check(Kind::Sqlite, "pragma writable_schema = on").is_err());
         assert!(check(Kind::Sqlite, "select load_extension('x')").is_err());
         assert!(check(Kind::Sqlite, "show tables").is_err());
+    }
+
+    #[test]
+    fn writes_tucked_inside_a_read_are_refused() {
+        let no = |sql: &str| check(Kind::Postgres, sql).unwrap_err();
+        assert!(
+            no("with gone as (delete from orders returning *) select * from gone")
+                .contains("DELETE")
+        );
+        assert!(no(
+            "with x as materialized (update orders set status = 'paid' returning id) select 1"
+        )
+        .contains("UPDATE"));
+        assert!(no("explain analyze delete from orders").contains("DELETE"));
+        assert!(no("explain (analyze, buffers) update orders set x = 1").contains("UPDATE"));
+        assert!(no("explain explain select 1").contains("EXPLAIN"));
+        assert!(no("select * into backup from orders").contains("INTO"));
+        assert!(no("select * from orders for update").contains("lock rows"));
+        assert!(no("select * from orders for no key update").contains("lock rows"));
+        assert!(no("select U&\"\\0070g_terminate_backend\"(1)").contains("U&"));
+        assert!(no("select pg_stat_reset()").contains("pg_stat_reset"));
+        assert!(no("select pg_read_server_files_x()").contains("pg_read_"));
+        assert!(no("select lo_get(1)").contains("lo_get"));
+        assert!(no("select dblink_open('c', 'select 1')").contains("dblink_open"));
+        assert!(
+            no("select query_to_xml('delete from orders', true, true, '')")
+                .contains("query_to_xml")
+        );
+        assert!(no("select net.http_get('https://example.com')").contains("http_get"));
+        assert!(no("select net.request(1)").contains("net.request"));
+        assert!(no("select pg_notify('c', 'hi')").contains("pg_notify"));
+        // Reads that only look similar still run.
+        let ok = |sql: &str| check(Kind::Postgres, sql);
+        assert!(ok("explain analyze select * from orders").is_ok());
+        assert!(ok("explain (format json) select 1").is_ok());
+        assert!(ok("select 'delete' as word, (select 1) as one").is_ok());
+        assert!(ok("select u & 3 from flags").is_ok());
+        assert!(ok("select * from orders order by id for_report").is_ok());
+        assert!(ok("select pg_advisory_unlock_all_x from t").is_ok());
+        assert!(check(Kind::Sqlite, "explain query plan select 1").is_ok());
+        assert!(check(Kind::Sqlite, "explain query plan delete from t").is_err());
     }
 
     #[test]
@@ -881,6 +1148,52 @@ mod tests {
         drop(conn);
         let (s, _) = Session::open(Kind::Sqlite, path.to_str().unwrap()).unwrap();
         (path, s)
+    }
+
+    fn masked(s: &mut Session, sql: &str) -> Vec<bool> {
+        let tables = s.tables().unwrap();
+        let ran = s.run(sql, 10).unwrap();
+        hidden_columns(&ran, sql, &tables)
+    }
+
+    #[test]
+    fn renaming_or_working_on_a_hidden_column_keeps_it_hidden() {
+        let path = std::env::temp_dir().join(format!("runo-mask-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, name TEXT);
+             INSERT INTO users VALUES (1, 'a@x.dev', 'Ann'), (2, 'b@x.dev', 'Bo');
+             CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);
+             INSERT INTO notes VALUES (1, 'hi');
+             CREATE VIEW people AS SELECT id, email AS contact FROM users;",
+        )
+        .unwrap();
+        drop(conn);
+        let (mut s, _) = Session::open(Kind::Sqlite, path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            masked(&mut s, "select id, email, name from users"),
+            [false, true, false]
+        );
+        assert_eq!(
+            masked(&mut s, "select email as contact, name as n from users"),
+            [true, false]
+        );
+        assert_eq!(
+            masked(&mut s, "select x from (select email as x from users)"),
+            [true]
+        );
+        assert_eq!(masked(&mut s, "select contact from people"), [true]);
+        assert_eq!(
+            masked(
+                &mut s,
+                "select upper(email) as shout, count(*) as n, length(name) as l from users"
+            ),
+            [true, false, false]
+        );
+        // An expression over a table with nothing hidden shows.
+        assert_eq!(masked(&mut s, "select upper(body) from notes"), [false]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -956,6 +1269,21 @@ mod tests {
             .is_err());
         assert!(s.run("explain select 1", 10).is_ok());
         assert!(s.run("show server_version", 10).is_ok());
+        // Where a result column comes from, through renames and subqueries.
+        let ran = s
+            .run(
+                "select x, c.relname as n, 1 as one from (select relname as x from pg_class limit 1) s, pg_class c limit 1",
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            ran.origins,
+            vec![
+                Some(("pg_class".into(), "relname".into())),
+                Some(("pg_class".into(), "relname".into())),
+                None
+            ]
+        );
         // The session is still usable and still read-only afterwards.
         assert!(s.run("select 2", 10).is_ok());
         let Session::Postgres(client, _) = &mut s else {

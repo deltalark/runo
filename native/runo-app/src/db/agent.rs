@@ -4,9 +4,9 @@
 //! on production, and every query goes in the activity log the Data place shows.
 
 use super::engine::Session;
-use super::query::{about, check};
+use super::query::{about, check, hidden_columns};
 use super::saved::{self, Activity, Saved};
-use super::{mask, sensitive_name, CellKind, Env, Table};
+use super::{mask, CellKind, Env, Table};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::Path;
@@ -206,7 +206,8 @@ fn query(session: &mut Session, conn: &Saved, sql: &str, entry: &mut Activity) -
         Ok(ran) => {
             entry.rows = ran.rows.rows.len();
             entry.millis = start.elapsed().as_millis();
-            let hidden: Vec<bool> = ran.rows.columns.iter().map(|c| sensitive_name(c)).collect();
+            let tables = session.tables().unwrap_or_default();
+            let hidden = hidden_columns(&ran, &checked, &tables);
             let mut out = String::new();
             out.push_str(&ran.rows.columns.join("\t"));
             out.push('\n');
@@ -395,6 +396,13 @@ mod tests {
         assert!(!err, "{t}");
         assert!(t.contains("1\ta•••@example.com\tpro"), "{t}");
         assert!(!t.contains("ann@"), "{t}");
+        // Renamed or worked on, it stays masked.
+        let (t, _) = say(
+            "data_query",
+            json!({"connection": "app", "sql": "select email as contact, lower(email) as l, plan from users"}),
+        );
+        assert!(!t.contains("ann@"), "{t}");
+        assert!(t.contains("a•••@example.com\ta•••@example.com\tpro"), "{t}");
         let (t, err) = say(
             "data_query",
             json!({"connection": "app", "sql": "delete from users"}),
@@ -406,7 +414,7 @@ mod tests {
         );
         assert!(err && t.contains("This project has: app"), "{t}");
         let log = saved::activity(&s.id, 10);
-        assert_eq!(log.len(), 2);
+        assert_eq!(log.len(), 3);
         assert!(log.iter().any(|a| a.refused.is_some()));
         assert!(log.iter().any(|a| a.rows == 2));
         sessions().lock().unwrap().clear();

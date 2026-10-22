@@ -171,13 +171,15 @@ pub(crate) struct Column {
     pub primary: bool,
     /// The table and column this one points at, when it is a foreign key.
     pub refers: Option<(String, String)>,
+    /// Hidden whatever its name: a query's column worked out from a hidden one.
+    pub hidden: bool,
 }
 
 impl Column {
     /// Whether the column holds personal or secret data, so its values stay hidden until
     /// the person asks to see them.
     pub(crate) fn sensitive(&self) -> bool {
-        sensitive_name(&self.name)
+        self.hidden || sensitive_name(&self.name)
     }
 }
 
