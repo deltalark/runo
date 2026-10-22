@@ -11,6 +11,7 @@ pub mod event;
 mod fixtures;
 pub mod host;
 pub mod log;
+pub mod pi;
 pub mod record;
 pub mod rpc;
 pub mod turn;

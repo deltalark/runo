@@ -413,7 +413,7 @@ fn turns(turn: &Path, agent: &mut Agent, h: &Handler, thread: &str) -> Result<bo
                         settle_until = Some(Instant::now() + Duration::from_secs(5));
                     }
                     if !KNOWN.contains(&method.as_str()) {
-                        drift(turn, &method);
+                        rpc::drift(turn, &method);
                     }
                 }
                 Message::Response { id, reply } => {
@@ -496,23 +496,6 @@ const KNOWN: &[&str] = &[
     "remoteControl/status/changed",
     "model/rerouted",
 ];
-
-/// Note a notification Runo doesn't know, once per method.
-fn drift(turn: &Path, method: &str) {
-    let path = turn.join("drift");
-    let seen = std::fs::read_to_string(&path).unwrap_or_default();
-    if seen.lines().any(|l| l == method) {
-        return;
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        use std::io::Write;
-        let _ = writeln!(file, "{method}");
-    }
-}
 
 /// Reads a Codex app-server turn's `out`.
 pub struct CodexAppStream {

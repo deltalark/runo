@@ -16,89 +16,32 @@ pub struct Provider {
     pub color: u32,
 }
 
-pub const PROVIDERS: [Provider; 10] = [
-    Provider {
-        id: "claude",
-        name: "Claude Code",
-        bin: "claude",
-        mark: "✳",
-        color: 0xd9633f,
-    },
-    Provider {
-        id: "codex",
-        name: "Codex",
-        bin: "codex",
-        mark: "◆",
-        color: 0x1767e8,
-    },
-    Provider {
-        id: "opencode",
-        name: "OpenCode",
-        bin: "opencode",
-        mark: ">_",
-        color: 0x258a5b,
-    },
-    Provider {
-        id: "cursor",
-        name: "Cursor",
-        bin: "cursor-agent",
-        mark: "▲",
-        color: 0x7c7c86,
-    },
-    Provider {
-        id: "gemini",
-        name: "Gemini",
-        bin: "gemini",
-        mark: "✦",
-        color: 0x4f7cf7,
-    },
-    Provider {
-        id: "copilot",
-        name: "Copilot",
-        bin: "copilot",
-        mark: "◎",
-        color: 0x8957e5,
-    },
-    Provider {
-        id: "amp",
-        name: "Amp",
-        bin: "amp",
-        mark: "∿",
-        color: 0xe5484d,
-    },
-    Provider {
-        id: "droid",
-        name: "Droid",
-        bin: "droid",
-        mark: "◈",
-        color: 0xf27b2a,
-    },
-    Provider {
-        id: "qwen",
-        name: "Qwen Code",
-        bin: "qwen",
-        mark: "◇",
-        color: 0x615ced,
-    },
-    Provider {
-        id: "grok",
-        name: "Grok",
-        bin: "grok",
-        mark: "𝕏",
-        color: 0x9a9aa3,
-    },
-];
+/// Every agent Runo can run, from the manifest (see `registry`): the built-in ones in
+/// a fixed order, then any the person added.
+pub static PROVIDERS: Providers = Providers;
+
+pub struct Providers;
+
+impl std::ops::Deref for Providers {
+    type Target = [Provider];
+    fn deref(&self) -> &[Provider] {
+        crate::registry::providers()
+    }
+}
+
+/// Whether a fact of the manifest holds for the installed CLI.
+fn holds(
+    provider: &str,
+    fact: impl Fn(&crate::registry::AgentSpec) -> &crate::registry::Gate,
+) -> bool {
+    crate::registry::spec(provider).is_some_and(|s| fact(s).holds(provider))
+}
 
 /// Whether the CLI keeps its own conversation that a follow-up can resume. Others get
 /// the recent conversation written into each follow-up prompt instead. Grok does once
 /// its help lists `--session`; older releases start fresh every turn.
 pub fn resumes(provider: &str) -> bool {
-    match provider {
-        "claude" | "codex" | "opencode" | "gemini" | "qwen" | "cursor" | "copilot" | "amp"
-        | "droid" => true,
-        "grok" => crate::caps::mentions("grok", "--session <"),
-        _ => false,
-    }
+    holds(provider, |s| &s.resumes)
 }
 
 /// The conversation id a CLI names on stderr: Grok's headless runs start with
@@ -140,12 +83,7 @@ pub(crate) fn strip_ansi(text: &str) -> String {
 /// CLIs that take a conversation id chosen by Runo on the first run. Copilot and Gemini
 /// do once their help lists `--session-id`; otherwise the id comes from their output.
 pub fn names_conversation(provider: &str) -> bool {
-    match provider {
-        "claude" | "qwen" => true,
-        "gemini" => crate::caps::mentions("gemini", "--session-id"),
-        "copilot" => crate::caps::mentions("copilot", "--session-id"),
-        _ => false,
-    }
+    holds(provider, |s| &s.names_conversation)
 }
 
 pub fn provider(id: &str) -> &'static Provider {
@@ -282,23 +220,22 @@ pub fn new_uuid() -> String {
 }
 
 /// How a CLI reports a run: Claude Code's stream-json (which Amp and Qwen Code also
-/// speak), its own JSON lines, or plain text.
+/// speak), its own JSON lines, Pi's events, or plain text.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Output {
     Claude,
     Json,
+    Pi,
     Text,
 }
 
 /// The output format Runo asks the CLI for. Formats only newer releases have are used
 /// once the installed CLI's help lists them.
 pub fn output(provider: &str) -> Output {
-    match provider {
-        "claude" | "amp" => Output::Claude,
-        "qwen" if crate::caps::mentions("qwen", "stream-json") => Output::Claude,
-        "codex" | "cursor" | "droid" | "opencode" => Output::Json,
-        "gemini" if crate::caps::mentions("gemini", "stream-json") => Output::Json,
-        "copilot" if crate::caps::mentions("copilot", "--output-format") => Output::Json,
+    match crate::registry::spec(provider).map(|s| s.format()) {
+        Some("claude") => Output::Claude,
+        Some("json") => Output::Json,
+        Some("pi") => Output::Pi,
         _ => Output::Text,
     }
 }
@@ -306,28 +243,26 @@ pub fn output(provider: &str) -> Output {
 /// Runo's permission levels a CLI can hold to, given its `--help`. Grok runs every tool
 /// without asking; Amp has no read-only mode; Cursor's print mode either only proposes
 /// changes or, with `--force`, also runs commands, so it has no edit-only level.
-pub fn modes(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "grok" => &["full"],
-        "amp" => &["edit", "full"],
-        "cursor" => &["plan", "full"],
-        _ => &["edit", "plan", "full"],
+pub fn modes(provider: &str) -> Vec<&'static str> {
+    match crate::registry::spec(provider) {
+        Some(spec) => spec.modes.iter().map(String::as_str).collect(),
+        None => vec!["edit", "plan", "full"],
     }
 }
 
 /// The level a CLI really runs at for the session's mode, for agents that have no exact
-/// match: Grok always runs everything, and Cursor's edits come with commands.
+/// match: one without Auto edit (Grok, whose tools always run, and Cursor, whose edits
+/// come with commands) runs at Full access.
 pub fn effective_mode<'a>(provider: &str, mode: &'a str) -> &'a str {
-    match (provider, mode) {
-        ("grok", "" | "edit") => "full",
-        ("cursor", "" | "edit") => "full",
+    match mode {
+        "" | "edit" if !modes(provider).contains(&"edit") => "full",
         _ => mode,
     }
 }
 
 /// Why the agent can't run in this mode, when it has no way to stay read-only.
 pub fn mode_error(provider: &str, mode: &str) -> Option<String> {
-    if mode != "plan" || !matches!(provider, "grok" | "amp") {
+    if mode != "plan" || modes(provider).contains(&"plan") {
         return None;
     }
     Some(format!(
@@ -339,11 +274,7 @@ pub fn mode_error(provider: &str, mode: &str) -> Option<String> {
 /// Whether images can be attached for this agent: it takes them as files or reads them
 /// from the paths listed in the prompt.
 pub fn takes_images(provider: &str) -> bool {
-    match provider {
-        "claude" | "codex" | "opencode" | "gemini" | "amp" => true,
-        "copilot" => crate::caps::mentions("copilot", "--attachment"),
-        _ => false,
-    }
+    holds(provider, |s| &s.images)
 }
 
 /// MCP servers for one run: the ones the person shares, then Cove's and Runo's memory
@@ -443,7 +374,23 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
     let mode = effective_mode(spec.provider, &mode).to_string();
     let knows = |flag: &str| crate::caps::mentions(spec.provider, flag);
     let mut args: Vec<String> = Vec::new();
+    // An agent Runo knows only from the manifest: its print command, if it gave one.
+    if let Some(agent) = crate::registry::spec(spec.provider).filter(|a| a.driver == "acp") {
+        let print = agent.print.clone().unwrap_or_default();
+        args.extend(print.args);
+        if let (Some(flag), false) = (print.model, model.is_empty()) {
+            args.extend([flag, model]);
+        }
+        args.extend(split_args(&opts.extra_args));
+        args.push(with_images(spec));
+        return args;
+    }
     match spec.provider {
+        "pi" => {
+            args.extend([s("--mode"), s("json")]);
+            args.extend(pi_args(spec, &model, &effort, &mode));
+            args.push(spec.prompt.to_string());
+        }
         "codex" => {
             args.extend([s("exec"), s("--json")]);
             // `-i` takes several files; the flag after it ends the list, so the prompt is
@@ -779,6 +726,34 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
     args
 }
 
+/// Pi's flags for a turn, in JSON or RPC mode: the conversation (named by Runo, which
+/// Pi creates when it doesn't have it yet), the model and thinking level, and the tools
+/// Runo's mode allows. Pi asks nothing before it acts, so Plan only gives it only tools
+/// that read and Auto edit adds the ones that edit, but no shell.
+fn pi_args(spec: &RunSpec, model: &str, effort: &str, mode: &str) -> Vec<String> {
+    let s = |v: &str| v.to_string();
+    let mut args = Vec::new();
+    if !spec.session_id.is_empty() {
+        args.extend([s("--session-id"), spec.session_id.to_string()]);
+    }
+    if !model.is_empty() {
+        args.extend([s("--model"), model.to_string()]);
+    }
+    if !effort.is_empty() {
+        args.extend([s("--thinking"), effort.to_string()]);
+    }
+    match mode {
+        "plan" => args.extend([s("--tools"), s("read,grep,find,ls")]),
+        "full" => {}
+        _ => args.extend([s("--tools"), s("read,edit,write,grep,find,ls")]),
+    }
+    if !spec.opts.append_prompt.trim().is_empty() {
+        args.extend([s("--append-system-prompt"), spec.opts.append_prompt.clone()]);
+    }
+    args.extend(split_args(&spec.opts.extra_args));
+    args
+}
+
 /// Agents whose own interactive CLI can open the same conversation the chat uses, so
 /// the Chat and CLI views of a session can be swapped without sending anything.
 pub fn has_cli_view(provider: &str) -> bool {
@@ -847,6 +822,13 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
         args
     };
     let resume = spec.resume && !id.is_empty();
+    if let Some(agent) = crate::registry::spec(spec.provider).filter(|a| a.driver == "acp") {
+        let flag = agent.print.as_ref().and_then(|p| p.model.clone());
+        return match flag {
+            Some(flag) => with_model(Vec::new(), &flag),
+            None => split_args(&spec.opts.extra_args),
+        };
+    }
     match spec.provider {
         "gemini" | "qwen" => {
             let mut args = with_model(Vec::new(), "-m");
@@ -883,6 +865,17 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             } else {
                 Vec::new()
             };
+        }
+        "pi" => {
+            let mut args = Vec::new();
+            if !id.is_empty() {
+                args.extend([s("--session-id"), id]);
+            }
+            let mut args = with_model(args, "--model");
+            if !spec.prompt.is_empty() {
+                args.push(spec.prompt.to_string());
+            }
+            return args;
         }
         "grok" => {
             let mut args = with_model(Vec::new(), "-m");
@@ -1409,7 +1402,7 @@ pub fn sign_in_help(provider: &str) -> String {
 
 /// Whether the CLI reports what a turn cost, which spending limits count.
 pub fn reports_cost(provider: &str) -> bool {
-    matches!(provider, "claude" | "opencode")
+    matches!(provider, "claude" | "opencode" | "pi")
 }
 
 /// Whether Runo reads the tokens a turn used from the CLI's output, which the token limit
@@ -1640,11 +1633,16 @@ pub fn prepare_folder(spec: &RunSpec, dir: &str, sandboxed: bool) {
 /// any message sent while it runs, on stdin (`--input-format stream-json`), and so does
 /// Amp, in the same format, once its help lists `--stream-json-input`.
 pub fn takes_live_input(provider: &str) -> bool {
-    match provider {
-        "claude" => true,
-        "amp" => crate::caps::mentions("amp", "--stream-json-input"),
-        _ => false,
-    }
+    live_form(provider).is_some()
+}
+
+/// The manifest's way for the installed CLI to take messages on stdin.
+fn live_form(provider: &str) -> Option<&'static crate::registry::Live> {
+    crate::registry::spec(provider)?.live.iter().find(|l| {
+        l.when
+            .as_deref()
+            .is_none_or(|w| crate::caps::mentions(provider, w))
+    })
 }
 
 /// A turn's command made live: the prompt at the end of its arguments (after `--` for
@@ -1658,12 +1656,14 @@ pub fn live_command(provider: &str, command: &Command) -> Option<(Command, Strin
     let [rest @ .., flag, prompt] = args.as_slice() else {
         return None;
     };
+    // The form that matches how the command ends; whether the installed CLI takes
+    // messages this way at all is `takes_live_input`.
+    let form = crate::registry::spec(provider)?
+        .live
+        .iter()
+        .find(|form| form.flag == *flag)?;
     let mut live = Command::new(command.get_program());
-    match (provider, flag.as_str()) {
-        ("claude", "--") => live.args(rest).args(["--input-format", "stream-json"]),
-        ("amp", "-x") => live.args(rest).args(["-x", "--stream-json-input"]),
-        _ => return None,
-    };
+    live.args(rest).args(&form.args);
     for (key, value) in command.get_envs() {
         match value {
             Some(value) => live.env(key, value),
@@ -1679,15 +1679,8 @@ pub fn acp_args(provider: &str) -> Option<Vec<String>> {
     if std::env::var_os("RUNO_NO_ACP").is_some() {
         return None;
     }
-    let knows = |text: &str| crate::caps::mentions(provider, text);
-    let args: &[&str] = match provider {
-        "opencode" | "cursor" if knows(" acp") => &["acp"],
-        "gemini" | "qwen" if knows("--acp") => &["--acp"],
-        "gemini" | "qwen" if knows("--experimental-acp") => &["--experimental-acp"],
-        "copilot" if knows("--acp") => &["--acp", "--stdio"],
-        _ => return None,
-    };
-    Some(args.iter().map(|a| a.to_string()).collect())
+    let spec = crate::registry::spec(provider)?;
+    spec.pick(&spec.acp).map(<[String]>::to_vec)
 }
 
 /// An ACP turn's settings, with `fallback` (the print-mode command) to run if the agent
@@ -1776,6 +1769,47 @@ pub fn codex_app_config(
     })
 }
 
+/// A Pi turn's settings for its RPC mode, once the installed Pi has it, with `fallback`
+/// (the `--mode json` command) to run if it can't start. Returns them and the prompt,
+/// which goes as the first message.
+pub fn pi_config(
+    spec: &RunSpec,
+    dir: &str,
+    fallback: &Command,
+) -> Option<(crate::harness::pi::Config, String)> {
+    let agent = crate::registry::spec(spec.provider).filter(|a| a.driver == "pi")?;
+    if std::env::var_os("RUNO_NO_RPC").is_some() {
+        return None;
+    }
+    let rpc = agent.pick(&agent.rpc)?;
+    let args: Vec<String> = fallback
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    // `--mode json … <prompt>` becomes `--mode rpc …`: the prompt goes as a message.
+    let [rest @ .., _prompt] = args.as_slice() else {
+        return None;
+    };
+    let mut command = vec![program(spec).to_string()];
+    command.extend(rpc.iter().cloned());
+    let mut flags = rest.iter();
+    while let Some(arg) = flags.next() {
+        if arg == "--mode" {
+            flags.next();
+        } else {
+            command.push(arg.clone());
+        }
+    }
+    let config = crate::harness::pi::Config {
+        command,
+        fallback: std::iter::once(fallback.get_program().to_string_lossy().into_owned())
+            .chain(args.iter().cloned())
+            .collect(),
+        cwd: dir.to_string(),
+    };
+    Some((config, with_images(spec)))
+}
+
 /// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
 pub fn run_agent(
     target: Target,
@@ -1808,6 +1842,12 @@ pub fn run_agent(
                 let setup = |turn: &std::path::Path| config.write(turn);
                 return crate::detach::spawn_driver(
                     root, id, "--acp", setup, command, &prompt, dir, tx,
+                );
+            }
+            if let Some((config, prompt)) = pi_config(spec, dir, &command) {
+                let setup = |turn: &std::path::Path| config.write(turn);
+                return crate::detach::spawn_driver(
+                    root, id, "--pi", setup, command, &prompt, dir, tx,
                 );
             }
             if let Some(config) = codex_app_config(spec, dir, &command) {
@@ -2173,6 +2213,85 @@ mod arg_tests {
             ("01a1", "plan")
         );
         assert_eq!(config.effort, "high");
+    }
+
+    #[test]
+    fn pi_gets_the_tools_its_mode_allows_and_runs_over_rpc() {
+        let o = AgentOptions::default();
+        let plan = args(
+            "pi",
+            false,
+            &[("mode", "plan"), ("model", "anthropic/sonnet")],
+            &o,
+            true,
+        );
+        assert_eq!(&plan[..2], ["--mode", "json"]);
+        assert!(plan
+            .windows(2)
+            .any(|w| w == ["--tools", "read,grep,find,ls"]));
+        assert!(plan
+            .windows(2)
+            .any(|w| w == ["--model", "anthropic/sonnet"]));
+        assert_eq!(plan.last().map(String::as_str), Some("hi"));
+        let edit = args("pi", false, &[], &o, true);
+        assert!(edit
+            .windows(2)
+            .any(|w| w == ["--tools", "read,edit,write,grep,find,ls"]));
+        let full = args(
+            "pi",
+            false,
+            &[("mode", "full"), ("effort", "high")],
+            &o,
+            true,
+        );
+        assert!(!full.iter().any(|a| a == "--tools"));
+        assert!(full.windows(2).any(|w| w == ["--thinking", "high"]));
+
+        let sel = std::collections::HashMap::new();
+        let spec = RunSpec {
+            provider: "pi",
+            prompt: "Fix it",
+            resume: true,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "pi-1",
+            images: &[],
+            memory: None,
+            local: true,
+            thread: 0,
+        };
+        let json_mode = turn_command(&spec);
+        // A Pi whose help doesn't list `--mode` runs each prompt in print mode.
+        assert!(pi_config(&spec, "/w", &json_mode).is_none());
+        crate::caps::set(
+            "pi",
+            crate::caps::Caps {
+                help: "--mode <mode>  text, json or rpc".into(),
+                ..Default::default()
+            },
+        );
+        let (config, prompt) = pi_config(&spec, "/w", &json_mode).unwrap();
+        assert_eq!(&config.command[..3], ["pi", "--mode", "rpc"]);
+        assert!(!config.command.iter().any(|a| a == "json" || a == "Fix it"));
+        assert!(config
+            .command
+            .windows(2)
+            .any(|w| w == ["--session-id", "pi-1"]));
+        assert_eq!(config.fallback.last().map(String::as_str), Some("Fix it"));
+        assert_eq!(prompt, "Fix it");
+        assert!(resumes("pi") && names_conversation("pi"));
+        assert_eq!(output("pi"), Output::Pi);
+    }
+
+    #[test]
+    fn modes_come_from_the_manifest() {
+        assert_eq!(effective_mode("grok", "edit"), "full");
+        assert_eq!(effective_mode("cursor", ""), "full");
+        assert_eq!(effective_mode("amp", "edit"), "edit");
+        assert!(mode_error("amp", "plan").is_some());
+        assert!(mode_error("cursor", "plan").is_none());
+        assert!(mode_error("claude", "plan").is_none());
     }
 
     #[test]
@@ -2950,7 +3069,7 @@ mod arg_tests {
         assert!(model_hint("codex", "Model metadata for `x` not found.").is_some());
         assert!(model_hint("codex", "file not found").is_none());
         let note = cost_note();
-        assert!(note.starts_with("Only Claude Code and OpenCode report a cost; Codex, "));
+        assert!(note.starts_with("Only Claude Code, OpenCode and Pi report a cost; Codex, "));
         assert!(note.contains(" and Grok report none"));
         assert!(note.contains("spending limits don't hold them"));
         assert!(note.contains("turn limits") && note.contains("token limit"));

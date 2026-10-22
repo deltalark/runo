@@ -743,10 +743,13 @@ fn install_command(program: &str) -> Option<String> {
             r#"runo_curl && curl -fsSL https://claude.ai/install.sh | bash -s "${want:-latest}""#
                 .to_string()
         }
-        "cursor" => "runo_curl && curl https://cursor.com/install -fsS | bash".into(),
-        "droid" => "runo_curl && curl -fsSL https://app.factory.ai/cli | sh".into(),
-        "grok" => format!("runo_curl && {}", crate::install::GROK),
-        id => format!("runo_npm {}", crate::alerts::npm_package(id)?),
+        id => match crate::alerts::npm_package(id) {
+            Some(package) => format!("runo_npm {package}"),
+            None => format!(
+                "runo_curl && {}",
+                crate::registry::spec(id)?.install.unix.as_deref()?
+            ),
+        },
     })
 }
 

@@ -41,7 +41,7 @@ pub struct SignIn {
     pub fix: &'static str,
 }
 
-pub const SIGN_INS: [SignIn; 10] = [
+pub const SIGN_INS: [SignIn; 11] = [
     SignIn {
         provider: "claude",
         keys: &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
@@ -107,6 +107,17 @@ pub const SIGN_INS: [SignIn; 10] = [
         keys: &["GROK_API_KEY", "XAI_API_KEY"],
         file: None,
         fix: "export GROK_API_KEY (from console.x.ai)",
+    },
+    SignIn {
+        provider: "pi",
+        keys: &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENROUTER_API_KEY",
+        ],
+        file: None,
+        fix: "export a provider key such as ANTHROPIC_API_KEY or OPENROUTER_API_KEY in your shell profile",
     },
 ];
 

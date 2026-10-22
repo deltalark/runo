@@ -18,6 +18,8 @@ pub enum Parser {
     Acp(Box<crate::harness::acp::AcpStream>),
     /// A Codex app-server turn's output (see `harness::codex`).
     Codex(Box<crate::harness::codex::CodexAppStream>),
+    /// Pi's events, from its RPC or JSON mode (see `harness::pi`).
+    Pi(Box<crate::harness::pi::PiStream>),
 }
 
 impl Parser {
@@ -31,6 +33,9 @@ impl Parser {
         match format {
             crate::agent::Output::Claude => Some(Parser::Claude(ClaudeStream::new(cwd))),
             crate::agent::Output::Json => Some(Parser::Json(Box::new(JsonStream::new(cwd)))),
+            crate::agent::Output::Pi => {
+                Some(Parser::Pi(Box::new(crate::harness::pi::PiStream::new(cwd))))
+            }
             crate::agent::Output::Text => None,
         }
     }
@@ -41,6 +46,7 @@ impl Parser {
             Parser::Json(p) => p.feed(line),
             Parser::Acp(p) => p.feed(line),
             Parser::Codex(p) => p.feed(line),
+            Parser::Pi(p) => p.feed(line),
         }
     }
 }
@@ -294,7 +300,7 @@ fn short(text: &str, max: usize) -> String {
 }
 
 /// What a tool printed, from a result given as text or as content blocks.
-fn result_text(content: &Value) -> String {
+pub(crate) fn result_text(content: &Value) -> String {
     let text = match content {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => blocks
@@ -309,7 +315,7 @@ fn result_text(content: &Value) -> String {
 
 /// A short label for a tool call, such as "Read src/main.rs" or "Ran cargo test". Tool
 /// names and argument keys differ between CLIs; unknown tools read "Used <tool>".
-fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
+pub(crate) fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
     let s = |keys: &[&str]| {
         keys.iter()
             .find_map(|k| match &input[*k] {

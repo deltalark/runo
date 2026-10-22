@@ -168,8 +168,8 @@ pub fn spawn_live(
     start(id, turn, host, &command, dir, tx)
 }
 
-/// Start a turn that one of the agent host's protocol drivers runs (`--acp` or
-/// `--codex`), with its settings written into the turn folder by `setup` and `prompt` as
+/// Start a turn that one of the agent host's protocol drivers runs (`--acp`, `--codex`
+/// or `--pi`), with its settings written into the turn folder by `setup` and `prompt` as
 /// its first message. `command`, the print-mode command, lends the turn its environment.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_driver(

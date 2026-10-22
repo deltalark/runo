@@ -78,7 +78,8 @@ impl Turn {
     }
 
     /// Read the turn the way its folder says it runs: under the agent host, taking
-    /// messages as it works, over ACP or Codex's app server.
+    /// messages as it works, over ACP or Codex's app server. Pi's RPC mode prints what
+    /// its JSON mode does, so its parser stays.
     pub fn follow(&mut self, folder: &Path) {
         self.live = super::host::is_live(folder);
         if matches!(self.parser, Some(Parser::Acp(_) | Parser::Codex(_))) {
