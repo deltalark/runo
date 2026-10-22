@@ -98,11 +98,11 @@ fn bracket(key: SharedString, radius: f32, own_corners: bool) -> AnyElement {
                     let hover = accent::hover(&hover_key, b, window);
                     let (x0, x1, y0, y1) = (b.origin.x, b.right(), b.origin.y, b.bottom());
                     let r = px(radius).min((y1 - y0) / 2.);
-                    // Along the middle of a 2px edge inside the outline.
-                    let i = px(1.);
-                    let (x0, x1, y0, y1, r) = (x0 + i, x1 - i, y0 + i, y1 - i, r - i);
-                    let at = |x: Pixels, y: Pixels| point(x, y);
                     let rim = if own_corners {
+                        // Along the middle of a 2px edge inside the outline.
+                        let i = px(1.);
+                        let (x0, x1, y0, y1, r) = (x0 + i, x1 - i, y0 + i, y1 - i, r - i);
+                        let at = |x: Pixels, y: Pixels| point(x, y);
                         let mut rim = accent::Rim::new(at(x0 + r, y0));
                         rim.line(at(x1 - r, y0));
                         rim.corner(at(x1, y0), at(x1, y0 + r), false);
@@ -114,7 +114,7 @@ fn bracket(key: SharedString, radius: f32, own_corners: bool) -> AnyElement {
                         rim.corner(at(x0, y0), at(x0 + r, y0), true);
                         rim.close()
                     } else {
-                        left_rim(x0, x1, y0, y1, r)
+                        fused_rim(x0, x1, y0, y1, r, px(FUSE_R), true)
                     };
                     rim.paint(hover, window);
                 },
@@ -130,16 +130,41 @@ fn bracket(key: SharedString, radius: f32, own_corners: bool) -> AnyElement {
 }
 
 /// The rim of something whose right side runs on into what sits beside it, such as a
-/// fused row or the rail's open tab: in along the top from `x1`, round the top-left and
-/// bottom-left corners, both lit, and out along the bottom to `x1`.
-fn left_rim(x0: Pixels, x1: Pixels, y0: Pixels, y1: Pixels, r: Pixels) -> accent::Rim {
+/// fused row or the rail's open tab, along the middle of a 2px edge inside its outline:
+/// down the edge of what it sits on, round the curve (radius `o`) into its top, round its
+/// top-left and bottom-left corners (radius `r`), both lit, and along its bottom back
+/// round the curve out of it and on down the edge. Without a curve below (`curve_below`
+/// false, as for a tab at the rail's foot) the bottom runs straight on instead. The light
+/// follows the outline through the curves and fades out before it ends. `right` is the
+/// edge it runs on into.
+fn fused_rim(
+    x0: Pixels,
+    right: Pixels,
+    y0: Pixels,
+    y1: Pixels,
+    r: Pixels,
+    o: Pixels,
+    curve_below: bool,
+) -> accent::Rim {
     let at = |x: Pixels, y: Pixels| point(x, y);
-    let mut rim = accent::Rim::new(at(x1, y0));
+    let i = px(1.);
+    // The curves turn the other way, so inside them is the outside of their arc, and the
+    // rim there turns a step wider.
+    let (x0, y0, y1, r, edge) = (x0 + i, y0 + i, y1 - i, r - i, right + i);
+    let mut rim = accent::Rim::new(at(edge, y0 - i - 2. * o));
+    rim.line(at(edge, y0 - i - o));
+    rim.corner(at(edge, y0), at(right - o, y0), false);
     rim.line(at(x0 + r, y0));
     rim.corner(at(x0, y0), at(x0, y0 + r), true);
     rim.line(at(x0, y1 - r));
     rim.corner(at(x0, y1), at(x0 + r, y1), true);
-    rim.line(at(x1, y1));
+    if curve_below {
+        rim.line(at(right - o, y1));
+        rim.corner(at(edge, y1), at(edge, y1 + i + o), false);
+        rim.line(at(edge, y1 + i + 2. * o));
+    } else {
+        rim.line(at(right + 2. * o, y1));
+    }
     rim
 }
 
@@ -207,6 +232,8 @@ thread_local! {
     static TAB_CUT: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
     /// The layer the open tab is cut from, set while the rail is built.
     static TAB_SHEET: Cell<Option<Rgba>> = const { Cell::new(None) };
+    /// Where the rail's islands end, above the gutter, as the rail last painted it.
+    static RAIL_FLOOR: Cell<Option<Pixels>> = const { Cell::new(None) };
 }
 
 /// The open place's tab on the rail: a piece of what sits beside the rail, the same
@@ -241,13 +268,22 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
                         |_, _, _| (),
                         move |b, _, window, _| {
                             let hover = accent::hover(&hover_key, b, window);
-                            let i = px(1.);
-                            left_rim(
-                                b.origin.x + i,
+                            // At the rail's foot the tab runs level with the island's
+                            // square bottom edge, with no curve out below.
+                            let floor = RAIL_FLOOR.get().unwrap_or(b.bottom() + px(RAIL_R));
+                            let foot = b.bottom() + px(RAIL_R) > floor;
+                            fused_rim(
+                                b.origin.x,
                                 b.right(),
-                                b.origin.y + i,
-                                b.bottom() - i,
-                                px(FUSE_R) - i,
+                                b.origin.y,
+                                if foot {
+                                    b.bottom().min(floor)
+                                } else {
+                                    b.bottom()
+                                },
+                                px(FUSE_R),
+                                px(RAIL_R),
+                                !foot,
                             )
                             .paint(hover, window);
                         },
@@ -292,6 +328,7 @@ fn rail_fill(tab: Rgba) -> AnyElement {
             let (left, top, right, bottom) = (b.origin.x, b.origin.y, b.right(), b.bottom());
             // Where the islands end, above the gutter along the bottom.
             let floor = bottom - px(GUTTER);
+            RAIL_FLOOR.set(Some(floor));
             // The tab's outline, from the rail's edge above it round to the edge below.
             let outline = |f: &mut PathBuilder, t: Bounds<Pixels>| {
                 let (tx, ty, tb, r, o) = (t.origin.x, t.origin.y, t.bottom(), px(r), px(RAIL_R));
@@ -563,16 +600,24 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     let Some(t) = cut else { return };
                     let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
                     // The accent's rim, lit at the tab's own two corners, top-left and
-                    // top-right (its foot runs on into the island).
+                    // top-right, along the middle of a 2px edge inside its outline: in
+                    // along the island's top, round the flare up the tab's side, over its
+                    // top and down round the other flare and out again, so the light
+                    // follows the curves. Inside a flare is the outside of its arc, so the
+                    // rim there turns a step wider.
                     let hover = accent::hover(&SharedString::from(strip), t, window);
                     let i = px(1.);
-                    let (x0, x1, y0, r) = (x0 + i, x1 - i, y0 + i, tr - i);
-                    let mut rim = accent::Rim::new(at(x0, bottom));
+                    let (x0, x1, y0, r, foot) = (x0 + i, x1 - i, y0 + i, tr - i, bottom + i);
+                    let mut rim = accent::Rim::new(at(x0 - i - 2. * fr, foot));
+                    rim.line(at(x0 - i - fr, foot));
+                    rim.corner(at(x0, foot), at(x0, bottom - fr), false);
                     rim.line(at(x0, y0 + r));
                     rim.corner(at(x0, y0), at(x0 + r, y0), true);
                     rim.line(at(x1 - r, y0));
                     rim.corner(at(x1, y0), at(x1, y0 + r), true);
-                    rim.line(at(x1, bottom));
+                    rim.line(at(x1, bottom - fr));
+                    rim.corner(at(x1, foot), at(x1 + i + fr, foot), false);
+                    rim.line(at(x1 + i + 2. * fr, foot));
                     rim.paint(hover, window);
                 },
             )
