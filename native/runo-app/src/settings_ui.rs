@@ -3140,14 +3140,11 @@ impl RunoApp {
                         false,
                         glass_fill(c_canvas()),
                     ))
+                    // No bottom-left corner: the rail's Settings tab joins the island
+                    // there, level with its bottom edge.
                     .child(crate::shell::frame_corner(
                         false,
                         false,
-                        glass_fill(c_canvas()),
-                    ))
-                    .child(crate::shell::frame_corner(
-                        false,
-                        true,
                         glass_fill(c_canvas()),
                     )),
             )
