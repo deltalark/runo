@@ -68,46 +68,41 @@ pub fn color(hover: f32) -> Hsla {
     .into()
 }
 
-/// An outline traced as points, with the corners its rim is lit at. Start it with `new`,
-/// trace it with `line` and `corner`, and paint it with `paint`.
+/// An outline traced with straight edges and quarter turns, and the corners its rim is
+/// lit at. Start it with `new`, trace it with `line` and `corner`, and paint it with
+/// `paint`.
 pub struct Rim {
-    pts: Vec<Point<Pixels>>,
-    lit: Vec<usize>,
+    start: Point<Pixels>,
+    steps: Vec<Step>,
     closed: bool,
+}
+
+enum Step {
+    Line(Point<Pixels>),
+    Corner {
+        c: Point<Pixels>,
+        to: Point<Pixels>,
+        lit: bool,
+    },
 }
 
 impl Rim {
     pub fn new(from: Point<Pixels>) -> Self {
         Self {
-            pts: vec![from],
-            lit: Vec::new(),
+            start: from,
+            steps: Vec::new(),
             closed: false,
         }
     }
 
     pub fn line(&mut self, to: Point<Pixels>) {
-        self.pts.push(to);
+        self.steps.push(Step::Line(to));
     }
 
     /// A quarter turn from where the outline is to `to` round the square corner `c`, lit
-    /// at its middle when `lit`.
+    /// when `lit`.
     pub fn corner(&mut self, c: Point<Pixels>, to: Point<Pixels>, lit: bool) {
-        let k = 0.5523;
-        let from = *self.pts.last().unwrap();
-        let (c1, c2) = (from + (c - from) * k, to + (c - to) * k);
-        const STEPS: usize = 8;
-        for n in 1..=STEPS {
-            let t = n as f32 / STEPS as f32;
-            let u = 1. - t;
-            let p = from * (u * u * u)
-                + c1 * (3. * u * u * t)
-                + c2 * (3. * u * t * t)
-                + to * (t * t * t);
-            self.pts.push(p);
-            if lit && n == STEPS / 2 {
-                self.lit.push(self.pts.len() - 1);
-            }
-        }
+        self.steps.push(Step::Corner { c, to, lit });
     }
 
     /// Joins the outline's end back to its start.
@@ -116,78 +111,137 @@ impl Rim {
         self
     }
 
-    /// Strokes the outline 2px wide in the accent over a faint 6px glow, `hover` of the way
-    /// to its hovered look: full strength at each lit corner, fading to nothing `fade`
-    /// along the outline from it, in short runs of one strength each so the fade is smooth.
-    pub fn paint(mut self, hover: f32, window: &mut Window) {
+    /// Paints the light at each lit corner, `hover` of the way to its hovered look: one
+    /// unbroken stroke round the corner and on along the outline either side, through
+    /// any curves it meets, in the accent at the corner and fading to nothing `fade`
+    /// along (or under a third of the way to the next lit corner, so a gap stays dark between them, or at the outline's end), over a faint
+    /// wider glow.
+    pub fn paint(self, hover: f32, window: &mut Window) {
+        // The outline as a dense polyline, each turn cut fine enough to read as a curve,
+        // with how far along it each point is, and where each lit corner runs.
+        const CUTS: usize = 16;
+        let k = 0.5523;
+        let mut pts = vec![self.start];
+        let mut lit = Vec::new();
+        for step in &self.steps {
+            let from = *pts.last().unwrap();
+            match *step {
+                Step::Line(to) => pts.push(to),
+                Step::Corner { c, to, lit: on } => {
+                    let (c1, c2) = (from + (c - from) * k, to + (c - to) * k);
+                    let first = pts.len() - 1;
+                    for n in 1..=CUTS {
+                        let t = n as f32 / CUTS as f32;
+                        let u = 1. - t;
+                        pts.push(
+                            from * (u * u * u)
+                                + c1 * (3. * u * u * t)
+                                + c2 * (3. * u * t * t)
+                                + to * (t * t * t),
+                        );
+                    }
+                    if on {
+                        lit.push((first, pts.len() - 1));
+                    }
+                }
+            }
+        }
         if self.closed {
-            self.pts.push(self.pts[0]);
+            pts.push(self.start);
         }
-        let len = |a: Point<Pixels>, b: Point<Pixels>| {
-            let d = b - a;
-            (f32::from(d.x).powi(2) + f32::from(d.y).powi(2)).sqrt()
+        let len = |d: Point<Pixels>| (f32::from(d.x).powi(2) + f32::from(d.y).powi(2)).sqrt();
+        let mut at = vec![0.];
+        for w in pts.windows(2) {
+            at.push(at.last().unwrap() + len(w[1] - w[0]));
+        }
+        let total = *at.last().unwrap();
+        // The point `s` along the outline, wrapping round a closed one.
+        let point_at = |s: f32| {
+            let s = if self.closed {
+                s.rem_euclid(total)
+            } else {
+                s.clamp(0., total)
+            };
+            let v = at.partition_point(|&a| a <= s).clamp(1, pts.len() - 1);
+            let span = at[v] - at[v - 1];
+            let t = if span > 0. {
+                (s - at[v - 1]) / span
+            } else {
+                0.
+            };
+            pts[v - 1] + (pts[v] - pts[v - 1]) * t
         };
-        let mut along = vec![0.];
-        for w in self.pts.windows(2) {
-            along.push(along.last().unwrap() + len(w[0], w[1]));
-        }
-        let total = *along.last().unwrap();
-        let lit: Vec<f32> = self.lit.iter().map(|&i| along[i]).collect();
+        // The outline from `lo` to `hi` along it.
+        let stretch = |lo: f32, hi: f32| {
+            let mut out = vec![point_at(lo)];
+            let laps: &[f32] = if self.closed { &[-1., 0., 1.] } else { &[0.] };
+            for lap in laps {
+                for (p, a) in pts.iter().zip(&at) {
+                    let a = a + lap * total;
+                    if a > lo && a < hi {
+                        out.push(*p);
+                    }
+                }
+            }
+            out.push(point_at(hi));
+            out.dedup_by(|a, b| len(*a - *b) < 0.01);
+            out
+        };
         let fade = 34. + 18. * hover;
-        let strength = |s: f32| {
-            let d = lit
-                .iter()
-                .map(|&l| {
-                    let d = (s - l).abs();
-                    if self.closed {
-                        d.min(total - d)
-                    } else {
-                        d
-                    }
-                })
-                .fold(f32::MAX, f32::min);
-            (1. - d / fade).max(0.).powf(1.25)
-        };
         let color = color(hover);
-        // A soft glow first, then the line itself. Each is laid in pieces of at most 2px,
-        // each at the strength of its middle, merged into runs that share a step of it.
-        const LEVELS: f32 = 24.;
-        let flush = |run: &mut Option<(f32, PathBuilder)>, window: &mut Window, glow: bool| {
-            if let Some((level, f)) = run.take() {
-                if let Ok(path) = f.build() {
-                    let mut c = color;
-                    c.a *= level / LEVELS * if glow { 0.22 } else { 1. };
-                    window.paint_path(path, c);
+        let count = lit.len();
+        // How much of the way between two lit corners each one's light may take, so the
+        // middle of the edge between them stays dark.
+        const SHARE: f32 = 0.3;
+        for (n, &(a, b)) in lit.iter().enumerate() {
+            let (sa, sb) = (at[a], at[b]);
+            // How far the light may run back and on: `fade`, but no further than `SHARE`
+            // of the way to the lit corner beside it, or the outline's end.
+            let back = match (n, self.closed) {
+                (0, false) => sa,
+                (0, true) => {
+                    let (_, pb) = lit[count - 1];
+                    (sa - (at[pb] - total)) * SHARE
+                }
+                _ => (sa - at[lit[n - 1].1]) * SHARE,
+            };
+            let on = match (n + 1 == count, self.closed) {
+                (true, false) => total - sb,
+                (true, true) => {
+                    let (na, _) = lit[0];
+                    (at[na] + total - sb) * SHARE
+                }
+                _ => (at[lit[n + 1].0] - sb) * SHARE,
+            };
+            let (back, on) = (fade.min(back), fade.min(on));
+            // gpui's gradients don't follow a bent path, so the fade is built from
+            // layers: each the whole corner and the outline either side out to a step
+            // further, so the corner is full and each side thins out in even steps.
+            const LAYERS: usize = 12;
+            for (width, strength) in [(5., 0.12), (2., 1.)] {
+                for j in 1..=LAYERS {
+                    // What the layers from j out must add up to over step j, and so what
+                    // this one alone adds over the ones further out.
+                    let want = |j: usize| 1. - (j as f32 - 1.) / LAYERS as f32;
+                    let alpha = if j == LAYERS {
+                        want(j)
+                    } else {
+                        1. - (1. - want(j)) / (1. - want(j + 1))
+                    };
+                    let t = j as f32 / LAYERS as f32;
+                    let line = stretch(sa - back * t, sb + on * t);
+                    let mut f = PathBuilder::stroke(px(width));
+                    f.move_to(line[0]);
+                    for p in &line[1..] {
+                        f.line_to(*p);
+                    }
+                    if let Ok(path) = f.build() {
+                        let mut lit = color;
+                        lit.a *= alpha * strength;
+                        window.paint_path(path, lit);
+                    }
                 }
             }
-        };
-        for glow in [true, false] {
-            let mut run: Option<(f32, PathBuilder)> = None;
-            for (i, w) in self.pts.windows(2).enumerate() {
-                let (a, b, s0) = (w[0], w[1], along[i]);
-                let l = len(a, b);
-                let pieces = (l / 2.).ceil().max(1.) as usize;
-                for n in 0..pieces {
-                    let (t0, t1) = (n as f32 / pieces as f32, (n + 1) as f32 / pieces as f32);
-                    let (p0, p1) = (a + (b - a) * t0, a + (b - a) * t1);
-                    let level = (strength(s0 + l * (t0 + t1) / 2.) * LEVELS).round();
-                    if level == 0. {
-                        flush(&mut run, window, glow);
-                        continue;
-                    }
-                    match &mut run {
-                        Some((lv, f)) if *lv == level => f.line_to(p1),
-                        _ => {
-                            flush(&mut run, window, glow);
-                            let mut f = PathBuilder::stroke(px(if glow { 6. } else { 2. }));
-                            f.move_to(p0);
-                            f.line_to(p1);
-                            run = Some((level, f));
-                        }
-                    }
-                }
-            }
-            flush(&mut run, window, glow);
         }
     }
 }
