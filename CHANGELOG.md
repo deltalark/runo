@@ -4,6 +4,8 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-22
+
 ### Added
 
 - Runo in the macOS menu bar. A glyph by the clock counts the sessions that need you, or the agents working when nothing does, with a dot while something waits on you. Its menu lists what needs you and what's working, with each session's agent, project and running time; hover one for its branch, last reply, changes and cost, and to open it. Ask Runo… opens the assistant, and New session…, Open Runo and Quit are there too. Turn it off in Settings > General > Alerts.
