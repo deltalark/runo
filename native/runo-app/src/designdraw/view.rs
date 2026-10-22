@@ -32,6 +32,7 @@ mod chrome;
 mod codelinks;
 mod comments;
 mod components;
+mod discard;
 mod figma;
 mod grids;
 mod handoff;
@@ -440,6 +441,10 @@ pub(crate) struct DesignCanvas {
     f_ask: Entity<InputState>,
     /// The change an agent was asked for, while it works and until it's kept or undone.
     ai: Option<AiChange>,
+    /// Files under design/ that differ from the project's last commit.
+    uncommitted: Vec<String>,
+    /// `files_changed` when `uncommitted` was last asked for.
+    uncommitted_seen: u64,
     /// The ask bar is describing a new screen for this device.
     ask_new: Option<Device>,
     /// The agent the ask bar hands its task to.
@@ -731,6 +736,8 @@ impl DesignCanvas {
             seen: HashMap::new(),
             f_ask,
             ai: None,
+            uncommitted: Vec::new(),
+            uncommitted_seen: 0,
             ask_new: None,
             pick: crate::agent_pick::AgentPick::new(cx),
             jobs: Default::default(),
@@ -750,6 +757,7 @@ impl DesignCanvas {
         }
         this.watch(cx);
         this.serve_agents(cx);
+        this.refresh_uncommitted(cx);
         this
     }
 
@@ -872,6 +880,11 @@ impl DesignCanvas {
             let check = |this: &mut Self, cx: &mut Context<Self>| {
                 if this.watching {
                     this.check_files(cx);
+                    // Saved or changed since git was last asked: ask again.
+                    if this.uncommitted_seen != this.files_changed {
+                        this.uncommitted_seen = this.files_changed;
+                        this.refresh_uncommitted(cx);
+                    }
                 }
             };
             if this.update(cx, check).is_err() {
@@ -914,6 +927,7 @@ impl DesignCanvas {
 
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         self.check_files(cx);
+        self.refresh_uncommitted(cx);
         self.refs = crate::design::load(&self.root);
         let refs = &self.refs;
         self.refs_picked
@@ -1554,7 +1568,12 @@ impl DesignCanvas {
         }
         self.undo.clear();
         self.redo.clear();
-        self.check_files(cx);
+        if ai.by_ai {
+            self.check_files(cx);
+        } else {
+            // Screens and their places come back exactly as the files have them.
+            self.reread(cx);
+        }
         cx.notify();
     }
 

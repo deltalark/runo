@@ -124,6 +124,22 @@ impl RunoApp {
     /// The sessions the sidebar shows, in order, under their group: by status when the
     /// sidebar is grouped that way, else under each open project.
     pub(crate) fn sidebar_rows(&self, filter: &str, cx: &App) -> Vec<(String, Vec<&Session>)> {
+        if self.needs_filter {
+            let (blocked, unseen): (Vec<_>, Vec<_>) = self
+                .needs_you()
+                .into_iter()
+                .filter(|(s, _)| {
+                    filter.is_empty()
+                        || s.title.to_lowercase().contains(filter)
+                        || s.branch.to_lowercase().contains(filter)
+                })
+                .partition(|(_, need)| *need == shell::Need::Blocked);
+            return [("Waiting on you", blocked), ("Finished unseen", unseen)]
+                .into_iter()
+                .filter(|(_, m)| !m.is_empty())
+                .map(|(name, m)| (name.to_string(), m.into_iter().map(|(s, _)| s).collect()))
+                .collect();
+        }
         if cx.global::<AppSettings>().group_by_status {
             let visible: Vec<&Session> = self
                 .state

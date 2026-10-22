@@ -114,6 +114,7 @@ const SOURCES: &[(&str, &str)] = &[
         "assistant",
         include_str!("../../../docs/guide/assistant.md"),
     ),
+    ("menu-bar", include_str!("../../../docs/guide/menu-bar.md")),
 ];
 
 /// Questions offered when the panel opens with nothing asked yet.
@@ -568,6 +569,15 @@ impl RunoApp {
             window.focus(&self.focus, cx);
         }
         cx.notify();
+    }
+
+    /// Open the assistant with the cursor in its box, as Ask Runo in the menu bar does.
+    pub(crate) fn open_assistant(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.assistant.open {
+            self.assistant.input.update(cx, |i, cx| i.focus(window, cx));
+        } else {
+            self.toggle_assistant(window, cx);
+        }
     }
 
     pub(crate) fn close_assistant(&mut self, window: &mut Window, cx: &mut Context<Self>) {

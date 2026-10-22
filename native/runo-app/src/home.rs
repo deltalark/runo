@@ -527,7 +527,6 @@ impl RunoApp {
 
     /// Home: a big prompt to start from, ideas, a line of what's waiting, and recent work.
     pub(crate) fn home_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let counts = self.counts();
         let in_scope = |b: Bucket| {
             self.state
                 .sessions
@@ -585,14 +584,7 @@ impl RunoApp {
                 }
                 col_ = col_
                     .child(self.home_ideas(n_needs, n_review, git.as_ref(), cx))
-                    .child(self.home_status(
-                        n_needs,
-                        n_running,
-                        n_review,
-                        counts.spend_today,
-                        git.as_ref(),
-                        cx,
-                    ))
+                    .child(self.home_status(n_needs, n_running, n_review, git.as_ref(), cx))
                     .child(self.home_recent_view(cx));
             }
         }
@@ -1455,7 +1447,6 @@ impl RunoApp {
         n_needs: usize,
         n_running: usize,
         n_review: usize,
-        spend_today: f64,
         git: Option<&GitNews>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1574,29 +1565,6 @@ impl RunoApp {
                     GitStep::BringIn,
                 ))
             })
-            .child(
-                div()
-                    .id("home-pill-spend")
-                    .h(px(28.))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .rounded_full()
-                    .bg(tint(c_subtle()))
-                    .text_size(px(12.5))
-                    .text_color(rgb(c_secondary()))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
-                            .child(format!("${:.2}", spend_today / 100.0)),
-                    )
-                    .child("today")
-                    .tooltip(tip(
-                        "Spend reported by Claude Code and OpenCode, all projects",
-                    )),
-            )
             .animated(
                 "home-status-in",
                 Animation::new(Duration::from_millis(QUICK_HOME)).with_easing(ease_out_quint()),

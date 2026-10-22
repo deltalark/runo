@@ -548,6 +548,10 @@ pub struct State {
     /// Cost reported by the agents per day ("%Y-%m-%d"), in US cents; the last 31 days.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub spend: std::collections::BTreeMap<String, f64>,
+    /// The same cost split by agent ("claude", "opencode"), for the Usage popover; the
+    /// last 31 days. Days from before it was kept have only the total in `spend`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub agent_spend: std::collections::BTreeMap<String, std::collections::BTreeMap<String, f64>>,
     /// Turns started and tokens reported per day ("%Y-%m-%d"), for the turn and token
     /// limits; the last 31 days, like `spend`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -891,13 +895,29 @@ pub fn today() -> String {
 }
 
 impl State {
-    /// Add a turn's cost to `day`, keeping a month of days.
-    pub fn add_spend(&mut self, day: &str, cents: f64) {
+    /// Add a turn's cost to `day`, in total and for `provider`, keeping a month of days.
+    pub fn add_spend(&mut self, day: &str, provider: &str, cents: f64) {
         if cents <= 0.0 {
             return;
         }
         *self.spend.entry(day.to_string()).or_default() += cents;
         keep_month(&mut self.spend);
+        *self
+            .agent_spend
+            .entry(day.to_string())
+            .or_default()
+            .entry(provider.to_string())
+            .or_default() += cents;
+        keep_month(&mut self.agent_spend);
+    }
+
+    /// What `provider` reported spending on `day`, in cents.
+    pub fn agent_spend_on(&self, day: &str, provider: &str) -> f64 {
+        self.agent_spend
+            .get(day)
+            .and_then(|by| by.get(provider))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Count a turn started on `day`, keeping a month of days.
@@ -1529,14 +1549,18 @@ pub(crate) mod tests {
     #[test]
     fn spend_adds_up_per_day_and_keeps_a_month() {
         let mut state = State::default();
-        state.add_spend("2026-10-13", 12.5);
-        state.add_spend("2026-10-13", 7.5);
-        state.add_spend("2026-10-13", 0.0);
+        state.add_spend("2026-10-13", "claude", 12.5);
+        state.add_spend("2026-10-13", "opencode", 7.5);
+        state.add_spend("2026-10-13", "claude", 0.0);
         assert_eq!(state.spend.get("2026-10-13"), Some(&20.0));
+        assert_eq!(state.agent_spend_on("2026-10-13", "claude"), 12.5);
+        assert_eq!(state.agent_spend_on("2026-10-13", "opencode"), 7.5);
+        assert_eq!(state.agent_spend_on("2026-10-13", "codex"), 0.0);
         for day in 1..=40 {
-            state.add_spend(&format!("2026-11-{day:02}"), 1.0);
+            state.add_spend(&format!("2026-11-{day:02}"), "claude", 1.0);
         }
         assert_eq!(state.spend.len(), 31);
+        assert_eq!(state.agent_spend.len(), 31);
         assert!(!state.spend.contains_key("2026-10-13"));
     }
 

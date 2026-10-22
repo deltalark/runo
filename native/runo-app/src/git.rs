@@ -1582,6 +1582,81 @@ pub fn discard(dir: &str, path: &str) -> Result<(), String> {
     }
 }
 
+/// Files under `path` (relative to `dir`) that differ from the last commit: changed,
+/// staged, deleted or new, relative to `dir`. Ignored files don't count.
+pub fn changed_under(dir: &str, path: &str) -> Vec<String> {
+    let tracked = if exists(dir, "HEAD") {
+        git(
+            dir,
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "--relative",
+                "-z",
+                "HEAD",
+                "--",
+                path,
+            ],
+        )
+    } else {
+        git(dir, &["ls-files", "-z", "--", path])
+    };
+    let new = git(
+        dir,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            path,
+        ],
+    );
+    let mut out: Vec<String> = [tracked, new]
+        .into_iter()
+        .flat_map(|r| split_z(&r.unwrap_or_default()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A file's text as the last commit has it, `path` relative to `dir`.
+pub fn committed_text(dir: &str, path: &str) -> Option<String> {
+    git(dir, &["show", &format!("HEAD:./{path}")]).ok()
+}
+
+/// Put everything under `path` (relative to `dir`) back as the last commit has it, staged
+/// changes too: committed files come back and files made since are removed, so git shows
+/// no changes there. Ignored files are left alone.
+pub fn discard_under(dir: &str, path: &str) -> Result<(), String> {
+    if exists(dir, "HEAD") {
+        if let Err(e) = git(
+            dir,
+            &[
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                path,
+            ],
+        ) {
+            // Nothing under it was ever committed or staged: only new files to remove.
+            if !e.contains("did not match") {
+                return Err(e);
+            }
+        }
+    } else {
+        git(
+            dir,
+            &["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", path],
+        )?;
+    }
+    git(dir, &["clean", "-f", "-d", "-q", "--", path]).map(|_| ())
+}
+
 /// Add one file's changes to the index.
 pub fn stage(dir: &str, path: &str) -> Result<(), String> {
     git(dir, &["add", "-A", "--", path]).map(|_| ())
@@ -3707,6 +3782,79 @@ index 1..2 100644
         remove_worktree(repo_str, &dir).unwrap();
         assert!(!Path::new(&dir).exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_folder_goes_back_to_the_last_commit() {
+        let top = repo("under");
+        // The project can sit below the repository's top.
+        let project = top.join("app");
+        std::fs::create_dir_all(project.join("design/screens")).unwrap();
+        let dir = project.to_str().unwrap();
+        std::fs::write(project.join("design/canvas.toml"), "one\n").unwrap();
+        std::fs::write(project.join("design/.gitignore"), "local.txt\n").unwrap();
+        std::fs::write(project.join("design/screens/old.html"), "<p>old").unwrap();
+        std::fs::write(project.join("code.rs"), "fn a() {}\n").unwrap();
+        sh(&top, &["add", "-A"]);
+        sh(&top, &["commit", "-q", "-m", "init"]);
+        assert!(changed_under(dir, "design").is_empty());
+        assert_eq!(
+            committed_text(dir, "design/canvas.toml").as_deref(),
+            Some("one\n")
+        );
+        assert!(committed_text(dir, "design/nope.toml").is_none());
+
+        // Edited, staged, new and deleted files; ignored ones and other folders stay.
+        std::fs::remove_file(project.join("design/screens/old.html")).unwrap();
+        std::fs::write(project.join("design/canvas.toml"), "two\n").unwrap();
+        std::fs::write(project.join("design/screens/home.html"), "<p>").unwrap();
+        std::fs::write(project.join("design/screens/staged.html"), "<p>").unwrap();
+        sh(&project, &["add", "design/screens/staged.html"]);
+        std::fs::write(project.join("design/local.txt"), "mine").unwrap();
+        std::fs::write(project.join("code.rs"), "fn b() {}\n").unwrap();
+        assert_eq!(
+            changed_under(dir, "design"),
+            [
+                "design/canvas.toml",
+                "design/screens/home.html",
+                "design/screens/old.html",
+                "design/screens/staged.html"
+            ]
+        );
+        discard_under(dir, "design").unwrap();
+        assert!(changed_under(dir, "design").is_empty());
+        assert_eq!(
+            std::fs::read_to_string(project.join("design/canvas.toml")).unwrap(),
+            "one\n"
+        );
+        assert!(project.join("design/screens/old.html").exists());
+        assert!(!project.join("design/screens/home.html").exists());
+        assert!(!project.join("design/screens/staged.html").exists());
+        assert!(project.join("design/local.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(project.join("code.rs")).unwrap(),
+            "fn b() {}\n"
+        );
+
+        // A folder never committed goes away entirely.
+        std::fs::create_dir_all(project.join("architecture/views")).unwrap();
+        std::fs::write(project.join("architecture/views/a.toml"), "x").unwrap();
+        assert_eq!(changed_under(dir, "architecture").len(), 1);
+        discard_under(dir, "architecture").unwrap();
+        assert!(!project.join("architecture").exists());
+        // So does one in a repository with no commit yet, staged or not.
+        let fresh = repo("under-fresh");
+        let fresh_dir = fresh.to_str().unwrap();
+        std::fs::create_dir_all(fresh.join("design")).unwrap();
+        std::fs::write(fresh.join("design/a.html"), "a").unwrap();
+        std::fs::write(fresh.join("design/b.html"), "b").unwrap();
+        sh(&fresh, &["add", "design/a.html"]);
+        assert_eq!(changed_under(fresh_dir, "design").len(), 2);
+        discard_under(fresh_dir, "design").unwrap();
+        assert!(changed_under(fresh_dir, "design").is_empty());
+        assert!(!fresh.join("design").exists());
+        let _ = std::fs::remove_dir_all(&top);
+        let _ = std::fs::remove_dir_all(&fresh);
     }
 
     #[test]

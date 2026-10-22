@@ -27,6 +27,7 @@ mod copies;
 mod cove;
 mod coveserver;
 mod crew;
+mod crew_peek;
 mod crew_ui;
 mod crew_view;
 mod ctxmenu;
@@ -52,6 +53,7 @@ mod install;
 mod keymap;
 mod mcp;
 mod memory_mcp;
+mod menubar;
 mod modelcheck;
 mod models;
 mod notes;
@@ -81,6 +83,7 @@ mod signin;
 mod store;
 mod stream;
 mod terminal;
+mod themes;
 mod timemachine;
 mod tour;
 mod turns;
@@ -229,6 +232,8 @@ struct RunoApp {
     git_folder_open: bool,
     git_folder_file: Option<String>,
     git_left_out: parts::LeftOut,
+    /// Sections of the folder's files folded away, by their key.
+    git_folder_shut: HashSet<String>,
     /// The folder's commit box, a value waiting to go into it, and the message being
     /// committed, put back if the commit fails.
     git_folder_msg: Entity<InputState>,
@@ -280,6 +285,11 @@ struct RunoApp {
     right_tab: RightTab,
     /// The Threads tab's finished threads are folded away.
     threads_done_shut: bool,
+    /// The Crew thread open in the Threads tab, beside Crew's chat.
+    peek: Option<u64>,
+    peek_scroll: ScrollHandle,
+    /// What the person writes to the thread open in the Threads tab.
+    peek_prompt: Entity<TextareaState>,
     /// The Threads tab lists every finished thread, not only the latest few.
     threads_done_all: bool,
     /// Projects whose finished Crew threads are unfolded in the sidebar.
@@ -351,7 +361,8 @@ struct RunoApp {
     cleanup: settings_ui::CleanupView,
     settings_menu: Option<String>,
     discovered: Option<Discovered>,
-    applied_dark: Option<bool>,
+    /// The mode and colour theme the component library was last set up for.
+    applied_dark: Option<(bool, &'static str)>,
     applied_font: Option<&'static str>,
     applied_glass: Option<bool>,
     applied_enter: Option<bool>,
@@ -470,6 +481,8 @@ struct RunoApp {
     sidebar_width: f32,
     /// The sidebar's edge is being dragged.
     resizing_sidebar: bool,
+    /// The sidebar lists only what needs the person, in place of every project.
+    needs_filter: bool,
     /// Width of the right panel (Changes, Files, terminal), dragged from its left edge.
     panel_width: f32,
     resizing_panel: bool,
@@ -1414,6 +1427,24 @@ impl RunoApp {
                 .placeholder("What would you like to change?")
                 .submit_on_enter(true)
         });
+        let peek_prompt = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Message this thread…")
+                .submit_on_enter(true)
+        });
+        let peek_sub = cx.subscribe_in(&peek_prompt, window, |this, _, event, window, cx| {
+            if let InputEvent::PressEnter { shift, secondary } = event {
+                let send = if cx.global::<AppSettings>().send_on_enter {
+                    !*shift
+                } else {
+                    *secondary
+                };
+                if send {
+                    this.send_peek(window, cx);
+                }
+            }
+            cx.notify();
+        });
         let prompt_sub = cx.subscribe_in(&prompt, window, |this, _, event, window, cx| {
             let on_enter = cx.global::<AppSettings>().send_on_enter;
             let send = match event {
@@ -1465,6 +1496,7 @@ impl RunoApp {
             ctx_index: None,
             sidebar_width: SIDEBAR_WIDTH,
             resizing_sidebar: false,
+            needs_filter: false,
             panel_width: PANEL_WIDTH,
             resizing_panel: false,
             panel_auto_hidden: false,
@@ -1500,6 +1532,7 @@ impl RunoApp {
             git_folder_open: false,
             git_folder_file: None,
             git_left_out: Default::default(),
+            git_folder_shut: Default::default(),
             git_folder_msg,
             git_folder_msg_set: None,
             git_folder_msg_kept: None,
@@ -1530,6 +1563,9 @@ impl RunoApp {
             selected,
             right_tab: RightTab::Changes,
             threads_done_shut: false,
+            peek: None,
+            peek_scroll: ScrollHandle::new(),
+            peek_prompt,
             threads_done_all: false,
             sidebar_done_open: HashSet::new(),
             browser_open: false,
@@ -1769,6 +1805,7 @@ impl RunoApp {
             diff_expanded: Default::default(),
             _subscriptions: vec![
                 search_sub,
+                peek_sub,
                 prompt_sub,
                 settings_search_sub,
                 commit_sub,
@@ -2382,11 +2419,25 @@ impl RunoApp {
                             stream::Update::Conversation(conversation) => {
                                 session.agent_session = conversation
                             }
+                            // A thread's checklist follows the agent's own todo list too, so
+                            // steps it ticks off there show without a second report.
+                            stream::Update::Todos(steps) => {
+                                if session.canvas != crew::CANVAS {
+                                    if let Some(info) = session.crew.as_mut() {
+                                        let kind =
+                                            crew::EventKind::Checklist { steps, title: None };
+                                        crew::apply(info, &kind, 0);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 if self.selected == Some(id) && autoscroll() {
                     self.chat_scroll.scroll_to_bottom();
+                }
+                if self.peek == Some(id) && autoscroll() {
+                    self.peek_scroll.scroll_to_bottom();
                 }
             }
             Event::Err(Target::Session(id), line) => {
@@ -3975,7 +4026,7 @@ impl RunoApp {
             shell::hover_wash(button, id, tint(c_subtle()), 6.)
                 .border_1()
                 .border_color(divider())
-                .bg(rgb(c_raised()))
+                .bg(raised())
                 .text_color(rgb(c_text()))
         }
         .child(label.into())
@@ -4099,8 +4150,8 @@ impl RunoApp {
 
     // ---------- sidebar ----------
 
-    /// One choice in the sidebar's segmented row under its header: a place the list
-    /// opens, lit while it is open, with a count where it helps.
+    /// One choice in the sidebar's segmented row under its header. All and Isolated open
+    /// their places; Needs you narrows the list itself, so its rows open in place.
     fn nav_segment(
         &self,
         id: &'static str,
@@ -4109,11 +4160,12 @@ impl RunoApp {
         view: View,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // The list under the filter always holds every session, so "All" stays lit
-        // unless one of the narrower places is open.
+        // The list under the filter holds every session unless Needs you narrows it, so
+        // "All" stays lit unless one of the narrower choices is on.
         let on = match view {
-            View::AllSessions => !matches!(self.view, View::Worktrees | View::Inbox),
-            _ => self.view == view,
+            View::Inbox => self.needs_filter,
+            View::AllSessions => !self.needs_filter && self.view != View::Worktrees,
+            _ => !self.needs_filter && self.view == view,
         };
         // Each choice is as wide as its label and count, and the spare room is shared,
         // so a three-figure count widens "Needs you" instead of squeezing its neighbours.
@@ -4121,7 +4173,17 @@ impl RunoApp {
             .flex_auto()
             .px(px(8.))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.view = view;
+                match view {
+                    View::Inbox => this.needs_filter = true,
+                    // Leaving Needs you for All only widens the list again; the open
+                    // session stays open.
+                    View::AllSessions if this.needs_filter => this.needs_filter = false,
+                    _ => {
+                        this.needs_filter = false;
+                        this.view = view;
+                    }
+                }
+                this.cursor = None;
                 cx.notify();
             }))
             .child(label)
@@ -4187,7 +4249,7 @@ impl RunoApp {
             .then(|| session.branch.clone());
         // The selected row joins the open session beside the list. Rows sit 8px in from
         // the list's edge under a project, 4px when grouped by status.
-        let reach = if cx.global::<AppSettings>().group_by_status {
+        let reach = if cx.global::<AppSettings>().group_by_status || self.needs_filter {
             4.
         } else {
             8.
@@ -4769,7 +4831,9 @@ impl RunoApp {
             }
             projects = projects.child(group);
         }
-        if cx.global::<AppSettings>().group_by_status {
+        if self.needs_filter {
+            projects = self.needs_groups(&filter, cx);
+        } else if cx.global::<AppSettings>().group_by_status {
             projects = self.status_groups(&filter, cx);
         }
         div()
@@ -5638,7 +5702,7 @@ impl RunoApp {
                     .child(format!("Started {}", first.time)),
             );
         }
-        if let Some(strip) = self.thread_strip(session, cx) {
+        if let Some(strip) = self.thread_strip(session, false, cx) {
             list = list.child(strip);
         }
         for (i, message) in session.messages.iter().enumerate() {
@@ -6398,8 +6462,9 @@ impl RunoApp {
                     .rounded(px(12.))
                     .border_1()
                     .border_color(divider())
-                    .bg(rgb(c_raised()))
-                    .shadow_sm()
+                    .bg(raised())
+                    // A shadow under a see-through fill shows through it as a dark smudge.
+                    .when(!glass_on(), |el| el.shadow_sm())
                     .drag_over::<ExternalPaths>(|el, _, _, _| el.border_color(rgb(c_blue())))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                         this.attach_paths(paths.paths());
@@ -9066,8 +9131,9 @@ impl Render for RunoApp {
                 WindowBackgroundAppearance::Opaque
             });
         }
-        if self.applied_dark != Some(dark) {
-            self.applied_dark = Some(dark);
+        let theme = crate::themes::get(dark).id;
+        if self.applied_dark != Some((dark, theme)) {
+            self.applied_dark = Some((dark, theme));
             gpui_kit::component::Theme::change(
                 if dark {
                     gpui_kit::component::ThemeMode::Dark
@@ -9080,8 +9146,8 @@ impl Render for RunoApp {
             if glass {
                 gpui_kit::component::Theme::update(cx, |theme| theme.muted = code_wash().into());
             }
-            // Inputs, menus and editors take Runo's dark palette too.
-            if dark {
+            // Inputs, menus and editors take the colour theme too.
+            if dark || theme != "runo" {
                 gpui_kit::component::Theme::update(cx, |theme| {
                     theme.background = rgb(c_canvas()).into();
                     theme.foreground = rgb(c_text()).into();
@@ -9926,6 +9992,7 @@ fn main() {
         bind_keys(cx);
         cx.on_action(quit);
         desktop_notify::install(cx);
+        menubar::install(cx);
         cx.set_menus(app_menus());
         open_main_window(cx);
     });

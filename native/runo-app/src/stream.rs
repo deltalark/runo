@@ -6,6 +6,7 @@
 
 use serde_json::Value;
 
+use crate::crew::{Mark, Step};
 use crate::store::{Question, Usage};
 
 #[derive(Debug, PartialEq)]
@@ -35,6 +36,9 @@ pub enum Update {
     Questions(Vec<Question>),
     /// The CLI's own id for the conversation, so follow-ups resume exactly this one.
     Conversation(String),
+    /// The agent's own todo list, whole, as its todo tool last wrote it: Claude's
+    /// TodoWrite, Codex's plan and the like. A Crew thread shows it as its checklist.
+    Todos(Vec<Step>),
 }
 
 /// The parser for one run, by the format the agent prints.
@@ -156,6 +160,9 @@ impl ClaudeStream {
                                 if let Some(plan) = block["input"]["plan"].as_str() {
                                     out.push(Update::Plan(plan.to_string()));
                                 }
+                            }
+                            name if is_todo_tool(name) => {
+                                out.extend(todos(&block["input"]).map(Update::Todos));
                             }
                             "AskUserQuestion" => {
                                 let questions: Vec<Question> = block["input"]["questions"]
@@ -374,11 +381,61 @@ fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
             "Ran a subagent: {}",
             short(&s(&["description", "prompt"]), 60)
         ),
-        "TodoWrite" | "todowrite" | "write_todos" | "update_todo" => "Updated the plan".to_string(),
+        tool if is_todo_tool(tool) => "Updated the plan".to_string(),
         "ExitPlanMode" => "Proposed a plan".to_string(),
         "AskUserQuestion" => "Asked a question".to_string(),
         other => format!("Used {other}"),
     }
+}
+
+/// Whether `tool` is one of the CLIs' own todo tools.
+fn is_todo_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "TodoWrite" | "todowrite" | "write_todos" | "update_todo" | "todo_write" | "update_plan"
+    )
+}
+
+/// The todo list a todo tool was given, under any of the shapes the CLIs use:
+/// `{"todos":[{"content":…,"status":"in_progress"}]}` (Claude, Gemini, OpenCode, Cursor),
+/// `{"plan":[{"step":…,"status":…}]}` and Codex's `{"items":[{"text":…,"completed":true}]}`.
+fn todos(input: &Value) -> Option<Vec<Step>> {
+    let items = ["todos", "plan", "items"]
+        .iter()
+        .find_map(|k| input[*k].as_array())?;
+    let steps: Vec<Step> = items
+        .iter()
+        .filter_map(|item| {
+            let text = ["content", "text", "step", "description", "title", "task"]
+                .iter()
+                .find_map(|k| item[*k].as_str())
+                .or(item.as_str())?;
+            let status = ["status", "state"]
+                .iter()
+                .find_map(|k| item[*k].as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let mark = if item["completed"] == true
+                || status.contains("complete")
+                || status.contains("done")
+            {
+                Mark::Done
+            } else if status.contains("progress")
+                || status.contains("doing")
+                || status.contains("active")
+            {
+                Mark::Doing
+            } else {
+                Mark::Todo
+            };
+            Some(Step {
+                text: text.to_string(),
+                mark,
+            })
+        })
+        .collect();
+    let steps = crate::crew::clean_steps(steps);
+    (!steps.is_empty()).then_some(steps)
 }
 
 /// Per-run parser for the JSON lines of Codex (`exec --json`), Cursor and Droid
@@ -472,6 +529,15 @@ impl JsonStream {
             self.any_text = true;
             return vec![Update::Text(format!("{sep}{rest}"))];
         }
+        // A todo list is named once but each change to it is passed on.
+        if kind == "todo_list" {
+            let mut out = Vec::new();
+            if id.is_empty() || self.shown.insert(id) {
+                out.push(Update::Step("Updated the plan".into()));
+            }
+            out.extend(todos(item).map(Update::Todos));
+            return out;
+        }
         if !id.is_empty() && self.shown.contains(&id) {
             return vec![];
         }
@@ -515,7 +581,6 @@ impl JsonStream {
                     )));
                 }
             }
-            "todo_list" => out.push(Update::Step("Updated the plan".into())),
             // Warnings that don't stop the run, such as "Model metadata for … not found".
             "error" | "warning" => {
                 let message = error_message(&item["message"])
@@ -563,8 +628,13 @@ impl JsonStream {
         Some(Update::Text(text.to_string()))
     }
 
-    fn step(&self, tool: &str, input: &Value) -> Update {
-        Update::Step(step_label(&self.cwd, tool, input))
+    /// A tool call's step, and the todo list it wrote when it is a todo tool.
+    fn tool(&self, tool: &str, input: &Value) -> Vec<Update> {
+        let mut out = vec![Update::Step(step_label(&self.cwd, tool, input))];
+        if is_todo_tool(tool) {
+            out.extend(todos(input).map(Update::Todos));
+        }
+        out
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<Update> {
@@ -615,8 +685,8 @@ impl JsonStream {
                 for block in event["message"]["content"].as_array().into_iter().flatten() {
                     match block["type"].as_str().unwrap_or("") {
                         "text" => out.extend(self.block(block["text"].as_str().unwrap_or(""))),
-                        "tool_use" => out.push(
-                            self.step(block["name"].as_str().unwrap_or("a tool"), &block["input"]),
+                        "tool_use" => out.extend(
+                            self.tool(block["name"].as_str().unwrap_or("a tool"), &block["input"]),
                         ),
                         _ => {}
                     }
@@ -627,12 +697,12 @@ impl JsonStream {
                     // Cursor: {"subtype":"started","tool_call":{"readToolCall":{"args":{…}}}}.
                     if event["subtype"] == "started" {
                         if let Some((kind, call)) = call.iter().next() {
-                            out.push(self.cursor_step(kind, call));
+                            out.extend(self.cursor_step(kind, call));
                         }
                     }
                 } else if let Some(tool) = event["toolName"].as_str() {
                     // Droid: {"type":"tool_call","toolName":"Read","parameters":{…}}.
-                    out.push(self.step(tool, &event["parameters"]));
+                    out.extend(self.tool(tool, &event["parameters"]));
                 }
             }
             // Droid and Gemini.
@@ -651,10 +721,10 @@ impl JsonStream {
             "tool_use" => {
                 if let Some(tool) = event["tool_name"].as_str() {
                     // Gemini.
-                    out.push(self.step(tool, &event["parameters"]));
+                    out.extend(self.tool(tool, &event["parameters"]));
                 } else if let Some(tool) = event["part"]["tool"].as_str() {
                     // OpenCode.
-                    out.push(self.step(tool, &event["part"]["state"]["input"]));
+                    out.extend(self.tool(tool, &event["part"]["state"]["input"]));
                 }
             }
             // OpenCode.
@@ -757,7 +827,7 @@ impl JsonStream {
                     Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
                     other => other.clone(),
                 };
-                out.push(self.step(tool, &args));
+                out.extend(self.tool(tool, &args));
             }
             "assistant.usage" => {
                 self.usage.input = num(&data["inputTokens"]);
@@ -789,7 +859,7 @@ impl JsonStream {
     }
 
     /// A Cursor tool call, keyed by its kind (`readToolCall`, `shellToolCall`…).
-    fn cursor_step(&self, kind: &str, call: &Value) -> Update {
+    fn cursor_step(&self, kind: &str, call: &Value) -> Vec<Update> {
         let args = &call["args"];
         let tool = match kind {
             "readToolCall" => "Read",
@@ -802,22 +872,22 @@ impl JsonStream {
             "updateTodosToolCall" | "todoToolCall" => "TodoWrite",
             "deleteToolCall" => {
                 let path = args["path"].as_str().unwrap_or("");
-                return Update::Step(format!(
+                return vec![Update::Step(format!(
                     "Deleted {}",
                     path.strip_prefix(&self.cwd)
                         .map(|p| p.trim_start_matches('/'))
                         .unwrap_or(path)
-                ));
+                ))];
             }
             "function" => {
-                return Update::Step(format!(
+                return vec![Update::Step(format!(
                     "Used {}",
                     call["name"].as_str().unwrap_or("a tool")
-                ))
+                ))]
             }
             other => {
                 let name = other.strip_suffix("ToolCall").unwrap_or(other);
-                return Update::Step(format!("Used {name}"));
+                return vec![Update::Step(format!("Used {name}"))];
             }
         };
         let mut input = args.clone();
@@ -826,7 +896,7 @@ impl JsonStream {
                 input["pattern"] = p.into();
             }
         }
-        self.step(tool, &input)
+        self.tool(tool, &input)
     }
 }
 
@@ -1196,6 +1266,61 @@ mod tests {
             json_all(&[r#"{"type":"error","error":{"name":"ProviderAuthError","data":{}}}"#]),
             [Update::Error("ProviderAuthError".into())]
         );
+    }
+
+    fn step(text: &str, mark: Mark) -> Step {
+        Step {
+            text: text.into(),
+            mark,
+        }
+    }
+
+    #[test]
+    fn todo_tools_pass_on_the_whole_list() {
+        let out = feed_all(&[
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"Read docs","status":"completed","activeForm":"Reading docs"},{"content":"Start docker","status":"in_progress"},{"content":"Verify","status":"pending"}]}}]}}"#,
+        ]);
+        assert_eq!(
+            out,
+            [
+                Update::Todos(vec![
+                    step("Read docs", Mark::Done),
+                    step("Start docker", Mark::Doing),
+                    step("Verify", Mark::Todo),
+                ]),
+                Update::Step("Updated the plan".into()),
+            ]
+        );
+        // Codex names its list once, then passes on every change to it.
+        let codex = json_all(&[
+            r#"{"type":"item.started","item":{"id":"t1","type":"todo_list","items":[{"text":"Build","completed":false},{"text":"Test","completed":false}]}}"#,
+            r#"{"type":"item.updated","item":{"id":"t1","type":"todo_list","items":[{"text":"Build","completed":true},{"text":"Test","completed":false}]}}"#,
+            r#"{"type":"item.completed","item":{"id":"t1","type":"todo_list","items":[{"text":"Build","completed":true},{"text":"Test","completed":true}]}}"#,
+        ]);
+        assert_eq!(
+            codex,
+            [
+                Update::Step("Updated the plan".into()),
+                Update::Todos(vec![step("Build", Mark::Todo), step("Test", Mark::Todo)]),
+                Update::Todos(vec![step("Build", Mark::Done), step("Test", Mark::Todo)]),
+                Update::Todos(vec![step("Build", Mark::Done), step("Test", Mark::Done)]),
+            ]
+        );
+        let cursor = json_all(&[
+            r#"{"type":"tool_call","subtype":"started","call_id":"z","tool_call":{"updateTodosToolCall":{"args":{"todos":[{"content":"Fix","status":"TODO_STATUS_COMPLETED"},{"content":"Ship","status":"TODO_STATUS_IN_PROGRESS"}]}}}}"#,
+        ]);
+        assert_eq!(
+            cursor,
+            [
+                Update::Step("Updated the plan".into()),
+                Update::Todos(vec![step("Fix", Mark::Done), step("Ship", Mark::Doing)]),
+            ]
+        );
+        // A list in a shape no CLI uses is only a step.
+        let odd = json_all(&[
+            r#"{"type":"tool_use","tool_name":"write_todos","parameters":{"todos":"- a"}}"#,
+        ]);
+        assert_eq!(odd, [Update::Step("Updated the plan".into())]);
     }
 
     #[test]
