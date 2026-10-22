@@ -1,0 +1,90 @@
+[
+  {
+    "type": "conversation",
+    "data": "a62ccfb8-d465-4cc8-9513-e2d15cba4ae8"
+  },
+  {
+    "type": "usage",
+    "data": {
+      "input": 2,
+      "output": 0,
+      "cached": 40518,
+      "cost_cents": 0.0,
+      "window": 0
+    }
+  },
+  {
+    "type": "tool",
+    "data": {
+      "id": "toolu_01SgFojoeAibzuX84deNM657",
+      "kind": "shell",
+      "tool": "Bash",
+      "label": "Ran ls",
+      "state": "running"
+    }
+  },
+  {
+    "type": "usage",
+    "data": {
+      "input": 2,
+      "output": 0,
+      "cached": 40518,
+      "cost_cents": 0.0,
+      "window": 0
+    }
+  },
+  {
+    "type": "tool",
+    "data": {
+      "id": "toolu_01PWfAQj4MtLWx12intJRjx3",
+      "kind": "shell",
+      "tool": "Bash",
+      "label": "Ran ls /nonexistent",
+      "state": "running"
+    }
+  },
+  {
+    "type": "tool_done",
+    "data": {
+      "id": "toolu_01PWfAQj4MtLWx12intJRjx3",
+      "ok": false,
+      "output": "Exit code 1\nls: /nonexistent: No such file or directory"
+    }
+  },
+  {
+    "type": "tool_done",
+    "data": {
+      "id": "toolu_01SgFojoeAibzuX84deNM657",
+      "ok": true,
+      "output": "a.txt\nb.md"
+    }
+  },
+  {
+    "type": "text",
+    "data": "OK"
+  },
+  {
+    "type": "usage",
+    "data": {
+      "input": 2,
+      "output": 0,
+      "cached": 40759,
+      "cost_cents": 0.0,
+      "window": 0
+    }
+  },
+  {
+    "type": "usage",
+    "data": {
+      "input": 2,
+      "output": 158,
+      "cached": 40759,
+      "cost_cents": 15.300639999999998,
+      "window": 1000000
+    }
+  },
+  {
+    "type": "summary",
+    "data": "9s · 3 turns · $0.15"
+  }
+]

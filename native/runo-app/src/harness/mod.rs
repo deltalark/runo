@@ -4,6 +4,9 @@
 //! `sessions/<id>/events.jsonl`.
 
 pub mod event;
+#[cfg(test)]
+mod fixtures;
 pub mod log;
+pub mod record;
 
 pub use event::{AgentEvent, StepState, ToolKind, ToolStep};

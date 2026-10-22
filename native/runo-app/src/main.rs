@@ -2344,6 +2344,11 @@ impl RunoApp {
                 if agent::waits_for_sign_in(&line) {
                     self.sign_in_wait(id, &line);
                 }
+                if self.streams.contains_key(&id) {
+                    if let (Some(log), Some(s)) = (self.logs.get(&id), self.state.session(id)) {
+                        harness::record::line(&s.provider, id, log.turn(), &line);
+                    }
+                }
                 let updates = match self.streams.get_mut(&id) {
                     Some(parser) => parser.feed(&line),
                     None => vec![AgentEvent::Text(line)],

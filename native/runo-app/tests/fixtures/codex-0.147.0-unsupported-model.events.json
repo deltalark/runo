@@ -1,0 +1,14 @@
+[
+  {
+    "type": "conversation",
+    "data": "01a1654b-9653-7393-b10d-bc2bcb59f0eb"
+  },
+  {
+    "type": "notice",
+    "data": "Model metadata for `gpt-6-sol` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+  },
+  {
+    "type": "error",
+    "data": "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
+  }
+]

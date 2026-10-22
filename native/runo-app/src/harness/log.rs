@@ -111,6 +111,11 @@ impl TurnLog {
         TurnLog::new(Some(path), turn, 1, written)
     }
 
+    /// The turn: the index of its prompt in the session's messages.
+    pub fn turn(&self) -> usize {
+        self.turn
+    }
+
     /// Add an event of the turn.
     pub fn record(&mut self, event: &AgentEvent) {
         let seq = self.seq;
