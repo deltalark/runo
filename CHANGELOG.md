@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- The Arcade: three small games for the wait while agents work. Spark flies a lit spark through gates, Commits is a snake drawn as a git branch that grows on commits, and Merge is 2048 in the theme's colours. Open it from "Play while you wait" beside an agent's Working line or from the command palette. It shows how many agents are still working, says when they are done with a Back to work button, pauses the round when it closes, and keeps each game's best score.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added
