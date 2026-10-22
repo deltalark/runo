@@ -24,6 +24,9 @@ pub struct Turn {
     pub signed_out: bool,
     /// The agent reported a failure in its output, whatever its exit code says.
     pub failed: bool,
+    /// The agent takes messages while it works (see `host`), so a prompt sent now goes
+    /// to it instead of waiting for the turn to end.
+    pub live: bool,
 }
 
 impl Turn {
@@ -67,6 +70,7 @@ impl Turn {
             stopping: false,
             signed_out: false,
             failed: false,
+            live: false,
         }
     }
 

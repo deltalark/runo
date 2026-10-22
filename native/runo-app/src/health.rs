@@ -270,23 +270,30 @@ impl RunoApp {
             };
             match crate::detach::attach(root, id, self.tx.clone()) {
                 Ok(handle) => {
-                    // The replay rebuilds everything after the prompt.
+                    // The replay rebuilds everything after the prompt. Messages sent to the
+                    // agent while it worked stay, just after it.
                     let start = session
                         .messages
                         .iter()
-                        .rposition(|m| m.role == Role::User)
+                        .rposition(|m| m.role == Role::User && m.meta != crate::turns::STEER)
                         .map_or(session.messages.len(), |i| i + 1);
-                    session.messages.truncate(start);
+                    let sent: Vec<Message> = session
+                        .messages
+                        .split_off(start.min(session.messages.len()))
+                        .into_iter()
+                        .filter(|m| m.role == Role::User && m.meta == crate::turns::STEER)
+                        .collect();
+                    session.messages.extend(sent);
                     session.messages.push(Message::now(Role::Agent, ""));
-                    self.turns.insert(
+                    let mut running = crate::harness::turn::Turn::resume(
                         id,
-                        crate::harness::turn::Turn::resume(
-                            id,
-                            &session.provider,
-                            &session.dir,
-                            start.saturating_sub(1),
-                        ),
+                        &session.provider,
+                        &session.dir,
+                        start.saturating_sub(1),
                     );
+                    running.live =
+                        crate::harness::host::is_live(&crate::detach::turn_dir(root, id));
+                    self.turns.insert(id, running);
                     self.handles.insert(Target::Session(id), handle);
                     picked += 1;
                 }

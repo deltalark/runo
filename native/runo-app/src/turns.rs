@@ -21,6 +21,8 @@ pub(crate) enum MentionPick {
 }
 
 /// Most recent conversation, written into follow-ups for CLIs that cannot resume.
+/// Marks a message sent to the agent while its turn ran.
+pub(crate) const STEER: &str = "sent while working";
 const CONTEXT_MESSAGES: usize = 8;
 const CONTEXT_CHARS: usize = 1500;
 /// Earlier requests summed up in one line each, before the recent conversation.
@@ -58,8 +60,11 @@ impl RunoApp {
             return;
         }
         // One run per session: a prompt that arrives while the agent or the worktree setup
-        // command is running waits its turn.
+        // command is running waits its turn, unless the agent takes it as it works.
         if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+            if images.is_empty() && self.steer(id, &prompt) {
+                return;
+            }
             if let Some(s) = self.state.session_mut(id) {
                 s.queue.push(Queued::new(prompt, images));
             }
@@ -267,10 +272,12 @@ impl RunoApp {
                     .rposition(|m| m.role == Role::User)
                     .unwrap_or(0);
                 let model = sel.get("model").map(String::as_str).unwrap_or("");
-                self.turns.insert(
-                    id,
-                    crate::harness::turn::Turn::start(id, &provider, &dir, turn, model),
-                );
+                let mut running =
+                    crate::harness::turn::Turn::start(id, &provider, &dir, turn, model);
+                running.live = crate::detach::root().is_some_and(|root| {
+                    crate::harness::host::is_live(&crate::detach::turn_dir(root, id))
+                });
+                self.turns.insert(id, running);
                 self.handles.insert(Target::Session(id), handle);
                 self.turn_files.remove(&id);
                 // Counted as it starts, so turns running side by side can't pass the limit.
@@ -362,6 +369,68 @@ impl RunoApp {
             if let Some(s) = self.state.session_mut(id) {
                 s.agent_session = found;
             }
+        }
+    }
+
+    /// Send `text` to the agent of a running live turn, which reads it as it works. The
+    /// message shows in the conversation at once and the reply carries on below it.
+    /// Returns false when the turn doesn't take messages, and the prompt should queue.
+    pub(crate) fn steer(&mut self, id: u64, text: &str) -> bool {
+        if !self.turns.get(&id).is_some_and(|t| t.live && !t.stopping) {
+            return false;
+        }
+        let Some(root) = crate::detach::root() else {
+            return false;
+        };
+        if let Err(e) = crate::harness::host::send(&crate::detach::turn_dir(root, id), text) {
+            crate::applog::warn(
+                "turn",
+                format!("session #{id}: couldn't send a message to the running agent: {e}"),
+            );
+            return false;
+        }
+        let Some(session) = self.state.session_mut(id) else {
+            return true;
+        };
+        // Undo still goes back to where the turn started.
+        let checkpoint = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.checkpoint.clone())
+            .unwrap_or_default();
+        let mut message = Message::now(Role::User, text);
+        message.meta = STEER.into();
+        message.checkpoint = checkpoint;
+        session.messages.push(message);
+        crate::applog::info(
+            "turn",
+            format!("session #{id}: message sent to the running agent"),
+        );
+        self.save();
+        true
+    }
+
+    /// The messages a live turn's agent never read, because it finished first: they leave
+    /// the conversation and go to the front of the queue, to be sent as the next turn.
+    pub(crate) fn requeue_unsent(&mut self, id: u64) {
+        let Some(root) = crate::detach::root() else {
+            return;
+        };
+        let unsent = crate::harness::host::unsent(&crate::detach::turn_dir(root, id));
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        take_unsent(session, &unsent);
+        if !unsent.is_empty() {
+            crate::applog::info(
+                "turn",
+                format!(
+                    "session #{id}: {} message(s) came after the agent finished; queued",
+                    unsent.len()
+                ),
+            );
         }
     }
 
@@ -558,9 +627,13 @@ impl RunoApp {
             self.editing = None;
             return;
         }
-        // While the agent or its setup command runs, the prompt and its images wait.
+        // While the agent or its setup command runs, the prompt and its images wait,
+        // unless the agent takes messages as it works.
         if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
             self.editing = None;
+            if images.is_empty() && playbook.is_none() && self.steer(id, &text) {
+                return;
+            }
             if let Some(session) = self.state.session_mut(id) {
                 session.queue.push(Queued::new(text, images));
             }
@@ -2433,11 +2506,47 @@ fn mentions_folder(text: &str, dir: &str) -> bool {
     })
 }
 
+/// Move messages the agent never read out of the conversation and to the front of the
+/// queue, in the order they were sent.
+fn take_unsent(session: &mut store::Session, unsent: &[String]) {
+    for text in unsent.iter().rev() {
+        if let Some(i) = session
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::User && m.meta == STEER && m.text == *text)
+        {
+            session.messages.remove(i);
+        }
+        session
+            .queue
+            .insert(0, Queued::new(text.clone(), Vec::new()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn messages_the_agent_never_read_go_back_to_the_queue() {
+        let mut session = store::Session::default();
+        session.messages.push(Message::new(Role::User, "Fix it"));
+        let mut read = Message::new(Role::User, "also the docs");
+        read.meta = STEER.into();
+        session.messages.push(read.clone());
+        session.messages.push(Message::new(Role::Agent, "Done."));
+        let mut late = Message::new(Role::User, "and the tests");
+        late.meta = STEER.into();
+        session.messages.push(late);
+        session.queue.push(Queued::new("later", Vec::new()));
+        take_unsent(&mut session, &["and the tests".to_string()]);
+        let texts: Vec<&str> = session.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["Fix it", "also the docs", "Done."]);
+        let queued: Vec<&str> = session.queue.iter().map(|q| q.text.as_str()).collect();
+        assert_eq!(queued, ["and the tests", "later"]);
+    }
 
     #[test]
     fn copilot_sessions_match_their_own_folder_and_prompt() {
