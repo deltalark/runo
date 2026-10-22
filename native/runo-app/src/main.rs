@@ -3970,7 +3970,7 @@ impl RunoApp {
             shell::hover_wash(button, id, tint(c_subtle()), 6.)
                 .border_1()
                 .border_color(divider())
-                .bg(rgb(c_raised()))
+                .bg(raised())
                 .text_color(rgb(c_text()))
         }
         .child(label.into())
@@ -6393,8 +6393,9 @@ impl RunoApp {
                     .rounded(px(12.))
                     .border_1()
                     .border_color(divider())
-                    .bg(rgb(c_raised()))
-                    .shadow_sm()
+                    .bg(raised())
+                    // A shadow under a see-through fill shows through it as a dark smudge.
+                    .when(!glass_on(), |el| el.shadow_sm())
                     .drag_over::<ExternalPaths>(|el, _, _, _| el.border_color(rgb(c_blue())))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                         this.attach_paths(paths.paths());

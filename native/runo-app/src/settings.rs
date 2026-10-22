@@ -506,9 +506,9 @@ pub fn autoscroll() -> bool {
 /// derived from it, so each style keeps the same layering.
 pub fn glass_alpha(style: &str) -> u8 {
     match style {
-        "subtle" => 248,
-        "frosted" => 236,
-        "clear" => 216,
+        "subtle" => 240,
+        "frosted" => 208,
+        "clear" => 180,
         _ => 255,
     }
 }
@@ -538,11 +538,11 @@ fn sidebar_alpha() -> u8 {
         255 => return 255,
         // Light glass needs more body than it looks: a pale sheet over a bright, colourful
         // desktop takes on its colour, and grey text on it loses contrast fast.
-        a if a >= 248 => (220, 232),
-        // Frosted and Clear keep enough body that text reads over a light or busy
-        // wallpaper, not only over a calm one; Clear stays the clearer of the two.
-        a if a >= 236 => (208, 222),
-        _ => (192, 208),
+        a if a >= 240 => (206, 214),
+        // Frosted and Clear let the desktop through clearly, with the blur and the
+        // stronger glass text keeping text readable; Clear stays the clearer of the two.
+        a if a >= 208 => (182, 188),
+        _ => (156, 162),
     };
     if is_dark() {
         dark
@@ -565,7 +565,7 @@ pub fn pane(color: u32) -> Rgba {
 /// the rail stays a clear step darker than its open tab in every glass style.
 pub fn rail_shade() -> Rgba {
     if glass_on() {
-        with_alpha(c_rail(), if is_dark() { 128 } else { 110 })
+        with_alpha(c_rail(), if is_dark() { 100 } else { 90 })
     } else {
         rgb(c_rail())
     }
@@ -600,7 +600,7 @@ pub fn stack(top: Rgba, under: Rgba) -> Rgba {
 pub fn frame() -> Rgba {
     if glass_on() {
         let f = stack(rail_shade(), pane(c_sheet()));
-        let floor = (GLASS.load(Ordering::Relaxed) as f32 + 8.0).min(255.0) / 255.0;
+        let floor = (GLASS.load(Ordering::Relaxed) as f32 + 4.0).min(255.0) / 255.0;
         Rgba {
             a: f.a.max(floor),
             ..f
@@ -610,12 +610,12 @@ pub fn frame() -> Rgba {
     }
 }
 
-/// Side panels next to the content, such as changes, files and the terminal: between
-/// the sidebar and the content.
+/// Side panels next to the content, such as changes, files and the terminal: halfway
+/// between the sidebar and the content.
 pub fn panel(color: u32) -> Rgba {
     if glass_on() {
         let (side, content) = (sidebar_alpha() as u16, GLASS.load(Ordering::Relaxed) as u16);
-        with_alpha(color, ((side + content * 2) / 3) as u8)
+        with_alpha(color, ((side + content) / 2) as u8)
     } else {
         rgb(color)
     }
@@ -789,6 +789,16 @@ pub fn c_active() -> u32 {
 /// Raised surfaces such as the composer, menus and cards.
 pub fn c_raised() -> u32 {
     pick(0xffffff, 0x1f2335)
+}
+/// A raised surface set into the page, such as the composer and secondary buttons: solid
+/// on a solid window, and in glass mode a sheet of it over the page, so the desktop
+/// still shows through instead of an opaque block cut into the glass.
+pub fn raised() -> Rgba {
+    if glass_on() {
+        with_alpha(c_raised(), if is_dark() { 0x8c } else { 0x99 })
+    } else {
+        rgb(c_raised())
+    }
 }
 pub fn c_blue() -> u32 {
     let accent = ACCENT.load(Ordering::Relaxed);
