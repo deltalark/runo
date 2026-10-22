@@ -35,7 +35,7 @@ pub(crate) struct Saved {
 #[cfg(test)]
 thread_local! {
     /// Tests keep their files apart from each other and from the person's.
-    static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static TEST_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 fn folder() -> PathBuf {
@@ -61,6 +61,94 @@ pub(crate) fn store(all: &[Saved]) -> std::io::Result<()> {
     std::fs::create_dir_all(folder())?;
     let text = serde_json::to_string_pretty(all).unwrap_or_else(|_| "[]".into());
     std::fs::write(file(), text)
+}
+
+/// A query kept under a name, for one connection.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SavedQuery {
+    pub id: String,
+    /// The saved connection it runs on.
+    pub conn: String,
+    pub name: String,
+    pub sql: String,
+}
+
+fn queries_file() -> PathBuf {
+    folder().join("queries.json")
+}
+
+pub(crate) fn load_queries() -> Vec<SavedQuery> {
+    std::fs::read_to_string(queries_file())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn store_queries(all: &[SavedQuery]) -> std::io::Result<()> {
+    std::fs::create_dir_all(folder())?;
+    let text = serde_json::to_string_pretty(all).unwrap_or_else(|_| "[]".into());
+    std::fs::write(queries_file(), text)
+}
+
+/// One thing an agent ran on a database, kept so the person can see it in the Data place.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Activity {
+    /// Seconds since 1970.
+    pub at: u64,
+    pub conn: String,
+    pub sql: String,
+    #[serde(default)]
+    pub rows: usize,
+    #[serde(default)]
+    pub millis: u128,
+    /// Why it didn't run, when it didn't.
+    #[serde(default)]
+    pub refused: Option<String>,
+}
+
+fn activity_file() -> PathBuf {
+    folder().join("activity.jsonl")
+}
+
+/// The log keeps about this much; older lines are dropped.
+const ACTIVITY_MAX: u64 = 1 << 20;
+
+/// Add a line to the activity log, which only the person can read.
+pub(crate) fn log_activity(entry: &Activity) {
+    let path = activity_file();
+    let _ = std::fs::create_dir_all(folder());
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > ACTIVITY_MAX) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let keep: Vec<&str> = text.lines().collect();
+            let half = keep[keep.len() / 2..].join("\n");
+            let _ = std::fs::write(&path, half + "\n");
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let (Ok(mut file), Ok(line)) = (options.open(&path), serde_json::to_string(entry)) {
+        use std::io::Write as _;
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+/// The latest `n` entries for connection `conn`, newest first.
+pub(crate) fn activity(conn: &str, n: usize) -> Vec<Activity> {
+    let text = std::fs::read_to_string(activity_file()).unwrap_or_default();
+    let mut out: Vec<Activity> = text
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<Activity>(l).ok())
+        .filter(|a| a.conn == conn)
+        .take(n)
+        .collect();
+    out.sort_by_key(|a| std::cmp::Reverse(a.at));
+    out
 }
 
 /// A new connection's id: unique enough for one person's list.

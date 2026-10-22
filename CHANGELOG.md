@@ -7,6 +7,8 @@ All notable changes to Runo are documented here.
 ### Added
 
 - A Data place for each project, beside Design and Architecture (⌘9). It finds the databases the project uses in its `.env` files, Docker Compose services, Prisma, Drizzle and Rails configs and SQLite files, and shows where each was found and whether it's running. Connect to a Postgres or SQLite database to browse its tables: filter by typing `status = failed`, sort by a column, follow keys to the rows they point at, and see the rows that point back. Every connection is read-only, enforced by the database itself. Columns that look personal or secret stay masked until you reveal them, and pasted passwords go to the Keychain, never to Runo's files. MySQL, Redis and MongoDB are found and listed now, and open in a later release.
+- The Data place's Query tab: an SQL editor that completes tables and columns, runs read-only statements (Ctrl-Enter or ⌘-Enter) inside a transaction that's always rolled back, keeps saved queries per connection and recent runs, and exports a query or a filtered table as CSV with hidden columns left out. Count a table's rows exactly, and see each column's empty and distinct values and most common values, estimated or counted. On production connections, a read that would scan every row of a big table waits for Run anyway. A Diagram tab draws the tables and their foreign keys.
+- Ask an agent about a table or a whole database from the Data place, with the schema attached. Agents started from Runo can list a project's databases, describe tables and run read-only queries through Runo's data tools, with hidden columns masked and heavy reads on production refused; what they ran shows on the connection's page.
 
 ## [0.3.0] - 2026-10-22
 
