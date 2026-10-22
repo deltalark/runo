@@ -70,7 +70,7 @@ pub fn color(hover: f32) -> Hsla {
 
 /// An outline traced with straight edges and quarter turns, and the corners its rim is
 /// lit at. Start it with `new`, trace it with `line` and `corner`, and paint it with
-/// `paint`. Each lit corner must sit between two straight edges.
+/// `paint`.
 pub struct Rim {
     start: Point<Pixels>,
     steps: Vec<Step>,
@@ -84,14 +84,6 @@ enum Step {
         to: Point<Pixels>,
         lit: bool,
     },
-}
-
-impl Step {
-    fn end(&self) -> Point<Pixels> {
-        match self {
-            Step::Line(to) | Step::Corner { to, .. } => *to,
-        }
-    }
 }
 
 impl Rim {
@@ -120,64 +112,109 @@ impl Rim {
     }
 
     /// Paints the light at each lit corner, `hover` of the way to its hovered look: one
-    /// unbroken stroke round the corner and out along both its edges, in the accent at
-    /// the corner and fading to nothing `fade` along each edge (or halfway along an edge
-    /// lit at both ends), over a faint wider glow. One path per corner, so its curve is
-    /// as smooth as the outline's own.
+    /// unbroken stroke round the corner and on along the outline either side, through
+    /// any curves it meets, in the accent at the corner and fading to nothing `fade`
+    /// along (or halfway to the next lit corner, or at the outline's end), over a faint
+    /// wider glow.
     pub fn paint(self, hover: f32, window: &mut Window) {
-        let n = self.steps.len();
-        let begin = |i: usize| match i {
-            0 => self.start,
-            _ => self.steps[i - 1].end(),
-        };
-        let lit = |i: usize| matches!(self.steps[i], Step::Corner { lit: true, .. });
-        let fade = px(34. + 18. * hover);
+        // The outline as a dense polyline, each turn cut fine enough to read as a curve,
+        // with how far along it each point is, and where each lit corner runs.
+        const CUTS: usize = 16;
+        let k = 0.5523;
+        let mut pts = vec![self.start];
+        let mut lit = Vec::new();
+        for step in &self.steps {
+            let from = *pts.last().unwrap();
+            match *step {
+                Step::Line(to) => pts.push(to),
+                Step::Corner { c, to, lit: on } => {
+                    let (c1, c2) = (from + (c - from) * k, to + (c - to) * k);
+                    let first = pts.len() - 1;
+                    for n in 1..=CUTS {
+                        let t = n as f32 / CUTS as f32;
+                        let u = 1. - t;
+                        pts.push(
+                            from * (u * u * u)
+                                + c1 * (3. * u * u * t)
+                                + c2 * (3. * u * t * t)
+                                + to * (t * t * t),
+                        );
+                    }
+                    if on {
+                        lit.push((first, pts.len() - 1));
+                    }
+                }
+            }
+        }
+        if self.closed {
+            pts.push(self.start);
+        }
         let len = |d: Point<Pixels>| (f32::from(d.x).powi(2) + f32::from(d.y).powi(2)).sqrt();
+        let mut at = vec![0.];
+        for w in pts.windows(2) {
+            at.push(at.last().unwrap() + len(w[1] - w[0]));
+        }
+        let total = *at.last().unwrap();
+        // The point `s` along the outline, wrapping round a closed one.
+        let point_at = |s: f32| {
+            let s = if self.closed {
+                s.rem_euclid(total)
+            } else {
+                s.clamp(0., total)
+            };
+            let v = at.partition_point(|&a| a <= s).clamp(1, pts.len() - 1);
+            let span = at[v] - at[v - 1];
+            let t = if span > 0. {
+                (s - at[v - 1]) / span
+            } else {
+                0.
+            };
+            pts[v - 1] + (pts[v] - pts[v - 1]) * t
+        };
+        // The outline from `lo` to `hi` along it.
+        let stretch = |lo: f32, hi: f32| {
+            let mut out = vec![point_at(lo)];
+            let laps: &[f32] = if self.closed { &[-1., 0., 1.] } else { &[0.] };
+            for lap in laps {
+                for (p, a) in pts.iter().zip(&at) {
+                    let a = a + lap * total;
+                    if a > lo && a < hi {
+                        out.push(*p);
+                    }
+                }
+            }
+            out.push(point_at(hi));
+            out.dedup_by(|a, b| len(*a - *b) < 0.01);
+            out
+        };
+        let fade = 34. + 18. * hover;
         let color = color(hover);
-        for i in 0..n {
-            let Step::Corner { c, to, lit: true } = self.steps[i] else {
-                continue;
+        let count = lit.len();
+        for (n, &(a, b)) in lit.iter().enumerate() {
+            let (sa, sb) = (at[a], at[b]);
+            // How far the light may run back and on: `fade`, but no further than halfway
+            // to the lit corner beside it, or the outline's end.
+            let back = match (n, self.closed) {
+                (0, false) => sa,
+                (0, true) => {
+                    let (_, pb) = lit[count - 1];
+                    (sa - (at[pb] - total)) / 2.
+                }
+                _ => (sa - at[lit[n - 1].1]) / 2.,
             };
-            let from = begin(i);
-            // The straight edges either side, and whether the corner beyond each is lit too.
-            let prev = if i > 0 {
-                Some(i - 1)
-            } else {
-                self.closed.then_some(n - 1)
+            let on = match (n + 1 == count, self.closed) {
+                (true, false) => total - sb,
+                (true, true) => {
+                    let (na, _) = lit[0];
+                    (at[na] + total - sb) / 2.
+                }
+                _ => (at[lit[n + 1].0] - sb) / 2.,
             };
-            let next = if i + 1 < n {
-                Some(i + 1)
-            } else {
-                self.closed.then_some(0)
-            };
-            let arm = |edge: Option<usize>, at: Point<Pixels>, far_side: usize| {
-                let edge = edge.filter(|&e| matches!(self.steps[e], Step::Line(_)))?;
-                let other = match far_side {
-                    0 => begin(edge),
-                    _ => self.steps[edge].end(),
-                };
-                let beyond = match far_side {
-                    0 => edge.checked_sub(1).or(self.closed.then_some(n - 1)),
-                    _ => Some(edge + 1)
-                        .filter(|&e| e < n)
-                        .or(self.closed.then_some(0)),
-                };
-                let span = len(other - at);
-                let span = if beyond.is_some_and(lit) {
-                    span / 2.
-                } else {
-                    span
-                };
-                let reach = f32::from(fade).min(span);
-                (span > 0.).then(|| at + (other - at) * (reach / span))
-            };
-            let a = arm(prev, from, 0).unwrap_or(from);
-            let b = arm(next, to, 1).unwrap_or(to);
+            let (back, on) = (fade.min(back), fade.min(on));
             // gpui's gradients don't follow a bent path, so the fade is built from
-            // layers: each the whole corner and its arms out to a step further, so the
-            // corner is full and each arm thins out in even steps to nothing.
+            // layers: each the whole corner and the outline either side out to a step
+            // further, so the corner is full and each side thins out in even steps.
             const LAYERS: usize = 12;
-            let k = 0.5523;
             for (width, strength) in [(5., 0.12), (2., 1.)] {
                 for j in 1..=LAYERS {
                     // What the layers from j out must add up to over step j, and so what
@@ -189,11 +226,12 @@ impl Rim {
                         1. - (1. - want(j)) / (1. - want(j + 1))
                     };
                     let t = j as f32 / LAYERS as f32;
+                    let line = stretch(sa - back * t, sb + on * t);
                     let mut f = PathBuilder::stroke(px(width));
-                    f.move_to(from + (a - from) * t);
-                    f.line_to(from);
-                    f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
-                    f.line_to(to + (b - to) * t);
+                    f.move_to(line[0]);
+                    for p in &line[1..] {
+                        f.line_to(*p);
+                    }
                     if let Ok(path) = f.build() {
                         let mut lit = color;
                         lit.a *= alpha * strength;
