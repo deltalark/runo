@@ -38,7 +38,7 @@ pub(crate) struct Snapshot {
     pub count: String,
     /// The glyph carries a dot while something needs the person.
     pub attention: bool,
-    /// Under "Runo" at the top: "3 working · 2 need you · $4.12 today".
+    /// Under "Runo" at the top: "3 working · 2 need you".
     pub summary: String,
     pub needs: Vec<Row>,
     pub more_needs: usize,
