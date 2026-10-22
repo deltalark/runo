@@ -62,6 +62,8 @@ impl AgentOptions {
 pub struct AppSettings {
     pub agents: HashMap<String, AgentOptions>,
     pub theme: String,
+    /// The colour theme, by id from `themes::THEMES`; it has a light and a dark version.
+    pub color_theme: String,
     pub accent: String,
     pub diff_colors: String,
     pub animations: bool,
@@ -174,6 +176,8 @@ pub struct AppSettings {
     pub assistant_agent: String,
     /// Its model; empty is a fast one where Runo knows it, else the agent's default.
     pub assistant_model: String,
+    /// Show Runo in the macOS menu bar with what agents are doing.
+    pub menu_bar: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -196,6 +200,7 @@ impl Default for AppSettings {
             agents: HashMap::new(),
             usage_detailed: false,
             theme: "dark".into(),
+            color_theme: "runo".into(),
             accent: "indigo".into(),
             diff_colors: "default".into(),
             animations: true,
@@ -256,6 +261,7 @@ impl Default for AppSettings {
             assistant_answers: "agent".into(),
             assistant_agent: String::new(),
             assistant_model: String::new(),
+            menu_bar: true,
         }
     }
 }
@@ -314,6 +320,7 @@ impl AppSettings {
             .map(|a| a.2)
             .unwrap_or(ACCENTS[0].2);
         ACCENT.store(accent, Ordering::Relaxed);
+        crate::themes::set(&self.color_theme);
         DIFF.store(
             match self.diff_colors.as_str() {
                 "colorblind" => 1,
@@ -512,9 +519,9 @@ pub fn autoscroll() -> bool {
 /// derived from it, so each style keeps the same layering.
 pub fn glass_alpha(style: &str) -> u8 {
     match style {
-        "subtle" => 248,
-        "frosted" => 236,
-        "clear" => 216,
+        "subtle" => 240,
+        "frosted" => 208,
+        "clear" => 180,
         _ => 255,
     }
 }
@@ -544,11 +551,11 @@ fn sidebar_alpha() -> u8 {
         255 => return 255,
         // Light glass needs more body than it looks: a pale sheet over a bright, colourful
         // desktop takes on its colour, and grey text on it loses contrast fast.
-        a if a >= 248 => (220, 232),
-        // Frosted and Clear keep enough body that text reads over a light or busy
-        // wallpaper, not only over a calm one; Clear stays the clearer of the two.
-        a if a >= 236 => (208, 222),
-        _ => (192, 208),
+        a if a >= 240 => (206, 214),
+        // Frosted and Clear let the desktop through clearly, with the blur and the
+        // stronger glass text keeping text readable; Clear stays the clearer of the two.
+        a if a >= 208 => (182, 188),
+        _ => (156, 162),
     };
     if is_dark() {
         dark
@@ -571,7 +578,7 @@ pub fn pane(color: u32) -> Rgba {
 /// the rail stays a clear step darker than its open tab in every glass style.
 pub fn rail_shade() -> Rgba {
     if glass_on() {
-        with_alpha(c_rail(), if is_dark() { 128 } else { 110 })
+        with_alpha(c_rail(), if is_dark() { 100 } else { 90 })
     } else {
         rgb(c_rail())
     }
@@ -606,7 +613,7 @@ pub fn stack(top: Rgba, under: Rgba) -> Rgba {
 pub fn frame() -> Rgba {
     if glass_on() {
         let f = stack(rail_shade(), pane(c_sheet()));
-        let floor = (GLASS.load(Ordering::Relaxed) as f32 + 8.0).min(255.0) / 255.0;
+        let floor = (GLASS.load(Ordering::Relaxed) as f32 + 4.0).min(255.0) / 255.0;
         Rgba {
             a: f.a.max(floor),
             ..f
@@ -616,12 +623,12 @@ pub fn frame() -> Rgba {
     }
 }
 
-/// Side panels next to the content, such as changes, files and the terminal: between
-/// the sidebar and the content.
+/// Side panels next to the content, such as changes, files and the terminal: halfway
+/// between the sidebar and the content.
 pub fn panel(color: u32) -> Rgba {
     if glass_on() {
         let (side, content) = (sidebar_alpha() as u16, GLASS.load(Ordering::Relaxed) as u16);
-        with_alpha(color, ((side + content * 2) / 3) as u8)
+        with_alpha(color, ((side + content) / 2) as u8)
     } else {
         rgb(color)
     }
@@ -728,55 +735,59 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
 
-// Light is a neutral zinc scale; dark is Tokyo Night.
+/// The colour theme for the current mode, from Settings > Appearance.
+fn theme() -> &'static crate::themes::Palette {
+    crate::themes::current()
+}
+
 pub fn c_canvas() -> u32 {
-    pick(0xffffff, 0x1a1b26)
+    theme().canvas
 }
 pub fn c_sidebar() -> u32 {
-    pick(0xf7f7f8, 0x16161e)
+    theme().sidebar
 }
 /// The mode rail: the deepest layer, so the open place's tab, cut from the sheet beside
 /// it, stands out from it.
 pub fn c_rail() -> u32 {
-    pick(0xe4e4e8, 0x111118)
+    theme().rail
 }
 /// The sheet the rail's tab is cut from: the list beside the rail, raised a step above
 /// both the rail and the page, so the tab and the selected row's join to the page read.
 pub fn c_sheet() -> u32 {
-    pick(0xf4f4f6, 0x1f2030)
+    theme().sheet
 }
 pub fn c_subtle() -> u32 {
-    pick(0xf1f1f3, 0x222436)
+    theme().subtle
 }
 pub fn c_border() -> u32 {
-    pick(0xe5e5e8, 0x2a2e42)
+    theme().border
 }
 /// Text is a step stronger in glass mode, at every level: the translucent layers let
 /// the desktop through under the text too, so its contrast depends on the wallpaper, and
 /// a light or busy one would otherwise wash it out.
 pub fn c_text() -> u32 {
     if glass_on() {
-        pick(0x0f0f12, 0xdce2fa)
+        theme().glass_text()
     } else {
-        pick(0x18181b, 0xc0caf5)
+        theme().text
     }
 }
 pub fn c_secondary() -> u32 {
     if glass_on() {
-        pick(0x2c2c33, 0xcbd0e6)
+        theme().glass_secondary()
     } else {
-        pick(0x55555e, 0xa9b1d6)
+        theme().secondary
     }
 }
 pub fn c_muted() -> u32 {
     if glass_on() {
-        pick(0x4f4f58, 0x969bb9)
+        theme().glass_muted()
     } else {
-        pick(0x8a8a94, 0x737aa2)
+        theme().muted
     }
 }
 pub fn c_term_bg() -> u32 {
-    pick(0xfafafa, 0x16161e)
+    theme().term_bg
 }
 /// Behind an agent's CLI and other terminal screens: the terminal's own shade on a solid
 /// window, and in glass mode a shade over the glass, so the CLI is part of the window
@@ -790,23 +801,29 @@ pub fn term_fill() -> Rgba {
 }
 /// Neutral fill for the selected row, so selection does not compete with status colours.
 pub fn c_active() -> u32 {
-    pick(0xe9e9ec, 0x2b3047)
+    theme().active
 }
 /// Raised surfaces such as the composer, menus and cards.
 pub fn c_raised() -> u32 {
-    pick(0xffffff, 0x1f2335)
+    theme().raised
+}
+/// A raised surface set into the page, such as the composer and secondary buttons: solid
+/// on a solid window, and in glass mode a sheet of it over the page, so the desktop
+/// still shows through instead of an opaque block cut into the glass.
+pub fn raised() -> Rgba {
+    if glass_on() {
+        with_alpha(c_raised(), if is_dark() { 0x8c } else { 0x99 })
+    } else {
+        rgb(c_raised())
+    }
 }
 pub fn c_blue() -> u32 {
     let accent = ACCENT.load(Ordering::Relaxed);
-    if is_dark() {
-        // Dark mode uses Tokyo Night's blue unless another accent was picked.
-        if accent == ACCENTS[0].2 {
-            0x7aa2f7
-        } else {
-            mix(accent, 0xffffff, 0.8)
-        }
-    } else {
-        accent
+    // A theme with its own accent uses it unless another accent was picked.
+    match theme().accent {
+        Some(own) if accent == ACCENTS[0].2 => own,
+        _ if is_dark() => mix(accent, 0xffffff, 0.8),
+        _ => accent,
     }
 }
 /// Background of a selected row or option: neutral, so the accent stays for text and focus.
@@ -814,13 +831,13 @@ pub fn c_selected() -> u32 {
     c_active()
 }
 pub fn c_green() -> u32 {
-    pick(0x16a34a, 0x9ece6a)
+    theme().green
 }
 pub fn c_amber() -> u32 {
-    pick(0xf0a020, 0xe0af68)
+    theme().amber
 }
 pub fn c_red() -> u32 {
-    pick(0xdc2626, 0xf7768e)
+    theme().red
 }
 
 /// Text colour for added / removed lines, honouring the diff palette.

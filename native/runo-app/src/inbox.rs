@@ -408,6 +408,150 @@ impl RunoApp {
     }
 }
 
+impl RunoApp {
+    /// The sidebar narrowed to Needs you: blocked sessions and Crew threads first, then
+    /// those that finished unseen, then GitHub's asks. A session row opens that session;
+    /// the Inbox below answers them all in one place.
+    pub(crate) fn needs_groups(&self, filter: &str, cx: &mut Context<Self>) -> Div {
+        let no_sessions = self.sidebar_rows(filter, cx).is_empty();
+        let mut col = self.status_groups(filter, cx);
+        let matches = |text: &str| filter.is_empty() || text.to_lowercase().contains(filter);
+        let mut asks: Vec<(IconName, u32, &'static str, String, String)> = Vec::new();
+        for pr in self.gh.requested() {
+            asks.push((
+                IconName::GitPullRequest,
+                c_blue(),
+                "Review requested",
+                format!("#{} {}", pr.number, pr.title),
+                pr.url.clone(),
+            ));
+        }
+        for run in github::latest_failures(&self.gh.runs) {
+            asks.push((
+                IconName::CircleX,
+                c_red(),
+                "Check failed",
+                run.title.clone(),
+                run.url.clone(),
+            ));
+        }
+        asks.retain(|(_, _, _, title, _)| matches(title));
+        let quiet = no_sessions && asks.is_empty();
+        if !asks.is_empty() {
+            col = col.child(group_label("GitHub", asks.len()));
+        }
+        for (n, (mark, color, label, title, url)) in asks.into_iter().enumerate() {
+            col = col.child(
+                div()
+                    .id(("needs-gh", n))
+                    .mx_1()
+                    .px(px(8.))
+                    .py(px(5.))
+                    .flex()
+                    .items_center()
+                    .gap(px(9.))
+                    .rounded(px(11.))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        if !url.is_empty() {
+                            cx.open_url(&url);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .size(px(24.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon(mark, 13., color)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .gap(px(1.))
+                            .child(div().truncate().text_size(px(12.5)).child(title))
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(c_muted()))
+                                    .child(label),
+                            ),
+                    ),
+            );
+        }
+        if quiet {
+            return col.child(
+                div()
+                    .mx_1()
+                    .mt_2()
+                    .px_3()
+                    .py_2()
+                    .v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_secondary()))
+                            .child(if filter.is_empty() {
+                                "You're all caught up"
+                            } else {
+                                "Nothing waiting matches"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("Permission prompts, plans, questions and sessions that finish while you're elsewhere show up here."),
+                    ),
+            );
+        }
+        col.child(
+            div()
+                .id("needs-open-inbox")
+                .mx_1()
+                .mt_2()
+                .px(px(8.))
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(rgb(c_muted()))
+                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_secondary())))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.view = View::Inbox;
+                    cx.notify();
+                }))
+                .child(icon(IconName::Inbox, 12., c_muted()))
+                .child("Answer them all in the Inbox"),
+        )
+    }
+}
+
+/// A group's name over its rows in the sidebar, with its count, as the status groups have.
+fn group_label(name: &'static str, count: usize) -> Div {
+    div()
+        .mt_2()
+        .mx_1()
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(c_secondary()))
+        .child(name)
+        .child(shell::count_badge(count, shell::Tone::Quiet))
+}
+
 /// A quiet label over one group of the Inbox, with its count.
 fn section(label: &'static str, count: usize) -> Div {
     div()

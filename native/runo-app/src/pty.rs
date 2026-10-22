@@ -124,7 +124,7 @@ fn now_ms() -> u64 {
 }
 
 impl Shell {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     /// Start the user's login shell in `dir`. `wake` is called (at most once per
     /// repaint) when there is new output, and once more when the shell exits.
     pub fn spawn(
@@ -702,17 +702,8 @@ pub fn key_bytes(
 
 /// xterm's 256-colour palette, with the first 16 tuned to the app's theme.
 pub fn palette(i: u8, dark: bool) -> u32 {
-    // Tokyo Night's terminal colours.
-    const DARK: [u32; 16] = [
-        0x15161e, 0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xa9b1d6, 0x414868,
-        0xf7768e, 0x9ece6a, 0xe0af68, 0x7aa2f7, 0xbb9af7, 0x7dcfff, 0xc0caf5,
-    ];
-    const LIGHT: [u32; 16] = [
-        0x18181b, 0xdc2626, 0x16a34a, 0xca8a04, 0x2563eb, 0x9333ea, 0x0891b2, 0x52525b, 0x71717a,
-        0xef4444, 0x22c55e, 0xeab308, 0x3b82f6, 0xa855f7, 0x06b6d4, 0x27272a,
-    ];
     match i {
-        0..=15 => (if dark { DARK } else { LIGHT })[i as usize],
+        0..=15 => crate::themes::get(dark).ansi[i as usize],
         16..=231 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v as u32 };
@@ -885,6 +876,7 @@ fn set_size_keeping_cursor(p: &mut vt100::Parser, rows: u16, cols: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     #[test]

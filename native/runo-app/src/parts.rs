@@ -10,6 +10,8 @@ use std::collections::HashSet;
 
 /// Marks a whole-only file (binary, deleted) as left out of the next commit.
 const WHOLE: (usize, usize) = (usize::MAX, usize::MAX);
+/// Width of the folder page's tree of changed files.
+const TREE_WIDTH: f32 = 340.;
 
 /// The project folder's changed files, read off the UI thread.
 #[derive(Clone, Default)]
@@ -75,6 +77,195 @@ fn split_path(path: &str) -> (String, String) {
         Some((dir, name)) => (name.to_string(), dir.to_string()),
         None => (path.to_string(), String::new()),
     }
+}
+
+/// A run of the folder's files shown together under one header.
+pub(crate) struct Section {
+    /// What folds the section, kept across reloads.
+    pub key: String,
+    pub title: String,
+    pub icon: IconName,
+    pub color: u32,
+    /// Indexes into the folder's files.
+    pub files: Vec<usize>,
+}
+
+/// The folder's files in sections by their top folder, in the order they first appear,
+/// with files at the top level in a section of their own.
+pub(crate) fn sections(folder: &Folder) -> Vec<Section> {
+    let mut out: Vec<Section> = Vec::new();
+    for (i, file) in folder.files.iter().enumerate() {
+        let top = match file.change.path.split_once('/') {
+            Some((top, _)) => top.to_string(),
+            None => String::new(),
+        };
+        match out.iter_mut().find(|s| s.key == top) {
+            Some(section) => section.files.push(i),
+            None => out.push(Section {
+                title: if top.is_empty() {
+                    "Top level".into()
+                } else {
+                    format!("{top}/")
+                },
+                icon: if top.is_empty() {
+                    IconName::File
+                } else {
+                    IconName::Folder
+                },
+                color: c_blue(),
+                key: top,
+                files: vec![i],
+            }),
+        }
+    }
+    out
+}
+
+/// A file's kind from its name: a short tag and its colour.
+fn file_kind(name: &str) -> (&'static str, u32) {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "rs" => ("RS", 0xdc7f4a),
+        "ts" | "tsx" | "mts" => ("TS", 0x3b82f6),
+        "js" | "jsx" | "mjs" | "cjs" => ("JS", 0xd4a017),
+        "py" => ("PY", 0x3b82f6),
+        "go" => ("GO", 0x06b6d4),
+        "swift" => ("SW", 0xf97316),
+        "css" | "scss" | "less" => ("CSS", 0x0ea5e9),
+        "html" | "htm" => ("HTML", 0xf97316),
+        "md" | "mdx" | "txt" => ("MD", 0x8b93b8),
+        "toml" | "yaml" | "yml" | "json" | "lock" => ("CFG", 0xa78bfa),
+        "sh" | "bash" | "zsh" | "fish" => ("SH", 0x22c55e),
+        "svg" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" => ("IMG", 0xec4899),
+        _ => ("FILE", 0x8b93b8),
+    }
+}
+
+/// A small coloured tag naming a file's kind.
+fn kind_badge(name: &str) -> Div {
+    let (tag, color) = file_kind(name);
+    div()
+        .w(px(30.))
+        .h(px(18.))
+        .flex_none()
+        .rounded(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba((color << 8) | 0x26))
+        .text_color(rgb(color))
+        .text_size(px(8.5))
+        .font_weight(FontWeight::BOLD)
+        .child(tag)
+}
+
+/// What happened to a file, as a small outlined chip.
+fn status_chip(status: &str) -> Div {
+    let (word, color) = match status {
+        "A" | "?" | "??" => ("new", c_add()),
+        "D" => ("deleted", c_del()),
+        s if s.starts_with('R') => ("renamed", c_blue()),
+        _ => ("edited", c_amber()),
+    };
+    div()
+        .flex_none()
+        .h(px(18.))
+        .px(px(7.))
+        .flex()
+        .items_center()
+        .rounded_full()
+        .border_1()
+        .border_color(rgba((color << 8) | 0x80))
+        .text_size(px(10.5))
+        .text_color(rgb(color))
+        .child(word)
+}
+
+/// What happened to a file, as a dot in its colour.
+fn status_dot(status: &str) -> Div {
+    let color = match status {
+        "A" | "?" | "??" => c_add(),
+        "D" => c_del(),
+        s if s.starts_with('R') => c_blue(),
+        _ => c_amber(),
+    };
+    div().size(px(6.)).flex_none().rounded_full().bg(rgb(color))
+}
+
+/// Five blocks showing how big a change is and how it splits between added and removed
+/// lines, the way GitHub shows a diff's size.
+fn diff_bars(added: usize, removed: usize, binary: bool) -> Div {
+    const BLOCKS: usize = 5;
+    let total = added + removed;
+    let filled = if binary || total == 0 {
+        0
+    } else {
+        (BLOCKS * total.min(200)).div_ceil(200).clamp(1, BLOCKS)
+    };
+    let green = if total == 0 {
+        0
+    } else {
+        ((filled * added) as f32 / total as f32).round() as usize
+    };
+    div()
+        .flex_none()
+        .flex()
+        .gap(px(2.))
+        .children((0..BLOCKS).map(|b| {
+            div().size(px(7.)).rounded(px(2.)).bg(if b < green {
+                rgb(c_add())
+            } else if b < filled {
+                rgb(c_del())
+            } else {
+                tint(c_border())
+            })
+        }))
+}
+
+/// A thin bar split between added and removed lines.
+fn ratio_bar(added: usize, removed: usize, height: f32) -> Div {
+    let total = (added + removed).max(1) as f32;
+    div()
+        .w_full()
+        .h(px(height))
+        .flex()
+        .rounded_full()
+        .overflow_hidden()
+        .bg(tint(c_border()))
+        .when(added > 0, |el| {
+            el.child(
+                div()
+                    .h_full()
+                    .w(relative(added as f32 / total))
+                    .bg(rgb(c_add())),
+            )
+        })
+        .when(removed > 0, |el| {
+            el.child(
+                div()
+                    .h_full()
+                    .w(relative(removed as f32 / total))
+                    .bg(rgb(c_del())),
+            )
+        })
+}
+
+/// The project folder's mark: its icon on a tile of the accent.
+fn folder_mark(size: f32) -> Div {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded(px(size * 0.3))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba((c_blue() << 8) | 0x26))
+        .border_1()
+        .border_color(rgba((c_blue() << 8) | 0x40))
+        .child(icon(IconName::Folder, size * 0.47, c_blue()))
 }
 
 impl RunoApp {
@@ -496,6 +687,7 @@ impl RunoApp {
             .map(|p| p.name.clone())
             .unwrap_or_default();
         let n = folder.files.len();
+        let unpushed = self.git_repo.as_ref().map_or(0, |r| r.state.ahead);
         Some(
             div()
                 .v_flex()
@@ -517,10 +709,10 @@ impl RunoApp {
                         .ml(px(10.))
                         .mr_1()
                         .px_2()
-                        .py(px(7.))
-                        .flex()
-                        .items_center()
-                        .gap_2()
+                        .pt(px(8.))
+                        .pb(px(9.))
+                        .v_flex()
+                        .gap(px(7.))
                         .rounded_md()
                         .cursor_pointer()
                         .when(on, |el| el.child(shell::row_fuse("review-folder-fuse", 4.)))
@@ -531,54 +723,391 @@ impl RunoApp {
                         }))
                         .child(
                             div()
-                                .size(px(28.))
-                                .flex_none()
-                                .rounded_md()
                                 .flex()
                                 .items_center()
-                                .justify_center()
-                                .bg(tint(c_subtle()))
-                                .child(icon(IconName::Folder, 13., c_secondary())),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .v_flex()
+                                .gap_2()
+                                .child(folder_mark(28.))
                                 .child(
                                     div()
-                                        .truncate()
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(name),
+                                        .flex_1()
+                                        .min_w_0()
+                                        .v_flex()
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(13.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(name),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(11.5))
+                                                .text_color(rgb(c_muted()))
+                                                .child(format!(
+                                                    "{}  ·  {n} file{} you changed",
+                                                    folder.branch,
+                                                    if n == 1 { "" } else { "s" }
+                                                )),
+                                        ),
                                 )
                                 .child(
                                     div()
-                                        .truncate()
+                                        .flex_none()
+                                        .flex()
+                                        .gap_1()
                                         .text_size(px(11.5))
-                                        .text_color(rgb(c_muted()))
-                                        .child(format!(
-                                            "{}  ·  {n} file{} you changed",
-                                            folder.branch,
-                                            if n == 1 { "" } else { "s" }
-                                        )),
+                                        .child(
+                                            div()
+                                                .text_color(rgb(c_add()))
+                                                .child(format!("+{added}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(rgb(c_del()))
+                                                .child(format!("−{removed}")),
+                                        ),
                                 ),
                         )
+                        // How the folder's work splits between added and removed lines, and
+                        // what is still waiting to go up.
                         .child(
                             div()
-                                .flex_none()
+                                .pl(px(36.))
                                 .flex()
-                                .gap_1()
-                                .text_size(px(11.5))
-                                .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
-                                .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
+                                .items_center()
+                                .gap_2()
+                                .child(div().flex_1().child(ratio_bar(added, removed, 4.)))
+                                .when(unpushed > 0, |el| {
+                                    el.child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(10.5))
+                                            .text_color(rgb(c_muted()))
+                                            .child(format!("{unpushed} to push")),
+                                    )
+                                }),
                         ),
                 )
                 .into_any_element(),
         )
     }
 
-    /// The folder's page: the commit box, the files, and the picked file's parts.
+    /// Tick or untick every file of a section together: all in when any were out.
+    fn flip_section(&mut self, paths: &[String]) {
+        let files: Vec<FileParts> = paths.iter().filter_map(|p| self.folder_file(p)).collect();
+        let all_in = files.iter().all(|f| self.file_ticked(f) == Ticked::All);
+        for file in files {
+            let lines = if file.whole_only() {
+                vec![WHOLE]
+            } else {
+                Self::changed_lines(&file)
+            };
+            let out = self
+                .git_left_out
+                .entry(file.change.path.clone())
+                .or_default();
+            for key in lines {
+                if all_in {
+                    out.insert(key);
+                } else {
+                    out.remove(&key);
+                }
+            }
+        }
+    }
+
+    /// One changed file in the tree: its tick box, kind and name, what happened to it and
+    /// how much.
+    fn folder_file_row(&self, i: usize, file: &FileParts, cx: &mut Context<Self>) -> Stateful<Div> {
+        let path = file.change.path.clone();
+        let (fname, fdir) = split_path(&path);
+        let on = self.git_folder_file.as_ref() == Some(&path);
+        let state = self.file_ticked(file);
+        let (flip, pick) = (path.clone(), path.clone());
+        let accent = c_blue();
+        // Files in a deeper folder than their section's say where they sit.
+        let sub = fdir.split_once('/').map(|(_, rest)| rest.to_string());
+        div()
+            .id(("folder-file", i))
+            .relative()
+            .h(px(30.))
+            .pl(px(30.))
+            .pr(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .when(on, |el| {
+                el.bg(rgba((accent << 8) | 0x24)).child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(2.))
+                        .bg(rgb(accent)),
+                )
+            })
+            .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.git_folder_file = Some(pick.clone());
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .id(("folder-file-tick", i))
+                    .p(px(2.))
+                    .child(tick_box(state))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.flip_file(&flip);
+                        cx.notify();
+                    })),
+            )
+            .child(kind_badge(&fname))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w_full()
+                            .truncate()
+                            .when(on, |el| el.font_weight(FontWeight::MEDIUM))
+                            .when(state == Ticked::None, |el| el.text_color(rgb(c_muted())))
+                            .when(file.change.status == "D", |el| el.line_through())
+                            .child(fname),
+                    )
+                    .when_some(sub, |el, sub| {
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(rgb(c_muted()))
+                                .child(sub),
+                        )
+                    }),
+            )
+            .child(status_dot(&file.change.status))
+            .when(!file.change.binary, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap(px(5.))
+                        .text_size(px(11.))
+                        .when(file.change.added > 0, |el| {
+                            el.child(
+                                div()
+                                    .text_color(rgb(c_add()))
+                                    .child(format!("+{}", file.change.added)),
+                            )
+                        })
+                        .when(file.change.removed > 0, |el| {
+                            el.child(
+                                div()
+                                    .text_color(rgb(c_del()))
+                                    .child(format!("−{}", file.change.removed)),
+                            )
+                        }),
+                )
+            })
+    }
+
+    /// A section of the tree: a header that ticks or folds its files, then the files.
+    fn folder_section(
+        &self,
+        s: usize,
+        section: &Section,
+        folder: &Folder,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let files: Vec<&FileParts> = section.files.iter().map(|i| &folder.files[*i]).collect();
+        let (added, removed) = files.iter().fold((0, 0), |a, f| {
+            (a.0 + f.change.added, a.1 + f.change.removed)
+        });
+        let ticks: Vec<Ticked> = files.iter().map(|f| self.file_ticked(f)).collect();
+        let state = if ticks.iter().all(|t| *t == Ticked::All) {
+            Ticked::All
+        } else if ticks.iter().all(|t| *t == Ticked::None) {
+            Ticked::None
+        } else {
+            Ticked::Some
+        };
+        let shut = self.git_folder_shut.contains(&section.key);
+        let paths: Vec<String> = files.iter().map(|f| f.change.path.clone()).collect();
+        let key = section.key.clone();
+        let head = div()
+            .id(("folder-section", s))
+            .h(px(30.))
+            .pl(px(8.))
+            .pr(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .hover(|el| el.bg(tint(c_subtle())))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.git_folder_shut.remove(&key) {
+                    this.git_folder_shut.insert(key.clone());
+                }
+                cx.notify();
+            }))
+            .child(icon(
+                if shut {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                },
+                12.,
+                c_muted(),
+            ))
+            .child(
+                div()
+                    .id(("folder-section-tick", s))
+                    .p(px(2.))
+                    .child(tick_box(state))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.flip_section(&paths);
+                        cx.notify();
+                    })),
+            )
+            .child(icon(section.icon, 13., section.color))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(c_secondary()))
+                    .child(section.title.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_muted()))
+                    .child(files.len().to_string()),
+            )
+            .when(shut, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .gap(px(5.))
+                        .text_size(px(11.))
+                        .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
+                        .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
+                )
+            });
+        div()
+            .v_flex()
+            .child(head)
+            .when(!shut, |el| {
+                el.children(
+                    section
+                        .files
+                        .iter()
+                        .zip(files.iter())
+                        .map(|(i, file)| self.folder_file_row(*i, file, cx)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The picked file's diff: its path and size above its parts.
+    fn folder_diff(&self, file: &FileParts, cx: &mut Context<Self>) -> AnyElement {
+        let path = file.change.path.clone();
+        let (fname, fdir) = split_path(&path);
+        div()
+            .flex_1()
+            .min_h_0()
+            .v_flex()
+            .child(
+                div()
+                    .h(px(44.))
+                    .flex_none()
+                    .px(px(16.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .border_b_1()
+                    .border_color(divider())
+                    .child(kind_badge(&fname))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .font_family("JetBrains Mono")
+                            .text_size(px(12.5))
+                            .when(!fdir.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(rgb(c_muted()))
+                                        .child(format!("{fdir}/")),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(fname),
+                            ),
+                    )
+                    .child(status_chip(&file.change.status))
+                    .when(!file.change.binary, |el| {
+                        el.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .gap(px(6.))
+                                .text_size(px(12.))
+                                .child(
+                                    div()
+                                        .text_color(rgb(c_add()))
+                                        .child(format!("+{}", file.change.added)),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(c_del()))
+                                        .child(format!("−{}", file.change.removed)),
+                                ),
+                        )
+                    })
+                    .child(diff_bars(
+                        file.change.added,
+                        file.change.removed,
+                        file.change.binary,
+                    )),
+            )
+            .child(
+                div()
+                    .id("folder-diff")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(16.))
+                    .pb(px(16.))
+                    .child(self.file_parts_view(file, cx)),
+            )
+            .into_any_element()
+    }
+
+    /// The folder's page: the changed files as a tree beside the picked file's diff, with
+    /// the commit bar under the diff.
     pub(crate) fn folder_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(folder) = self.git_folder.as_ref() else {
             return div().into_any_element();
@@ -610,267 +1139,272 @@ impl RunoApp {
         let (added, removed) = folder.files.iter().fold((0, 0), |a, f| {
             (a.0 + f.change.added, a.1 + f.change.removed)
         });
+        let n = folder.files.len();
+        let ticked_files = folder
+            .files
+            .iter()
+            .filter(|f| self.file_ticked(f) != Ticked::None)
+            .count();
         let amendable = folder.last.clone().filter(|(_, local)| *local);
-        let mut files = div().v_flex().gap(px(2.));
-        for (i, file) in folder.files.iter().enumerate() {
-            let path = file.change.path.clone();
-            let (fname, fdir) = split_path(&path);
-            let on = self.git_folder_file.as_ref() == Some(&path);
-            let state = self.file_ticked(file);
-            let n_parts = file.parts.len();
-            let picked_here = (0..n_parts)
-                .filter(|p| self.part_ticked(file, *p) != Ticked::None)
-                .count();
-            let (flip, pick) = (path.clone(), path.clone());
-            files = files.child(
-                div()
-                    .id(("folder-file", i))
-                    .h(px(34.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .when(on, |el| el.bg(tint(c_active())))
-                    .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.git_folder_file = Some(pick.clone());
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .id(("folder-file-tick", i))
-                            .p(px(3.))
-                            .child(tick_box(state))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.flip_file(&flip);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .w(px(12.))
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(match file.change.status.as_str() {
-                                "A" | "?" | "??" => c_add(),
-                                "D" => c_del(),
-                                _ => c_amber(),
-                            }))
-                            .child(match file.change.status.as_str() {
-                                "??" => "A".to_string(),
-                                s => s.chars().next().unwrap_or('M').to_string(),
-                            }),
-                    )
-                    .child(div().flex_none().child(fname))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_muted()))
-                            .child(fdir),
-                    )
-                    .when(state == Ticked::Some && n_parts > 1, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(rgb(c_muted()))
-                                .child(format!("{picked_here} of {}", parts(n_parts))),
-                        )
-                    })
-                    .when(!file.change.binary, |el| {
-                        el.child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(rgb(c_add()))
-                                .child(format!("+{}", file.change.added)),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.5))
-                                .text_color(rgb(c_del()))
-                                .child(format!("−{}", file.change.removed)),
-                        )
-                    }),
-            );
-        }
-        let shown = self
-            .git_folder_file
-            .as_ref()
-            .and_then(|p| folder.files.iter().find(|f| f.change.path == *p));
-        let parts_view = shown.map(|file| self.file_parts_view(file, cx));
         let empty = folder.files.is_empty();
-        div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .v_flex()
+        let header = div()
+            .h(px(58.))
+            .flex_none()
+            .px(px(20.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .border_b_1()
+            .border_color(divider())
+            .child(folder_mark(30.))
             .child(
                 div()
-                    .h(px(46.))
-                    .flex_none()
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(divider())
-                    .child(icon(IconName::Folder, 15., c_muted()))
+                    .min_w_0()
+                    .v_flex()
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(14.))
+                            .text_size(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(name),
                     )
                     .child(
                         div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .h(px(22.))
-                            .rounded_md()
-                            .bg(tint(c_subtle()))
+                            .truncate()
                             .text_size(px(11.5))
-                            .text_color(rgb(c_secondary()))
-                            .child(icon(IconName::GitBranch, 11., c_muted()))
-                            .child(folder.branch.clone()),
+                            .text_color(rgb(c_muted()))
+                            .child(if empty {
+                                "Nothing changed since the last commit".to_string()
+                            } else {
+                                format!("{n} changed  ·  {ticked_files} ticked for the next commit")
+                            }),
                     ),
             )
             .child(
                 div()
-                    .id("folder-page")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .h(px(22.))
+                    .rounded_full()
+                    .bg(tint(c_subtle()))
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_secondary()))
+                    .child(icon(IconName::GitBranch, 11., c_muted()))
+                    .child(folder.branch.clone()),
+            )
+            .child(div().flex_1())
+            .when(!empty, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(12.5))
+                        .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
+                        .child(div().text_color(rgb(c_del())).child(format!("−{removed}")))
+                        .child(div().w(px(90.)).child(ratio_bar(added, removed, 4.))),
+                )
+            });
+        if empty {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .v_flex()
+                .child(header)
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(13.))
+                        .text_color(rgb(c_muted()))
+                        .child("Nothing to commit. The folder matches its last commit."),
+                )
+                .into_any_element();
+        }
+        let sections: Vec<AnyElement> = sections(folder)
+            .iter()
+            .enumerate()
+            .map(|(s, section)| self.folder_section(s, section, folder, cx))
+            .collect();
+        let tree = div()
+            .w(px(TREE_WIDTH))
+            .flex_none()
+            .h_full()
+            .v_flex()
+            .border_r_1()
+            .border_color(divider())
+            .child(
+                div()
+                    .h(px(34.))
+                    .flex_none()
+                    .px(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(c_muted()))
+                    .child("CHANGES")
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .font_weight(FontWeight::NORMAL)
+                            .child(format!("{ticked_files} of {n} ticked")),
+                    ),
+            )
+            .child(
+                div()
+                    .id("folder-tree")
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px(px(20.))
-                    .py(px(16.))
+                    .pb(px(8.))
                     .v_flex()
-                    .when(empty, |el| {
-                        el.child(
-                            div()
-                                .py_4()
-                                .text_size(px(13.))
-                                .text_color(rgb(c_muted()))
-                                .child("Nothing to commit. The folder matches its last commit."),
-                        )
-                    })
-                    .when(!empty, |el| {
-                        el.child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            Input::new(&self.git_folder_msg)
-                                                .bordered(true)
-                                                .h(px(34.)),
-                                        ),
-                                ),
-                        )
-                        .when(belt, |el| el.child(self.seatbelt_card(&found, cx)))
+                    .gap(px(4.))
+                    .children(sections),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .border_t_1()
+                    .border_color(divider())
+                    .text_size(px(11.5))
+                    .text_color(rgb(c_muted()))
+                    .child("Tick files, parts or single lines. What you leave unticked stays in your folder."),
+            );
+        let shown = self
+            .git_folder_file
+            .as_ref()
+            .and_then(|p| folder.files.iter().find(|f| f.change.path == *p));
+        let diff = match shown {
+            Some(file) => self.folder_diff(file, cx),
+            None => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.))
+                .text_color(rgb(c_muted()))
+                .child("Pick a file to see what changed in it.")
+                .into_any_element(),
+        };
+        let go = if belt { c_amber() } else { c_blue() };
+        let on_go = if is_dark() { c_canvas() } else { 0xffffff };
+        let commit_bar = div()
+            .flex_none()
+            .px(px(14.))
+            .py(px(10.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_t_1()
+            .border_color(divider())
+            .bg(tint(c_subtle()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&self.git_folder_msg).bordered(true).h(px(34.))),
+            )
+            .when_some(amendable, |el, (subject, _)| {
+                el.child(
+                    div()
+                        .id("folder-amend")
+                        .flex_none()
+                        .h(px(34.))
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(divider())
+                        .cursor_pointer()
+                        .text_size(px(12.5))
+                        .text_color(rgb(c_secondary()))
+                        .hover(|el| el.bg(tint(c_active())))
+                        .child(icon(IconName::Plus, 12., c_secondary()))
                         .child(
                             div()
-                                .mt_2()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id("folder-commit")
-                                        .flex_1()
-                                        .h(px(34.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_2()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .bg(rgb(if belt { c_amber() } else { c_blue() }))
-                                        .text_color(rgb(0xffffff))
-                                        .text_size(px(13.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .hover(|el| el.opacity(0.9))
-                                        .when(picked == 0, |el| el.opacity(0.5))
-                                        .child(commit_label)
-                                        .child(
-                                            div()
-                                                .px(px(5.))
-                                                .rounded(px(4.))
-                                                .bg(rgba(0xffffff26))
-                                                .font_family("JetBrains Mono")
-                                                .text_size(px(10.5))
-                                                .child("commit"),
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.commit_folder(false, cx);
-                                            cx.notify();
-                                        })),
-                                )
-                                .when_some(amendable, |el, (subject, _)| {
-                                    el.child(
-                                        div()
-                                            .id("folder-amend")
-                                            .flex_none()
-                                            .h(px(34.))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .rounded_md()
-                                            .border_1()
-                                            .border_color(divider())
-                                            .cursor_pointer()
-                                            .text_size(px(12.5))
-                                            .hover(|el| el.bg(tint(c_subtle())))
-                                            .child(icon(IconName::Plus, 12., c_secondary()))
-                                            .child(
-                                                div()
-                                                    .max_w(px(220.))
-                                                    .truncate()
-                                                    .child(format!("Add to “{subject}”")),
-                                            )
-                                            .child(git_term("amend").self_center())
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.commit_folder(true, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                }),
+                                .max_w(px(180.))
+                                .truncate()
+                                .child(format!("Add to “{subject}”")),
                         )
-                        .child(
-                            div()
-                                .mt(px(20.))
-                                .mb(px(6.))
-                                .flex()
-                                .gap(px(6.))
-                                .text_size(px(10.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(c_muted()))
-                                .child(format!("CHANGES {}", folder.files.len()))
-                                .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
-                                .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
-                        )
-                        .child(files)
-                        .children(parts_view)
-                        .child(
-                            div()
-                                .mt_3()
-                                .text_size(px(12.))
-                                .text_color(rgb(c_muted()))
-                                .child("Tick a file, a part or single lines to put them in this commit. What you leave unticked stays in your folder."),
-                        )
-                    }),
+                        .child(git_term("amend").self_center())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.commit_folder(true, cx);
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                div()
+                    .id("folder-commit")
+                    .flex_none()
+                    .h(px(34.))
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .bg(rgb(go))
+                    .text_color(rgb(on_go))
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .hover(|el| el.opacity(0.9))
+                    .when(picked == 0, |el| el.opacity(0.5))
+                    .child(icon(IconName::GitCommitHorizontal, 14., on_go))
+                    .child(commit_label)
+                    .child(
+                        div()
+                            .px(px(5.))
+                            .rounded(px(4.))
+                            .bg(rgba((on_go << 8) | 0x24))
+                            .font_family("JetBrains Mono")
+                            .text_size(px(10.5))
+                            .child("commit"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.commit_folder(false, cx);
+                        cx.notify();
+                    })),
+            );
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .v_flex()
+            .child(header)
+            .child(
+                div().flex_1().min_h_0().flex().child(tree).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .v_flex()
+                        .child(diff)
+                        .when(belt, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(14.))
+                                    .pb(px(10.))
+                                    .child(self.seatbelt_card(&found, cx)),
+                            )
+                        })
+                        .child(commit_bar),
+                ),
             )
             .into_any_element()
     }

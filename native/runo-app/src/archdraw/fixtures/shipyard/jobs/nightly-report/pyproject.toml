@@ -1,0 +1,3 @@
+[project]
+name = "nightly-report"
+dependencies = ["psycopg2", "boto3"]

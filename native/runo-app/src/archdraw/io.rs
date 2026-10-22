@@ -1,8 +1,9 @@
 //! Getting diagrams in and out: draw.io files both ways, Mermaid, SVG and PNG, and a first
 //! diagram made from the project's code.
 
-use super::editor::{view_sight, view_wires, Editor};
+use super::editor::{view_sight, view_wires, Beautify, Editor};
 use super::geom;
+use super::infra;
 use super::model::*;
 use super::motion;
 use super::shape::{self, Seg, Theme};
@@ -869,11 +870,126 @@ pub(crate) fn from_scan(map: &ProjectMap, project: &str) -> Doc {
             });
         }
     }
-    doc.views.push(view);
-    // Lay it out once so it opens readable.
+    // What the project runs, from how it's deployed, comes first: one diagram per source,
+    // grouped and laid out so it opens readable.
+    let mut drawn = Vec::new();
+    for plan in &map.infra.plans {
+        drawn.push(plan_view(&mut doc, plan));
+    }
+    let packages = view.id.clone();
+    let keep_packages = !view.nodes.is_empty();
+    doc.views.extend(drawn.iter().cloned());
+    if keep_packages {
+        doc.views.push(view);
+    }
     let mut ed = Editor::new(doc);
-    ed.auto_layout(false);
+    for (i, v) in drawn.iter().enumerate() {
+        ed.open_view(&v.id);
+        ed.cur_mut().order = i as u32;
+        ed.beautify(Beautify::Grouped);
+    }
+    if keep_packages {
+        ed.open_view(&packages);
+        ed.cur_mut().order = drawn.len() as u32;
+        ed.auto_layout(false);
+    }
     ed.doc
+}
+
+/// A diagram of one plan: its groups as boundaries, its parts in the shapes and icons
+/// that say what they are, and what talks to what. A logo to look for is kept in the
+/// picture as `logo:<name>` until `infra::attach_logos` finds it.
+fn plan_view(doc: &mut Doc, plan: &infra::Plan) -> View {
+    let mut view = View {
+        id: doc.new_view_id(&plan.name),
+        name: plan.name.clone(),
+        ..Default::default()
+    };
+    let mut ids: HashMap<String, String> = HashMap::new();
+    let wanted = |logo: &str| {
+        if logo.is_empty() {
+            String::new()
+        } else {
+            format!("{}{logo}", infra::LOGO_WANTED)
+        }
+    };
+    for g in &plan.groups {
+        let id = doc.new_id(&g.name);
+        ids.insert(g.key.clone(), id.clone());
+        doc.elements.push(Element {
+            id,
+            name: g.name.clone(),
+            kind: Kind::Boundary,
+            icon: g.icon.clone(),
+            image: wanted(&g.logo),
+            ..Default::default()
+        });
+    }
+    for g in &plan.groups {
+        let (w, h) = Kind::Boundary.size();
+        view.nodes.push(Node {
+            id: ids[&g.key].clone(),
+            w,
+            h,
+            parent: g.parent.as_ref().and_then(|p| ids.get(p).cloned()),
+            ..Default::default()
+        });
+    }
+    for p in &plan.parts {
+        let id = doc.new_id(&p.name);
+        ids.insert(p.key.clone(), id.clone());
+        doc.elements.push(Element {
+            id: id.clone(),
+            name: p.name.clone(),
+            kind: p.kind,
+            tech: p.tech.clone(),
+            description: p.description.clone(),
+            code: p.code.clone(),
+            icon: if p.kind.pictured() {
+                String::new()
+            } else {
+                p.icon.clone()
+            },
+            image: wanted(&p.logo),
+            ..Default::default()
+        });
+        let (w, h) = p.kind.size();
+        view.nodes.push(Node {
+            id,
+            w,
+            h,
+            parent: p.group.as_ref().and_then(|g| ids.get(g).cloned()),
+            ..Default::default()
+        });
+    }
+    for l in &plan.links {
+        let (Some(from), Some(to)) = (ids.get(&l.from), ids.get(&l.to)) else {
+            continue;
+        };
+        let id = doc.new_id(&format!("{from}-to-{to}"));
+        // What the shapes already say goes unsaid: a line into a database is reading and
+        // writing it. Only what they can't say is written on the line.
+        let plain = matches!(
+            l.label.as_str(),
+            "calls" | "reads and writes" | "caches in" | "stores files in" | "indexes and searches"
+        );
+        doc.relations.push(Relation {
+            id: id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            label: if plain {
+                String::new()
+            } else {
+                l.label.clone()
+            },
+            tech: l.tech.clone(),
+        });
+        view.edges.push(Edge {
+            id,
+            ..Default::default()
+        });
+    }
+    view
 }
 
 // ---- SVG and PNG
@@ -1120,8 +1236,32 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
                 p.opacity
             );
         }
-        // A boundary's title moves over for its picture, as on the canvas.
-        let text = if shown_kind == Kind::Boundary && !e.image.is_empty() {
+        // The icon on the shape, where the canvas draws it: in a boundary's title, or in
+        // the corner of a part with no picture of its own.
+        let ink = hex(p.stroke.unwrap_or(p.text));
+        let corner = e.image.is_empty()
+            && e.kind.is_part()
+            && !e.kind.pictured()
+            && !e.kind.name_below()
+            && n.h > 34.
+            && n.w > 60.;
+        if shown_kind == Kind::Boundary && e.image.is_empty() {
+            if let Some(g) = lucide(&e.icon, o.text.x, o.text.y + 8., 14., &ink) {
+                out.push_str(&g);
+            }
+        } else if corner && shown_kind != Kind::Boundary {
+            let (ix, iy) = match e.kind {
+                Kind::Database => (n.x + 8., n.y + n.h * 0.25),
+                Kind::Container | Kind::External => (n.x + shape::SPINE + 8., n.y + 8.),
+                Kind::Component => (n.x + 14., n.y + 8.),
+                _ => (n.x + 8., n.y + 8.),
+            };
+            if let Some(g) = lucide(&e.icon, ix, iy, 14., &ink) {
+                out.push_str(&g);
+            }
+        }
+        // A boundary's title moves over for its picture or icon, as on the canvas.
+        let text = if shown_kind == Kind::Boundary && (!e.image.is_empty() || !e.icon.is_empty()) {
             Rect::new(o.text.x + 24., o.text.y, (o.text.w - 24.).max(1.), o.text.h)
         } else {
             o.text
@@ -1217,6 +1357,26 @@ fn render_svg(doc: &Doc, view: &View, animated: bool) -> String {
     out.push_str(&labels);
     out.push_str("</svg>\n");
     out
+}
+
+/// A Lucide icon drawn at (x, y), `size` across, in `color`: the same glyphs the canvas
+/// shows, so an export looks like the diagram.
+fn lucide(name: &str, x: f32, y: f32, size: f32, color: &str) -> Option<String> {
+    use gpui_kit::AssetSource;
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    let bytes = gpui_kit::assets::AllAssets
+        .load(&format!("icons/{name}.svg"))
+        .ok()??;
+    let text = String::from_utf8(bytes.into_owned()).ok()?;
+    let start = text.find("<svg")?;
+    let open = start + text[start..].find('>')? + 1;
+    let close = text.rfind("</svg>")?;
+    let inner = text[open..close].replace("currentColor", color);
+    Some(format!(
+        "<svg x=\"{x}\" y=\"{y}\" width=\"{size}\" height=\"{size}\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"{color}\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" opacity=\"0.85\">{inner}</svg>\n"
+    ))
 }
 
 /// A web page that plays the diagram's stories: the animated diagram, and controls that walk
@@ -1611,5 +1771,99 @@ mod tests {
         );
         let png = png(&doc, &doc.views[0]).unwrap();
         assert_eq!(&png[1..4], b"PNG");
+    }
+
+    /// The Shipyard test project's diagrams as pictures, as drawn from its code and after
+    /// each Beautify, for looking at a change to layout by eye. Writes nothing unless
+    /// RUNO_SHOTS names a folder; downloads logos when it can.
+    #[test]
+    #[ignore = "RUNO_SHOTS=<folder> cargo test -p runo shipyard_pictures -- --ignored"]
+    fn shipyard_pictures() {
+        let Some(out) = std::env::var_os("RUNO_SHOTS").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/archdraw/fixtures/shipyard");
+        let map = crate::architecture::scan(&root);
+        let mut doc = from_scan(&map, "shipyard");
+        let project = out.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        infra::attach_logos(&mut doc, &project);
+        save(&project, &doc).unwrap();
+        // RUNO_SHOTS_ONLY=a,b draws only the pictures whose names start with one of those.
+        let only: Vec<String> = std::env::var("RUNO_SHOTS_ONLY")
+            .map(|o| o.split(',').map(String::from).collect())
+            .unwrap_or_default();
+        let shoot = |doc: &Doc, view: &str, name: &str| {
+            if !only.is_empty() && !only.iter().any(|o| name.starts_with(o.as_str())) {
+                return;
+            }
+            let mut d = doc.clone();
+            super::super::icons::inline_pictures(&project, &mut d);
+            let v = d.views.iter().find(|v| v.id == view).unwrap().clone();
+            std::fs::write(out.join(format!("{name}.png")), png(&d, &v).unwrap()).unwrap();
+        };
+        let views: Vec<(String, String)> = doc
+            .views
+            .iter()
+            .map(|v| (v.id.clone(), v.name.clone()))
+            .collect();
+        for (id, _) in &views {
+            shoot(&doc, id, &format!("{id}-from-code"));
+            // Beautify again on what From code drew should keep it as it is or better.
+            let mut ed = Editor::new(doc.clone());
+            ed.open_view(id);
+            let flow = ed.backflow();
+            let (before, after) = ed.beautify(Beautify::Best);
+            eprintln!(
+                "{id} again (backflow {flow:.2}): {} -> {}",
+                before.describe(),
+                after.describe()
+            );
+            shoot(&ed.doc, id, &format!("{id}-again"));
+        }
+        // Each diagram flattened into a grid, as an agent or a person might draw it, and
+        // then each way of beautifying it.
+        let mut flat = doc.clone();
+        for v in &mut flat.views {
+            let bounds: Vec<String> = v
+                .nodes
+                .iter()
+                .filter(|n| doc.element(&n.id).is_some_and(|e| e.kind == Kind::Boundary))
+                .map(|n| n.id.clone())
+                .collect();
+            v.nodes.retain(|n| !bounds.contains(&n.id));
+            for (i, n) in v.nodes.iter_mut().enumerate() {
+                n.parent = None;
+                n.x = (i % 6) as f32 * 260.;
+                n.y = (i / 6) as f32 * 190.;
+            }
+        }
+        let flat_root = out.join("flat");
+        std::fs::create_dir_all(&flat_root).unwrap();
+        save(&flat_root, &flat).unwrap();
+        for (id, _) in &views {
+            shoot(&flat, id, &format!("{id}-flat"));
+            for (how, label) in [
+                (Beautify::Best, "best"),
+                (Beautify::Down, "down"),
+                (Beautify::Across, "across"),
+                (Beautify::Grouped, "grouped"),
+                (Beautify::Compact, "compact"),
+            ] {
+                let mut ed = Editor::new(flat.clone());
+                ed.open_view(id);
+                if how == Beautify::Best {
+                    eprintln!("{id} flat backflow {:.2}", ed.backflow());
+                }
+                let (before, after) = ed.beautify(how);
+                eprintln!(
+                    "{id} {label}: {} -> {}",
+                    before.describe(),
+                    after.describe()
+                );
+                shoot(&ed.doc, id, &format!("{id}-flat-{label}"));
+            }
+        }
     }
 }

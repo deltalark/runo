@@ -815,6 +815,136 @@ pub(crate) fn restore(root: &Path, snap: &Snapshot) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The model and one diagram as the project's last commit has them: an empty model when
+/// the commit has none, and no diagram when it didn't have that one.
+pub(crate) fn committed(root: &Path, view_id: &str) -> Result<(Doc, Option<View>), String> {
+    let dir = root.to_string_lossy();
+    let mut doc = Doc::default();
+    if let Some(text) = crate::git::committed_text(&dir, &format!("{FOLDER}/{MODEL}")) {
+        let file: ModelFile =
+            toml::from_str(&text).map_err(|e| format!("{FOLDER}/{MODEL}: {e}"))?;
+        doc.elements = file.elements;
+        doc.relations = file.relations;
+    }
+    let view = match crate::git::committed_text(&dir, &format!("{FOLDER}/{VIEWS}/{view_id}.toml")) {
+        Some(text) => {
+            let mut v: View = toml::from_str(&text)
+                .map_err(|e| format!("{FOLDER}/{VIEWS}/{view_id}.toml: {e}"))?;
+            v.id = view_id.to_string();
+            Some(v)
+        }
+        None => None,
+    };
+    Ok((doc, view))
+}
+
+/// `doc` with one diagram put back as the last commit had it (`was`, None when the commit
+/// didn't have it), along with the parts and connections only that diagram shows: they go
+/// back to how the commit had them, or go when it didn't have them. What other diagrams
+/// show stays as it is now.
+pub(crate) fn revert_view(doc: &Doc, view_id: &str, committed: &Doc, was: Option<View>) -> Doc {
+    use std::collections::HashSet;
+    let now = doc.views.iter().find(|v| v.id == view_id);
+    let others = doc.views.iter().filter(|v| v.id != view_id);
+    let mut shown_elsewhere = HashSet::new();
+    let mut drawn_elsewhere = HashSet::new();
+    for v in others {
+        shown_elsewhere.extend(v.nodes.iter().map(|n| n.id.as_str()));
+        drawn_elsewhere.extend(v.edges.iter().map(|e| e.id.as_str()));
+    }
+    let both = now.into_iter().chain(was.as_ref());
+    let mut own_parts = HashSet::new();
+    let mut own_links = HashSet::new();
+    for v in both {
+        own_parts.extend(
+            v.nodes
+                .iter()
+                .map(|n| n.id.as_str())
+                .filter(|id| !shown_elsewhere.contains(id)),
+        );
+        own_links.extend(
+            v.edges
+                .iter()
+                .map(|e| e.id.as_str())
+                .filter(|id| !drawn_elsewhere.contains(id)),
+        );
+    }
+    // In the commit's order, so a model put fully back reads as it did.
+    fn merge<T: Clone>(
+        now: &[T],
+        then: &[T],
+        own: &HashSet<&str>,
+        id: impl Fn(&T) -> &str,
+    ) -> Vec<T> {
+        let mut out: Vec<T> = then
+            .iter()
+            .filter_map(|t| {
+                if own.contains(id(t)) {
+                    Some(t.clone())
+                } else {
+                    now.iter().find(|n| id(n) == id(t)).cloned()
+                }
+            })
+            .collect();
+        out.extend(
+            now.iter()
+                .filter(|n| !own.contains(id(n)) && !then.iter().any(|t| id(t) == id(n)))
+                .cloned(),
+        );
+        out
+    }
+    let mut out = Doc {
+        elements: merge(&doc.elements, &committed.elements, &own_parts, |e| &e.id),
+        relations: merge(&doc.relations, &committed.relations, &own_links, |r| &r.id),
+        views: Vec::new(),
+    };
+    for v in &doc.views {
+        if v.id != view_id {
+            out.views.push(v.clone());
+        } else if let Some(was) = &was {
+            out.views.push(was.clone());
+        }
+    }
+    out.tidy();
+    out
+}
+
+/// After a diagram was put back: files that hold what the last commit has, written in
+/// another way (by hand, or by an agent), get the commit's own text, so git shows no
+/// change in them; and the guide to the files goes when it is all that's left changed.
+pub(crate) fn match_commit(root: &Path, doc: &Doc) -> std::io::Result<()> {
+    let dir = root.to_string_lossy();
+    let model = format!("{FOLDER}/{MODEL}");
+    if let Some(text) = crate::git::committed_text(&dir, &model) {
+        let same = toml::from_str::<ModelFile>(&text)
+            .is_ok_and(|f| f.elements == doc.elements && f.relations == doc.relations);
+        if same {
+            write_if_changed(&root.join(&model), &text)?;
+        }
+    }
+    for now in &doc.views {
+        let file = format!("{FOLDER}/{VIEWS}/{}.toml", now.id);
+        let Some(text) = crate::git::committed_text(&dir, &file) else {
+            continue;
+        };
+        let same = toml::from_str::<View>(&text).is_ok_and(|mut then| {
+            let mut now = now.clone();
+            then.id = now.id.clone();
+            then.order = 0;
+            now.order = 0;
+            then == now
+        });
+        if same {
+            write_if_changed(&root.join(&file), &text)?;
+        }
+    }
+    let readme = format!("{FOLDER}/{README_FILE}");
+    if crate::git::changed_under(&dir, FOLDER) == [readme.clone()] {
+        crate::git::discard_under(&dir, &readme).map_err(std::io::Error::other)?;
+    }
+    Ok(())
+}
+
 /// A fingerprint of the diagram folder's files (names, sizes and times), to notice edits.
 pub(crate) fn stamp(root: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -1167,5 +1297,104 @@ mod tests {
             .starts_with("# hand formatted"));
         assert!(!folder(&dir).join(VIEWS).join("new.toml").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_diagram_goes_back_to_the_commit() {
+        let then = sample();
+        let mut now = then.clone();
+        // On the committed diagram: a part renamed and a new part added.
+        now.elements[0].name = "Storefront".into();
+        now.elements.push(Element {
+            id: "cache".into(),
+            name: "Cache".into(),
+            ..Default::default()
+        });
+        now.views[0].nodes.push(Node {
+            id: "cache".into(),
+            ..Default::default()
+        });
+        // A new diagram showing the database and a part of its own.
+        now.elements.push(Element {
+            id: "queue".into(),
+            name: "Queue".into(),
+            ..Default::default()
+        });
+        now.views.push(View {
+            id: "extra".into(),
+            name: "Extra".into(),
+            nodes: ["db", "queue"]
+                .map(|id| Node {
+                    id: id.into(),
+                    ..Default::default()
+                })
+                .into(),
+            ..Default::default()
+        });
+        let was = then.views[0].clone();
+        let back = revert_view(&now, "containers", &then, Some(was));
+        assert_eq!(back.element("web").unwrap().name, "Web app");
+        assert!(back.element("cache").is_none());
+        assert!(back.element("queue").is_some());
+        assert_eq!(back.views[0], then.views[0]);
+        assert_eq!(back.views.len(), 2);
+        // The new diagram goes, with the part only it showed; the shared one stays.
+        let gone = revert_view(&back, "extra", &then, None);
+        assert_eq!(gone, then);
+        assert_eq!(gone.model_text(), then.model_text());
+    }
+
+    #[test]
+    fn diagrams_put_back_one_by_one_leave_git_with_no_changes() {
+        let root = temp("revert-git");
+        let dir = root.to_str().unwrap().to_string();
+        let sh = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        sh(&["init", "-q"]);
+        sh(&["config", "user.email", "t@t"]);
+        sh(&["config", "user.name", "t"]);
+        let then = sample();
+        save(&root, &then).unwrap();
+        // Written by hand, or by an agent: the same diagram in other words.
+        let view = folder(&root).join(VIEWS).join("containers.toml");
+        let text = std::fs::read_to_string(&view).unwrap();
+        std::fs::write(&view, format!("# Drawn by hand\n{text}")).unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-q", "-m", "diagrams"]);
+        let mut now = load(&root).unwrap();
+        now.elements[0].name = "Storefront".into();
+        now.elements.push(Element {
+            id: "queue".into(),
+            name: "Queue".into(),
+            ..Default::default()
+        });
+        now.views.push(View {
+            id: "extra".into(),
+            name: "Extra".into(),
+            nodes: vec![Node {
+                id: "queue".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        save(&root, &now).unwrap();
+        // The model, the new diagram, and the hand-written one saved in Runo's words.
+        assert_eq!(crate::git::changed_under(&dir, FOLDER).len(), 3);
+        for id in ["containers", "extra"] {
+            let (committed_doc, was) = committed(&root, id).unwrap();
+            now = revert_view(&now, id, &committed_doc, was);
+            save(&root, &now).unwrap();
+            match_commit(&root, &now).unwrap();
+        }
+        assert!(crate::git::changed_under(&dir, FOLDER).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

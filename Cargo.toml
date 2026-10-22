@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["native/runo-app"]
-exclude = ["vendor/portable-pty", "vendor/gpui-pre-apple", "vendor/vt100"]
+exclude = ["vendor/block", "vendor/portable-pty", "vendor/gpui-pre-apple", "vendor/vt100"]
 
 [workspace.package]
 version = "0.2.0"
@@ -57,5 +57,10 @@ strip = "none"
 
 # gpui's macOS renderer with one blending fix for translucent (glass) windows; see
 # vendor/gpui-pre-apple/src/metal_renderer.rs.
+#
+# block 0.1.6 (pulled in by cocoa, metal and core-video under gpui) declares an
+# uninhabited extern static, which newer compilers flag as a future hard error; see
+# vendor/block/UPSTREAM.md.
 [patch.crates-io]
+block = { path = "vendor/block" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }

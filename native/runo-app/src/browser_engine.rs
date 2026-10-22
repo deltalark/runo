@@ -8,7 +8,9 @@
 use gpui_kit::RenderImage;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -232,6 +234,7 @@ pub fn find_chromium() -> Option<PathBuf> {
 }
 
 /// Where downloads from the panel go: the person's Downloads folder.
+#[cfg(unix)]
 fn downloads_dir() -> Option<String> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let dir = home.join("Downloads");
@@ -277,6 +280,7 @@ pub fn frame_message(msg: &Value) -> Vec<u8> {
 }
 
 /// Take every complete message off the front of `buf`, leaving a partial one behind.
+#[cfg(unix)]
 pub fn split_messages(buf: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     while let Some(end) = buf.iter().position(|b| *b == 0) {
@@ -321,7 +325,6 @@ pub struct Frame {
 #[derive(Clone, Default)]
 pub struct PageInfo {
     pub url: String,
-    pub title: String,
     pub loading: bool,
     /// An `alert`, `confirm` or `prompt` waiting for an answer: (kind, message).
     pub dialog: Option<(String, String)>,
@@ -330,6 +333,7 @@ pub struct PageInfo {
 }
 
 /// Console errors kept per page.
+#[cfg(unix)]
 const MAX_CONSOLE: usize = 50;
 
 /// Run in every page before its own scripts: links and `window.open` that would open
@@ -352,6 +356,7 @@ const IN_PLACE_JS: &str = r#"(() => {
 })();"#;
 
 /// A console error or uncaught exception from a CDP event, as one line of text.
+#[cfg(unix)]
 pub fn console_error(method: &str, params: &Value) -> Option<String> {
     match method {
         "Runtime.consoleAPICalled" => {
@@ -419,8 +424,10 @@ struct Shared {
     replies: HashMap<u64, Sender<Value>>,
     dead: bool,
     /// New tabs or windows a page opened, by target, with the session of their opener.
+    #[cfg(unix)]
     popups: HashMap<String, u64>,
     /// Downloads by guid: the file name, until they finish.
+    #[cfg(unix)]
     downloads: HashMap<String, String>,
     /// What to tell the person about downloads, oldest first.
     notes: Vec<String>,
@@ -997,6 +1004,7 @@ pub fn key_spec(name: &str) -> Option<KeySpec> {
 }
 
 /// Read CDP messages until the pipe closes: route replies, track pages, decode frames.
+#[cfg(unix)]
 fn read_loop(
     mut reader: std::fs::File,
     mut writer: std::fs::File,
@@ -1074,7 +1082,6 @@ fn read_loop(
                     let mut s = shared.lock().unwrap();
                     if let Some(page) = s.pages.values_mut().find(|p| p.target == target) {
                         page.info.url = info["url"].as_str().unwrap_or_default().to_string();
-                        page.info.title = info["title"].as_str().unwrap_or_default().to_string();
                         seq.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -1145,6 +1152,7 @@ fn read_loop(
 
 /// When `info` is a new tab or window one of our pages opened, load its URL in the
 /// opener and close it. Returns whether the target was such a popup.
+#[cfg(unix)]
 fn adopt_popup(
     info: &Value,
     shared: &Arc<Mutex<Shared>>,
@@ -1188,6 +1196,7 @@ fn adopt_popup(
 }
 
 /// A base64 JPEG as a BGRA image GPUI can draw.
+#[cfg(unix)]
 fn decode_frame(data: &str) -> Option<Arc<RenderImage>> {
     decode_image(data, image::ImageFormat::Jpeg)
 }
@@ -1223,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn messages_are_nul_framed_and_split() {
         let bytes = frame_message(&json!({"id": 1, "method": "Page.enable"}));
         assert_eq!(*bytes.last().unwrap(), 0);
@@ -1238,6 +1248,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn console_errors_become_lines() {
         let log = json!({"type": "error", "args": [{"type": "string", "value": "boom"}, {"type": "number", "value": 3}]});
         assert_eq!(
