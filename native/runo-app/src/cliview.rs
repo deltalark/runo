@@ -423,7 +423,7 @@ impl RunoApp {
         for m in &mut turns {
             m.time = time.clone();
             for step in &mut m.steps {
-                *step = step.replace(&prefix, "");
+                step.label = step.label.replace(&prefix, "");
             }
         }
         if let Some(s) = self.state.session_mut(id) {

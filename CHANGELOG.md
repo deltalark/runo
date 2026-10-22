@@ -4,6 +4,11 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Steps from Codex, Cursor, Gemini and Copilot now show as running until they finish, and a step whose tool failed is marked with a cross, as Claude's already were. Each step also records what kind of work it was and how long it took.
+- Every turn is kept in a log beside its session (`sessions/<id>/events.jsonl`): the reply text, each tool call with the end of its output, token use and how the turn ended. A turn picked up again after Runo restarts isn't logged twice. `Runo --events <session id>` prints a session's log.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

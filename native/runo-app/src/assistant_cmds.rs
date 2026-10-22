@@ -149,7 +149,14 @@ impl RunoApp {
                 let text: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
                 let text: String = text.chars().take(400).collect();
                 out.push_str(&format!("- {who}: {text}\n"));
-                for step in m.steps.iter().rev().take(5).rev() {
+                for step in m
+                    .step_labels()
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .rev()
+                {
                     out.push_str(&format!("  · {step}\n"));
                 }
             }

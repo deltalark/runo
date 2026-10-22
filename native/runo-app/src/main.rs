@@ -45,6 +45,7 @@ mod githistory;
 mod github;
 mod gitplace;
 mod handoff;
+mod harness;
 mod health;
 mod history;
 mod home;
@@ -102,6 +103,7 @@ use gpui_kit::component::text::TextView;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use harness::AgentEvent;
 use settings::*;
 use settings_ui::{McpForm, SettingsPage};
 use shell::Mode;
@@ -400,6 +402,8 @@ struct RunoApp {
     stderr: HashMap<u64, Vec<String>>,
     /// Parsers for runs that print JSON rather than plain text.
     streams: HashMap<u64, stream::Parser>,
+    /// Each running turn's event log, by session.
+    logs: HashMap<u64, harness::log::TurnLog>,
     search: Entity<InputState>,
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
@@ -1646,6 +1650,7 @@ impl RunoApp {
             chat_scroll: ScrollHandle::new(),
             stderr: HashMap::new(),
             streams: HashMap::new(),
+            logs: HashMap::new(),
             search,
             prompt,
             new_task: cx.new(|cx| {
@@ -2306,25 +2311,36 @@ impl RunoApp {
                 }
                 let updates = match self.streams.get_mut(&id) {
                     Some(parser) => parser.feed(&line),
-                    None => vec![stream::Update::Text(line)],
+                    None => vec![AgentEvent::Text(line)],
                 };
                 let plain = !self.streams.contains_key(&id);
+                if let Some(log) = self.logs.get_mut(&id) {
+                    for update in &updates {
+                        match update {
+                            // Plain output is kept line by line.
+                            AgentEvent::Text(text) if plain => {
+                                log.record(&AgentEvent::Text(format!("{text}\n")))
+                            }
+                            other => log.record(other),
+                        }
+                    }
+                }
                 // Crew's chat and its threads have Runo's blocks taken out as they stream.
                 // Crew never proposes a plan to approve: one it writes is its reply.
                 let crew_chat = self
                     .state
                     .session(id)
                     .is_some_and(|s| s.canvas == crew::CANVAS);
-                let updates: Vec<stream::Update> = updates
+                let updates: Vec<AgentEvent> = updates
                     .into_iter()
                     .map(|u| match u {
-                        stream::Update::Plan(plan) if crew_chat => stream::Update::Text(plan),
+                        AgentEvent::Plan(plan) if crew_chat => AgentEvent::Text(plan),
                         other => other,
                     })
                     .filter_map(|u| match u {
-                        stream::Update::Text(text) => match self.crew_text(id, &text, plain) {
-                            Some(shown) => shown.map(stream::Update::Text),
-                            None => Some(stream::Update::Text(text)),
+                        AgentEvent::Text(text) => match self.crew_text(id, &text, plain) {
+                            Some(shown) => shown.map(AgentEvent::Text),
+                            None => Some(AgentEvent::Text(text)),
                         },
                         other => Some(other),
                     })
@@ -2333,7 +2349,7 @@ impl RunoApp {
                 // The reply's run summary names the model it ran on.
                 let model = updates
                     .iter()
-                    .any(|u| matches!(u, stream::Update::Summary(_)))
+                    .any(|u| matches!(u, AgentEvent::Summary(_)))
                     .then(|| {
                         self.state
                             .session(id)
@@ -2350,18 +2366,17 @@ impl RunoApp {
                             continue;
                         };
                         match update {
-                            stream::Update::Text(text) => {
+                            AgentEvent::Text(text) => {
                                 if plain && !m.text.is_empty() {
                                     m.text.push('\n');
                                 }
                                 m.text.push_str(&text);
                             }
-                            stream::Update::Step(step) => m.steps.push(step),
-                            stream::Update::Started { id, label } => {
-                                m.running_steps.push((m.steps.len(), id));
-                                m.steps.push(label);
+                            AgentEvent::Tool(mut step) => {
+                                step.started = Some(std::time::Instant::now());
+                                m.steps.push(step);
                             }
-                            stream::Update::Finished { id, ok } => {
+                            AgentEvent::ToolDone { id, ok, .. } => {
                                 // The step may sit in an earlier reply when an error
                                 // message came between.
                                 for m in session.messages.iter_mut().rev() {
@@ -2370,13 +2385,15 @@ impl RunoApp {
                                     }
                                 }
                             }
-                            stream::Update::Summary(summary) => {
+                            // Written to the log by whoever starts and ends the turn.
+                            AgentEvent::TurnStarted { .. } | AgentEvent::TurnEnded { .. } => {}
+                            AgentEvent::Summary(summary) => {
                                 m.meta = match &model {
                                     Some(model) => format!("{model} · {summary}"),
                                     None => summary,
                                 }
                             }
-                            stream::Update::Error(error) => {
+                            AgentEvent::Error(error) => {
                                 applog::warn(
                                     "agent",
                                     format!(
@@ -2388,7 +2405,7 @@ impl RunoApp {
                                 self.stream_failed.insert(id);
                                 session.messages.push(Message::new(Role::System, error))
                             }
-                            stream::Update::Notice(text) => {
+                            AgentEvent::Notice(text) => {
                                 let turn = session
                                     .messages
                                     .iter()
@@ -2413,19 +2430,19 @@ impl RunoApp {
                                     session.messages.insert(at, warning);
                                 }
                             }
-                            stream::Update::Usage(usage) => m.usage = usage,
-                            stream::Update::Denied(tools) => {
+                            AgentEvent::Usage(usage) => m.usage = usage,
+                            AgentEvent::Denied(tools) => {
                                 m.denied =
                                     tools.into_iter().filter(|t| !refused.contains(t)).collect()
                             }
-                            stream::Update::Plan(plan) => m.plan = plan,
-                            stream::Update::Questions(questions) => m.questions = questions,
-                            stream::Update::Conversation(conversation) => {
+                            AgentEvent::Plan(plan) => m.plan = plan,
+                            AgentEvent::Questions(questions) => m.questions = questions,
+                            AgentEvent::Conversation(conversation) => {
                                 session.agent_session = conversation
                             }
                             // A thread's checklist follows the agent's own todo list too, so
                             // steps it ticks off there show without a second report.
-                            stream::Update::Todos(steps) => {
+                            AgentEvent::Todos(steps) => {
                                 if session.canvas != crew::CANVAS {
                                     if let Some(info) = session.crew.as_mut() {
                                         let kind =
@@ -2475,6 +2492,7 @@ impl RunoApp {
                 let took = self.started.get(&id).map(|start| start.elapsed());
                 self.handles.remove(&Target::Session(id));
                 self.streams.remove(&id);
+                let log = self.logs.remove(&id);
                 self.end_approvals(id);
                 if let Some(start) = self.started.remove(&id) {
                     let since =
@@ -2503,6 +2521,14 @@ impl RunoApp {
                 let mut hold = false;
                 let sync_warning = self.sync_warning(id);
                 if let Some(session) = self.state.session_mut(id) {
+                    for m in session
+                        .messages
+                        .iter_mut()
+                        .rev()
+                        .take_while(|m| m.role != Role::User)
+                    {
+                        m.settle_steps();
+                    }
                     // A CLI that exits cleanly without replying may have refused to run
                     // because it isn't signed in; say so instead of reporting an empty reply.
                     let silent = session.messages.last().is_some_and(|m| {
@@ -2659,6 +2685,9 @@ impl RunoApp {
                     .state
                     .session(id)
                     .is_some_and(|s| s.status == Status::Done);
+                if let Some(mut log) = log {
+                    log.end(ok);
+                }
                 self.log_turn_end(id, ok, stopped, hold, took, &all);
                 self.finish_turn(id, ok, stopped, hold, cx);
                 self.design_turn_done(id, stopped, cx);
@@ -3766,7 +3795,7 @@ impl RunoApp {
             .unwrap_or_default();
         for m in &mut earlier {
             for step in &mut m.steps {
-                *step = step.replace(&prefix, "");
+                step.label = step.label.replace(&prefix, "");
             }
         }
         let picked_up = format!(
@@ -5373,7 +5402,11 @@ impl RunoApp {
         let shown = if open { message.steps.len() } else { 0 };
         for (i, step) in message.steps.iter().take(shown).enumerate() {
             steps = steps.child(stagger(
-                div().child(self.step_row(step, message.step_state(i, live), (key.0, index, i))),
+                div().child(self.step_row(
+                    &step.label,
+                    message.step_state(i, live),
+                    (key.0, index, i),
+                )),
                 SharedString::from(format!("step-{}-{}-{}", key.0, index, i)),
                 i,
             ));
@@ -9964,6 +9997,14 @@ fn main() {
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."), thread);
         return;
     }
+    // `runo --events <session>`: print a session's event log, one JSON line per event.
+    if args.get(1).map(String::as_str) == Some("--events") {
+        let Some(id) = args.get(2).and_then(|id| id.parse().ok()) else {
+            eprintln!("usage: runo --events <session id>");
+            std::process::exit(2);
+        };
+        std::process::exit(harness::log::print(&store::data_dir(), id));
+    }
     // `runo --phone [address]`: the API Runo's mobile app talks to, without a window.
     if args.get(1).map(String::as_str) == Some("--phone") {
         std::process::exit(phone::serve(args.get(2).map(String::as_str)));
@@ -9991,6 +10032,7 @@ fn main() {
     shellenv::init();
     applog::init();
     detach::enable(store::data_dir());
+    harness::log::enable(store::data_dir());
     let app = application().with_assets(assets::AllAssets);
     // Clicking the Dock icon with the window closed (macOS keeps Runo running) opens it again.
     app.on_reopen(|cx| {

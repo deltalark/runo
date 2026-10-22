@@ -195,9 +195,9 @@ fn read_output(provider: &str, dir: &str, out: &str) -> (String, Option<String>,
     for line in out.lines() {
         for update in parser.feed(line) {
             match update {
-                crate::stream::Update::Text(t) => text.push_str(&t),
-                crate::stream::Update::Error(e) => error = Some(e),
-                crate::stream::Update::Conversation(c) => conversation = c,
+                crate::harness::AgentEvent::Text(t) => text.push_str(&t),
+                crate::harness::AgentEvent::Error(e) => error = Some(e),
+                crate::harness::AgentEvent::Conversation(c) => conversation = c,
                 _ => {}
             }
         }

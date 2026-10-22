@@ -190,7 +190,7 @@ pub(crate) fn brief(input: &BriefInput) -> String {
                     let skip = reply.steps.len().saturating_sub(STEPS_LISTED);
                     let steps: Vec<String> = reply.steps[skip..]
                         .iter()
-                        .map(|s| one_line(s, 80))
+                        .map(|s| one_line(&s.label, 80))
                         .collect();
                     out.push_str(&format!(
                         "{who} did: {}{}\n",
@@ -298,7 +298,10 @@ pub(crate) fn digest(messages: &[Message], current: &str) -> String {
             Some((at, r)) => {
                 let who = author(messages, *at, current);
                 let what = if r.text.trim().is_empty() {
-                    r.steps.last().map(|s| one_line(s, 120)).unwrap_or_default()
+                    r.steps
+                        .last()
+                        .map(|s| one_line(&s.label, 120))
+                        .unwrap_or_default()
                 } else {
                     one_line(&r.text, 160)
                 };
@@ -1116,7 +1119,7 @@ mod tests {
         for i in 0..300 {
             messages.push(Message::new(Role::User, format!("Request {i}: {big}")));
             let mut reply = Message::new(Role::Agent, big.clone());
-            reply.steps = (0..50).map(|n| format!("Step {n} {big}")).collect();
+            reply.steps = (0..50).map(|n| format!("Step {n} {big}").into()).collect();
             messages.push(reply);
         }
         let files: Vec<git::Change> = (0..500)
