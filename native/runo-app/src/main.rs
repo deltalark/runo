@@ -31,6 +31,8 @@ mod crew_peek;
 mod crew_ui;
 mod crew_view;
 mod ctxmenu;
+mod dataplace;
+mod db;
 mod design;
 mod designdraw;
 mod desktop_notify;
@@ -126,6 +128,7 @@ actions!(
         GoSessions,
         GoDesign,
         GoArchitecture,
+        GoData,
         GoPlaybooks,
         GoReviews,
         GoReview,
@@ -155,6 +158,8 @@ enum View {
     Home,
     Design,
     Architecture,
+    /// The project's databases.
+    Data,
     Session,
     NewSession,
     Inbox,
@@ -565,6 +570,8 @@ struct RunoApp {
     /// The Runo assistant in the corner, when turned on in Settings.
     assistant: assistant::Assistant,
     arch: architecture::ArchPage,
+    /// The Data place.
+    data: dataplace::DataPage,
     /// Each session's unsent prompt while another session is on screen, and the session
     /// whose text the composer holds now.
     drafts: HashMap<u64, String>,
@@ -1407,6 +1414,12 @@ impl RunoApp {
         let (design, design_subs) = design::DesignPage::new(window, cx);
         let (assistant, assistant_subs) = assistant::Assistant::new(window, cx);
         let (arch, arch_subs) = architecture::ArchPage::new(window, cx);
+        let (data, data_subs) = dataplace::DataPage::new(
+            ui_tx.clone(),
+            cx.theme().mono_font_family.clone(),
+            window,
+            cx,
+        );
         let (home, home_sub) = home::HomeState::new(window, cx);
         let notes_input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -1730,6 +1743,7 @@ impl RunoApp {
             design,
             assistant,
             arch,
+            data,
             drafts: HashMap::new(),
             draft_for: None,
             question_picks: HashMap::new(),
@@ -1945,6 +1959,7 @@ impl RunoApp {
         app._subscriptions.extend(design_subs);
         app._subscriptions.extend(assistant_subs);
         app._subscriptions.extend(arch_subs);
+        app._subscriptions.extend(data_subs);
         cx.set_global(MainApp(cx.entity().downgrade()));
         app.init_github(window, cx);
         app.restore_layout();
@@ -2967,6 +2982,7 @@ impl RunoApp {
             ("Go to Timeline", IconName::Activity, View::Activity),
             ("Go to Design", IconName::PanelsTopLeft, View::Design),
             ("Go to Architecture", IconName::Network, View::Architecture),
+            ("Go to Data", IconName::Database, View::Data),
             ("Go to Project notes", IconName::NotebookPen, View::Notes),
         ] {
             commands = commands.item(CommandItem::new().label(label).icon(name));
@@ -9095,6 +9111,7 @@ impl Render for RunoApp {
         match self.view {
             View::Design => self.prepare_design(window, cx),
             View::Architecture => self.prepare_architecture(window, cx),
+            View::Data => self.prepare_data(cx),
             _ => {
                 if std::mem::take(&mut self.design.shown) {
                     self.watch_design(None, cx);
@@ -9207,6 +9224,7 @@ impl Render for RunoApp {
             View::Home => self.home_view(cx),
             View::Design => self.design_view(window, cx),
             View::Architecture => self.architecture_view(cx),
+            View::Data => self.data_view(cx),
             // The Browser tab takes the work area while it is the tab shown.
             View::Session if self.browser_main && self.current().is_some() => div()
                 .flex_1()
@@ -9321,7 +9339,12 @@ impl Render for RunoApp {
         // sidebar.
         let page_fill = if matches!(
             self.view,
-            View::Review | View::GitHistory | View::Branches | View::GitHub | View::Settings
+            View::Review
+                | View::GitHistory
+                | View::Branches
+                | View::GitHub
+                | View::Settings
+                | View::Data
         ) || (self.view == View::Architecture && self.arch_diagram_open())
             || (self.view == View::Design && self.design_canvas_open())
         {
@@ -9404,6 +9427,9 @@ impl Render for RunoApp {
             .on_action(cx.listener(|this, _: &GoDesign, window, cx| {
                 this.go(Mode::Design, window, cx);
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoData, window, cx| {
+                this.go(Mode::Data, window, cx);
             }))
             .on_action(cx.listener(|this, _: &GoArchitecture, window, cx| {
                 this.go(Mode::Architecture, window, cx);

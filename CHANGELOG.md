@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- A Data place for each project, beside Design and Architecture (⌘9). It finds the databases the project uses in its `.env` files, Docker Compose services, Prisma, Drizzle and Rails configs and SQLite files, and shows where each was found and whether it's running. Connect to a Postgres or SQLite database to browse its tables: filter by typing `status = failed`, sort by a column, follow keys to the rows they point at, and see the rows that point back. Every connection is read-only, enforced by the database itself. Columns that look personal or secret stay masked until you reveal them, and pasted passwords go to the Keychain, never to Runo's files. MySQL, Redis and MongoDB are found and listed now, and open in a later release.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

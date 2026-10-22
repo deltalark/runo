@@ -58,6 +58,14 @@ flate2 = "1"
 resvg = "0.45"
 # The pairing code `runo --phone` prints in the terminal.
 qrcode = { version = "0.14", default-features = false }
+# The Data place: read-only sessions on the project's databases.
+postgres = "0.19"
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+url = "2"
+percent-encoding = "2"
 
 [build-dependencies]
 embed-resource = "3.0.11"
@@ -69,6 +77,8 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFDate"] }
 objc2-foundation = "0.3"
+# Database passwords live in the Keychain.
+security-framework = "3"
 # The design canvas draws its screens with WebKit, the engine built into macOS.
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "std",
