@@ -225,6 +225,8 @@ struct RunoApp {
     git_folder_open: bool,
     git_folder_file: Option<String>,
     git_left_out: parts::LeftOut,
+    /// Sections of the folder's files folded away, by their key.
+    git_folder_shut: HashSet<String>,
     /// The folder's commit box, a value waiting to go into it, and the message being
     /// committed, put back if the commit fails.
     git_folder_msg: Entity<InputState>,
@@ -1496,6 +1498,7 @@ impl RunoApp {
             git_folder_open: false,
             git_folder_file: None,
             git_left_out: Default::default(),
+            git_folder_shut: Default::default(),
             git_folder_msg,
             git_folder_msg_set: None,
             git_folder_msg_kept: None,
