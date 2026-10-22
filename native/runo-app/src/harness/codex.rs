@@ -382,6 +382,7 @@ fn turns(turn: &Path, agent: &mut Agent, h: &Handler, thread: &str) -> Result<bo
         // Steers waiting for their answer, by request id.
         let mut steering: HashMap<u64, String> = HashMap::new();
         let mut ended = false;
+        let mut active = false;
         let mut settle_until: Option<Instant> = None;
         loop {
             match agent.next(Duration::from_millis(100)) {
@@ -391,12 +392,28 @@ fn turns(turn: &Path, agent: &mut Agent, h: &Handler, thread: &str) -> Result<bo
                     line,
                 } => {
                     rpc::write_line(h.out, &line);
-                    if method == "turn/completed" && params["turn"]["id"] == turn_id.as_str() {
-                        if params["turn"]["status"] == "failed" {
+                    let completed =
+                        method == "turn/completed" && params["turn"]["id"] == turn_id.as_str();
+                    // The thread going idle ends the turn too, so a release that reshapes
+                    // `turn/completed` can't leave the host waiting forever.
+                    let status = (method == "thread/status/changed"
+                        && params["threadId"] == thread)
+                        .then(|| params["status"]["type"].as_str().unwrap_or(""));
+                    // Only after the thread was seen working, so an idle state from before
+                    // this turn started isn't taken for its end.
+                    if status == Some("active") || method == "turn/started" {
+                        active = true;
+                    }
+                    let idle = active && status == Some("idle");
+                    if (completed || idle) && !ended {
+                        if completed && params["turn"]["status"] == "failed" {
                             failed = true;
                         }
                         ended = true;
                         settle_until = Some(Instant::now() + Duration::from_secs(5));
+                    }
+                    if !KNOWN.contains(&method.as_str()) {
+                        drift(turn, &method);
                     }
                 }
                 Message::Response { id, reply } => {
@@ -443,6 +460,57 @@ fn turns(turn: &Path, agent: &mut Agent, h: &Handler, thread: &str) -> Result<bo
                 break;
             }
         }
+    }
+}
+
+/// Notifications Runo reads or knowingly passes over. Others are noted in `turn/drift`,
+/// so a protocol change in a new Codex release shows up early.
+const KNOWN: &[&str] = &[
+    "error",
+    "warning",
+    "configWarning",
+    "deprecationNotice",
+    "thread/started",
+    "thread/status/changed",
+    "thread/tokenUsage/updated",
+    "thread/name/updated",
+    "thread/settings/updated",
+    "turn/started",
+    "turn/completed",
+    "turn/diff/updated",
+    "turn/plan/updated",
+    "item/started",
+    "item/completed",
+    "item/agentMessage/delta",
+    "item/plan/delta",
+    "item/reasoning/summaryTextDelta",
+    "item/reasoning/summaryPartAdded",
+    "item/reasoning/textDelta",
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta",
+    "item/fileChange/patchUpdated",
+    "item/mcpToolCall/progress",
+    "serverRequest/resolved",
+    "account/rateLimits/updated",
+    "mcpServer/startupStatus/updated",
+    "remoteControl/status/changed",
+    "model/rerouted",
+];
+
+/// Note a notification Runo doesn't know, once per method.
+fn drift(turn: &Path, method: &str) {
+    let path = turn.join("drift");
+    let seen = std::fs::read_to_string(&path).unwrap_or_default();
+    if seen.lines().any(|l| l == method) {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{method}");
     }
 }
 
@@ -877,6 +945,49 @@ for line in sys.stdin:
         assert!(
             events.contains(&AgentEvent::Text("from exec".into())),
             "{events:?}"
+        );
+        let _ = std::fs::remove_dir_all(turn);
+    }
+
+    /// An app server whose turns end with the thread going idle, without the
+    /// `turn/completed` Runo knows.
+    const IDLE: &str = r#"
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("method") == "initialize": print(json.dumps({"id": m["id"], "result": {}}), flush=True)
+    elif m.get("method") == "thread/start": print(json.dumps({"id": m["id"], "result": {"thread": {"id": "th1"}}}), flush=True)
+    elif m.get("method") == "turn/start":
+        print(json.dumps({"id": m["id"], "result": {"turn": {"id": "t1"}}}), flush=True)
+        print(json.dumps({"method": "thread/status/changed", "params": {"threadId": "th1", "status": {"type": "idle"}}}), flush=True)
+        print(json.dumps({"method": "thread/status/changed", "params": {"threadId": "th1", "status": {"type": "active"}}}), flush=True)
+        print(json.dumps({"method": "turn/finished2", "params": {"turnId": "t1"}}), flush=True)
+        print(json.dumps({"method": "thread/status/changed", "params": {"threadId": "th1", "status": {"type": "idle"}}}), flush=True)
+"#;
+
+    #[test]
+    fn a_turn_ends_when_the_thread_goes_idle_and_new_methods_are_noted() {
+        if std::process::Command::new("python3")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let turn = temp("idle");
+        let script = turn.join("server.py");
+        std::fs::write(&script, IDLE).unwrap();
+        super::super::host::send(&turn, "go").unwrap();
+        let cfg = Config {
+            command: vec!["python3".into(), script.to_string_lossy().into()],
+            cwd: turn.to_string_lossy().into(),
+            ..Config::default()
+        };
+        cfg.write(&turn).unwrap();
+        assert_eq!(main(&turn), 0);
+        assert_eq!(
+            std::fs::read_to_string(turn.join("drift")).unwrap(),
+            "turn/finished2\n"
         );
         let _ = std::fs::remove_dir_all(turn);
     }
