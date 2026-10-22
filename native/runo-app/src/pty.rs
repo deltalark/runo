@@ -124,7 +124,7 @@ fn now_ms() -> u64 {
 }
 
 impl Shell {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     /// Start the user's login shell in `dir`. `wake` is called (at most once per
     /// repaint) when there is new output, and once more when the shell exits.
     pub fn spawn(
@@ -885,6 +885,7 @@ fn set_size_keeping_cursor(p: &mut vt100::Parser, rows: u16, cols: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     #[test]
