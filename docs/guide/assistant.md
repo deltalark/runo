@@ -17,4 +17,8 @@ It knows your projects, sessions and how each is doing, permission requests and 
 
 Each offer is a card that says exactly what it will do; nothing happens until you click **Run** or **Go**, and **×** dismisses it. Follow-ups like "do that" or "and the other one?" work, as it remembers the conversation until you start a new chat.
 
-Turn it on or off in **Settings → General → Runo assistant**. It answers with your default agent on a fast model; with **Guide only** it answers from this guide without an agent and can't see or do anything in the app.
+Answers stream in as they are written; **Stop** keeps what is there so far.
+
+Pick which agent answers, and its model, from the chip under the input; **Default** is a fast model where Runo knows one. The same choice is under **Settings → General → Runo assistant → Assistant agent**, where it starts out the same as your default agent for new sessions.
+
+Turn it on or off in **Settings → General → Runo assistant**. With **Guide only** it answers from this guide without an agent and can't see or do anything in the app.

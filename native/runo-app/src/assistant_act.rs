@@ -68,11 +68,9 @@ pub(crate) enum Outcome {
 
 /// An `ACTION:` line's action, or nothing when the line isn't one or doesn't parse.
 pub(crate) fn parse(line: &str) -> Option<Action> {
-    let json = line
-        .trim()
-        .strip_prefix("ACTION:")?
-        .trim()
-        .trim_matches('`');
+    let rest = line.trim().strip_prefix("ACTION:")?;
+    // The object alone, whatever the agent wrapped it in.
+    let json = &rest[rest.find('{')?..=rest.rfind('}')?];
     serde_json::from_str(json).ok()
 }
 
@@ -660,6 +658,10 @@ mod tests {
         );
         assert_eq!(parse("ACTION: {\"do\":\"format-disk\"}"), None);
         assert_eq!(parse("ACTION: not json"), None);
+        assert_eq!(
+            parse(r#"ACTION: {"do":"stop","session":4}\n"#),
+            Some(Action::Stop { session: 4 })
+        );
         assert_eq!(parse("Start a race."), None);
     }
 

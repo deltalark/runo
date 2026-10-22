@@ -379,6 +379,21 @@ fn browser_options(chosen: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The agents the assistant can answer with: the default, then each one installed, and
+/// the chosen one even if it has since been removed.
+fn assistant_agents(st: &AppSettings) -> Vec<(String, String)> {
+    let mut out = vec![(String::new(), "Same as new sessions".to_string())];
+    out.extend(
+        agent::PROVIDERS
+            .iter()
+            .filter(|p| {
+                p.id == st.assistant_agent || agent::available(p.bin, &st.agent(p.id).binary)
+            })
+            .map(|p| (p.id.to_string(), p.name.to_string())),
+    );
+    out
+}
+
 fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
     items
         .iter()
@@ -738,7 +753,8 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Runo assistant", "A Runo mark in the corner of the window that answers questions about Runo from its built-in guide. It never changes anything.", vec![
                 switch_row("Show the Runo assistant", "Click the mark or press the Ask Runo shortcut, then ask how to do something. Off, the mark is hidden.", st.assistant, |s, v| s.assistant = v),
-                row("Answers with", "Your default agent writes answers from the guide on a fast model, and it counts toward usage. Guide only answers offline with the best matching article.", Ctl::Dropdown(options(&[("agent", "Default agent"), ("guide", "Guide only")]), st.assistant_answers.clone(), Rc::new(|s, v| s.assistant_answers = v))),
+                row("Answers with", "An agent writes answers from the guide and what's happening in the app, and can offer to do things for you; it counts toward usage. Guide only answers offline with the best matching article.", Ctl::Dropdown(options(&[("agent", "An agent"), ("guide", "Guide only")]), st.assistant_answers.clone(), Rc::new(|s, v| s.assistant_answers = v))),
+                row("Assistant agent", "Which agent answers. Pick its model from the chip under the assistant's input.", Ctl::Dropdown(assistant_agents(st), st.assistant_agent.clone(), Rc::new(|s, v| { if s.assistant_agent != v { s.assistant_model.clear(); } s.assistant_agent = v; }))),
             ]),
             section("Browser", "Show pages in the Browser tab with a headless copy of a Chromium-based browser on this machine (Chrome, Edge, Brave, Arc, Vivaldi, Opera and others), using its own profile.", vec![
                 switch_row("Built-in browser", "Adds the Browser tab: open your dev server beside the conversation and click and type in it. Off, the tab is hidden.", st.browser_enabled, |s, v| s.browser_enabled = v),

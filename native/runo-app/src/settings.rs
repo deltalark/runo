@@ -168,8 +168,12 @@ pub struct AppSettings {
     pub phone_everywhere: bool,
     /// Show the Runo assistant in the corner of the window. Off until turned on.
     pub assistant: bool,
-    /// Who writes its answers: "agent" (the default agent on a fast model) or "guide".
+    /// Who writes its answers: "agent" (the agent below) or "guide".
     pub assistant_answers: String,
+    /// The agent that answers, by id; empty answers with the default agent.
+    pub assistant_agent: String,
+    /// Its model; empty is a fast one where Runo knows it, else the agent's default.
+    pub assistant_model: String,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -250,6 +254,8 @@ impl Default for AppSettings {
             phone_everywhere: false,
             assistant: false,
             assistant_answers: "agent".into(),
+            assistant_agent: String::new(),
+            assistant_model: String::new(),
         }
     }
 }
