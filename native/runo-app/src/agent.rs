@@ -1637,27 +1637,33 @@ pub fn prepare_folder(spec: &RunSpec, dir: &str, sandboxed: bool) {
 }
 
 /// Whether Runo talks to the agent while it works: Claude Code takes its prompt, and
-/// any message sent while it runs, on stdin (`--input-format stream-json`).
+/// any message sent while it runs, on stdin (`--input-format stream-json`), and so does
+/// Amp, in the same format, once its help lists `--stream-json-input`.
 pub fn takes_live_input(provider: &str) -> bool {
-    provider == "claude"
+    match provider {
+        "claude" => true,
+        "amp" => crate::caps::mentions("amp", "--stream-json-input"),
+        _ => false,
+    }
 }
 
-/// A Claude turn's command made live: the prompt at the end of its arguments goes
-/// instead as the first message on stdin. Returns the command and that prompt, or
-/// `None` when the arguments don't end in `-- <prompt>`.
-pub fn live_command(command: &Command) -> Option<(Command, String)> {
+/// A turn's command made live: the prompt at the end of its arguments (after `--` for
+/// Claude Code, `-x` for Amp) goes instead as the first message on stdin. Returns the
+/// command and that prompt, or `None` when the arguments don't end that way.
+pub fn live_command(provider: &str, command: &Command) -> Option<(Command, String)> {
     let args: Vec<String> = command
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let [rest @ .., dashes, prompt] = args.as_slice() else {
+    let [rest @ .., flag, prompt] = args.as_slice() else {
         return None;
     };
-    if dashes != "--" {
-        return None;
-    }
     let mut live = Command::new(command.get_program());
-    live.args(rest).args(["--input-format", "stream-json"]);
+    match (provider, flag.as_str()) {
+        ("claude", "--") => live.args(rest).args(["--input-format", "stream-json"]),
+        ("amp", "-x") => live.args(rest).args(["-x", "--stream-json-input"]),
+        _ => return None,
+    };
     for (key, value) in command.get_envs() {
         match value {
             Some(value) => live.env(key, value),
@@ -1818,7 +1824,7 @@ pub fn run_agent(
                 );
             }
             if takes_live_input(spec.provider) {
-                if let Some((live, prompt)) = live_command(&command) {
+                if let Some((live, prompt)) = live_command(spec.provider, &command) {
                     return crate::detach::spawn_live(root, id, live, &prompt, dir, tx);
                 }
             }
@@ -2175,7 +2181,7 @@ mod arg_tests {
         command
             .args(["-p", "--output-format", "stream-json", "--", "Fix it"])
             .env("RUNO_X", "1");
-        let (live, prompt) = live_command(&command).unwrap();
+        let (live, prompt) = live_command("claude", &command).unwrap();
         assert_eq!(prompt, "Fix it");
         let args: Vec<_> = live
             .get_args()
@@ -2195,8 +2201,19 @@ mod arg_tests {
         // Without a trailing prompt there's nothing to move.
         let mut bare = Command::new("claude");
         bare.args(["-p", "hi"]);
-        assert!(live_command(&bare).is_none());
+        assert!(live_command("claude", &bare).is_none());
         assert!(takes_live_input("claude") && !takes_live_input("codex"));
+        // Amp takes its messages the same way once its help lists the flag.
+        let mut amp = Command::new("amp");
+        amp.args(["--stream-json", "-x", "Fix it"]);
+        let (live, prompt) = live_command("amp", &amp).unwrap();
+        assert_eq!(prompt, "Fix it");
+        let args: Vec<_> = live
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["--stream-json", "-x", "--stream-json-input"]);
+        assert!(live_command("claude", &amp).is_none());
     }
 
     #[test]
