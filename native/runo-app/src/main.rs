@@ -2378,6 +2378,17 @@ impl RunoApp {
                             stream::Update::Conversation(conversation) => {
                                 session.agent_session = conversation
                             }
+                            // A thread's checklist follows the agent's own todo list too, so
+                            // steps it ticks off there show without a second report.
+                            stream::Update::Todos(steps) => {
+                                if session.canvas != crew::CANVAS {
+                                    if let Some(info) = session.crew.as_mut() {
+                                        let kind =
+                                            crew::EventKind::Checklist { steps, title: None };
+                                        crew::apply(info, &kind, 0);
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -475,7 +475,11 @@ impl RunoApp {
             let answer_only = self.crew.answer_now.remove(&id);
             self.chat_turn_ended(id, blocks, ok && !stopped && !answer_only, answer_only, cx);
         } else if s.crew.is_some() {
-            self.thread_turn_ended(id, blocks, ok, stopped);
+            let reports = s.crew.as_ref().map_or(0, |i| i.reports.len());
+            // What the thread sent through Runo's tools during the turn lands first, so
+            // its last checklist and report count, not one read a tick later.
+            self.crew_tick(cx);
+            self.thread_turn_ended(id, blocks, ok, stopped, reports);
         }
     }
 
@@ -671,7 +675,15 @@ impl RunoApp {
         self.save();
     }
 
-    fn thread_turn_ended(&mut self, id: u64, blocks: Vec<crew::Tagged>, ok: bool, stopped: bool) {
+    /// `reports` is how many reports the thread had before its turn's last ones were read.
+    fn thread_turn_ended(
+        &mut self,
+        id: u64,
+        blocks: Vec<crew::Tagged>,
+        ok: bool,
+        stopped: bool,
+        reports: usize,
+    ) {
         let at = crate::workspace::unix_now();
         let mut reported = None;
         if let Some(s) = self.state.session_mut(id).filter(|s| s.crew.is_some()) {
@@ -690,10 +702,13 @@ impl RunoApp {
             if info.decision.is_none() {
                 info.attention = ok.then_some(crew::Attention::Review);
             }
+            if ok && !stopped {
+                crew::settle(info);
+            }
             reported = info
                 .reports
                 .last()
-                .filter(|r| r.at >= at.saturating_sub(1))
+                .filter(|r| info.reports.len() > reports || r.at >= at.saturating_sub(1))
                 .map(|r| r.summary.clone());
         }
         let Some(s) = self.state.session(id) else {
