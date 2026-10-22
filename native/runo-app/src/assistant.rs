@@ -653,21 +653,27 @@ impl RunoApp {
     }
 
     fn assistant_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let thinking = self.assistant.asking.is_some();
+        let mood = if thinking {
+            Mood::Thinking
+        } else {
+            Mood::Listening
+        };
         let header = div()
             .flex()
             .items_center()
             .gap_2()
-            .px_4()
-            .py_3()
-            .border_b_1()
-            .border_color(divider())
-            .child(mark(Mood::Idle, 24., None))
+            .child(header_mark(mood))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("Runo"))
             .child(
                 div()
                     .text_size(px(11.5))
-                    .text_color(rgb(c_muted()))
-                    .child("Ask how to do anything in Runo"),
+                    .text_color(rgb(if thinking { pose(mood).1 } else { c_muted() }))
+                    .child(if thinking {
+                        "Thinking…"
+                    } else {
+                        "Ask how to do anything in Runo"
+                    }),
             )
             .child(div().flex_1())
             .when(!self.assistant.chat.is_empty(), |el| {
@@ -687,6 +693,16 @@ impl RunoApp {
                         cx.notify();
                     })),
             );
+        let header = div()
+            .px_4()
+            .pt_3()
+            .pb(px(10.))
+            .v_flex()
+            .gap(px(10.))
+            .border_b_1()
+            .border_color(divider())
+            .child(header)
+            .child(self.assistant_telemetry());
 
         let mut body = div()
             .id("assistant-body")
@@ -806,12 +822,7 @@ impl RunoApp {
             body = body.child(answer);
         }
         if self.assistant.asking.is_some() {
-            body = body.child(
-                div()
-                    .text_size(px(12.5))
-                    .text_color(rgb(c_muted()))
-                    .child("Looking it up…"),
-            );
+            body = body.child(thinking_line());
         }
 
         let st = cx.global::<AppSettings>();
@@ -841,6 +852,10 @@ impl RunoApp {
                     .child("Never changes anything"),
             );
 
+        // The ring Home's prompt wears: a gradient a hair larger than the panel, the
+        // accent turning violet, with a soft glow of the accent under it.
+        let accent = c_blue();
+        let ring_to = settings::mix(RING_VIOLET, accent, 0.6);
         div()
             .id("assistant-panel")
             .absolute()
@@ -850,17 +865,30 @@ impl RunoApp {
             .max_w(relative(0.9))
             .h(px(520.))
             .max_h(relative(0.75))
-            .v_flex()
-            .rounded_xl()
-            .border_1()
-            .border_color(float_edge())
-            .bg(float(c_canvas()))
-            .shadow_2xl()
+            .p(px(1.5))
+            .rounded(px(13.5))
+            .bg(linear_gradient(
+                160.,
+                linear_color_stop(glow(accent, 0.85), 0.),
+                linear_color_stop(glow(ring_to, 0.75), 1.),
+            ))
+            .shadow(vec![
+                halo(0x000000, if is_dark() { 0.45 } else { 0.16 }, 48., 0., 18.),
+                halo(accent, if is_dark() { 0.3 } else { 0.2 }, 40., 0., 8.),
+            ])
             .occlude()
             .on_click(|_, _, cx| cx.stop_propagation())
-            .child(header)
-            .child(body)
-            .child(footer)
+            .child(
+                div()
+                    .size_full()
+                    .v_flex()
+                    .rounded(px(12.))
+                    .overflow_hidden()
+                    .bg(float(c_canvas()))
+                    .child(header)
+                    .child(body)
+                    .child(footer),
+            )
             // It opens up out of the mark: fading in while rising the last few pixels.
             .animated(
                 "assistant-panel-in",
@@ -957,7 +985,8 @@ fn live_mark(
         None => 0.,
     };
     let thinking = mood == Mood::Thinking;
-    let animation = if thinking {
+    let alive = mood != Mood::Idle;
+    let animation = if alive {
         Animation::new(Duration::from_millis(1400)).repeat()
     } else {
         Animation::new(Duration::from_millis(MORPH_MS.max(LIFT_MS) as u64))
@@ -977,12 +1006,19 @@ fn live_mark(
             }
             let lift = lift_at();
             bars[1].1 += 5. * lift;
-            el.child(
-                div()
-                    .absolute()
-                    .top(px(-2. * lift))
-                    .child(mark_with(mood, 46., bars, None)),
-            )
+            // Something waiting makes the glow breathe.
+            let swell = if mood == Mood::NeedsYou {
+                (d * std::f32::consts::TAU).sin() * 0.5 + 0.5
+            } else {
+                0.
+            };
+            el.child(div().absolute().top(px(-2. * lift)).child(lit_mark(
+                mood,
+                46.,
+                bars,
+                alive.then(|| turn(mood)),
+                swell,
+            )))
         },
     );
     let mut layer = div().relative().child(el);
@@ -1019,11 +1055,13 @@ fn badge_dot(n: usize) -> Div {
 /// Runo's icon, three staggered bars on a rounded square, posed for `mood`. At `size` 46 it
 /// is the mark in the corner; smaller in the panel header.
 fn mark(mood: Mood, size: f32, badge: Option<usize>) -> AnyElement {
-    mark_with(mood, size, pose(mood).0, badge)
+    mark_with(mood, size, pose(mood).0, badge, false)
 }
 
 /// The icon with its bars at `bars`, as (left, width) at size 46.
-fn mark_with(mood: Mood, size: f32, bars: Bars, badge: Option<usize>) -> AnyElement {
+/// While a light runs round its edge (`running`), the edge itself steps back so the light
+/// stands out on it.
+fn mark_with(mood: Mood, size: f32, bars: Bars, badge: Option<usize>, running: bool) -> AnyElement {
     let s = size / 46.;
     let middle = pose(mood).1;
     let tops = [13., 20.5, 28.];
@@ -1038,6 +1076,7 @@ fn mark_with(mood: Mood, size: f32, bars: Bars, badge: Option<usize>) -> AnyElem
         .rounded(px(14. * s))
         .border_1()
         .border_color(rgb(match mood {
+            _ if running => settings::mix(c_border(), middle, 0.55),
             Mood::Listening => c_blue(),
             Mood::NeedsYou => c_amber(),
             _ => settings::mix(c_border(), c_text(), 0.88),
@@ -1063,6 +1102,257 @@ fn mark_with(mood: Mood, size: f32, bars: Bars, badge: Option<usize>) -> AnyElem
 }
 
 const VIOLET: u32 = 0xa78bfa;
+/// The violet Home's prompt ring turns into.
+const RING_VIOLET: u32 = 0x8b5cf6;
+/// How long the light takes to run once round the mark's edge; thinking runs it three
+/// times as fast.
+const RUN_MS: f32 = 4200.;
+
+/// `color` at opacity `a`.
+fn glow(color: u32, a: f32) -> Rgba {
+    rgba((color << 8) | (a.clamp(0., 1.) * 255.).round() as u32)
+}
+
+/// A soft shadow of `color`, `lift` pixels below what casts it.
+fn halo(color: u32, a: f32, blur: f32, spread: f32, lift: f32) -> BoxShadow {
+    BoxShadow {
+        color: glow(color, a).into(),
+        offset: point(px(0.), px(lift)),
+        blur_radius: px(blur),
+        spread_radius: px(spread),
+        inset: false,
+    }
+}
+
+/// How far round the mark's edge the light has run, as a fraction of a lap. Read from
+/// the clock, so it never jumps back when the mark is drawn again.
+fn turn(mood: Mood) -> f32 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let ms = ms_since(*START.get_or_init(std::time::Instant::now));
+    let lap = if mood == Mood::Thinking {
+        RUN_MS / 3.
+    } else {
+        RUN_MS
+    };
+    (ms / lap).fract()
+}
+
+/// The point `t` of the way round a `w` square with corners of radius `r`, clockwise from
+/// the middle of its top edge.
+fn round_square_at(w: f32, r: f32, t: f32) -> (f32, f32) {
+    let side = w - 2. * r;
+    let bend = std::f32::consts::FRAC_PI_2 * r;
+    let lap = 4. * (side + bend);
+    let mut d = (t.rem_euclid(1.) * lap + side / 2.).rem_euclid(lap);
+    // Each side, then the corner after it, starting along the top.
+    let corners = [(w - r, r), (w - r, w - r), (r, w - r), (r, r)];
+    let starts = [(r, 0.), (w, r), (w - r, w), (0., w - r)];
+    let dirs = [(1., 0.), (0., 1.), (-1., 0.), (0., -1.)];
+    for i in 0..4 {
+        if d <= side {
+            return (starts[i].0 + dirs[i].0 * d, starts[i].1 + dirs[i].1 * d);
+        }
+        d -= side;
+        if d <= bend {
+            let a = (i as f32 - 1.) * std::f32::consts::FRAC_PI_2 + d / r;
+            return (corners[i].0 + r * a.cos(), corners[i].1 + r * a.sin());
+        }
+        d -= bend;
+    }
+    (w / 2., 0.)
+}
+
+/// The mark, lit: a glow of its mood's colour under it and, while it is alive, a light
+/// running round its edge with a tail that fades behind it. `run` is how far round the
+/// light is; `swell` how far the glow has breathed out, 0 to 1.
+fn lit_mark(mood: Mood, size: f32, bars: Bars, run: Option<f32>, swell: f32) -> AnyElement {
+    let s = size / 46.;
+    let light = match mood {
+        Mood::Idle => return mark_with(mood, size, bars, None, false),
+        Mood::Listening => c_blue(),
+        Mood::Thinking => VIOLET,
+        Mood::NeedsYou => c_amber(),
+    };
+    let strength = if is_dark() { 0.55 } else { 0.32 };
+    // The light's head: the mood's colour lifted towards white on dark themes.
+    let head = if is_dark() {
+        settings::mix(0xffffff, light, 0.35)
+    } else {
+        light
+    };
+    let mut layer = div()
+        .relative()
+        .size(px(size))
+        .rounded(px(14. * s))
+        .shadow(vec![halo(
+            light,
+            strength + 0.18 * swell,
+            20. * s,
+            5. * s * swell,
+            1. * s,
+        )])
+        .child(mark_with(mood, size, bars, None, run.is_some()));
+    if let Some(run) = run {
+        layer = layer.child(
+            div().absolute().inset_0().child(
+                canvas(
+                    |_, _, _| (),
+                    move |b, _, window, _| {
+                        let (w, r) = (size - 1., 14. * s - 0.5);
+                        let at = |t: f32| {
+                            let (x, y) = round_square_at(w, r, t);
+                            point(b.origin.x + px(x + 0.5), b.origin.y + px(y + 0.5))
+                        };
+                        // The head, bright, then two lengths of tail, each fainter.
+                        for (from, to, color, a) in [
+                            (0.2, 0.3, head, 1.),
+                            (0.1, 0.2, light, 0.8),
+                            (0., 0.1, light, 0.35),
+                        ] {
+                            let mut f = PathBuilder::stroke(px(2.4 * s));
+                            let steps = 16;
+                            for i in 0..=steps {
+                                let t = run + from + (to - from) * i as f32 / steps as f32;
+                                if i == 0 {
+                                    f.move_to(at(t));
+                                } else {
+                                    f.line_to(at(t));
+                                }
+                            }
+                            if let Ok(path) = f.build() {
+                                window.paint_path(path, Hsla::from(glow(color, a)));
+                            }
+                        }
+                    },
+                )
+                .size_full(),
+            ),
+        );
+        // A spark at the head, glowing.
+        let (x, y) = round_square_at(size - 1., 14. * s - 0.5, run + 0.3);
+        let d = 4. * s;
+        layer = layer.child(
+            div()
+                .absolute()
+                .left(px(x + 0.5 - d / 2.))
+                .top(px(y + 0.5 - d / 2.))
+                .size(px(d))
+                .rounded_full()
+                .bg(rgb(head))
+                .shadow(vec![halo(light, 0.9, 8. * s, 1. * s, 0.)]),
+        );
+    }
+    layer.into_any_element()
+}
+
+/// The mark in the panel's header, with the light running round it while the panel is
+/// open.
+fn header_mark(mood: Mood) -> AnyElement {
+    if !anim_on() {
+        return lit_mark(mood, 24., pose(mood).0, None, 0.);
+    }
+    div()
+        .size(px(24.))
+        .with_animation(
+            ElementId::Name(format!("assistant-header-mark-{mood:?}").into()),
+            Animation::new(Duration::from_millis(1400)).repeat(),
+            move |el, _| el.child(lit_mark(mood, 24., pose(mood).0, Some(turn(mood)), 0.)),
+        )
+        .into_any_element()
+}
+
+/// While the agent works on an answer: the line it always showed, and a caret in the
+/// accent that blinks after it.
+fn thinking_line() -> AnyElement {
+    let caret = div()
+        .w(px(6.))
+        .h(px(13.))
+        .rounded(px(1.))
+        .bg(rgb(c_blue()))
+        .shadow(vec![halo(c_blue(), 0.6, 8., 0., 0.)]);
+    let caret = if anim_on() {
+        caret
+            .with_animation(
+                "assistant-caret",
+                Animation::new(Duration::from_millis(1000)).repeat(),
+                |el, d| el.opacity(if d < 0.5 { 1. } else { 0.15 }),
+            )
+            .into_any_element()
+    } else {
+        caret.into_any_element()
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .text_size(px(12.5))
+        .text_color(rgb(c_muted()))
+        .child("Looking it up")
+        .child(caret)
+        .into_any_element()
+}
+
+/// One reading on the panel's status row, in the look of the chips under an answer: a
+/// lit dot when `lit`, the value, and what it counts.
+fn readout(lit: Option<u32>, value: String, what: &'static str) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .px(px(7.))
+        .py(px(2.))
+        .rounded_md()
+        .border_1()
+        .border_color(divider())
+        .text_size(px(11.))
+        .text_color(rgb(c_muted()))
+        .when_some(lit, |el, c| {
+            el.child(
+                div()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(rgb(c))
+                    .shadow(vec![halo(c, 0.7, 6., 0., 0.)]),
+            )
+        })
+        .child(
+            div()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(c_text()))
+                .child(value),
+        )
+        .child(what)
+}
+
+impl RunoApp {
+    /// The status row under the panel's header: agents running, what waits on the
+    /// person, the session's branch and the clashes the radar found. Only what is already
+    /// in memory, so drawing it never runs git.
+    fn assistant_telemetry(&self) -> Div {
+        let running = self.started.len();
+        let waiting = self.approvals.len() + self.waiting_sessions().len();
+        let mut row = div().flex().flex_wrap().gap_1().child(readout(
+            (running > 0).then_some(c_green()),
+            running.to_string(),
+            "running",
+        ));
+        if waiting > 0 {
+            row = row.child(readout(Some(c_amber()), waiting.to_string(), "waiting"));
+        }
+        if let Some(session) = self.current() {
+            row = row.child(readout(None, session.branch.clone(), "branch"));
+        }
+        let clashes = self.git_radar.as_ref().map_or(0, |hits| hits.len());
+        if clashes > 0 {
+            row = row.child(readout(
+                Some(c_red()),
+                clashes.to_string(),
+                if clashes == 1 { "clash" } else { "clashes" },
+            ));
+        }
+        row
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1189,6 +1479,27 @@ mod tests {
         assert_eq!(open.as_deref(), Some("race-agents"));
         let (_, none) = split_reply("Not covered.\nOPEN: none");
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn the_light_runs_round_the_edge() {
+        let (w, r) = (46., 14.);
+        // It starts in the middle of the top edge and comes back to it after a lap.
+        assert_eq!(round_square_at(w, r, 0.), (23., 0.));
+        let back = round_square_at(w, r, 1.);
+        assert!((back.0 - 23.).abs() < 0.01 && back.1.abs() < 0.01);
+        // A quarter of the way round it is halfway down the right edge.
+        let q = round_square_at(w, r, 0.25);
+        assert!((q.0 - w).abs() < 0.01 && (q.1 - 23.).abs() < 0.01);
+        // Small steps make small moves: no jumps where a side meets a corner.
+        let mut last = round_square_at(w, r, 0.);
+        for i in 1..=400 {
+            let at = round_square_at(w, r, i as f32 / 400.);
+            let step = ((at.0 - last.0).powi(2) + (at.1 - last.1).powi(2)).sqrt();
+            assert!(step < 0.6, "jumped {step} at {i}");
+            assert!((0. ..=w).contains(&at.0) && (0. ..=w).contains(&at.1));
+            last = at;
+        }
     }
 
     #[test]
