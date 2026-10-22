@@ -61,6 +61,8 @@ pub(crate) struct DataPage {
     pub adding: bool,
     pub add_error: Option<String>,
     pub filter_error: Option<String>,
+    /// The connection whose Remove was pressed once, waiting for the second press.
+    pub confirm_remove: Option<String>,
 }
 
 impl DataPage {
@@ -144,6 +146,7 @@ impl DataPage {
                 adding: false,
                 add_error: None,
                 filter_error: None,
+                confirm_remove: None,
             },
             subs,
         )
@@ -173,6 +176,38 @@ pub(crate) fn short_count(n: i64) -> String {
 }
 
 /// A hidden value: an email keeps its first letter and domain, anything else is dots.
+/// A JSON value laid out over lines, or the text as it is when it isn't JSON.
+pub(crate) fn pretty_json(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| text.to_string())
+}
+
+/// A row as a JSON object, for the clipboard. Values still hidden stay masked.
+pub(crate) fn row_json(
+    columns: &[String],
+    row: &[Cell],
+    hidden: impl Fn(&String) -> bool,
+) -> String {
+    let mut out = serde_json::Map::new();
+    for (name, cell) in columns.iter().zip(row) {
+        let value = match cell.kind {
+            CellKind::Null => serde_json::Value::Null,
+            _ if hidden(name) => serde_json::Value::String(mask(&cell.text)),
+            CellKind::Bool => serde_json::Value::Bool(cell.text == "true"),
+            CellKind::Number => serde_json::from_str::<serde_json::Number>(&cell.text)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|_| serde_json::Value::String(cell.text.clone())),
+            CellKind::Json => serde_json::from_str(&cell.text)
+                .unwrap_or_else(|_| serde_json::Value::String(cell.text.clone())),
+            _ => serde_json::Value::String(cell.text.clone()),
+        };
+        out.insert(name.clone(), value);
+    }
+    serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_default()
+}
+
 pub(crate) fn mask(text: &str) -> String {
     match text.split_once('@') {
         Some((user, domain)) if !user.is_empty() && domain.contains('.') => {
@@ -200,8 +235,15 @@ pub(crate) fn parse_filter(text: &str, columns: &[db::Column]) -> Result<Filter,
         })
         .max_by_key(|c| c.name.len())
         .ok_or_else(|| {
-            let first = text.split_whitespace().next().unwrap_or("");
-            format!("This table has no column called {first}.")
+            let first = text
+                .split(|c: char| c.is_whitespace() || "=<>!≠~".contains(c))
+                .next()
+                .unwrap_or("");
+            let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+            format!(
+                "This table has no column called {first}. Its columns: {}.",
+                names.join(", ")
+            )
         })?;
     let rest = text[column.name.len()..].trim_start();
     let rest_lower = rest.to_lowercase();
@@ -235,6 +277,15 @@ pub(crate) fn parse_filter(text: &str, columns: &[db::Column]) -> Result<Filter,
         .to_string();
     if op.takes_value() && value.is_empty() {
         return Err(format!("Give a value after {word}."));
+    }
+    // A number column compared with something that isn't a number would only come back as
+    // the database's error, so say it here.
+    let numeric = db::engine::kind_of_type(&column.data_type) == CellKind::Number;
+    if numeric && op != Op::Contains && op.takes_value() && value.parse::<f64>().is_err() {
+        return Err(format!(
+            "{} holds numbers, and {value} isn't one.",
+            column.name
+        ));
     }
     Ok(Filter {
         column: column.name.clone(),
@@ -433,6 +484,14 @@ impl RunoApp {
         ) else {
             return;
         };
+        // Already in the list: open that one rather than adding it twice.
+        let existing = self.data.saved.iter().find(|s| {
+            s.project == pid && matches!(&s.source, db::saved::Source::Found { key: k } if k == key)
+        });
+        if let Some(id) = existing.map(|s| s.id.clone()) {
+            self.select_data_conn(&id, cx);
+            return;
+        }
         let saved = db::saved::from_found(pid, found);
         let id = saved.id.clone();
         self.data.saved.push(saved);
@@ -467,6 +526,7 @@ impl RunoApp {
 
     fn select_data_conn(&mut self, id: &str, cx: &mut Context<Self>) {
         self.data.selected = Some(id.to_string());
+        self.data.confirm_remove = None;
         self.data.table = None;
         self.data.rows = None;
         self.data.row = None;
@@ -533,6 +593,24 @@ impl RunoApp {
         );
     }
 
+    /// Close the session but keep the connection in the list.
+    fn disconnect_data_conn(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.data.conns.remove(id);
+        self.data
+            .live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
+        if self.data.selected.as_deref() == Some(id) {
+            self.data.selected = None;
+            self.data.table = None;
+            self.data.rows = None;
+            self.data.row = None;
+        }
+        cx.notify();
+    }
+
+    /// Take the connection out of the list, with its saved password.
     fn forget_data_conn(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(i) = self.data.saved.iter().position(|s| s.id == id) {
             let saved = self.data.saved.remove(i);
@@ -572,6 +650,8 @@ impl RunoApp {
         };
         let browse = self.data.browse.clone();
         let live = self.data.live.clone();
+        let saved = self.data.saved.iter().find(|s| s.id == id).cloned();
+        let root = self.data_root();
         self.data.loading = true;
         self.data.rows_error = None;
         cx.notify();
@@ -582,7 +662,25 @@ impl RunoApp {
                 let session = live
                     .get_mut(&id)
                     .ok_or_else(|| "The connection closed. Connect again.".to_string())?;
-                session.browse(&table, &browse).map(|rows| (rows, table))
+                match session.browse(&table, &browse) {
+                    // The server ended the session (it restarted, or the computer slept):
+                    // open a new one and ask again, once.
+                    Err(_) if session.is_closed() => {
+                        let (Some(saved), Some(root)) = (saved, root) else {
+                            return Err("The connection closed. Connect again.".to_string());
+                        };
+                        let target = db::saved::target(&saved, Path::new(&root))?;
+                        let (fresh, opened) = db::engine::Session::open(saved.kind, &target)
+                            .map_err(|e| format!("The connection closed, and reconnecting failed: {e}"))?;
+                        if !opened.read_only {
+                            live.remove(&id);
+                            return Err("The database didn't confirm a read-only session on reconnecting, so Runo closed it.".into());
+                        }
+                        *session = fresh;
+                        session.browse(&table, &browse).map(|rows| (rows, table))
+                    }
+                    other => other.map(|rows| (rows, table)),
+                }
             },
             move |this, result, cx| {
                 if this.data.table.as_deref() != Some(label.as_str()) {
@@ -740,11 +838,17 @@ impl RunoApp {
                         self.ghost_button_sized(
                             "data-rescan",
                             IconName::RefreshCw,
-                            "Look through the project's files again",
+                            "Refresh: read the rows again, and look through the project's files",
                             26.,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.scan_data(cx);
+                            if this.data.table.is_some() {
+                                this.load_rows(cx);
+                            } else if let Some(id) = this.data.selected.clone() {
+                                // Read the schema again, as it may have changed.
+                                this.open_data_conn(&id, cx);
+                            }
                         })),
                     ),
             );
@@ -905,15 +1009,15 @@ impl RunoApp {
                     .when(on, |el| {
                         el.child(
                             self.ghost_button_sized(
-                                ("data-forget", i),
+                                ("data-disconnect", i),
                                 IconName::X,
-                                "Remove this connection",
+                                "Disconnect",
                                 20.,
                             )
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     cx.stop_propagation();
-                                    this.forget_data_conn(&forget, cx);
+                                    this.disconnect_data_conn(&forget, cx);
                                 },
                             )),
                         )
@@ -1211,21 +1315,58 @@ impl RunoApp {
                             .child(error),
                     )
                     .child(
-                        small_button("data-retry", "Try again", true).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                if let Some(id) = this.data.selected.clone() {
-                                    this.open_data_conn(&id, cx);
-                                }
-                            },
-                        )),
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(small_button("data-retry", "Try again", true).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if let Some(id) = this.data.selected.clone() {
+                                        this.open_data_conn(&id, cx);
+                                    }
+                                }),
+                            ))
+                            .child(self.data_remove_button(cx)),
                     ),
             )
             .into_any_element()
     }
 
+    /// Takes the selected connection out of the list; a second press confirms.
+    fn data_remove_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let armed =
+            self.data.confirm_remove.is_some() && self.data.confirm_remove == self.data.selected;
+        small_button(
+            "data-remove",
+            if armed {
+                "Press again to remove"
+            } else {
+                "Remove from the list"
+            },
+            false,
+        )
+        .when(armed, |el| el.text_color(rgb(c_red())))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let Some(id) = this.data.selected.clone() else {
+                return;
+            };
+            if this.data.confirm_remove.as_deref() == Some(id.as_str()) {
+                this.data.confirm_remove = None;
+                this.forget_data_conn(&id, cx);
+            } else {
+                this.data.confirm_remove = Some(id);
+                cx.notify();
+            }
+        }))
+    }
+
     /// A connected database before a table is picked: what it is, and its biggest tables.
     fn data_overview(&self, conn: &Conn, cx: &mut Context<Self>) -> AnyElement {
         let opened = conn.opened.clone();
+        let saved = self
+            .data
+            .selected
+            .as_ref()
+            .and_then(|id| self.data.saved.iter().find(|s| &s.id == id));
         let mut biggest: Vec<&Table> = conn.tables.iter().filter(|t| !t.view).collect();
         biggest.sort_by_key(|t| std::cmp::Reverse(t.estimate.unwrap_or(0)));
         let mut list = div().v_flex().gap_1().max_w(px(560.));
@@ -1283,7 +1424,19 @@ impl RunoApp {
                                 div()
                                     .text_size(px(17.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(opened.as_ref().map(|o| o.server.clone()).unwrap_or_default()),
+                                    .child(saved.map(|s| s.name.clone()).unwrap_or_default()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(c_muted()))
+                                    .font_family(self.mono_font.clone())
+                                    .truncate()
+                                    .child(format!(
+                                        "{} · {}",
+                                        opened.as_ref().map(|o| o.server.clone()).unwrap_or_default(),
+                                        saved.map(|s| s.shown.clone()).unwrap_or_default()
+                                    )),
                             )
                             .child(
                                 div()
@@ -1303,6 +1456,19 @@ impl RunoApp {
                                         }
                                     )),
                             ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(small_button("data-disconnect-page", "Disconnect", false).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if let Some(id) = this.data.selected.clone() {
+                                        this.disconnect_data_conn(&id, cx);
+                                    }
+                                }),
+                            ))
+                            .child(self.data_remove_button(cx)),
                     )
                     .when(!biggest.is_empty(), |el| {
                         el.child(label_row("LARGEST TABLES").px_0()).child(list)
@@ -1389,34 +1555,46 @@ impl RunoApp {
                     .text_color(rgb(c_red()))
                     .child(e)
             }));
-        let grid: AnyElement = if let Some(e) = &self.data.rows_error {
-            div()
-                .size_full()
-                .p_6()
-                .v_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child("The database refused that"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_secondary()))
-                        .child(e.clone()),
-                )
-                .into_any_element()
-        } else if self.data.rows.is_none() {
-            centered("Loading rows…")
-        } else {
-            DataTable::new(&self.data.grid)
-                .with_size(gpui_kit::component::Size::Small)
-                .stripe(false)
-                .bordered(false)
-                .into_any_element()
-        };
+        let grid: AnyElement =
+            if let Some(e) = &self.data.rows_error {
+                div()
+                    .size_full()
+                    .p_6()
+                    .v_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("The database refused that"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_secondary()))
+                            .child(e.clone()),
+                    )
+                    .when(!self.data.browse.filters.is_empty(), |el| {
+                        el.child(div().text_size(px(12.)).text_color(rgb(c_muted())).child(
+                            "A filter may not fit its column's type. Remove it above with ×.",
+                        ))
+                    })
+                    .child(
+                        div().pt_2().flex().child(
+                            small_button("data-rows-retry", "Try again", false)
+                                .on_click(cx.listener(|this, _, _, cx| this.load_rows(cx))),
+                        ),
+                    )
+                    .into_any_element()
+            } else if self.data.rows.is_none() {
+                centered("Loading rows…")
+            } else {
+                DataTable::new(&self.data.grid)
+                    .with_size(gpui_kit::component::Size::Small)
+                    .stripe(false)
+                    .bordered(false)
+                    .into_any_element()
+            };
         let status = self.data.rows.as_ref().map(|rows| {
             let first = self.data.browse.offset + 1;
             let last = self.data.browse.offset + rows.rows.len();
@@ -1424,7 +1602,12 @@ impl RunoApp {
                 0 => "No rows match".to_string(),
                 1 if first == 1 && !rows.more => "1 row".to_string(),
                 n if first == 1 && !rows.more => format!("{n} rows"),
-                _ if rows.more => format!("Rows {first}–{last}, more after"),
+                _ if rows.more => match table.estimate {
+                    Some(n) if self.data.browse.filters.is_empty() && n > last as i64 => {
+                        format!("Rows {first}–{last} of about {}", short_count(n))
+                    }
+                    _ => format!("Rows {first}–{last}, more after"),
+                },
                 _ => format!("Rows {first}–{last}, the last"),
             };
             let sql = rows.sql.clone();
@@ -1540,6 +1723,8 @@ impl RunoApp {
                 .filter(|_| cell.kind != CellKind::Null);
             let shown = if hidden && cell.kind != CellKind::Null {
                 mask(&cell.text)
+            } else if cell.kind == CellKind::Json {
+                pretty_json(&cell.text)
             } else {
                 cell.text.clone()
             };
@@ -1640,6 +1825,21 @@ impl RunoApp {
                 .and_then(|i| row.get(i))
                 .map(|c| c.text.clone())
         });
+        let title = match (&pk, &pk_value) {
+            (Some(pk), Some(v)) => format!("{} · {pk} {v}", table.label()),
+            _ => format!(
+                "{} · row {}",
+                table.label(),
+                self.data.browse.offset + i + 1
+            ),
+        };
+        let copied = row_json(&rows.columns, row, |name| {
+            table
+                .columns
+                .iter()
+                .any(|m| &m.name == name && m.sensitive())
+                && !self.data.revealed.contains(name)
+        });
         let mut linked = div().v_flex();
         let mut any = false;
         if let (Some(pk), Some(pk_value)) = (pk, pk_value) {
@@ -1711,7 +1911,23 @@ impl RunoApp {
                                 .flex_1()
                                 .text_size(px(13.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(format!("Row {}", self.data.browse.offset + i + 1)),
+                                .truncate()
+                                .child(title),
+                        )
+                        .child(
+                            self.ghost_button_sized(
+                                "data-inspector-copy",
+                                IconName::Copy,
+                                "Copy this row as JSON",
+                                22.,
+                            )
+                            .on_click(cx.listener(
+                                move |_, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copied.clone(),
+                                    ));
+                                },
+                            )),
                         )
                         .child(
                             self.ghost_button_sized(
@@ -1785,12 +2001,14 @@ impl Grid {
                     .max()
                     .unwrap_or(4);
                 // The header holds the name, its type in small type and the sort arrow.
-                let header = name.len() as f32 * 7.5
-                    + meta.map_or(0, |m| m.data_type.len().min(12)) as f32 * 6.
-                    + 44.;
+                let data_type = meta
+                    .map(|m| db::short_type(&m.data_type))
+                    .unwrap_or_default();
+                let header =
+                    name.chars().count() as f32 * 7.5 + data_type.len().min(16) as f32 * 6.2 + 44.;
                 GridCol {
                     name: name.clone(),
-                    data_type: meta.map(|m| m.data_type.clone()).unwrap_or_default(),
+                    data_type,
                     hidden: meta.is_some_and(|m| m.sensitive()) && !revealed.contains(name),
                     link: meta.is_some_and(|m| m.refers.is_some()),
                     width: (longest as f32 * 7.2 + 24.).max(header).clamp(64., 360.),
@@ -1841,6 +2059,7 @@ impl TableDelegate for Grid {
             .overflow_hidden()
             .child(
                 div()
+                    .flex_none()
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_secondary()))
@@ -2007,6 +2226,48 @@ mod tests {
         assert!(parse_filter("status =", &c).is_err());
         // A column name that only starts another word isn't a match.
         assert!(parse_filter("statuses = 1", &c).is_err());
+    }
+
+    #[test]
+    fn number_columns_want_numbers() {
+        let c = vec![db::Column {
+            name: "total_cents".into(),
+            data_type: "integer".into(),
+            ..db::Column::default()
+        }];
+        assert!(parse_filter("total_cents > -12.5", &c).is_ok());
+        assert!(parse_filter("total_cents contains 12", &c).is_ok());
+        let e = parse_filter("total_cents > lots", &c).unwrap_err();
+        assert!(e.contains("holds numbers"), "{e}");
+        let e = parse_filter("totl=3", &c).unwrap_err();
+        assert!(
+            e.contains("called totl.") && e.contains("total_cents"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn rows_copy_as_json_with_hidden_values_masked() {
+        let columns = vec![
+            "id".to_string(),
+            "email".into(),
+            "meta".into(),
+            "note".into(),
+        ];
+        let row = vec![
+            Cell::text("7", CellKind::Number),
+            Cell::text("ann@example.com", CellKind::Text),
+            Cell::text("{\"a\":1}", CellKind::Json),
+            Cell::null(),
+        ];
+        let json: serde_json::Value =
+            serde_json::from_str(&row_json(&columns, &row, |n| n == "email")).unwrap();
+        assert_eq!(json["id"], 7);
+        assert_eq!(json["meta"]["a"], 1);
+        assert!(json["note"].is_null());
+        assert!(!json["email"].as_str().unwrap().contains("ann@"));
+        assert_eq!(pretty_json("{\"a\":1}"), "{\n  \"a\": 1\n}");
+        assert_eq!(pretty_json("not json"), "not json");
     }
 
     #[test]

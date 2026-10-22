@@ -189,6 +189,26 @@ pub(crate) fn sensitive_name(name: &str) -> bool {
     WORDS.iter().any(|w| n.contains(w)) && !n.ends_with("_at") && !n.ends_with("_id")
 }
 
+/// A column type as the grid's header shows it: Postgres' long names shortened to the
+/// ones people type.
+pub(crate) fn short_type(data_type: &str) -> String {
+    const SHORT: [(&str, &str); 7] = [
+        ("timestamp with time zone", "timestamptz"),
+        ("timestamp without time zone", "timestamp"),
+        ("time with time zone", "timetz"),
+        ("time without time zone", "time"),
+        ("character varying", "varchar"),
+        ("character", "char"),
+        ("double precision", "float8"),
+    ];
+    for (long, short) in SHORT {
+        if let Some(rest) = data_type.strip_prefix(long) {
+            return format!("{short}{rest}");
+        }
+    }
+    data_type.to_string()
+}
+
 /// A table or view.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Table {
@@ -303,6 +323,14 @@ mod tests {
         assert!(says_prod(&["botoxy-prod.cluster.rds.amazonaws.com"]));
         assert!(says_prod(&[".env.production"]));
         assert!(!says_prod(&["staging.internal", "app_dev"]));
+    }
+
+    #[test]
+    fn long_type_names_are_shortened() {
+        assert_eq!(short_type("timestamp with time zone"), "timestamptz");
+        assert_eq!(short_type("character varying(64)"), "varchar(64)");
+        assert_eq!(short_type("character(3)"), "char(3)");
+        assert_eq!(short_type("jsonb"), "jsonb");
     }
 
     #[test]

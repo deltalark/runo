@@ -355,6 +355,15 @@ impl Session {
         }
     }
 
+    /// Whether the server ended the session: it restarted, or the network dropped it
+    /// while the computer slept.
+    pub(crate) fn is_closed(&self) -> bool {
+        match self {
+            Session::Postgres(client) => client.is_closed(),
+            Session::Sqlite(_) => false,
+        }
+    }
+
     pub(crate) fn kind(&self) -> Kind {
         match self {
             Session::Postgres(_) => Kind::Postgres,
