@@ -1945,7 +1945,7 @@ impl RunoApp {
         app._subscriptions.extend(design_subs);
         app._subscriptions.extend(assistant_subs);
         app._subscriptions.extend(arch_subs);
-        cx.set_global(MainApp(cx.entity().downgrade()));
+        cx.set_global(MainApp(cx.entity().downgrade(), window.window_handle()));
         app.init_github(window, cx);
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
@@ -1984,6 +1984,11 @@ impl RunoApp {
         // layout is saved either way.
         let app_entity = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
+            // With Runo in the menu bar, closing hides it there and agents keep running.
+            if menubar::keeps_running(cx) {
+                menubar::to_background(cx);
+                return false;
+            }
             app_entity
                 .update(cx, |this, cx| {
                     this.save_now();
@@ -10016,14 +10021,20 @@ fn main() {
     });
 }
 
-/// The open main window's app, so quitting can warn about running agents first.
-struct MainApp(WeakEntity<RunoApp>);
+/// The open main window's app, so quitting can warn about running agents first, and the
+/// window it is in.
+struct MainApp(WeakEntity<RunoApp>, AnyWindowHandle);
 
 impl Global for MainApp {}
 
 /// Quit from the shortcut, the menu or the command palette. With agents running in the
 /// window, this warns first, the same as closing the window.
 fn quit(_: &Quit, cx: &mut App) {
+    // With Runo in the menu bar, ⌘Q hides it there and agents keep running.
+    if menubar::keeps_running(cx) && cx.has_global::<MainApp>() {
+        menubar::to_background(cx);
+        return;
+    }
     let app = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade());
     let go = app.is_none_or(|app| {
         app.update(cx, |this, cx| {
@@ -10038,19 +10049,7 @@ fn quit(_: &Quit, cx: &mut App) {
 
 /// A clicked notification: bring the window forward on its session.
 fn open_session_from_notification(id: u64, cx: &mut App) {
-    let Some(app) = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade()) else {
-        open_main_window(cx);
-        return;
-    };
-    app.update(cx, |this, cx| {
-        if this.state.session(id).is_some() {
-            this.select(id);
-            cx.notify();
-        }
-    });
-    for window in cx.windows() {
-        let _ = window.update(cx, |_, window, _| window.activate_window());
-    }
+    menubar::go(menubar::Go::Open(id), cx);
 }
 
 /// The menu bar: the app menu with Settings and Quit, and the main commands with their

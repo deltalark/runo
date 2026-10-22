@@ -4,6 +4,11 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- The menu bar glyph opens a panel instead of a menu, live as agents work. Allow, Always or Deny a waiting permission and Stop a working agent from it, click a session for its detail or to open it, and Ask Runo in the same chat as the assistant in the window, Run cards and all.
+- Runo keeps running in the menu bar: with it on, ⌘Q and closing the window hide Runo and its Dock icon while agents keep working, and Quit Runo in the panel quits. Turn it off under Settings > General > Alerts.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

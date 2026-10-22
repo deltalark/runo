@@ -180,6 +180,10 @@ pub struct AppSettings {
     pub assistant_nudges: bool,
     /// Show Runo in the macOS menu bar with what agents are doing.
     pub menu_bar: bool,
+    /// With the menu bar on, ⌘Q and closing the window hide Runo to it instead of quitting.
+    pub run_in_background: bool,
+    /// The person was told once that Runo kept running in the menu bar.
+    pub background_told: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -265,6 +269,8 @@ impl Default for AppSettings {
             assistant_model: String::new(),
             assistant_nudges: true,
             menu_bar: true,
+            run_in_background: true,
+            background_told: false,
         }
     }
 }

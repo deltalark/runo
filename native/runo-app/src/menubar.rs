@@ -1,7 +1,8 @@
-//! Runo in the macOS menu bar: a glyph with a count, and a menu of what agents are doing,
-//! what needs the person, and Ask Runo. The menu is AppKit's own, so it looks and behaves
-//! like the system's. It is rebuilt from the latest snapshot each time it opens; the app
-//! refreshes the snapshot every second and picks up clicks a few times a second.
+//! Runo in the macOS menu bar: a glyph with a count, and a panel under it with what
+//! agents are doing, what needs the person, and Ask Runo, all usable in place: allow or
+//! deny a waiting agent, stop one, or chat with the assistant without opening Runo.
+//! With the menu bar on, closing the window or ⌘Q hides Runo to it so agents keep
+//! running; Quit in the panel quits.
 //!
 //! gpui has no tray support, so other platforms show nothing for now.
 
@@ -9,9 +10,9 @@ use crate::*;
 use shell::Need;
 
 /// Rows shown per section; the rest are one "more" line away.
-const ROWS: usize = 8;
+pub(crate) const ROWS: usize = 8;
 
-/// One session in the menu.
+/// One session in the panel.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Row {
     pub id: u64,
@@ -19,8 +20,12 @@ pub(crate) struct Row {
     /// What it is doing and where: "Waiting on you · Claude · api".
     pub line: String,
     pub dot: Dot,
-    /// The submenu's lines: agent and branch, status, last reply, changes and cost.
+    /// Shown when the row is opened: agent and branch, status, last reply, changes, cost.
     pub detail: Vec<String>,
+    /// The permission it waits on: "Claude wants to run `cargo test`".
+    pub approval: Option<String>,
+    /// Its agent runs on this machine and can be stopped.
+    pub stoppable: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -38,7 +43,7 @@ pub(crate) struct Snapshot {
     pub count: String,
     /// The glyph carries a dot while something needs the person.
     pub attention: bool,
-    /// Under "Runo" at the top: "3 working · 2 need you".
+    /// Beside "Runo" at the top: "3 working · 2 need you".
     pub summary: String,
     pub needs: Vec<Row>,
     pub more_needs: usize,
@@ -46,23 +51,20 @@ pub(crate) struct Snapshot {
     pub more_working: usize,
     /// Idle sessions with changes to review.
     pub review: usize,
-    /// No window is open: the menu only offers to open one.
+    /// No window is open: the panel only offers to open one.
     pub closed: bool,
 }
 
-/// A menu item picked by the person. Only the Mac menu makes them.
+/// Somewhere in Runo the panel sends the person: the window comes forward on it.
 #[derive(Clone, Copy, PartialEq, Debug)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) enum Click {
+pub(crate) enum Go {
     Open(u64),
-    Ask,
-    AskAbout(u64),
     NewSession,
     Inbox,
     Sessions,
     Review,
     OpenRuno,
-    Quit,
 }
 
 impl Snapshot {
@@ -219,78 +221,127 @@ impl RunoApp {
             line: line.join(" · "),
             dot,
             detail,
+            approval: self.approval_for(s.id).map(|r| {
+                format!(
+                    "{agent} wants to {}",
+                    approvals::describe(&r.tool, &r.input)
+                )
+            }),
+            stoppable: self.handles.contains_key(&Target::Session(s.id)),
         }
     }
 
-    /// Act on a menu item that needs the window.
-    pub(crate) fn menubar_click(
-        &mut self,
-        click: Click,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match click {
-            Click::Open(id) => {
+    /// Show the place `go` names in the window.
+    pub(crate) fn menubar_go(&mut self, go: Go, window: &mut Window, cx: &mut Context<Self>) {
+        match go {
+            Go::Open(id) => {
                 if self.state.session(id).is_some() {
                     self.select(id);
                 }
             }
-            Click::Ask => self.open_assistant(window, cx),
-            Click::AskAbout(id) => {
-                if self.state.session(id).is_some() {
-                    self.select(id);
-                }
-                self.open_assistant(window, cx);
-            }
-            Click::NewSession => self.open_new_session(),
-            Click::Inbox => self.go(Mode::Inbox, window, cx),
-            Click::Sessions => {
-                self.view = View::AllSessions;
-            }
-            Click::Review => self.go(Mode::Home, window, cx),
-            Click::OpenRuno | Click::Quit => {}
+            Go::NewSession => self.open_new_session(),
+            Go::Inbox => self.go(Mode::Inbox, window, cx),
+            Go::Sessions => self.view = View::AllSessions,
+            Go::Review => self.go(Mode::Home, window, cx),
+            Go::OpenRuno => {}
         }
         cx.notify();
     }
 }
 
-/// Show, refresh or hide the menu bar item, and act on what was picked. Runs every
-/// quarter second on the main thread; the snapshot is rebuilt every fourth time.
+/// Whether ⌘Q and closing the window hide Runo to the menu bar instead of quitting.
+pub(crate) fn keeps_running(cx: &App) -> bool {
+    let st = cx.global::<AppSettings>();
+    platform::SUPPORTED && st.menu_bar && st.run_in_background
+}
+
+/// Hide Runo to the menu bar: the window and the Dock icon go, the agents keep running.
+/// The first time, a notification says where Runo went.
+pub(crate) fn to_background(cx: &mut App) {
+    if let Some(app) = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade()) {
+        app.update(cx, |this, _| this.save_now());
+    }
+    panel::close(cx);
+    if let Some(window) = cx.try_global::<MainApp>().map(|m| m.1) {
+        let _ = window.update(cx, |_, window, _| platform::order_out(window));
+    }
+    platform::set_dock_icon(false);
+    if !cx.global::<AppSettings>().background_told {
+        settings::update(cx, |s| s.background_told = true);
+        crate::desktop_notify::send(
+            cx,
+            None,
+            "Runo is still running",
+            "It's in the menu bar, and your agents keep working. Quit from there to quit.",
+        );
+    }
+}
+
+/// Bring Runo back from the menu bar, with its Dock icon.
+pub(crate) fn to_foreground(cx: &mut App) {
+    platform::set_dock_icon(true);
+    cx.activate(true);
+    match cx.try_global::<MainApp>().map(|m| m.1) {
+        Some(window) => {
+            let _ = window.update(cx, |_, window, _| window.activate_window());
+        }
+        None => crate::open_main_window(cx),
+    }
+}
+
+/// Bring the window forward on `go`, closing the panel.
+pub(crate) fn go(go: Go, cx: &mut App) {
+    panel::close(cx);
+    let main = cx
+        .try_global::<MainApp>()
+        .and_then(|m| m.0.upgrade().map(|app| (app, m.1)));
+    to_foreground(cx);
+    if let Some((app, window)) = main {
+        let _ = window.update(cx, |_, window, cx| {
+            app.update(cx, |this, cx| this.menubar_go(go, window, cx));
+        });
+    }
+}
+
+/// Quit for real, from the panel: running agents still get the usual warning, in the
+/// window.
+pub(crate) fn quit(cx: &mut App) {
+    panel::close(cx);
+    let app = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade());
+    let go = app.is_none_or(|app| {
+        app.update(cx, |this, cx| {
+            this.save();
+            this.may_close(cx)
+        })
+    });
+    if go {
+        cx.quit();
+    } else {
+        to_foreground(cx);
+    }
+}
+
+/// What the menu bar shows now.
+pub(crate) fn snapshot(cx: &App) -> Snapshot {
+    match cx.try_global::<MainApp>().and_then(|m| m.0.upgrade()) {
+        Some(app) => app.read(cx).menubar_snapshot(),
+        None => Snapshot::closed(),
+    }
+}
+
+/// Show, refresh or hide the menu bar item, and open or close the panel when the glyph
+/// was clicked.
 fn tick(refresh: bool, cx: &mut App) {
     if !cx.global::<AppSettings>().menu_bar {
+        panel::close(cx);
         platform::hide();
         return;
     }
-    let app = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade());
     if refresh || !platform::shown() {
-        let snapshot = match &app {
-            Some(app) => app.read(cx).menubar_snapshot(),
-            None => Snapshot::closed(),
-        };
-        platform::show(snapshot);
+        platform::show(snapshot(cx));
     }
-    for click in platform::take_clicks() {
-        match click {
-            Click::Quit => crate::quit(&Quit, cx),
-            Click::OpenRuno if app.is_none() => {
-                crate::open_main_window(cx);
-                cx.activate(true);
-            }
-            _ => {
-                let Some(app) = app.clone() else {
-                    crate::open_main_window(cx);
-                    cx.activate(true);
-                    continue;
-                };
-                cx.activate(true);
-                for window in cx.windows() {
-                    let _ = window.update(cx, |_, window, cx| {
-                        window.activate_window();
-                        app.update(cx, |this, cx| this.menubar_click(click, window, cx));
-                    });
-                }
-            }
-        }
+    if platform::take_toggle() {
+        panel::toggle(platform::anchor(), cx);
     }
 }
 
@@ -299,6 +350,15 @@ pub(crate) fn install(cx: &mut App) {
     if !platform::SUPPORTED {
         return;
     }
+    // A click on the glyph is handled straight away rather than on the next tick.
+    let async_cx = cx.to_async();
+    platform::on_click(move || {
+        let cx = async_cx.clone();
+        async_cx
+            .foreground_executor()
+            .spawn(async move { cx.update(|cx| tick(false, cx)) })
+            .detach();
+    });
     cx.spawn(async move |cx| {
         let mut n = 0u32;
         loop {
@@ -313,12 +373,24 @@ pub(crate) fn install(cx: &mut App) {
     .detach();
 }
 
+#[path = "menubar_panel.rs"]
+mod panel;
+
+/// Where the glyph is on screen, in the display's own coordinates from its top left:
+/// the point under its middle where the panel hangs, and the display it is on.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Anchor {
+    pub x: f32,
+    pub y: f32,
+    pub display: Option<u32>,
+}
+
 #[cfg(target_os = "macos")]
 use mac as platform;
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    use super::{Click, Snapshot};
+    use super::{Anchor, Snapshot};
 
     pub(super) const SUPPORTED: bool = false;
 
@@ -330,31 +402,39 @@ mod platform {
 
     pub(super) fn hide() {}
 
-    pub(super) fn take_clicks() -> Vec<Click> {
-        Vec::new()
+    pub(super) fn take_toggle() -> bool {
+        false
     }
+
+    pub(super) fn on_click(_: impl Fn() + 'static) {}
+
+    pub(super) fn anchor() -> Option<Anchor> {
+        None
+    }
+
+    pub(super) fn set_dock_icon(_: bool) {}
+
+    pub(super) fn place(_: &gpui_kit::Window, _: f32, _: f32) {}
+
+    pub(super) fn order_out(_: &gpui_kit::Window) {}
 }
 
 #[cfg(target_os = "macos")]
 mod mac {
-    //! The status item, its menu and the object its items call. Everything here lives on
-    //! the main thread, where AppKit and gpui's foreground tasks both run.
+    //! The status item and the object its button calls. Everything here lives on the main
+    //! thread, where AppKit and gpui's foreground tasks both run.
 
-    use super::{Click, Dot, Row, Snapshot};
-    use block2::RcBlock;
+    use super::{Anchor, Snapshot};
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, Bool, NSObject, ProtocolObject};
+    use objc2::runtime::{AnyObject, NSObject};
     use objc2::{define_class, msg_send, sel, AnyThread, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSBezierPath, NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
-        NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
-        NSVariableStatusItemLength,
+        NSApplication, NSApplicationActivationPolicy, NSImage, NSScreen, NSStatusBar, NSStatusItem,
+        NSVariableStatusItemLength, NSView, NSWindow,
     };
-    use objc2_foundation::{
-        NSAttributedString, NSData, NSDictionary, NSMutableAttributedString, NSObjectProtocol,
-        NSRect, NSSize, NSString,
-    };
-    use std::cell::RefCell;
+    use objc2_foundation::{NSData, NSObjectProtocol, NSPoint, NSSize, NSString};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::cell::{Cell, RefCell};
 
     pub(super) const SUPPORTED: bool = true;
 
@@ -363,8 +443,7 @@ mod mac {
 
     struct Bar {
         item: Retained<NSStatusItem>,
-        // Kept alive: the menu holds its delegate and the items their target weakly.
-        _menu: Retained<NSMenu>,
+        // Kept alive: the button holds its target weakly.
         _target: Retained<Target>,
         /// What the button shows now: the count and whether it has the dot.
         button: (String, bool),
@@ -372,11 +451,8 @@ mod mac {
 
     thread_local! {
         static BAR: RefCell<Option<Bar>> = const { RefCell::new(None) };
-        /// The latest snapshot, which the menu is built from when it opens.
-        static LATEST: RefCell<Snapshot> = RefCell::new(Snapshot::default());
-        /// What each item's tag stands for, from the last time the menu was built.
-        static TAGS: RefCell<Vec<Click>> = const { RefCell::new(Vec::new()) };
-        static CLICKS: RefCell<Vec<Click>> = const { RefCell::new(Vec::new()) };
+        static CLICKED: Cell<bool> = const { Cell::new(false) };
+        static ON_CLICK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     }
 
     define_class!(
@@ -387,24 +463,18 @@ mod mac {
         struct Target;
 
         impl Target {
-            #[unsafe(method(pick:))]
-            fn pick(&self, sender: &NSMenuItem) {
-                let tag = sender.tag();
-                if let Some(click) = TAGS.with_borrow(|t| usize::try_from(tag).ok().and_then(|i| t.get(i).copied())) {
-                    CLICKS.with_borrow_mut(|c| c.push(click));
-                }
+            #[unsafe(method(toggle:))]
+            fn toggle(&self, _sender: &AnyObject) {
+                CLICKED.set(true);
+                ON_CLICK.with_borrow(|f| {
+                    if let Some(f) = f {
+                        f();
+                    }
+                });
             }
         }
 
         unsafe impl NSObjectProtocol for Target {}
-
-        unsafe impl NSMenuDelegate for Target {
-            #[unsafe(method(menuNeedsUpdate:))]
-            fn menu_needs_update(&self, menu: &NSMenu) {
-                let mtm = self.mtm();
-                LATEST.with_borrow(|s| build(menu, s, self, mtm));
-            }
-        }
     );
 
     impl Target {
@@ -412,6 +482,14 @@ mod mac {
             let this = Self::alloc(mtm).set_ivars(());
             unsafe { msg_send![super(this), init] }
         }
+    }
+
+    pub(super) fn on_click(f: impl Fn() + 'static) {
+        ON_CLICK.with_borrow_mut(|slot| *slot = Some(Box::new(f)));
+    }
+
+    pub(super) fn take_toggle() -> bool {
+        CLICKED.replace(false)
     }
 
     pub(super) fn shown() -> bool {
@@ -427,13 +505,14 @@ mod mac {
                 let item =
                     NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
                 let target = Target::new(mtm);
-                let menu = NSMenu::new(mtm);
-                menu.setAutoenablesItems(false);
-                menu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
-                item.setMenu(Some(&menu));
+                if let Some(button) = item.button(mtm) {
+                    unsafe {
+                        button.setTarget(Some(&target));
+                        button.setAction(Some(sel!(toggle:)));
+                    }
+                }
                 Bar {
                     item,
-                    _menu: menu,
                     _target: target,
                     button: (String::from("unset"), false),
                 }
@@ -457,18 +536,13 @@ mod mac {
                 bar.button = want;
             }
         });
-        LATEST.with_borrow_mut(|latest| *latest = snapshot);
     }
 
     pub(super) fn hide() {
         if let Some(bar) = BAR.with_borrow_mut(Option::take) {
             NSStatusBar::systemStatusBar().removeStatusItem(&bar.item);
         }
-        CLICKS.with_borrow_mut(Vec::clear);
-    }
-
-    pub(super) fn take_clicks() -> Vec<Click> {
-        CLICKS.with_borrow_mut(std::mem::take)
+        CLICKED.set(false);
     }
 
     /// The glyph as a template image, so macOS draws it in the menu bar's own color.
@@ -480,182 +554,91 @@ mod mac {
         Some(image)
     }
 
-    /// A small filled circle in `color`, for a session's row.
-    fn dot(dot: Dot) -> Retained<NSImage> {
-        let draw = RcBlock::new(move |rect: NSRect| -> Bool {
-            let color = match dot {
-                Dot::Waiting => NSColor::systemOrangeColor(),
-                Dot::Failed => NSColor::systemRedColor(),
-                Dot::Finished => NSColor::systemGreenColor(),
-                Dot::Working => NSColor::systemBlueColor(),
-            };
-            color.setFill();
-            let inset = rect.size.width * 0.15;
-            let oval = NSRect::new(
-                objc2_foundation::NSPoint::new(rect.origin.x + inset, rect.origin.y + inset),
-                NSSize::new(rect.size.width - inset * 2., rect.size.height - inset * 2.),
-            );
-            NSBezierPath::bezierPathWithOvalInRect(oval).fill();
-            Bool::YES
-        });
-        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(10., 10.), false, &draw)
+    /// The glyph's screen: its frame, and its id as gpui names displays.
+    fn screen_of(button: &NSView) -> Option<(objc2_foundation::NSRect, Retained<NSScreen>)> {
+        let window = button.window()?;
+        let frame = window.frame();
+        let screen = window.screen()?;
+        Some((frame, screen))
     }
 
-    /// `text` in the menu's font, `size` points, secondary colour when `dim`.
-    fn styled(text: &str, size: f64, bold: bool, dim: bool) -> Retained<NSAttributedString> {
-        let font = if bold {
-            NSFont::boldSystemFontOfSize(size)
-        } else {
-            NSFont::menuFontOfSize(size)
-        };
-        let color = if dim {
-            NSColor::secondaryLabelColor()
-        } else {
-            NSColor::labelColor()
-        };
-        let font: &AnyObject = (*font).as_ref();
-        let color: &AnyObject = (*color).as_ref();
-        let attrs: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::from_slices(
-            unsafe { &[NSFontAttributeName, NSForegroundColorAttributeName] },
-            &[font, color],
-        );
-        unsafe { NSAttributedString::new_with_attributes(&NSString::from_str(text), &attrs) }
+    pub(super) fn anchor() -> Option<Anchor> {
+        let mtm = MainThreadMarker::new()?;
+        BAR.with_borrow(|bar| {
+            let button = bar.as_ref()?.item.button(mtm)?;
+            let (frame, screen) = screen_of(&button)?;
+            let display = screen.frame();
+            let number = screen
+                .deviceDescription()
+                .objectForKey(&NSString::from_str("NSScreenNumber"))
+                .and_then(|n| n.downcast::<objc2_foundation::NSNumber>().ok())
+                .map(|n| n.unsignedIntValue());
+            Some(Anchor {
+                x: (frame.origin.x + frame.size.width / 2. - display.origin.x) as f32,
+                y: (display.origin.y + display.size.height - frame.origin.y) as f32,
+                display: number,
+            })
+        })
     }
 
-    /// A title over a smaller, dimmer line.
-    fn two_lines(title: &str, line: &str) -> Retained<NSAttributedString> {
-        let out =
-            NSMutableAttributedString::from_attributed_nsstring(&styled(title, 13., false, false));
-        out.appendAttributedString(&styled(&format!("\n{line}"), 11., false, true));
-        Retained::into_super(out)
-    }
-
-    fn item(title: &str, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
-        unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(title),
-                None,
-                &NSString::from_str(""),
-            )
-        }
-    }
-
-    /// A line that only informs.
-    fn label(menu: &NSMenu, text: Retained<NSAttributedString>, mtm: MainThreadMarker) {
-        let it = item("", mtm);
-        it.setAttributedTitle(Some(&text));
-        it.setEnabled(false);
-        menu.addItem(&it);
-    }
-
-    /// Fill `menu` from `s`. Each clickable item's tag indexes `TAGS`.
-    fn build(menu: &NSMenu, s: &Snapshot, target: &Target, mtm: MainThreadMarker) {
-        menu.removeAllItems();
-        let mut tags = Vec::new();
-        let mut action = |menu: &NSMenu, it: Retained<NSMenuItem>, click: Click| {
-            it.setTag(tags.len() as isize);
-            tags.push(click);
-            unsafe {
-                it.setTarget(Some(target));
-                it.setAction(Some(sel!(pick:)));
-            }
-            menu.addItem(&it);
-        };
-        let plain = |title: &str| item(title, mtm);
-
-        let head =
-            NSMutableAttributedString::from_attributed_nsstring(&styled("Runo", 13., true, false));
-        head.appendAttributedString(&styled(&format!("\n{}", s.summary), 11., false, true));
-        label(menu, Retained::into_super(head), mtm);
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-
-        if s.closed {
-            action(menu, plain("Open Runo"), Click::OpenRuno);
-            menu.addItem(&NSMenuItem::separatorItem(mtm));
-            action(menu, plain("Quit Runo"), Click::Quit);
-            TAGS.with_borrow_mut(|t| *t = tags);
+    /// Hang the panel `window` under the glyph, kept on screen, and bring it up.
+    pub(super) fn place(window: &gpui_kit::Window, width: f32, height: f32) {
+        let Some(mtm) = MainThreadMarker::new() else {
             return;
-        }
+        };
+        let Some(panel) = ns_window(window) else {
+            return;
+        };
+        let spot = BAR.with_borrow(|bar| {
+            let button = bar.as_ref()?.item.button(mtm)?;
+            screen_of(&button)
+        });
+        let Some((frame, screen)) = spot else {
+            return;
+        };
+        let visible = screen.visibleFrame();
+        let (w, h) = (width as f64, height as f64);
+        let x = (frame.origin.x + frame.size.width / 2. - w / 2.)
+            .min(visible.origin.x + visible.size.width - w - 8.)
+            .max(visible.origin.x + 8.);
+        let top = frame.origin.y - 6.;
+        panel.setFrameTopLeftPoint(NSPoint::new(x, top.max(visible.origin.y + h)));
+        panel.makeKeyAndOrderFront(None);
+    }
 
-        let section =
-            |menu: &NSMenu,
-             title: &str,
-             rows: &[Row],
-             more: usize,
-             more_click: Click,
-             action: &mut dyn FnMut(&NSMenu, Retained<NSMenuItem>, Click)| {
-                if rows.is_empty() {
-                    return;
-                }
-                label(menu, styled(title, 11., true, true), mtm);
-                for row in rows {
-                    let it = plain(&row.title);
-                    it.setAttributedTitle(Some(&two_lines(&row.title, &row.line)));
-                    it.setImage(Some(&dot(row.dot)));
-                    // An item with a submenu opens it rather than acting, so Open is in there.
-                    let sub = NSMenu::new(mtm);
-                    sub.setAutoenablesItems(false);
-                    let mut lines = row.detail.iter();
-                    let top = NSMutableAttributedString::from_attributed_nsstring(&styled(
-                        &row.title, 13., true, false,
-                    ));
-                    if let Some(first) = lines.next() {
-                        top.appendAttributedString(&styled(
-                            &format!("\n{first}"),
-                            11.,
-                            false,
-                            true,
-                        ));
-                    }
-                    label(&sub, Retained::into_super(top), mtm);
-                    sub.addItem(&NSMenuItem::separatorItem(mtm));
-                    for line in lines {
-                        label(&sub, styled(line, 12., false, true), mtm);
-                    }
-                    sub.addItem(&NSMenuItem::separatorItem(mtm));
-                    action(&sub, plain("Open session"), Click::Open(row.id));
-                    action(&sub, plain("Ask Runo about this…"), Click::AskAbout(row.id));
-                    it.setSubmenu(Some(&sub));
-                    menu.addItem(&it);
-                }
-                if more > 0 {
-                    action(menu, plain(&format!("{more} more…")), more_click);
-                }
-            };
-        section(
-            menu,
-            "NEEDS YOU",
-            &s.needs,
-            s.more_needs,
-            Click::Inbox,
-            &mut action,
-        );
-        section(
-            menu,
-            "WORKING",
-            &s.working,
-            s.more_working,
-            Click::Sessions,
-            &mut action,
-        );
-        if s.review > 0 {
-            let text = if s.review == 1 {
-                "1 session has changes to review".to_string()
-            } else {
-                format!("{} sessions have changes to review", s.review)
-            };
-            action(menu, plain(&text), Click::Review);
+    /// The AppKit window behind a gpui one.
+    fn ns_window(window: &gpui_kit::Window) -> Option<Retained<NSWindow>> {
+        let handle = HasWindowHandle::window_handle(window).ok()?;
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return None;
+        };
+        // SAFETY: gpui hands out its own content view, alive while the window is.
+        let view: &NSView = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+        view.window()
+    }
+
+    /// Take the window off screen without closing it; showing it again brings it back.
+    pub(super) fn order_out(window: &gpui_kit::Window) {
+        if let Some(window) = ns_window(window) {
+            window.orderOut(None);
         }
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let ask = plain("Ask Runo…");
-        ask.setAttributedTitle(Some(&styled("Ask Runo…", 13., true, false)));
-        action(menu, ask, Click::Ask);
-        action(menu, plain("New session…"), Click::NewSession);
-        action(menu, plain("Open Runo"), Click::OpenRuno);
-        menu.addItem(&NSMenuItem::separatorItem(mtm));
-        action(menu, plain("Quit Runo"), Click::Quit);
-        TAGS.with_borrow_mut(|t| *t = tags);
+    }
+
+    /// Show or hide Runo's Dock icon: hidden while it runs only in the menu bar.
+    pub(super) fn set_dock_icon(shown: bool) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(if shown {
+            NSApplicationActivationPolicy::Regular
+        } else {
+            NSApplicationActivationPolicy::Accessory
+        });
+        if shown {
+            // The icon comes back as the bundle's; set Runo's own again.
+            crate::set_dock_icon();
+        }
     }
 }
 
