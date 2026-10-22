@@ -267,25 +267,19 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         )
 }
 
-/// The pattern on the rail's shade, round the open tab, which is cut from the sheet.
+/// The pattern on the rail's shade, clear of the open tab, which is cut from the sheet.
 fn rail_pattern() -> AnyElement {
     canvas(
         |_, _, _| (),
         |b, _, window, _| {
-            if crate::pattern::current() == crate::pattern::Pattern::Off {
-                return;
-            }
-            let rail = b;
-            let mut areas = vec![rail];
-            if let Some(t) = TAB_CUT.get() {
-                let (top, bottom) = (t.origin.y - px(RAIL_R), t.bottom() + px(RAIL_R));
-                areas = vec![
-                    Bounds::from_corners(rail.origin, point(rail.right(), top)),
-                    Bounds::from_corners(point(rail.left(), bottom), rail.bottom_right()),
-                    Bounds::from_corners(point(rail.left(), top), point(t.left(), bottom)),
-                ];
-            }
-            crate::pattern::paint(&areas, crate::pattern::FRAME, window);
+            // The tab with the curves into it above and below.
+            let skip = TAB_CUT.get().map(|t| {
+                Bounds::from_corners(
+                    point(t.left(), t.top() - px(RAIL_R)),
+                    point(b.right(), t.bottom() + px(RAIL_R)),
+                )
+            });
+            crate::pattern::paint(b, skip, crate::pattern::FRAME, window);
         },
     )
     .absolute()

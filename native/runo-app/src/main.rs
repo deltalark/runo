@@ -9808,7 +9808,6 @@ impl Render for RunoApp {
                             ),
                     ),
             )
-            .children(pattern::wash())
             .when(self.view == View::NewSession, |el| {
                 el.child(self.new_session_modal(f32::from(window.viewport_size().height) - 96., cx))
             })

@@ -6,7 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
-- Aurora, a background for the window. Soft light in your accent pools in the top-left corner, with violet and ember light from the others, along the top bar, the rail, the gutters and the status bar. With glass on it glows through the sidebars and panels too, between the desktop and your work. It follows the colour theme and accent. Turn it on in Settings > Appearance > Background.
+- Dot matrix, a background for the window. A fine grid of dots lies on the frame round your work (the top bar, the rail, the gutters and the status bar), warming into your accent toward the top-left corner. With glass on it shows through the sidebars and panels too, like dotted glass. It follows the colour theme and accent. Turn it on in Settings > Appearance > Background.
 
 ## [0.3.0] - 2026-10-22
 
