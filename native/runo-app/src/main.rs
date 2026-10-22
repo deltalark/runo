@@ -49,6 +49,7 @@ mod install;
 mod keymap;
 mod mcp;
 mod memory_mcp;
+mod menubar;
 mod modelcheck;
 mod models;
 mod notes;
@@ -9986,6 +9987,7 @@ fn main() {
         bind_keys(cx);
         cx.on_action(quit);
         desktop_notify::install(cx);
+        menubar::install(cx);
         cx.set_menus(app_menus());
         open_main_window(cx);
     });

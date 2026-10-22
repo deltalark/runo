@@ -748,9 +748,15 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     None => row("Uses", "No Chromium-based browser found. Install Chrome, Edge, Brave or another, or set CHROME_PATH.", Ctl::Chip("Not found".into(), 1)),
                 },
             ]),
-            section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
-                switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
-            ]),
+            section("Alerts", "How Runo reaches you while you are looking somewhere else.", {
+                let mut rows = vec![
+                    switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
+                ];
+                if cfg!(target_os = "macos") {
+                    rows.push(switch_row("Show Runo in the menu bar", "A Runo glyph by the clock counts what needs you and what's working. Click it for each session's status, to open one, or to Ask Runo.", st.menu_bar, |s, v| s.menu_bar = v));
+                }
+                rows
+            }),
             section("Behavior", "Motion, sleep and how the sidebar groups sessions.", vec![
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
