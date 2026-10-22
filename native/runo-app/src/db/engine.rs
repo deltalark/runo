@@ -15,7 +15,8 @@ pub(crate) const TIMEOUT: Duration = Duration::from_secs(30);
 const CELL_MAX: usize = 4000;
 
 pub(crate) enum Session {
-    Postgres(postgres::Client),
+    /// The client, and how its TLS was checked, which a cancel request uses too.
+    Postgres(postgres::Client, TlsCheck),
     Sqlite(rusqlite::Connection),
 }
 
@@ -46,7 +47,7 @@ fn like_escape(value: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn table_ref(kind: Kind, table: &Table) -> String {
+pub(crate) fn table_ref(kind: Kind, table: &Table) -> String {
     if kind == Kind::Postgres && !table.schema.is_empty() {
         format!("{}.{}", ident(&table.schema), ident(&table.name))
     } else {
@@ -54,14 +55,9 @@ fn table_ref(kind: Kind, table: &Table) -> String {
     }
 }
 
-/// The WHERE, ORDER BY and paging of a browse, with values written in as literals (for
+/// A browse's filters as SQL conditions, with values written in as literals (for
 /// Postgres, and for showing) or as `?` with the values beside (for SQLite).
-pub(crate) fn browse_sql(
-    kind: Kind,
-    table: &Table,
-    b: &Browse,
-    bind: bool,
-) -> (String, Vec<String>) {
+pub(crate) fn conditions(kind: Kind, filters: &[Filter], bind: bool) -> (Vec<String>, Vec<String>) {
     let mut values = Vec::new();
     let mut put = |v: String| -> String {
         if bind {
@@ -72,7 +68,7 @@ pub(crate) fn browse_sql(
         }
     };
     let mut wheres = Vec::new();
-    for Filter { column, op, value } in &b.filters {
+    for Filter { column, op, value } in filters {
         let col = ident(column);
         let cond = match op {
             Op::Eq => format!("{col} = {}", put(value.clone())),
@@ -91,11 +87,46 @@ pub(crate) fn browse_sql(
         };
         wheres.push(cond);
     }
-    let mut sql = format!("SELECT * FROM {}", table_ref(kind, table));
-    if !wheres.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&wheres.join(" AND "));
+    (wheres, values)
+}
+
+/// ` WHERE …` for a browse's filters, or nothing.
+pub(super) fn where_sql(wheres: &[String]) -> String {
+    if wheres.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", wheres.join(" AND "))
     }
+}
+
+/// The WHERE, ORDER BY and paging of a browse, with values written in as literals (for
+/// Postgres, and for showing) or as `?` with the values beside (for SQLite).
+pub(crate) fn browse_sql(
+    kind: Kind,
+    table: &Table,
+    b: &Browse,
+    bind: bool,
+) -> (String, Vec<String>) {
+    let (sql, values) = select_sql(kind, table, b, bind);
+    (
+        format!("{sql} LIMIT {} OFFSET {}", PAGE + 1, b.offset),
+        values,
+    )
+}
+
+/// A browse's rows, filtered and sorted, without paging: what an export writes out.
+pub(crate) fn select_sql(
+    kind: Kind,
+    table: &Table,
+    b: &Browse,
+    bind: bool,
+) -> (String, Vec<String>) {
+    let (wheres, values) = conditions(kind, &b.filters, bind);
+    let mut sql = format!(
+        "SELECT * FROM {}{}",
+        table_ref(kind, table),
+        where_sql(&wheres)
+    );
     if let Some((column, desc)) = &b.sort {
         sql.push_str(&format!(" ORDER BY {}", ident(column)));
         sql.push_str(if *desc { " DESC" } else { " ASC" });
@@ -103,7 +134,6 @@ pub(crate) fn browse_sql(
             sql.push_str(" NULLS LAST");
         }
     }
-    sql.push_str(&format!(" LIMIT {} OFFSET {}", PAGE + 1, b.offset));
     (sql, values)
 }
 
@@ -129,7 +159,7 @@ pub(crate) fn kind_of_type(data_type: &str) -> CellKind {
     }
 }
 
-fn clip(mut text: String) -> String {
+pub(super) fn clip(mut text: String) -> String {
     if text.len() > CELL_MAX {
         let mut end = CELL_MAX;
         while !text.is_char_boundary(end) {
@@ -231,7 +261,7 @@ impl rustls::client::danger::ServerCertVerifier for Unchecked {
     }
 }
 
-fn tls(check: TlsCheck) -> Result<tokio_postgres_rustls::MakeRustlsConnect, String> {
+pub(super) fn tls(check: TlsCheck) -> Result<tokio_postgres_rustls::MakeRustlsConnect, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
@@ -253,7 +283,7 @@ fn tls(check: TlsCheck) -> Result<tokio_postgres_rustls::MakeRustlsConnect, Stri
 }
 
 /// A database's own error, in a sentence the place can show.
-fn pg_error(e: postgres::Error) -> String {
+pub(super) fn pg_error(e: postgres::Error) -> String {
     if let Some(db) = e.as_db_error() {
         let mut msg = db.message().to_string();
         if let Some(hint) = db.hint() {
@@ -315,7 +345,7 @@ impl Session {
                     .unwrap_or_default();
                 let version = version.split_whitespace().next().unwrap_or("").to_string();
                 Ok((
-                    Session::Postgres(client),
+                    Session::Postgres(client, check),
                     Opened {
                         server: format!("Postgres {version}").trim().to_string(),
                         read_only,
@@ -359,14 +389,14 @@ impl Session {
     /// while the computer slept.
     pub(crate) fn is_closed(&self) -> bool {
         match self {
-            Session::Postgres(client) => client.is_closed(),
+            Session::Postgres(client, _) => client.is_closed(),
             Session::Sqlite(_) => false,
         }
     }
 
     pub(crate) fn kind(&self) -> Kind {
         match self {
-            Session::Postgres(_) => Kind::Postgres,
+            Session::Postgres(..) => Kind::Postgres,
             Session::Sqlite(_) => Kind::Sqlite,
         }
     }
@@ -374,7 +404,7 @@ impl Session {
     /// Every table and view with its columns, keys and estimated size.
     pub(crate) fn tables(&mut self) -> Result<Vec<Table>, String> {
         match self {
-            Session::Postgres(client) => pg_tables(client),
+            Session::Postgres(client, _) => pg_tables(client),
             Session::Sqlite(conn) => sqlite_tables(conn).map_err(|e| e.to_string()),
         }
     }
@@ -390,55 +420,15 @@ impl Session {
             .collect();
         let start = Instant::now();
         let mut rows = match self {
-            Session::Postgres(client) => {
+            Session::Postgres(client, _) => {
                 let messages = client.simple_query(&shown).map_err(pg_error)?;
-                let mut columns: Vec<String> = Vec::new();
-                let mut rows = Vec::new();
-                for m in messages {
-                    match m {
-                        postgres::SimpleQueryMessage::RowDescription(cols) => {
-                            columns = cols.iter().map(|c| c.name().to_string()).collect();
-                        }
-                        postgres::SimpleQueryMessage::Row(r) => {
-                            if columns.is_empty() {
-                                columns =
-                                    r.columns().iter().map(|c| c.name().to_string()).collect();
-                            }
-                            let cells = (0..r.len())
-                                .map(|i| match r.get(i) {
-                                    None => Cell::null(),
-                                    Some(v) => {
-                                        let kind = columns
-                                            .get(i)
-                                            .and_then(|n| types.get(n.as_str()))
-                                            .copied()
-                                            .unwrap_or(CellKind::Text);
-                                        let text = if kind == CellKind::Bool {
-                                            match v {
-                                                "t" => "true".into(),
-                                                "f" => "false".into(),
-                                                v => v.to_string(),
-                                            }
-                                        } else {
-                                            v.to_string()
-                                        };
-                                        Cell::text(clip(text), kind)
-                                    }
-                                })
-                                .collect();
-                            rows.push(cells);
-                        }
-                        _ => {}
-                    }
+                let mut rows = pg_text_rows(messages, |_, name| {
+                    types.get(name).copied().unwrap_or(CellKind::Text)
+                });
+                if rows.columns.is_empty() {
+                    rows.columns = table.columns.iter().map(|c| c.name.clone()).collect();
                 }
-                if columns.is_empty() {
-                    columns = table.columns.iter().map(|c| c.name.clone()).collect();
-                }
-                Rows {
-                    columns,
-                    rows,
-                    ..Rows::default()
-                }
+                rows
             }
             Session::Sqlite(conn) => {
                 let (sql, values) = browse_sql(kind, table, b, true);
@@ -453,7 +443,56 @@ impl Session {
     }
 }
 
-fn pg_rows(client: &mut postgres::Client, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+/// The rows of a simple query, as cells; `kind` gives each column's look by name.
+pub(super) fn pg_text_rows(
+    messages: Vec<postgres::SimpleQueryMessage>,
+    kind: impl Fn(usize, &str) -> CellKind,
+) -> Rows {
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows = Vec::new();
+    for m in messages {
+        match m {
+            postgres::SimpleQueryMessage::RowDescription(cols) => {
+                columns = cols.iter().map(|c| c.name().to_string()).collect();
+            }
+            postgres::SimpleQueryMessage::Row(r) => {
+                if columns.is_empty() {
+                    columns = r.columns().iter().map(|c| c.name().to_string()).collect();
+                }
+                let cells = (0..r.len())
+                    .map(|i| match r.get(i) {
+                        None => Cell::null(),
+                        Some(v) => {
+                            let kind = columns.get(i).map(|n| kind(i, n)).unwrap_or(CellKind::Text);
+                            let text = if kind == CellKind::Bool {
+                                match v {
+                                    "t" => "true".into(),
+                                    "f" => "false".into(),
+                                    v => v.to_string(),
+                                }
+                            } else {
+                                v.to_string()
+                            };
+                            Cell::text(clip(text), kind)
+                        }
+                    })
+                    .collect();
+                rows.push(cells);
+            }
+            _ => {}
+        }
+    }
+    Rows {
+        columns,
+        rows,
+        ..Rows::default()
+    }
+}
+
+pub(super) fn pg_rows(
+    client: &mut postgres::Client,
+    sql: &str,
+) -> Result<Vec<Vec<Option<String>>>, String> {
     Ok(client
         .simple_query(sql)
         .map_err(pg_error)?
@@ -594,13 +633,36 @@ fn sqlite_tables(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Table>> {
     Ok(tables)
 }
 
+/// One SQLite value as a cell, shown as its column's declared type says.
+pub(super) fn sqlite_cell(value: rusqlite::types::ValueRef<'_>, declared: CellKind) -> Cell {
+    use rusqlite::types::ValueRef;
+    match value {
+        ValueRef::Null => Cell::null(),
+        ValueRef::Integer(n) if declared == CellKind::Bool => {
+            Cell::text(if n == 0 { "false" } else { "true" }, CellKind::Bool)
+        }
+        ValueRef::Integer(n) => Cell::text(n.to_string(), CellKind::Number),
+        ValueRef::Real(f) => Cell::text(f.to_string(), CellKind::Number),
+        ValueRef::Text(t) => {
+            let text = String::from_utf8_lossy(t).to_string();
+            let kind =
+                if declared == CellKind::Json || (text.starts_with('{') && text.ends_with('}')) {
+                    CellKind::Json
+                } else {
+                    CellKind::Text
+                };
+            Cell::text(clip(text), kind)
+        }
+        ValueRef::Blob(b) => Cell::text(format!("{} bytes", b.len()), CellKind::Bytes),
+    }
+}
+
 fn sqlite_rows(
     conn: &rusqlite::Connection,
     sql: &str,
     values: &[String],
     types: &HashMap<&str, CellKind>,
 ) -> rusqlite::Result<Rows> {
-    use rusqlite::types::ValueRef;
     let mut stmt = conn.prepare(sql)?;
     let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
     let mut out = Vec::new();
@@ -609,26 +671,7 @@ fn sqlite_rows(
         let mut cells = Vec::with_capacity(columns.len());
         for (i, name) in columns.iter().enumerate() {
             let declared = types.get(name.as_str()).copied().unwrap_or(CellKind::Text);
-            cells.push(match row.get_ref(i)? {
-                ValueRef::Null => Cell::null(),
-                ValueRef::Integer(n) if declared == CellKind::Bool => {
-                    Cell::text(if n == 0 { "false" } else { "true" }, CellKind::Bool)
-                }
-                ValueRef::Integer(n) => Cell::text(n.to_string(), CellKind::Number),
-                ValueRef::Real(f) => Cell::text(f.to_string(), CellKind::Number),
-                ValueRef::Text(t) => {
-                    let text = String::from_utf8_lossy(t).to_string();
-                    let kind = if declared == CellKind::Json
-                        || (text.starts_with('{') && text.ends_with('}'))
-                    {
-                        CellKind::Json
-                    } else {
-                        CellKind::Text
-                    };
-                    Cell::text(clip(text), kind)
-                }
-                ValueRef::Blob(b) => Cell::text(format!("{} bytes", b.len()), CellKind::Bytes),
-            });
+            cells.push(sqlite_cell(row.get_ref(i)?, declared));
         }
         out.push(cells);
     }
@@ -805,7 +848,7 @@ mod tests {
         };
         let (mut s, opened) = Session::open(Kind::Postgres, &url).unwrap();
         assert!(opened.read_only, "{opened:?}");
-        let Session::Postgres(client) = &mut s else {
+        let Session::Postgres(client, _) = &mut s else {
             unreachable!()
         };
         let err = client

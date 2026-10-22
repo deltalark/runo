@@ -3,8 +3,10 @@
 //! sorting, and a row inspector that follows foreign keys.
 
 use super::*;
+use crate::dataquery::DataTab;
 use db::detect::Found;
 use db::engine::Opened;
+pub(crate) use db::mask;
 use db::saved::Saved;
 use db::{Browse, Cell, CellKind, Env, Filter, Kind, Op, Rows, Table};
 use gpui_kit::component::table::{
@@ -21,6 +23,78 @@ const INSPECTOR_WIDTH: f32 = 300.;
 
 /// Open sessions, by saved connection id, shared with the threads that run queries.
 type Live = Arc<Mutex<HashMap<String, db::engine::Session>>>;
+/// How to stop what each session is running, kept apart so a stop needn't wait for it.
+type Cancellers = Arc<Mutex<HashMap<String, db::query::Canceller>>>;
+
+/// Why a run on a worker thread didn't give a result.
+pub(crate) enum Stop {
+    Failed(String),
+    /// It would read a whole big table on production: the warning to show first.
+    Heavy(String),
+}
+
+/// A connection's session as worker threads reach it. When the server dropped it (a
+/// restart, or the computer slept), it reconnects once and tries again.
+pub(crate) struct SessionRef {
+    live: Live,
+    cancellers: Cancellers,
+    id: String,
+    saved: Option<Saved>,
+    root: Option<String>,
+}
+
+impl SessionRef {
+    pub(crate) fn with<T>(
+        &self,
+        f: impl Fn(&mut db::engine::Session) -> Result<T, Stop>,
+    ) -> Result<T, Stop> {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        let session = live
+            .get_mut(&self.id)
+            .ok_or_else(|| Stop::Failed("The connection closed. Connect again.".into()))?;
+        match f(session) {
+            Err(Stop::Failed(_)) if session.is_closed() => {
+                *session = self.reopen().map_err(Stop::Failed)?;
+                self.cancellers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(self.id.clone(), session.canceller());
+                f(session)
+            }
+            other => other,
+        }
+    }
+
+    fn reopen(&self) -> Result<db::engine::Session, String> {
+        let (Some(saved), Some(root)) = (&self.saved, &self.root) else {
+            return Err("The connection closed. Connect again.".into());
+        };
+        let target = db::saved::target(saved, Path::new(root))?;
+        let (session, opened) = db::engine::Session::open(saved.kind, &target)
+            .map_err(|e| format!("The connection closed, and reconnecting failed: {e}"))?;
+        if !opened.read_only {
+            return Err("The database didn't confirm a read-only session on reconnecting, so Runo didn't use it.".into());
+        }
+        Ok(session)
+    }
+}
+
+/// A run held back on production until the person says go.
+pub(crate) struct Warning {
+    pub text: String,
+    /// The statement it's about; once run anyway, it isn't asked about again.
+    pub sql: String,
+    pub then: Then,
+}
+
+/// What to do once the person says go.
+pub(crate) enum Then {
+    Browse,
+    Query,
+    Count,
+    Column(String),
+    Export(std::path::PathBuf, HashSet<String>),
+}
 
 /// One saved connection's state while the place is open.
 #[derive(Default)]
@@ -63,6 +137,16 @@ pub(crate) struct DataPage {
     pub filter_error: Option<String>,
     /// The connection whose Remove was pressed once, waiting for the second press.
     pub confirm_remove: Option<String>,
+    pub tab: crate::dataquery::DataTab,
+    pub stats: crate::datastats::Stats,
+    pub query: crate::dataquery::QueryPage,
+    cancellers: Cancellers,
+    /// A run waiting for "Run anyway".
+    pub warning: Option<Warning>,
+    /// Statements the person said to run anyway on production.
+    pub cleared: HashSet<String>,
+    /// What agents ran on the selected connection, newest first.
+    pub activity: Vec<db::saved::Activity>,
 }
 
 impl DataPage {
@@ -81,6 +165,8 @@ impl DataPage {
                 .placeholder("Filter, like status = failed, total > 1000, email contains gmail")
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a table"));
+        let (query, query_subs) =
+            crate::dataquery::QueryPage::new(ui_tx.clone(), mono.clone(), window, cx);
         let grid = cx.new(|cx| {
             TableState::new(Grid::empty(ui_tx, mono), window, cx)
                 .row_selectable(true)
@@ -88,7 +174,7 @@ impl DataPage {
                 .col_movable(false)
                 .sortable(true)
         });
-        let subs = vec![
+        let mut subs = vec![
             cx.subscribe_in(&url, window, |this, input, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let text = input.read(cx).value().trim().to_string();
@@ -115,7 +201,8 @@ impl DataPage {
             cx.subscribe_in(&grid, window, |this, _, event: &TableEvent, _, cx| {
                 match event {
                     TableEvent::SelectRow(i) | TableEvent::SelectCell(i, _) => {
-                        this.data.row = Some(*i)
+                        this.data.row = Some(*i);
+                        this.data.stats.open = false;
                     }
                     TableEvent::ClearSelection => this.data.row = None,
                     _ => return,
@@ -123,6 +210,7 @@ impl DataPage {
                 cx.notify();
             }),
         ];
+        subs.extend(query_subs);
         (
             Self {
                 url,
@@ -147,12 +235,28 @@ impl DataPage {
                 add_error: None,
                 filter_error: None,
                 confirm_remove: None,
+                tab: Default::default(),
+                stats: Default::default(),
+                query,
+                cancellers: Arc::default(),
+                warning: None,
+                cleared: HashSet::new(),
+                activity: Vec::new(),
             },
             subs,
         )
     }
 
-    fn table_of(&self) -> Option<&Table> {
+    pub(crate) fn table_by_label(&self, label: &str) -> Option<&Table> {
+        let id = self.selected.as_ref()?;
+        self.conns
+            .get(id)?
+            .tables
+            .iter()
+            .find(|t| t.label() == label)
+    }
+
+    pub(crate) fn table_of(&self) -> Option<&Table> {
         let id = self.selected.as_ref()?;
         let label = self.table.as_ref()?;
         self.conns
@@ -206,15 +310,6 @@ pub(crate) fn row_json(
         out.insert(name.clone(), value);
     }
     serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_default()
-}
-
-pub(crate) fn mask(text: &str) -> String {
-    match text.split_once('@') {
-        Some((user, domain)) if !user.is_empty() && domain.contains('.') => {
-            format!("{}•••@{domain}", user.chars().next().unwrap_or('•'))
-        }
-        _ => "••••••".into(),
-    }
 }
 
 /// A condition typed in the filter bar, against the table's columns: `status = failed`,
@@ -356,7 +451,7 @@ fn env_chip(env: Env) -> Div {
         .child(env.label())
 }
 
-fn label_row(text: impl Into<SharedString>) -> Div {
+pub(crate) fn label_row(text: impl Into<SharedString>) -> Div {
     div()
         .px_3()
         .pt(px(14.))
@@ -370,7 +465,7 @@ fn label_row(text: impl Into<SharedString>) -> Div {
         .child(div().flex_1().child(text.into()))
 }
 
-fn small_button(
+pub(crate) fn small_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     primary: bool,
@@ -398,7 +493,7 @@ fn small_button(
     }
 }
 
-fn centered(text: impl Into<SharedString>) -> AnyElement {
+pub(crate) fn centered(text: impl Into<SharedString>) -> AnyElement {
     div()
         .size_full()
         .flex()
@@ -531,6 +626,7 @@ impl RunoApp {
         self.data.rows = None;
         self.data.row = None;
         self.data.rows_error = None;
+        self.data.activity = db::saved::activity(id, crate::dataask::SHOWN);
         let open = self.data.conns.get(id).is_some_and(|c| c.opened.is_some());
         if !open {
             self.open_data_conn(id, cx);
@@ -553,6 +649,7 @@ impl RunoApp {
         conn.connecting = true;
         conn.error = None;
         let live = self.data.live.clone();
+        let cancellers = self.data.cancellers.clone();
         let id = id.to_string();
         cx.notify();
         self.bg(
@@ -571,6 +668,10 @@ impl RunoApp {
                         return Err("The database didn't confirm a read-only session, so Runo didn't open it.".into());
                     }
                     let tables = session.tables()?;
+                    cancellers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(id.clone(), session.canceller());
                     live.lock().unwrap_or_else(|e| e.into_inner()).insert(id, session);
                     Ok((opened, tables))
                 }
@@ -582,6 +683,7 @@ impl RunoApp {
                     Ok((opened, tables)) => {
                         conn.opened = Some(opened);
                         conn.tables = tables;
+                        this.refresh_words();
                     }
                     Err(e) => {
                         conn.opened = None;
@@ -631,7 +733,14 @@ impl RunoApp {
         cx.notify();
     }
 
-    fn pick_table(&mut self, label: String, filters: Vec<Filter>, cx: &mut Context<Self>) {
+    pub(crate) fn pick_table(
+        &mut self,
+        label: String,
+        filters: Vec<Filter>,
+        cx: &mut Context<Self>,
+    ) {
+        self.data.tab = DataTab::Browse;
+        self.data.warning = None;
         self.data.table = Some(label);
         self.data.browse = Browse {
             filters,
@@ -642,45 +751,95 @@ impl RunoApp {
         self.load_rows(cx);
     }
 
-    /// Fetch the open table's page of rows, off the UI thread.
+    /// The open session for connection `id`, to use on a worker thread.
+    pub(crate) fn data_session(&self, id: &str) -> SessionRef {
+        SessionRef {
+            live: self.data.live.clone(),
+            cancellers: self.data.cancellers.clone(),
+            id: id.to_string(),
+            saved: self.data.saved.iter().find(|s| s.id == id).cloned(),
+            root: self.data_root(),
+        }
+    }
+
+    /// The selected connection's kind of database.
+    pub(crate) fn data_kind(&self) -> Kind {
+        self.data
+            .selected
+            .as_ref()
+            .and_then(|id| self.data.saved.iter().find(|s| &s.id == id))
+            .map_or(Kind::Postgres, |s| s.kind)
+    }
+
+    /// Whether the selected connection is production, so heavy reads wait for a go.
+    pub(crate) fn data_prod(&self) -> bool {
+        self.data
+            .selected
+            .as_ref()
+            .and_then(|id| self.data.saved.iter().find(|s| &s.id == id))
+            .is_some_and(|s| s.env == Env::Prod)
+    }
+
+    /// Stop what the selected connection is running.
+    pub(crate) fn cancel_data(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.data.selected.clone() else {
+            return;
+        };
+        let cancellers = self.data.cancellers.clone();
+        std::thread::spawn(move || {
+            if let Some(c) = cancellers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&id)
+            {
+                c.cancel();
+            }
+        });
+        cx.notify();
+    }
+
     pub(crate) fn load_rows(&mut self, cx: &mut Context<Self>) {
         let (Some(id), Some(table)) = (self.data.selected.clone(), self.data.table_of().cloned())
         else {
             return;
         };
         let browse = self.data.browse.clone();
-        let live = self.data.live.clone();
-        let saved = self.data.saved.iter().find(|s| s.id == id).cloned();
-        let root = self.data_root();
+        let kind = self
+            .data
+            .saved
+            .iter()
+            .find(|s| s.id == id)
+            .map_or(Kind::Postgres, |s| s.kind);
+        // Sorting or filtering can read the whole table; asked about once per statement.
+        let whole = db::engine::select_sql(kind, &table, &browse, false).0;
+        let heavy_check = self.data_prod()
+            && (!browse.filters.is_empty() || browse.sort.is_some())
+            && !self.data.cleared.contains(&whole);
+        let tables = self
+            .data
+            .conns
+            .get(&id)
+            .map(|c| c.tables.clone())
+            .unwrap_or_default();
+        let session = self.data_session(&id);
         self.data.loading = true;
         self.data.rows_error = None;
+        self.data.warning = None;
         cx.notify();
         let label = table.label();
         self.bg(
             move || {
-                let mut live = live.lock().unwrap_or_else(|e| e.into_inner());
-                let session = live
-                    .get_mut(&id)
-                    .ok_or_else(|| "The connection closed. Connect again.".to_string())?;
-                match session.browse(&table, &browse) {
-                    // The server ended the session (it restarted, or the computer slept):
-                    // open a new one and ask again, once.
-                    Err(_) if session.is_closed() => {
-                        let (Some(saved), Some(root)) = (saved, root) else {
-                            return Err("The connection closed. Connect again.".to_string());
-                        };
-                        let target = db::saved::target(&saved, Path::new(&root))?;
-                        let (fresh, opened) = db::engine::Session::open(saved.kind, &target)
-                            .map_err(|e| format!("The connection closed, and reconnecting failed: {e}"))?;
-                        if !opened.read_only {
-                            live.remove(&id);
-                            return Err("The database didn't confirm a read-only session on reconnecting, so Runo closed it.".into());
+                session.with(|s| {
+                    if heavy_check {
+                        let (paged, _) = db::engine::browse_sql(kind, &table, &browse, false);
+                        if let Ok(Some(warning)) = s.scan_warning(&paged, &tables) {
+                            return Err(Stop::Heavy(warning));
                         }
-                        *session = fresh;
-                        session.browse(&table, &browse).map(|rows| (rows, table))
                     }
-                    other => other.map(|rows| (rows, table)),
-                }
+                    s.browse(&table, &browse)
+                        .map(|rows| (rows, table.clone()))
+                        .map_err(Stop::Failed)
+                })
             },
             move |this, result, cx| {
                 if this.data.table.as_deref() != Some(label.as_str()) {
@@ -699,7 +858,15 @@ impl RunoApp {
                         });
                         this.data.rows = Some(rows);
                     }
-                    Err(e) => {
+                    Err(Stop::Heavy(text)) => {
+                        this.data.rows = None;
+                        this.data.warning = Some(Warning {
+                            text,
+                            sql: whole,
+                            then: Then::Browse,
+                        });
+                    }
+                    Err(Stop::Failed(e)) => {
                         this.data.rows = None;
                         this.data.rows_error = Some(e);
                     }
@@ -707,6 +874,97 @@ impl RunoApp {
                 cx.notify();
             },
         );
+    }
+
+    /// Export the open table's rows, with its filters and sort, as CSV.
+    fn export_browse(&mut self, cx: &mut Context<Self>) {
+        let Some(table) = self.data.table_of().cloned() else {
+            return;
+        };
+        let sql = db::engine::select_sql(self.data_kind(), &table, &self.data.browse, false).0;
+        let hidden = table
+            .columns
+            .iter()
+            .filter(|c| c.sensitive() && !self.data.revealed.contains(&c.name))
+            .map(|c| c.name.clone())
+            .collect();
+        self.export_csv(sql, table.name.clone(), hidden, cx);
+    }
+
+    /// Do what the warning held back, and don't ask about that statement again.
+    fn run_anyway(&mut self, cx: &mut Context<Self>) {
+        let Some(w) = self.data.warning.take() else {
+            return;
+        };
+        self.data.cleared.insert(w.sql.trim().to_string());
+        match w.then {
+            Then::Browse => self.load_rows(cx),
+            Then::Query => self.run_query(true, cx),
+            Then::Count => self.count_rows(true, cx),
+            Then::Column(name) => self.exact_column(&name, true, cx),
+            Then::Export(path, hidden) => self.write_csv(w.sql, path, hidden, true, cx),
+        }
+    }
+
+    /// The warning held over a run on production, with Run anyway and Cancel.
+    pub(crate) fn data_warning_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let w = self.data.warning.as_ref()?;
+        Some(
+            div()
+                .mx_3()
+                .my_2()
+                .px_3()
+                .py_2()
+                .flex_none()
+                .flex()
+                .items_start()
+                .gap_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgba((c_amber() << 8) | 0x66))
+                .bg(rgba((c_amber() << 8) | 0x14))
+                .child(
+                    div()
+                        .pt(px(2.))
+                        .child(icon(IconName::TriangleAlert, 14., c_amber())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .v_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Heavy read on production"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(c_secondary()))
+                                .child(w.text.clone()),
+                        )
+                        .child(
+                            div()
+                                .pt_1()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    small_button("data-warn-run", "Run anyway", false).on_click(
+                                        cx.listener(|this, _, _, cx| this.run_anyway(cx)),
+                                    ),
+                                )
+                                .child(small_button("data-warn-cancel", "Cancel", false).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.data.warning = None;
+                                        cx.notify();
+                                    }),
+                                )),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Add the condition typed in the filter bar. Returns whether it was understood.
@@ -809,7 +1067,26 @@ impl RunoApp {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Data"),
             )
-            .child(shell::strip_tab("data-browse", "data", true).child("Browse"))
+            .children(
+                [
+                    (DataTab::Browse, "Browse", IconName::Table),
+                    (DataTab::Query, "Query", IconName::SquareTerminal),
+                    (DataTab::Diagram, "Diagram", IconName::Network),
+                ]
+                .into_iter()
+                .map(|(tab, label, glyph)| {
+                    shell::strip_tab(
+                        SharedString::from(format!("data-tab-{label}")),
+                        "data",
+                        self.data.tab == tab,
+                    )
+                    .child(icon(glyph, 12., c_muted()))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_data_tab(tab, window, cx);
+                    }))
+                }),
+            )
             .child(div().flex_1())
             .child(
                 div()
@@ -859,9 +1136,11 @@ impl RunoApp {
                 self.data_error_page(c.error.clone().unwrap_or_default(), cx)
             }
             Some(c) if c.opened.is_none() => centered("Not connected."),
-            Some(c) => match self.data.table_of() {
-                Some(table) => self.data_table_page(table, cx),
-                None => self.data_overview(c, cx),
+            Some(c) => match (self.data.tab, self.data.table_of()) {
+                (DataTab::Query, _) => self.data_query_page(cx),
+                (DataTab::Diagram, _) => self.data_diagram(c, cx),
+                (DataTab::Browse, Some(table)) => self.data_table_page(table, cx),
+                (DataTab::Browse, None) => self.data_overview(c, cx),
             },
         };
         let body = shell::island(
@@ -1038,6 +1317,9 @@ impl RunoApp {
                 .iter()
                 .filter(|t| query.is_empty() || t.label().to_lowercase().contains(&query))
                 .collect();
+            if self.data.tab == DataTab::Query {
+                list = self.data_query_side(list, cx);
+            }
             list = list
                 .child(label_row(format!("TABLES · {}", conn.tables.len())))
                 .child(
@@ -1064,8 +1346,19 @@ impl RunoApp {
                         .text_size(px(12.5))
                         .when(on, |el| el.bg(tint(c_active())))
                         .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.pick_table(pick.clone(), Vec::new(), cx);
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if this.data.tab == DataTab::Query {
+                                // Start a query on it rather than leaving the editor.
+                                let start = this
+                                    .data
+                                    .table_by_label(&pick)
+                                    .map(|t| crate::dataquery::starter(this.data_kind(), t));
+                                if let Some(sql) = start {
+                                    this.edit_query(&sql, window, cx);
+                                }
+                            } else {
+                                this.pick_table(pick.clone(), Vec::new(), cx);
+                            }
                         }))
                         .child(icon(
                             if table.view {
@@ -1468,11 +1761,15 @@ impl RunoApp {
                                     }
                                 }),
                             ))
-                            .child(self.data_remove_button(cx)),
+                            .child(self.data_remove_button(cx))
+                            .child(small_button("data-ask-db", "Ask about this database", true).on_click(
+                                cx.listener(|this, _, window, cx| this.ask_about_database(window, cx)),
+                            )),
                     )
                     .when(!biggest.is_empty(), |el| {
                         el.child(label_row("LARGEST TABLES").px_0()).child(list)
-                    }),
+                    })
+                    .children(self.agent_activity()),
             )
             .into_any_element()
     }
@@ -1546,7 +1843,62 @@ impl RunoApp {
                             .text_size(px(11.5))
                             .text_color(rgb(c_muted()))
                             .child(format!("Sorted by {col} {}", if *desc { "↓" } else { "↑" }))
-                    })),
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                self.ghost_button_sized(
+                                    "data-columns",
+                                    IconName::Activity,
+                                    "Columns: types, keys and statistics",
+                                    24.,
+                                )
+                                .when(self.data.stats.open, |el| el.bg(tint(c_active())))
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_stats(cx))),
+                            )
+                            .child(
+                                self.ghost_button_sized(
+                                    "data-to-query",
+                                    IconName::SquareTerminal,
+                                    "Write a query on this table",
+                                    24.,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        let sql = this.data.table_of().map(|t| {
+                                            crate::dataquery::starter(this.data_kind(), t)
+                                        });
+                                        if let Some(sql) = sql {
+                                            this.edit_query(&sql, window, cx);
+                                        }
+                                    },
+                                )),
+                            )
+                            .child(
+                                self.ghost_button_sized(
+                                    "data-export",
+                                    IconName::Download,
+                                    "Export these rows as CSV (hidden columns stay hidden)",
+                                    24.,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| this.export_browse(cx))),
+                            )
+                            .child(
+                                self.ghost_button_sized(
+                                    "data-ask",
+                                    IconName::Sparkles,
+                                    "Ask an agent about this table",
+                                    24.,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.ask_about_table(window, cx),
+                                )),
+                            ),
+                    ),
             )
             .children(self.data.filter_error.clone().map(|e| {
                 div()
@@ -1586,6 +1938,8 @@ impl RunoApp {
                         ),
                     )
                     .into_any_element()
+            } else if self.data.warning.is_some() && self.data.rows.is_none() {
+                centered("Nothing has run yet.")
             } else if self.data.rows.is_none() {
                 centered("Loading rows…")
             } else {
@@ -1624,6 +1978,33 @@ impl RunoApp {
                 .text_size(px(11.5))
                 .text_color(rgb(c_muted()))
                 .child(div().flex_none().child(range))
+                .child(match self.exact_count() {
+                    Some(Ok(n)) => div()
+                        .flex_none()
+                        .text_color(rgb(c_secondary()))
+                        .child(format!("{} counted", crate::datastats::thousands(*n)))
+                        .into_any_element(),
+                    Some(Err(e)) => div()
+                        .flex_none()
+                        .max_w(px(240.))
+                        .truncate()
+                        .text_color(rgb(c_red()))
+                        .child(format!("Count failed: {e}"))
+                        .into_any_element(),
+                    None if self.data.stats.counting => {
+                        div().flex_none().child("Counting…").into_any_element()
+                    }
+                    None if rows.more || self.data.browse.offset > 0 => div()
+                        .id("data-count")
+                        .flex_none()
+                        .cursor_pointer()
+                        .text_color(rgb(c_blue()))
+                        .hover(|el| el.underline())
+                        .on_click(cx.listener(|this, _, _, cx| this.count_rows(false, cx)))
+                        .child("Count exactly")
+                        .into_any_element(),
+                    None => div().into_any_element(),
+                })
                 .child(div().flex_none().child(format!("{} ms", rows.millis)))
                 .child(
                     div()
@@ -1682,6 +2063,23 @@ impl RunoApp {
             .h_full()
             .v_flex()
             .child(bar)
+            .children(self.data_warning_bar(cx))
+            .children(
+                self.data
+                    .query
+                    .note
+                    .clone()
+                    .filter(|_| self.data.tab == DataTab::Browse)
+                    .map(|n| {
+                        div()
+                            .px_3()
+                            .py_1()
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_secondary()))
+                            .child(n)
+                    }),
+            )
             .child(div().flex_1().min_h_0().relative().child(grid).when(
                 self.data.loading && self.data.rows.is_some(),
                 |el| {
@@ -1704,7 +2102,10 @@ impl RunoApp {
             .size_full()
             .flex()
             .child(center)
-            .children(self.data_inspector(table, cx))
+            .children(
+                self.data_stats_panel(table, cx)
+                    .or_else(|| self.data_inspector(table, cx)),
+            )
             .into_any_element()
     }
 
@@ -1970,7 +2371,7 @@ struct GridCol {
 }
 
 impl Grid {
-    fn empty(ui_tx: Sender<ship::UiJob>, mono: SharedString) -> Self {
+    pub(crate) fn empty(ui_tx: Sender<ship::UiJob>, mono: SharedString) -> Self {
         Grid {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -1980,7 +2381,7 @@ impl Grid {
         }
     }
 
-    fn fill(
+    pub(crate) fn fill(
         &mut self,
         table: &Table,
         rows: &Rows,

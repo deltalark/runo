@@ -3,8 +3,10 @@
 //! them (`engine`). Every session is opened read-only, and the database itself enforces
 //! that, so nothing the place or an agent runs through it can change data.
 
+pub(crate) mod agent;
 pub(crate) mod detect;
 pub(crate) mod engine;
+pub(crate) mod query;
 pub(crate) mod saved;
 pub(crate) mod yamlish;
 
@@ -207,6 +209,17 @@ pub(crate) fn short_type(data_type: &str) -> String {
         }
     }
     data_type.to_string()
+}
+
+/// A hidden value as the grid shows it: an email keeps its first letter and domain, so
+/// rows can still be told apart; anything else is dots.
+pub(crate) fn mask(text: &str) -> String {
+    match text.split_once('@') {
+        Some((user, domain)) if !user.is_empty() && domain.contains('.') => {
+            format!("{}•••@{domain}", user.chars().next().unwrap_or('•'))
+        }
+        _ => "••••••".into(),
+    }
 }
 
 /// A table or view.

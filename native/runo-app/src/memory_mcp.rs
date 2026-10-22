@@ -51,7 +51,7 @@ pub fn handle_thread(dir: &str, thread: Option<u64>, request: &Value) -> Option<
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {}, "prompts": {} },
                 "serverInfo": { "name": "runo", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Runo's session memory and playbooks. Call read_memory to catch up on this task, search_history to find what earlier sessions did, and save_note to keep decisions for whoever works on this next. Playbooks are saved tasks: list_playbooks shows them, get_playbook gives one's instructions to carry out now, and run_playbook starts one as its own session in Runo."
+                "instructions": "Runo's session memory and playbooks. Call read_memory to catch up on this task, search_history to find what earlier sessions did, and save_note to keep decisions for whoever works on this next. Playbooks are saved tasks: list_playbooks shows them, get_playbook gives one's instructions to carry out now, and run_playbook starts one as its own session in Runo. When the project has databases in Runo's Data place, data_connections, data_tables and data_query read them, read-only."
             }))
         }
         "prompts/list" => Ok(json!({ "prompts": prompt_list(&load_state(), dir) })),
@@ -69,6 +69,11 @@ pub fn handle_thread(dir: &str, thread: Option<u64>, request: &Value) -> Option<
                     list.extend(thread_tools());
                 }
             }
+            if data_project(dir).is_some_and(|(pid, _)| crate::db::agent::offered(pid)) {
+                if let Some(list) = all.as_array_mut() {
+                    list.extend(crate::db::agent::tools());
+                }
+            }
             Ok(json!({ "tools": all }))
         }
         "tools/call" => {
@@ -81,6 +86,12 @@ pub fn handle_thread(dir: &str, thread: Option<u64>, request: &Value) -> Option<
                     &params["arguments"],
                     &MESSAGES_SENT,
                 )),
+                None if crate::db::agent::TOOLS.contains(&name) => Ok(match data_project(dir) {
+                    Some((pid, root)) => {
+                        crate::db::agent::call(pid, &root, name, &params["arguments"])
+                    }
+                    None => failure("This folder isn't one of Runo's projects."),
+                }),
                 None => Ok(call(dir, name, &params["arguments"])),
             }
         }
@@ -507,6 +518,14 @@ fn find_section(memory: &str, name: &str) -> Option<String> {
 static CLIENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// The project a session folder belongs to.
+/// The project of `dir` and its folder, for the data tools.
+fn data_project(dir: &str) -> Option<(u64, String)> {
+    let state = load_state();
+    let pid = project_of(&state, dir)?;
+    let root = state.projects.iter().find(|p| p.id == pid)?.path.clone();
+    Some((pid, root))
+}
+
 fn project_of(state: &State, dir: &str) -> Option<u64> {
     state
         .sessions
