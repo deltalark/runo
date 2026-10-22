@@ -9,13 +9,15 @@ use super::*;
 use crate::assistant_act::{Action, Outcome, MAX_ACTIONS};
 
 /// The slash commands, with what each does, as the input suggests them.
-pub(crate) const COMMANDS: [(&str, &str); 8] = [
+pub(crate) const COMMANDS: [(&str, &str); 10] = [
     ("/status", "What's running, waiting and done"),
     ("/new", "Start an agent on a task"),
     ("/race", "Race your agents on a task"),
     ("/playbook", "Run a playbook"),
     ("/stop", "Stop running agents"),
     ("/approve", "Answer what's waiting for permission"),
+    ("/remember", "Keep a preference for later chats"),
+    ("/forget", "Drop something remembered"),
     ("/clear", "Start a new chat"),
     ("/help", "What the assistant can do"),
 ];
@@ -162,10 +164,49 @@ impl RunoApp {
         };
         let (text, actions) = match cmd {
             "/clear" => {
-                self.assistant.chat.clear();
+                self.assistant_new_chat();
                 return true;
             }
             "/status" => (self.assistant_status(), Vec::new()),
+            "/remember" if rest.is_empty() => {
+                let notes = crate::assistant_mem::notes_for(
+                    &self.assistant.kept.notes,
+                    &self.assistant_project_name(),
+                );
+                let text = if notes.is_empty() {
+                    "I don't remember anything here yet. Say what to keep, like `/remember use worktrees for Codex`.".into()
+                } else {
+                    format!("Here I remember:\n\n- {}", notes.join("\n- "))
+                };
+                (text, Vec::new())
+            }
+            "/remember" => {
+                let text = match self.assistant_remember(rest) {
+                    Ok(done) => format!("{done}. I'll keep it in mind in later chats."),
+                    Err(why) => why,
+                };
+                (text, Vec::new())
+            }
+            "/forget" => {
+                let word = rest.to_lowercase();
+                let found: Vec<Action> = self
+                    .assistant
+                    .kept
+                    .notes
+                    .iter()
+                    .filter(|n| n.text.to_lowercase().contains(&word))
+                    .take(MAX_ACTIONS)
+                    .map(|n| Action::Forget {
+                        note: n.text.clone(),
+                    })
+                    .collect();
+                let text = if found.is_empty() {
+                    "I don't remember anything like that.".into()
+                } else {
+                    "Which one?".into()
+                };
+                (text, found)
+            }
             "/new" | "/race" if rest.is_empty() => (
                 format!("Say what to work on, like `{cmd} fix the flaky login test`."),
                 Vec::new(),
@@ -334,6 +375,7 @@ impl RunoApp {
             actions.into_iter().map(|a| (a, Outcome::Ready)).collect(),
         ));
         self.assistant.scroll.scroll_to_bottom();
+        self.assistant_keep();
     }
 
     /// The one thing worth a nudge now, if any: a race ready to compare, a run that

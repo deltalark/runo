@@ -314,12 +314,12 @@ pub(crate) fn open_label(open: &str) -> String {
 pub(crate) struct Msg {
     pub you: bool,
     /// What the answer offers to do, and what became of each.
-    actions: Vec<(Action, Outcome)>,
-    text: String,
+    pub(crate) actions: Vec<(Action, Outcome)>,
+    pub(crate) text: String,
     /// The guide articles the answer came from.
-    sources: Vec<&'static str>,
+    pub(crate) sources: Vec<&'static str>,
     /// Where "Take me there" goes.
-    open: Option<String>,
+    pub(crate) open: Option<String>,
 }
 
 impl Msg {
@@ -340,7 +340,7 @@ pub(crate) struct Assistant {
     input: Entity<InputState>,
     pub(crate) chat: Vec<Msg>,
     /// The question being answered by the agent, by its run key.
-    asking: Option<String>,
+    pub(crate) asking: Option<String>,
     asked: u64,
     /// The agent answering the question being asked.
     answerer: &'static str,
@@ -350,9 +350,17 @@ pub(crate) struct Assistant {
     /// Whether the pointer is over the mark in the corner, and since when.
     hover: Option<(bool, std::time::Instant)>,
     /// The answer so far, while the agent writes it.
-    streamed: String,
+    pub(crate) streamed: String,
     /// Stops the agent writing the answer.
     stopper: Option<agent::Stopper>,
+    /// Chats and notes kept between runs.
+    pub(crate) kept: crate::assistant_mem::Kept,
+    /// Which kept chat the open one is.
+    pub(crate) chat_id: u64,
+    /// Whether the list of earlier chats and notes shows instead of the chat.
+    pub(crate) chats_open: bool,
+    /// Whether the panel is the big command deck in the middle of the window.
+    pub(crate) deck: bool,
 }
 
 impl Assistant {
@@ -371,11 +379,28 @@ impl Assistant {
                 cx.notify();
             }),
         ];
+        // Today's chat reopens as it was; an older one waits under Chats.
+        let kept = crate::assistant_mem::load();
+        let (chat, chat_id) = match kept.chats.first() {
+            Some(c)
+                if crate::assistant_mem::same_day(c.updated, chrono::Local::now().timestamp()) =>
+            {
+                (c.msgs.iter().map(crate::assistant_mem::msg).collect(), c.id)
+            }
+            _ => (
+                Vec::new(),
+                kept.chats.iter().map(|c| c.id).max().unwrap_or(0) + 1,
+            ),
+        };
         (
             Self {
                 open: false,
                 input,
-                chat: Vec::new(),
+                chat,
+                kept,
+                chat_id,
+                chats_open: false,
+                deck: false,
                 asking: None,
                 asked: 0,
                 answerer: "",
@@ -410,7 +435,10 @@ ACTION: {\"do\":\"project\",\"name\":\"...\"} switch project\n\
 ACTION: {\"do\":\"open\",\"place\":\"inbox\"} go to home, inbox, sessions, review, git-history, \
 branches, github, playbooks, history, new-session, tour or settings:<page>\n\
 ACTION: {\"do\":\"setting\",\"key\":\"theme\",\"value\":\"dark\"} keys: theme (light, dark, \
-system), animations (true or false), default_agent (an agent id)\n";
+system), animations (true or false), default_agent (an agent id)\n\
+ACTION: {\"do\":\"remember\",\"note\":\"...\"} keep a preference or fact the person states \
+for later chats in this project, like how they like work started; offer it when they say \
+\"always\", \"never\" or \"remember\"\n";
 
 /// The prompt the answering agent gets: what is happening in the app, what is on screen,
 /// the guide articles that match, how to answer, and what it can offer to do.
@@ -420,6 +448,7 @@ fn prompt(
     context: &str,
     state: &str,
     history: &str,
+    notes: &str,
     cx: &App,
 ) -> String {
     let titles: Vec<&str> = guide().iter().map(|a| a.title.as_str()).collect();
@@ -437,6 +466,9 @@ fn prompt(
     text.push_str(&format!("State of the app now:\n{state}\n"));
     text.push_str(ACTIONS_HELP);
     text.push('\n');
+    if !notes.is_empty() {
+        text.push_str(&format!("{notes}\n"));
+    }
     if !history.is_empty() {
         text.push_str(&format!("The conversation so far:\n{history}\n"));
     }
@@ -631,6 +663,7 @@ impl RunoApp {
         if self.assistant.asking.is_some() {
             return;
         }
+        self.assistant.chats_open = false;
         if self.assistant_command(&question, cx) {
             return;
         }
@@ -669,6 +702,7 @@ impl RunoApp {
                     .unwrap_or_default()
             ),
             &self.assistant_history(),
+            &self.assistant_notes(),
             cx,
         );
         let configured = st.agent(provider.id).binary;
@@ -718,7 +752,7 @@ impl RunoApp {
     }
 
     /// Stop the agent writing the answer; what it wrote so far stays as the answer.
-    fn assistant_stop(&mut self) {
+    pub(crate) fn assistant_stop(&mut self) {
         if let Some(stopper) = self.assistant.stopper.take() {
             stopper.stop();
         }
@@ -752,6 +786,7 @@ impl RunoApp {
         };
         self.assistant.chat.push(msg);
         self.assistant.scroll.scroll_to_bottom();
+        self.assistant_keep();
     }
 
     /// The answering agent finished.
@@ -793,6 +828,7 @@ impl RunoApp {
                         .and_then(|a| a.open.clone()),
                 });
                 self.assistant.scroll.scroll_to_bottom();
+                self.assistant_keep();
             }
             _ => {
                 let name = self.assistant.answerer;
@@ -830,6 +866,7 @@ impl RunoApp {
         {
             slot.1 = outcome;
         }
+        self.assistant_keep();
         cx.notify();
     }
 
@@ -875,6 +912,7 @@ impl RunoApp {
                             {
                                 slot.1 = Outcome::Dismissed;
                             }
+                            this.assistant_keep();
                             cx.notify();
                         })),
                 )
@@ -1080,14 +1118,42 @@ impl RunoApp {
                     }),
             )
             .child(div().flex_1())
+            .child(
+                self.ghost_button(
+                    "assistant-chats",
+                    IconName::RotateCcwClock,
+                    "Chats and what I remember",
+                )
+                .when(self.assistant.chats_open, |el| el.bg(tint(c_subtle())))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.assistant.chats_open = !this.assistant.chats_open;
+                    cx.notify();
+                })),
+            )
+            .child(
+                self.ghost_button(
+                    "assistant-deck",
+                    if self.assistant.deck {
+                        IconName::Minimize2
+                    } else {
+                        IconName::Maximize2
+                    },
+                    if self.assistant.deck {
+                        "Back to the corner"
+                    } else {
+                        "Command deck"
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.assistant.deck = !this.assistant.deck;
+                    cx.notify();
+                })),
+            )
             .when(!self.assistant.chat.is_empty(), |el| {
                 el.child(
-                    self.ghost_button("assistant-clear", IconName::RotateCcw, "New chat")
+                    self.ghost_button("assistant-clear", IconName::MessageSquarePlus, "New chat")
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.assistant_stop();
-                            this.assistant.chat.clear();
-                            this.assistant.asking = None;
-                            this.assistant.streamed.clear();
+                            this.assistant_new_chat();
                             cx.notify();
                         })),
                 )
@@ -1121,14 +1187,18 @@ impl RunoApp {
             .v_flex()
             .gap_3();
         let acts = self.assistant_acts(cx);
-        if self.assistant.chat.is_empty() {
+        let deck = self.assistant.deck;
+        if self.assistant.chats_open {
+            body = body.child(self.assistant_chats_view(cx));
+        } else if self.assistant.chat.is_empty() {
             body = body
                 .child(
                     div()
                         .text_size(px(16.))
                         .font_weight(FontWeight::MEDIUM)
-                        .child("What do you need?"),
+                        .child(crate::home::greeting()),
                 )
+                .child(self.assistant_briefing(if deck { 3 } else { 2 }, cx))
                 .child(
                     div()
                         .text_size(px(12.5))
@@ -1173,7 +1243,12 @@ impl RunoApp {
                 );
             }
         }
-        for (i, m) in self.assistant.chat.iter().enumerate() {
+        let chat: &[Msg] = if self.assistant.chats_open {
+            &[]
+        } else {
+            &self.assistant.chat
+        };
+        for (i, m) in chat.iter().enumerate() {
             if m.you {
                 body = body.child(
                     div().flex().justify_end().child(
@@ -1241,7 +1316,7 @@ impl RunoApp {
             }
             body = body.child(answer);
         }
-        if self.assistant.asking.is_some() {
+        if self.assistant.asking.is_some() && !self.assistant.chats_open {
             let (so_far, _, _) = split_reply(&self.assistant.streamed);
             if !so_far.is_empty() {
                 body = body.child(
@@ -1338,15 +1413,13 @@ impl RunoApp {
         // accent turning violet, with a soft glow of the accent under it.
         let accent = c_blue();
         let ring_to = settings::mix(RING_VIOLET, accent, 0.6);
-        div()
+        let panel = div()
             .id("assistant-panel")
-            .absolute()
-            .right(px(18.))
-            .bottom(px(96.))
-            .w(px(400.))
+            .when(!deck, |el| el.absolute().right(px(18.)).bottom(px(96.)))
+            .w(px(if deck { 780. } else { 400. }))
             .max_w(relative(0.9))
-            .h(px(520.))
-            .max_h(relative(0.75))
+            .h(px(if deck { 640. } else { 520. }))
+            .max_h(relative(if deck { 0.86 } else { 0.75 }))
             .p(px(1.5))
             .rounded(px(13.5))
             .bg(linear_gradient(
@@ -1370,13 +1443,40 @@ impl RunoApp {
                     .child(header)
                     .child(body)
                     .child(footer),
-            )
-            // It opens up out of the mark: fading in while rising the last few pixels.
-            .animated(
+            );
+        if deck {
+            // The deck sits in the middle over a dimmed window; a click outside it puts it
+            // back in the corner.
+            return div()
+                .id("assistant-deck")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0., 0., 0., if is_dark() { 0.45 } else { 0.25 }))
+                .occlude()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.assistant.deck = false;
+                    cx.notify();
+                }))
+                .child(panel.with_animation(
+                    "assistant-deck-in",
+                    Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                    |el, d| el.opacity(d).mt(px(12. * (1. - d))),
+                ))
+                .into_any_element();
+        }
+        // It opens up out of the mark: fading in while rising the last few pixels.
+        panel
+            .with_animation(
                 "assistant-panel-in",
                 Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
                 |el, d| el.opacity(d).bottom(px(96. - 10. * (1. - d))),
             )
+            .into_any_element()
     }
 }
 
@@ -1596,7 +1696,7 @@ fn glow(color: u32, a: f32) -> Rgba {
 }
 
 /// A soft shadow of `color`, `lift` pixels below what casts it.
-fn halo(color: u32, a: f32, blur: f32, spread: f32, lift: f32) -> BoxShadow {
+pub(crate) fn halo(color: u32, a: f32, blur: f32, spread: f32, lift: f32) -> BoxShadow {
     BoxShadow {
         color: glow(color, a).into(),
         offset: point(px(0.), px(lift)),

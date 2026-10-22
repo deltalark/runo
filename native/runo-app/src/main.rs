@@ -11,6 +11,8 @@ mod askbar;
 mod assistant;
 mod assistant_act;
 mod assistant_cmds;
+mod assistant_deck;
+mod assistant_mem;
 mod branches;
 mod browser;
 mod browser_engine;
