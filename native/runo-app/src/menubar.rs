@@ -147,9 +147,6 @@ impl RunoApp {
         if summary.is_empty() {
             summary.push("Nothing running".into());
         }
-        if counts.spend_today >= 0.5 {
-            summary.push(format!("${:.2} today", counts.spend_today / 100.));
-        }
         let count = match (counts.needs_you, counts.running) {
             (0, 0) => String::new(),
             (0, n) | (n, _) => n.to_string(),
