@@ -6,7 +6,7 @@
 //! could by hand.
 
 use super::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The most actions one answer can offer.
 pub(crate) const MAX_ACTIONS: usize = 3;
@@ -14,7 +14,7 @@ pub(crate) const MAX_ACTIONS: usize = 3;
 const SESSIONS_SHOWN: usize = 20;
 
 /// Something the assistant offers to do.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "do", rename_all = "lowercase")]
 pub(crate) enum Action {
     /// Go to a place in the app, named the way guide articles name them.

@@ -174,6 +174,8 @@ pub struct AppSettings {
     pub assistant_agent: String,
     /// Its model; empty is a fast one where Runo knows it, else the agent's default.
     pub assistant_model: String,
+    /// The mark offers the next step when a run finishes, a race is ready or a clash shows.
+    pub assistant_nudges: bool,
 }
 
 /// `Name = command` lines; a line without `=` uses the command as its name.
@@ -256,6 +258,7 @@ impl Default for AppSettings {
             assistant_answers: "agent".into(),
             assistant_agent: String::new(),
             assistant_model: String::new(),
+            assistant_nudges: true,
         }
     }
 }

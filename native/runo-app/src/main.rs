@@ -10,6 +10,7 @@ mod architecture;
 mod askbar;
 mod assistant;
 mod assistant_act;
+mod assistant_cmds;
 mod branches;
 mod browser;
 mod browser_engine;
