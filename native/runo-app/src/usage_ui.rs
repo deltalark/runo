@@ -351,6 +351,31 @@ impl RunoApp {
             }
         }
         head = head.child(icon(IconName::ChevronRight, 12., c_muted()));
+        // Agents that report a cost: what they put on today. On a plan it's what the
+        // tokens would cost at API prices, not what the person is billed.
+        let on_plan = matches!(u.as_ref().map(|u| &u.reading), Some(Reading::Limits(_)));
+        let spend = agent::reports_cost(id).then(|| {
+            let cents = self.state.agent_spend_on(&store::today(), id);
+            div()
+                .pl(px(23.))
+                .pb_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(11.5))
+                .text_color(rgb(c_muted()))
+                .child(div().flex_1().min_w_0().truncate().child(if on_plan {
+                    "Est. today at API prices, not billed on your plan"
+                } else {
+                    "Est. today, as the agent reports it"
+                }))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(c_secondary()))
+                        .child(format!("${:.2}", cents / 100.)),
+                )
+        });
         div()
             .id(("usage-row", index))
             .px_2()
@@ -367,6 +392,7 @@ impl RunoApp {
             }))
             .child(head)
             .children(body)
+            .children(spend)
             .into_any_element()
     }
 

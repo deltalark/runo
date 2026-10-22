@@ -1,0 +1,163 @@
+name: shipyard
+
+x-app: &app
+  restart: unless-stopped
+  env_file: .env
+
+services:
+  proxy:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on: [web, api]
+    networks: [edge, backend]
+
+  web:
+    <<: *app
+    build: ./services/web
+    environment:
+      API_URL: http://api:8080
+    networks: [edge]
+
+  api:
+    <<: *app
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgres://shipyard:secret@postgres:5432/shipyard
+      - REDIS_URL=redis://redis:6379/0
+      - AMQP_URL=amqp://guest:guest@rabbitmq:5672
+      - ORDERS_URL=http://orders:9000
+      - TRACKING_URL=http://tracking:9100
+      - S3_ENDPOINT=http://minio:9000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - backend
+      - data
+
+  orders:
+    <<: *app
+    build: ./services/orders
+    environment:
+      DATABASE_URL: "postgres://shipyard:secret@postgres:5432/orders"
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672
+      BILLING_URL: http://billing:7000
+    networks: [backend, data]
+
+  billing:
+    <<: *app
+    build: ./services/billing
+    environment:
+      DATABASE_URL: postgres://shipyard:secret@postgres:5432/billing
+      STRIPE_API_KEY: ${STRIPE_API_KEY}
+    networks: [backend, data]
+
+  tracking:
+    <<: *app
+    build: ./services/tracking
+    environment:
+      ELASTICSEARCH_URL: http://search:9200
+      REDIS_URL: redis://redis:6379/1
+    networks: [backend, data]
+
+  notifications:
+    <<: *app
+    build: ./services/notifications
+    command: npm run worker
+    environment:
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672
+      SMTP_HOST: mailpit
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+    networks: [backend, data]
+
+  ingest-worker:
+    <<: *app
+    build: ./services/tracking
+    command: ["./tracking", "consume"]
+    environment:
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672
+      ELASTICSEARCH_URL: http://search:9200
+    depends_on: [rabbitmq, search]
+    networks: [backend, data]
+
+  # Jobs run on demand: docker compose --profile jobs run nightly-report
+  nightly-report:
+    build: ./jobs/nightly-report
+    profiles: [jobs]
+    environment:
+      DATABASE_URL: postgres://shipyard:secret@postgres:5432/shipyard
+      S3_ENDPOINT: http://minio:9000
+    networks: [backend, data]
+
+  invoice-run:
+    build: ./jobs/invoice-run
+    profiles: [jobs]
+    environment:
+      DATABASE_URL: postgres://shipyard:secret@postgres:5432/billing
+      BILLING_URL: http://billing:7000
+    networks: [backend, data]
+
+  data-export:
+    build: ./jobs/data-export
+    profiles: [jobs]
+    environment:
+      DATABASE_URL: postgres://shipyard:secret@postgres:5432/shipyard
+      S3_ENDPOINT: http://minio:9000
+    networks: [backend, data]
+
+  carrier-sync:
+    build: ./jobs/carrier-sync
+    profiles: [jobs]
+    environment:
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672
+      TRACKING_URL: http://tracking:9100
+    networks: [backend, data]
+
+  postgres:
+    image: postgres:16
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "shipyard"]
+    networks: [data]
+
+  redis:
+    image: redis:7-alpine
+    networks: [data]
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports: ["15672:15672"]
+    networks: [data]
+
+  search:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      discovery.type: single-node
+    networks: [data]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    networks: [data]
+
+  mailpit:
+    image: axllent/mailpit
+    ports: ["8025:8025"]
+    networks: [backend]
+
+networks:
+  edge:
+  backend:
+  data:
+    internal: true
+
+volumes:
+  pgdata:

@@ -2,6 +2,7 @@
 //! redo, adding and connecting shapes, moving, grouping, styling, clipboard and layout.
 
 use super::geom::{self, Align, Pt, Side, Wire};
+use super::group;
 use super::model::*;
 use super::tidy;
 use std::collections::{HashMap, HashSet};
@@ -512,6 +513,9 @@ pub(crate) struct Editor {
 
 /// Every connector of a diagram with its route.
 pub(crate) type Routes = Vec<(String, Wire)>;
+
+/// Boundaries laid out so far, by boundary and direction: their size and what they hold.
+type Levels = HashMap<(Option<String>, bool), (Pt, HashMap<String, Rect>)>;
 
 /// What is out of sight on a diagram: shapes on hidden layers, and shapes folded into a
 /// collapsed boundary (with the boundary that stands in for them).
@@ -1696,6 +1700,17 @@ impl Editor {
 
     /// Lay out the whole diagram in layers, boundaries and all, where it is now.
     fn layout_all(&mut self, horizontal: bool) {
+        self.arrange(Arrange {
+            horizontal,
+            tiers: false,
+            aspect: None,
+            overall: None,
+            turn: false,
+        });
+    }
+
+    /// Lay out the whole diagram, boundaries and all, where it is now.
+    fn arrange(&mut self, how: Arrange) {
         let v = self.cur().clone();
         let links: Vec<(String, String)> = v
             .edges
@@ -1706,13 +1721,154 @@ impl Editor {
         let origin = Rect::bounds(v.nodes.iter().map(|n| n.rect()))
             .map(|r| (r.x, r.y))
             .unwrap_or((0., 0.));
+        // Each shape's tier, and a boundary's the first tier of what it holds.
+        let mut rank: HashMap<String, usize> = HashMap::new();
+        if how.tiers {
+            for n in &v.nodes {
+                if let Some(e) = self.doc.element(&n.id) {
+                    let role = group::role_of(e);
+                    if role != group::Role::Other {
+                        rank.insert(n.id.clone(), role.rank());
+                    }
+                }
+            }
+            let mut bounds: Vec<&Node> = v
+                .nodes
+                .iter()
+                .filter(|n| self.kind_of(&n.id) == Kind::Boundary)
+                .collect();
+            // Innermost first, so an outer boundary sees the tiers of inner ones.
+            bounds.sort_by_key(|n| v.descendants(&n.id).len());
+            for b in bounds {
+                let r = v
+                    .descendants(&b.id)
+                    .iter()
+                    .filter_map(|d| rank.get(d))
+                    .copied()
+                    .min();
+                if let Some(r) = r {
+                    rank.insert(b.id.clone(), r);
+                }
+            }
+        }
         let mut placed: HashMap<String, Rect> = HashMap::new();
-        self.layout_level(&v, None, &links, horizontal, &mut placed);
+        self.layout_level(&v, None, &links, how, &rank, &mut placed);
         let moves: Vec<(String, Rect)> = placed
             .into_iter()
             .map(|(id, r)| (id, Rect::new(r.x + origin.0, r.y + origin.1, r.w, r.h)))
             .collect();
         self.set_rects(&moves);
+    }
+
+    /// Put loose parts that play the same role in a boundary of their own: clients, edge,
+    /// services, jobs, messaging, data, external systems and observability. Boundaries an
+    /// earlier run made are taken apart first, so running it again regroups. Parts already
+    /// in a boundary someone drew stay there; a big one is grouped inside the same way.
+    pub(crate) fn group_by_role(&mut self) {
+        let vid = self.view.clone();
+        // Take apart the boundaries an earlier run made.
+        let auto: Vec<String> = self
+            .cur()
+            .nodes
+            .iter()
+            .filter(|n| {
+                self.doc.element(&n.id).is_some_and(|e| {
+                    e.kind == Kind::Boundary && e.tags.iter().any(|t| t == group::AUTO_TAG)
+                })
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        for b in &auto {
+            let v = self.cur_mut();
+            let up = v.node(b).and_then(|n| n.parent.clone());
+            for n in &mut v.nodes {
+                if n.parent.as_deref() == Some(b.as_str()) {
+                    n.parent = up.clone();
+                }
+            }
+            v.nodes.retain(|n| &n.id != b);
+            if !self
+                .doc
+                .views
+                .iter()
+                .any(|w| w.id != vid && w.node(b).is_some())
+            {
+                self.doc.elements.retain(|e| &e.id != b);
+            }
+        }
+        self.doc.tidy();
+        // Group each level that holds enough loose parts of more than one role.
+        let v = self.cur().clone();
+        let mut levels: Vec<Option<String>> = vec![None];
+        levels.extend(
+            v.nodes
+                .iter()
+                .filter(|n| self.kind_of(&n.id) == Kind::Boundary && !n.collapsed)
+                .map(|n| Some(n.id.clone())),
+        );
+        for level in levels {
+            let mut by_role: std::collections::BTreeMap<group::Role, Vec<String>> =
+                Default::default();
+            let mut loose = 0;
+            for n in v.nodes.iter().filter(|n| n.parent == level && !n.locked) {
+                let Some(e) = self.doc.element(&n.id) else {
+                    continue;
+                };
+                let role = group::role_of(e);
+                if role == group::Role::Other {
+                    continue;
+                }
+                loose += 1;
+                by_role.entry(role).or_default().push(n.id.clone());
+            }
+            // Tiers of two or more get a boundary, when that splits the level; inside a
+            // boundary someone drew, only when it holds a lot.
+            let (least, each) = if level.is_none() { (5, 2) } else { (8, 2) };
+            by_role.retain(|_, ids| ids.len() >= each);
+            if loose < least || by_role.len() < 2 {
+                continue;
+            }
+            for (role, ids) in by_role {
+                let id = self.doc.new_id(role.label());
+                self.doc.elements.push(Element {
+                    id: id.clone(),
+                    name: role.label().into(),
+                    kind: Kind::Boundary,
+                    icon: role.icon().into(),
+                    tags: vec![group::AUTO_TAG.into()],
+                    ..Default::default()
+                });
+                let area = Rect::bounds(ids.iter().filter_map(|i| v.node(i).map(|n| n.rect())))
+                    .unwrap_or_default();
+                let node = Node {
+                    id: id.clone(),
+                    x: area.x,
+                    y: area.y,
+                    w: area.w.max(200.),
+                    h: area.h.max(120.),
+                    parent: level.clone(),
+                    style: Style {
+                        stroke: Some(role.colors().1.into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let cur = self.cur_mut();
+                // Behind what it holds.
+                let at = cur
+                    .nodes
+                    .iter()
+                    .position(|n| ids.contains(&n.id))
+                    .unwrap_or(cur.nodes.len());
+                cur.nodes.insert(at, node);
+                for n in &mut cur.nodes {
+                    if ids.contains(&n.id) {
+                        n.parent = Some(id.clone());
+                    }
+                }
+            }
+        }
+        self.dirty = true;
     }
 
     // ---- Beautify
@@ -1753,11 +1909,25 @@ impl Editor {
             .extent()
             .map(|r| (r.w.max(1.) / r.h.max(1.)).max(r.h.max(1.) / r.w.max(1.)))
             .unwrap_or(1.);
-        s + (shape - 2.5).max(0.) * 6.
+        // Room left empty: a sprawling layout has to be zoomed out to see, where its
+        // words are too small to read.
+        let parts: f32 = self
+            .cur()
+            .nodes
+            .iter()
+            .filter(|n| self.kind_of(&n.id).is_part())
+            .map(|n| n.w * n.h)
+            .sum();
+        let sprawl = self
+            .extent()
+            .map(|r| (r.w * r.h / parts.max(1.)).max(1.).ln())
+            .unwrap_or(0.);
+        s + (shape - 2.5).max(0.) * 6. + (sprawl - 1.5).max(0.) * 4.
     }
 
     /// Make the diagram easier to read; returns its score before and after. One step to
-    /// undo.
+    /// undo. Only places, sizes, groups and connector bends change: styles, motion and
+    /// effects stay as they were.
     pub(crate) fn beautify(&mut self, how: Beautify) -> (tidy::Score, tidy::Score) {
         let before = self.layout_score();
         if self.cur().nodes.is_empty() {
@@ -1765,25 +1935,28 @@ impl Editor {
         }
         self.checkpoint();
         match how {
-            Beautify::Tidy => self.tidy_in_place(),
-            Beautify::Down => self.relayout(false),
-            Beautify::Across => self.relayout(true),
             Beautify::Best => {
                 // Try each and keep the cleanest. Rearranging moves everything, so it has
-                // to be clearly better than tidying what's there.
+                // to be clearly better than tidying what's there. A big diagram only
+                // reads when related parts sit together and requests flow one way, so
+                // it is grouped; tidying is tried only when it already is and does.
+                let big = self.parts_shown() >= 10;
                 let start = self.doc.clone();
+                let ways = if !big {
+                    vec![Beautify::Tidy, Beautify::Down, Beautify::Across]
+                } else if self.backflow() <= 0.2 && self.has_boundaries() {
+                    vec![Beautify::Tidy, Beautify::Grouped, Beautify::Compact]
+                } else {
+                    vec![Beautify::Grouped, Beautify::Compact]
+                };
                 let mut best: Option<(f32, Doc)> = None;
-                for way in [Beautify::Tidy, Beautify::Down, Beautify::Across] {
+                for way in ways {
                     self.doc = start.clone();
                     let penalty = match way {
-                        Beautify::Tidy => 0.,
+                        Beautify::Tidy | Beautify::Grouped | Beautify::Compact => 0.,
                         _ => 3.,
                     };
-                    match way {
-                        Beautify::Tidy => self.tidy_in_place(),
-                        Beautify::Down => self.relayout(false),
-                        _ => self.relayout(true),
-                    }
+                    self.beautify_one(way);
                     let c = self.layout_cost() + penalty;
                     if best.as_ref().is_none_or(|(b, _)| c < *b) {
                         best = Some((c, self.doc.clone()));
@@ -1793,20 +1966,93 @@ impl Editor {
                     self.doc = doc;
                 }
             }
+            way => self.beautify_one(way),
         }
         self.dirty = true;
         (before, self.layout_score())
     }
 
+    fn beautify_one(&mut self, how: Beautify) {
+        // Layer rows wrap to about this width over height.
+        const WIDE: f32 = 1.6;
+        let arrange = |horizontal, overall| Arrange {
+            horizontal,
+            tiers: true,
+            aspect: Some(WIDE),
+            overall: Some(overall),
+            turn: true,
+        };
+        match how {
+            Beautify::Best | Beautify::Tidy => self.tidy_in_place(),
+            Beautify::Down => self.relayout(arrange(false, WIDE)),
+            Beautify::Across => self.relayout(arrange(true, WIDE)),
+            Beautify::Grouped => {
+                self.group_by_role();
+                self.relayout(arrange(false, WIDE));
+            }
+            Beautify::Compact => {
+                // Boundaries keep their rows; the whole is packed close to square.
+                self.group_by_role();
+                self.relayout(arrange(false, 1.));
+            }
+        }
+    }
+
+    /// The share of connectors that run back against the diagram's flow, read top to
+    /// bottom or left to right, whichever fits better: 0 when everything flows one way.
+    pub(crate) fn backflow(&self) -> f32 {
+        let sight = self.sight();
+        let v = self.cur();
+        let centre = |id: &str| {
+            let n = v.node(sight.stand_in(id)?)?;
+            Some((n.x + n.w / 2., n.y + n.h / 2.))
+        };
+        let rels = self.relations();
+        let (mut up, mut back, mut all) = (0, 0, 0);
+        for r in v.edges.iter().filter_map(|e| rels.get(e.id.as_str())) {
+            let (Some(a), Some(b)) = (centre(&r.from), centre(&r.to)) else {
+                continue;
+            };
+            if a == b {
+                continue;
+            }
+            all += 1;
+            up += usize::from(b.1 < a.1 - 20.);
+            back += usize::from(b.0 < a.0 - 20.);
+        }
+        if all == 0 {
+            return 0.;
+        }
+        up.min(back) as f32 / all as f32
+    }
+
+    fn has_boundaries(&self) -> bool {
+        let sight = self.sight();
+        self.cur()
+            .nodes
+            .iter()
+            .any(|n| sight.shows(&n.id) && self.kind_of(&n.id) == Kind::Boundary)
+    }
+
+    /// Shapes on the diagram that stand for parts of the system.
+    fn parts_shown(&self) -> usize {
+        let sight = self.sight();
+        self.cur()
+            .nodes
+            .iter()
+            .filter(|n| sight.shows(&n.id) && self.kind_of(&n.id).is_part())
+            .count()
+    }
+
     /// Rearrange in layers from scratch: bends and pinned sides placed by hand go, since
     /// they were for the old places.
-    fn relayout(&mut self, horizontal: bool) {
+    fn relayout(&mut self, how: Arrange) {
         for e in &mut self.cur_mut().edges {
             e.waypoints.clear();
             e.from_side = None;
             e.to_side = None;
         }
-        self.layout_all(horizontal);
+        self.arrange(how);
     }
 
     /// Tidy the diagram without rearranging it: inside each boundary and then at the top,
@@ -2039,14 +2285,79 @@ impl Editor {
 
     /// Lay out the direct children of `parent` (recursing into boundaries) at (0, 0), and
     /// return the size of the result. Positions go into `placed`, relative to that origin.
+    /// Inside a boundary, when `how` allows, it is laid out both ways and keeps the one
+    /// closer to the shape aimed for: a few big boundaries side by side beat a tall stack
+    /// of them. Going the same way as around it wins a close call, so connectors mostly
+    /// keep one direction.
     fn layout_level(
         &self,
         v: &View,
         parent: Option<&str>,
         links: &[(String, String)],
-        horizontal: bool,
+        how: Arrange,
+        rank: &HashMap<String, usize>,
         placed: &mut HashMap<String, Rect>,
     ) -> Pt {
+        let mut memo = HashMap::new();
+        let (size, at) = self.layout_level_best(v, parent, links, how, rank, &mut memo);
+        placed.extend(at);
+        size
+    }
+
+    /// `layout_level`, remembering each boundary's layout each way.
+    fn layout_level_best(
+        &self,
+        v: &View,
+        parent: Option<&str>,
+        links: &[(String, String)],
+        how: Arrange,
+        rank: &HashMap<String, usize>,
+        memo: &mut Levels,
+    ) -> (Pt, HashMap<String, Rect>) {
+        let key = (parent.map(String::from), how.horizontal);
+        if let Some(done) = memo.get(&key) {
+            return done.clone();
+        }
+        let mut same = HashMap::new();
+        let size = self.layout_level_as(v, parent, links, how, rank, memo, &mut same);
+        let mut best = (size, same);
+        // Only a boundary of plain shapes turns: one that holds boundaries keeps the
+        // diagram's direction, so the flow through it reads one way.
+        let leaf = parent.is_some_and(|p| {
+            v.nodes
+                .iter()
+                .filter(|n| n.parent.as_deref() == Some(p))
+                .all(|n| self.kind_of(&n.id) != Kind::Boundary)
+        });
+        if let (Some(aim), true, true) = (how.aspect, how.turn, leaf) {
+            let turned = Arrange {
+                horizontal: !how.horizontal,
+                ..how
+            };
+            let mut other = HashMap::new();
+            let size2 = self.layout_level_as(v, parent, links, turned, rank, memo, &mut other);
+            let off = |(w, h): Pt| ((w.max(1.) / h.max(1.)).ln() - aim.ln()).abs();
+            if off(size2) + 0.25 < off(size) {
+                best = (size2, other);
+            }
+        }
+        memo.insert(key, best.clone());
+        best
+    }
+
+    /// `layout_level` the way `how` says; what it holds may still turn.
+    #[allow(clippy::too_many_arguments)]
+    fn layout_level_as(
+        &self,
+        v: &View,
+        parent: Option<&str>,
+        links: &[(String, String)],
+        how: Arrange,
+        rank: &HashMap<String, usize>,
+        memo: &mut Levels,
+        placed: &mut HashMap<String, Rect>,
+    ) -> Pt {
+        let horizontal = how.horizontal;
         let kids: Vec<&Node> = v
             .nodes
             .iter()
@@ -2076,8 +2387,7 @@ impl Editor {
                     .iter()
                     .any(|n| n.parent.as_deref() == Some(k.id.as_str()))
             {
-                let mut sub = HashMap::new();
-                let (w, h) = self.layout_level(v, Some(&k.id), links, horizontal, &mut sub);
+                let ((w, h), sub) = self.layout_level_best(v, Some(&k.id), links, how, rank, memo);
                 sizes.insert(k.id.clone(), (w + 2. * pad, h + 2. * pad + BOUNDARY_HEAD));
                 inner.insert(k.id.clone(), sub);
             } else {
@@ -2100,7 +2410,14 @@ impl Editor {
             .filter(|(a, b)| a != b)
             .collect();
         let ids: Vec<String> = kids.iter().map(|k| k.id.clone()).collect();
-        let pos = geom::layered(&ids, &sizes, &lifted, (0., 0.), horizontal);
+        let shaping = tidy::Shaping {
+            rank: how.tiers.then_some(rank),
+            aspect: match parent {
+                None => how.overall.or(how.aspect),
+                Some(_) => how.aspect,
+            },
+        };
+        let pos = tidy::layered_with(&ids, &sizes, &lifted, (0., 0.), horizontal, shaping);
         let mut area: Option<Rect> = None;
         for id in &ids {
             let (x, y) = pos.get(id).copied().unwrap_or_default();
@@ -2838,6 +3155,26 @@ pub(crate) enum Beautify {
     Down,
     /// Rearrange in layers, left to right.
     Across,
+    /// Put parts in a boundary per role (clients, services, data and so on), then
+    /// rearrange top to bottom.
+    Grouped,
+    /// Grouped, packed close to a square so the whole diagram fits on screen.
+    Compact,
+}
+
+/// How a whole diagram is rearranged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Arrange {
+    /// Left to right instead of top to bottom.
+    pub horizontal: bool,
+    /// Keep tiers in order: clients, edge, services, messaging, data.
+    pub tiers: bool,
+    /// Width over height to aim for; None keeps every layer on one line.
+    pub aspect: Option<f32>,
+    /// The aim for the whole diagram, when it differs from the aim inside boundaries.
+    pub overall: Option<f32>,
+    /// A boundary may go the other way when that comes closer to the aim.
+    pub turn: bool,
 }
 
 /// Rounding to a grid step.
@@ -3351,7 +3688,13 @@ mod tests {
 
     #[test]
     fn beautify_leaves_folded_boundaries_folded() {
-        for how in [Beautify::Tidy, Beautify::Down, Beautify::Across] {
+        for how in [
+            Beautify::Tidy,
+            Beautify::Down,
+            Beautify::Across,
+            Beautify::Grouped,
+            Beautify::Compact,
+        ] {
             let mut ed = Editor::new(Doc::default());
             let web = ed.add(preset("Web app"), (0., 0.));
             let g = ed.add(preset("VPC / network"), (600., 600.));
@@ -3369,6 +3712,131 @@ mod tests {
             assert!(n.collapsed, "{how:?}");
             assert_eq!((n.w, n.h), COLLAPSED, "{how:?} keeps it folded");
             assert_eq!(gap(&ed), before, "{how:?} moves what it holds along");
+        }
+    }
+
+    /// A system drawn flat in a grid, the way a scan or a quick sketch leaves it.
+    fn flat_system() -> (Editor, Vec<String>) {
+        let mut ed = Editor::new(Doc::default());
+        let names = [
+            "Database",
+            "Web app",
+            "Queue",
+            "Service",
+            "Cache",
+            "Load balancer",
+            "Worker",
+            "Service",
+            "Database",
+            "Worker",
+            "Queue",
+            "Service",
+        ];
+        let ids: Vec<String> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let at = ((i % 4) as f32 * 260., (i / 4) as f32 * 200.);
+                ed.add(preset(n), at)
+            })
+            .collect();
+        for (a, b) in [
+            (1, 5),
+            (5, 3),
+            (5, 7),
+            (3, 0),
+            (3, 4),
+            (7, 8),
+            (7, 2),
+            (2, 6),
+            (6, 0),
+            (11, 10),
+            (10, 9),
+            (9, 8),
+            (3, 11),
+        ] {
+            ed.connect(&ids[a], &ids[b]);
+        }
+        ed.sel = Sel::default();
+        (ed, ids)
+    }
+
+    fn auto_groups(ed: &Editor) -> Vec<String> {
+        let mut names: Vec<String> = ed
+            .doc
+            .elements
+            .iter()
+            .filter(|e| e.tags.iter().any(|t| t == group::AUTO_TAG))
+            .map(|e| e.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn grouping_puts_parts_of_a_role_in_one_boundary_once() {
+        let (mut ed, ids) = flat_system();
+        ed.beautify(Beautify::Grouped);
+        let groups = auto_groups(&ed);
+        for want in ["Data", "Jobs and workers", "Messaging", "Services"] {
+            assert!(groups.iter().any(|g| g == want), "{groups:?}");
+        }
+        // Both databases and the cache sit inside the Data boundary.
+        let data = ed
+            .doc
+            .elements
+            .iter()
+            .find(|e| e.name == "Data")
+            .unwrap()
+            .id
+            .clone();
+        for i in [0, 4, 8] {
+            let n = ed.cur().node(&ids[i]).unwrap();
+            assert_eq!(n.parent.as_deref(), Some(data.as_str()));
+            assert!(ed.rect(&data).unwrap().contains_rect(&n.rect()));
+        }
+        // Again regroups rather than nesting boundaries in boundaries.
+        ed.beautify(Beautify::Grouped);
+        ed.beautify(Beautify::Compact);
+        assert_eq!(auto_groups(&ed), groups);
+    }
+
+    #[test]
+    fn best_groups_a_big_tangled_diagram_and_flows_down() {
+        let (mut ed, ids) = flat_system();
+        ed.beautify(Beautify::Best);
+        assert!(!auto_groups(&ed).is_empty());
+        // The web app comes before the load balancer, which comes before the data.
+        let y = |i: usize| ed.rect(&ids[i]).unwrap().y;
+        assert!(y(1) < y(5) && y(5) < y(0), "{} {} {}", y(1), y(5), y(0));
+        assert!(ed.backflow() < 0.25, "{}", ed.backflow());
+    }
+
+    #[test]
+    fn beautify_keeps_animation_and_style() {
+        for how in [
+            Beautify::Best,
+            Beautify::Tidy,
+            Beautify::Down,
+            Beautify::Across,
+            Beautify::Grouped,
+            Beautify::Compact,
+        ] {
+            let (mut ed, ids) = flat_system();
+            for e in &mut ed.cur_mut().edges {
+                e.motion = Motion::Packets;
+            }
+            let n = ed.cur_mut().node_mut(&ids[3]).unwrap();
+            n.effect = Effect::Pulse;
+            n.style.fill = Some("#ff0000".into());
+            ed.beautify(how);
+            assert!(
+                ed.cur().edges.iter().all(|e| e.motion == Motion::Packets),
+                "{how:?}"
+            );
+            let n = ed.cur().node(&ids[3]).unwrap();
+            assert_eq!(n.effect, Effect::Pulse, "{how:?}");
+            assert_eq!(n.style.fill.as_deref(), Some("#ff0000"), "{how:?}");
         }
     }
 

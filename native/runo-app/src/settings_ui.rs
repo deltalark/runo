@@ -748,9 +748,15 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     None => row("Uses", "No Chromium-based browser found. Install Chrome, Edge, Brave or another, or set CHROME_PATH.", Ctl::Chip("Not found".into(), 1)),
                 },
             ]),
-            section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
-                switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
-            ]),
+            section("Alerts", "How Runo reaches you while you are looking somewhere else.", {
+                let mut rows = vec![
+                    switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
+                ];
+                if cfg!(target_os = "macos") {
+                    rows.push(switch_row("Show Runo in the menu bar", "A Runo glyph by the clock counts what needs you and what's working. Click it for each session's status, to open one, or to Ask Runo.", st.menu_bar, |s, v| s.menu_bar = v));
+                }
+                rows
+            }),
             section("Behavior", "Motion, sleep and how the sidebar groups sessions.", vec![
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
@@ -805,6 +811,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::Appearance => vec![
             section("Colors", "System follows your OS appearance.", vec![
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
+                row("Color theme", "Each theme has a light and a dark version; Theme above picks which one shows.", Ctl::Dropdown(crate::themes::THEMES.iter().map(|t| (t.id.to_string(), t.name.to_string())).collect(), st.color_theme.clone(), Rc::new(|s, v| s.color_theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
             ]),
             section("Glass", "A translucent window over a blurred desktop, like macOS glass.", vec![
@@ -3140,14 +3147,11 @@ impl RunoApp {
                         false,
                         glass_fill(c_canvas()),
                     ))
+                    // No bottom-left corner: the rail's Settings tab joins the island
+                    // there, level with its bottom edge.
                     .child(crate::shell::frame_corner(
                         false,
                         false,
-                        glass_fill(c_canvas()),
-                    ))
-                    .child(crate::shell::frame_corner(
-                        false,
-                        true,
                         glass_fill(c_canvas()),
                     )),
             )
@@ -3344,7 +3348,7 @@ impl RunoApp {
                     .flex()
                     .gap(px(22.))
                     .child(meter(
-                        "Spent today",
+                        "Est. spend today",
                         dollars(spent),
                         (limits.day_cents > 0.).then(|| dollars(limits.day_cents)),
                         share(spent, limits.day_cents),

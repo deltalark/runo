@@ -69,14 +69,25 @@ fn inner_curve(fill: Rgba, top: bool, r: f32) -> Div {
     )
 }
 
-/// The one touch of accent on a selected row: a thin bracket in the accent inside the
-/// row's left edge that follows its rounded corners, like "(". `radius` is the row's own
-/// corner radius, so the bracket sits on the row's outline, the way an open tab's does.
-/// It draws in once the row has landed, and while the row is hovered it reaches a little
-/// way along the top and bottom edges and brightens (see `accent`). A child of the row,
-/// which must be `relative`.
+/// The one touch of accent on a selected row: two thin hooks in the accent, one round the
+/// row's top-left corner and one round its bottom-right, following its rounded outline
+/// like the corners of the app icon. `radius` is the row's own corner radius, so the
+/// hooks sit on the row's outline, the way an open tab's bracket does. They draw in once
+/// the row has landed, and while the row is hovered they reach a little further along
+/// the edges and brighten (see `accent`). A child of the row, which must be `relative`.
 pub(crate) fn accent_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
-    let key: SharedString = key.into();
+    bracket(key.into(), radius, true)
+}
+
+/// The accent for a row fused to the page beside it (see `row_fuse`), which has no
+/// bottom-right corner of its own: the same top-left hook, and a bottom-right one that
+/// runs along the bottom edge and down the curve where the row flows into the page.
+/// Drawn over the fuse, whose right side is the list's edge.
+fn fused_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
+    bracket(key.into(), radius, false)
+}
+
+fn bracket(key: SharedString, radius: f32, own_corner: bool) -> AnyElement {
     let hover_key = key.clone();
     div()
         .absolute()
@@ -86,29 +97,49 @@ pub(crate) fn accent_bracket(key: impl Into<SharedString>, radius: f32) -> AnyEl
                 |_, _, _| (),
                 move |b, _, window, _| {
                     let hover = accent::hover(&hover_key, b, window);
-                    let (x0, y0, y1) = (b.origin.x, b.origin.y, b.bottom());
+                    let (x0, x1, y0, y1) = (b.origin.x, b.right(), b.origin.y, b.bottom());
                     let r = px(radius).min((y1 - y0) / 2.);
-                    // Down the middle of a 2px edge inside the outline, round both
-                    // corners and on along the edges by `tail`.
-                    let (x, i, rc, tail) = (x0 + px(1.), px(1.), r - px(1.), px(6. * hover));
+                    // Along the middle of a 2px edge inside the outline. `i` is that inset
+                    // and `rc` the corner's radius there. Each hook runs `reach` past its
+                    // corner along the top or bottom, and `down` along the side, never
+                    // more than halfway.
+                    let (i, rc) = (px(1.), r - px(1.));
+                    let side = ((y1 - y0) / 2. - i - rc).max(px(0.));
+                    let (reach, down) = (px(9. + 6. * hover), px(5. + 4. * hover).min(side));
                     let at = |x: Pixels, y: Pixels| point(x, y);
                     let mut f = PathBuilder::stroke(px(2.));
-                    f.move_to(at(x + rc + tail, y0 + i));
-                    f.line_to(at(x + rc, y0 + i));
+                    f.move_to(at(x0 + i, y0 + i + rc + down));
+                    f.line_to(at(x0 + i, y0 + i + rc));
                     turn(
                         &mut f,
-                        at(x + rc, y0 + i),
-                        at(x, y0 + i),
-                        at(x, y0 + i + rc),
+                        at(x0 + i, y0 + i + rc),
+                        at(x0 + i, y0 + i),
+                        at(x0 + i + rc, y0 + i),
                     );
-                    f.line_to(at(x, y1 - i - rc));
-                    turn(
-                        &mut f,
-                        at(x, y1 - i - rc),
-                        at(x, y1 - i),
-                        at(x + rc, y1 - i),
-                    );
-                    f.line_to(at(x + rc + tail, y1 - i));
+                    f.line_to(at(x0 + i + rc + reach, y0 + i));
+                    if own_corner {
+                        f.move_to(at(x1 - i, y1 - i - rc - down));
+                        f.line_to(at(x1 - i, y1 - i - rc));
+                        turn(
+                            &mut f,
+                            at(x1 - i, y1 - i - rc),
+                            at(x1 - i, y1 - i),
+                            at(x1 - i - rc, y1 - i),
+                        );
+                        f.line_to(at(x1 - i - rc - reach, y1 - i));
+                    } else {
+                        // The fuse's curve turns outwards, from its bottom edge down into
+                        // the list's edge at `x1`, so inside it the radius is `r + i`.
+                        let ro = r + i;
+                        f.move_to(at(x1 - r - reach, y1 - i));
+                        f.line_to(at(x1 + i - ro, y1 - i));
+                        turn(
+                            &mut f,
+                            at(x1 + i - ro, y1 - i),
+                            at(x1 + i, y1 - i),
+                            at(x1 + i, y1 - i + ro),
+                        );
+                    }
                     if let Ok(path) = f.build() {
                         window.paint_path(path, accent::color(hover));
                     }
@@ -358,7 +389,7 @@ fn rail_icon(glyph: IconName, on: bool) -> AnyElement {
 
 /// A list's selected row joined to the page beside the list: a fill in the page's colour
 /// from the row out to the list's edge, with the list curving into it above and below,
-/// the same way the rail's tab joins the list, and a short accent rule on its left edge.
+/// the same way the rail's tab joins the list, and the accent's hooks at its corners.
 /// `reach` is how far the list's edge is past the row's right side. It slides in from the
 /// page when the row is picked. A child of the row, which must be `relative` and draw it
 /// first, under its content.
@@ -376,7 +407,7 @@ pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
         .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
         .child(inner_curve(page, true, FUSE_R).top(px(-FUSE_R)))
         .child(inner_curve(page, false, FUSE_R).bottom(px(-FUSE_R)))
-        .child(accent_bracket(format!("{key}-rule"), FUSE_R))
+        .child(fused_bracket(format!("{key}-rule"), FUSE_R))
         .animated(
             ElementId::Name(key),
             Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
@@ -1068,6 +1099,23 @@ pub(crate) fn move_tab(tabs: &mut Vec<u64>, id: u64, target: u64) {
     tabs.insert(to, tab);
 }
 
+/// The usage the latest turn reported: the last reply after the latest prompt that
+/// carries any. A turn that ended before its agent replied, such as one stopped or failed
+/// at start, reported nothing, rather than the turn before it again.
+pub(crate) fn turn_usage(messages: &[store::Message]) -> store::Usage {
+    let start = messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or(0);
+    messages[start..]
+        .iter()
+        .rev()
+        .filter(|m| m.role == Role::Agent)
+        .find(|m| !m.usage.is_empty() || m.usage.cost_cents > 0.0)
+        .map(|m| m.usage)
+        .unwrap_or_default()
+}
+
 /// Totals shown in the top bar and on Home.
 #[derive(Default)]
 pub(crate) struct Counts {
@@ -1076,10 +1124,6 @@ pub(crate) struct Counts {
     pub needs_you: usize,
     /// Idle sessions with uncommitted changes.
     pub review: usize,
-    /// Spend reported by the agents today.
-    pub spend_today: f64,
-    /// Spend over every session ever, for the tooltip.
-    pub spend_cents: f64,
 }
 
 /// A tab being dragged to a new place in the strip.
@@ -1209,33 +1253,19 @@ impl RunoApp {
                 _ => {}
             }
         }
-        counts.spend_cents = self
-            .state
-            .sessions
-            .iter()
-            .flat_map(|s| s.messages.iter())
-            .map(|m| m.usage.cost_cents)
-            .sum();
-        counts.spend_today = self
-            .state
-            .spend
-            .get(&store::today())
-            .copied()
-            .unwrap_or_default();
         counts
     }
 
-    /// Note a finished turn's cost and tokens under today, for the top bar's spend and
-    /// the daily limits.
+    /// Note a finished turn's cost and tokens under today, for the daily limits and the
+    /// Usage popover.
     pub(crate) fn record_spend(&mut self, id: u64) {
-        let usage = self
-            .state
-            .session(id)
-            .and_then(|s| s.messages.iter().rev().find(|m| m.role == Role::Agent))
-            .map(|m| m.usage)
-            .unwrap_or_default();
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        let provider = session.provider.clone();
+        let usage = turn_usage(&session.messages);
         let today = store::today();
-        self.state.add_spend(&today, usage.cost_cents);
+        self.state.add_spend(&today, &provider, usage.cost_cents);
         self.state
             .add_tokens(&today, crate::health::turn_tokens(&usage));
     }
@@ -2052,12 +2082,16 @@ impl RunoApp {
                     .overflow_hidden()
                     .when(mode == Mode::Sessions, |el| {
                         el.child(
-                            self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_sidebar = !this.show_sidebar;
-                                    this.save();
-                                    cx.notify();
-                                })),
+                            self.ghost_button(
+                                "toggle-sidebar",
+                                IconName::PanelLeft,
+                                "Toggle sidebar",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_sidebar = !this.show_sidebar;
+                                this.save();
+                                cx.notify();
+                            })),
                         )
                     })
                     .child(
@@ -2079,11 +2113,12 @@ impl RunoApp {
                                     .when(menu_open, |el| el.bg(tint(c_active())))
                                     .hover(|el| el.bg(tint(c_subtle())))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.menu = if this.menu.as_deref() == Some("project-switch") {
-                                            None
-                                        } else {
-                                            Some("project-switch".into())
-                                        };
+                                        this.menu =
+                                            if this.menu.as_deref() == Some("project-switch") {
+                                                None
+                                            } else {
+                                                Some("project-switch".into())
+                                            };
                                         cx.notify();
                                     }))
                                     .when_some(project, |el, p| el.child(project_mark(p, 20.)))
@@ -2117,7 +2152,8 @@ impl RunoApp {
                                 .cursor_pointer()
                                 .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
                                 .tooltip(|window, cx| {
-                                    Tooltip::new("Branch: changes, terminal, worktrees").build(window, cx)
+                                    Tooltip::new("Branch: changes, terminal, worktrees")
+                                        .build(window, cx)
                                 })
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -2158,74 +2194,81 @@ impl RunoApp {
                                     .child(mode.label()),
                             )
                             .when_some(crumb, |el, title| {
-                                el.child(icon(IconName::ChevronRight, 12., c_muted())).child(
-                                    div()
-                                        .id("crumb-session")
-                                        .min_w_0()
-                                        .max_w(px(220.))
-                                        .truncate()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .cursor_pointer()
-                                        .text_color(rgb(c_text()))
-                                        .hover(|el| el.bg(tint(c_subtle())))
-                                        .tooltip(|window, cx| {
-                                            Tooltip::new("Rename this session").build(window, cx)
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.start_rename(window, cx);
-                                            cx.notify();
-                                        }))
-                                        .child(title),
-                                )
+                                el.child(icon(IconName::ChevronRight, 12., c_muted()))
+                                    .child(
+                                        div()
+                                            .id("crumb-session")
+                                            .min_w_0()
+                                            .max_w(px(220.))
+                                            .truncate()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .text_color(rgb(c_text()))
+                                            .hover(|el| el.bg(tint(c_subtle())))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("Rename this session")
+                                                    .build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.start_rename(window, cx);
+                                                cx.notify();
+                                            }))
+                                            .child(title),
+                                    )
                             }),
-                    )
+                    ),
             )
             .child(
-                div().flex_shrink(1.).min_w(px(160.)).flex().justify_center().child(
-                    div()
-                        .id("top-search")
-                        .relative()
-                        .child(tour::anchor(&self.anchors, "palette"))
-                        .w(px(420.))
-                        .min_w(px(160.))
-                        .flex_shrink(1.)
-                        .h(px(28.))
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(divider())
-                        .bg(tint(c_subtle()))
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_muted()))
-                        .hover(|el| el.border_color(rgb(c_secondary())))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_palette(window, cx);
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::Search, 13., c_muted()))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child("Search sessions, projects, files, commands"),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .px(px(5.))
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(divider())
-                                .text_size(px(11.))
-                                .child(keymap::label(cx, "quick-open")),
-                        ),
-                ),
+                div()
+                    .flex_shrink(1.)
+                    .min_w(px(160.))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("top-search")
+                            .relative()
+                            .child(tour::anchor(&self.anchors, "palette"))
+                            .w(px(420.))
+                            .min_w(px(160.))
+                            .flex_shrink(1.)
+                            .h(px(28.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(divider())
+                            .bg(tint(c_subtle()))
+                            .cursor_pointer()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_muted()))
+                            .hover(|el| el.border_color(rgb(c_secondary())))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_palette(window, cx);
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::Search, 13., c_muted()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child("Search sessions, projects, files, commands"),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .px(px(5.))
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(divider())
+                                    .text_size(px(11.))
+                                    .child(keymap::label(cx, "quick-open")),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -2269,22 +2312,6 @@ impl RunoApp {
                             )
                             .when(agents_open, |el| el.child(self.agents_menu(cx))),
                     )
-                    .when(counts.spend_cents > 0.0, |el| {
-                        let total = counts.spend_cents;
-                        el.child(
-                            self.bar_pill("top-spend")
-                                .cursor_default()
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(format!(
-                                        "Spend reported by the agents today. ${:.2} across every session. {}",
-                                        total / 100.0,
-                                        agent::cost_note()
-                                    ))
-                                    .build(window, cx)
-                                })
-                                .child(format!("${:.2} today", counts.spend_today / 100.0)),
-                        )
-                    })
                     .child(
                         div()
                             .relative()
@@ -2312,7 +2339,10 @@ impl RunoApp {
                                         .text_size(px(9.5))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0xffffff))
-                                        .child(pop(inbox.to_string(), format!("top-inbox-{inbox}"))),
+                                        .child(pop(
+                                            inbox.to_string(),
+                                            format!("top-inbox-{inbox}"),
+                                        )),
                                 )
                             }),
                     )
@@ -3737,6 +3767,27 @@ mod tests {
                 mode.label()
             );
         }
+    }
+
+    #[test]
+    fn a_turn_without_a_reply_reports_no_usage() {
+        let reply = |cents: f64| {
+            let mut m = Message::new(Role::Agent, "done");
+            m.usage.output = 10;
+            m.usage.cost_cents = cents;
+            m
+        };
+        let mut messages = vec![Message::new(Role::User, "one"), reply(40.0)];
+        assert_eq!(turn_usage(&messages).cost_cents, 40.0);
+        // Stopped or failed before replying: the earlier reply isn't counted again.
+        messages.push(Message::new(Role::User, "two"));
+        messages.push(Message::new(Role::System, "The agent stopped."));
+        assert_eq!(turn_usage(&messages).cost_cents, 0.0);
+        // An error between two replies of one turn: the later one carries the usage.
+        messages.push(reply(15.0));
+        messages.push(Message::new(Role::System, "warning"));
+        messages.push(Message::new(Role::Agent, "more"));
+        assert_eq!(turn_usage(&messages).cost_cents, 15.0);
     }
 
     #[test]

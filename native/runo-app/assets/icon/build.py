@@ -5,6 +5,7 @@ Run from this folder: python3 build.py (needs cairosvg and Pillow).
 - macOS: runo.icns, from the inset artwork (Apple's grid leaves a margin round the tile).
 - Windows: runo.ico, full-bleed so small sizes stay legible.
 - Linux: png/runo-<size>.png for the hicolor theme.
+- macOS menu bar: menubar/*.png, black template glyphs at 2x from menubar/*.svg.
 """
 
 import io
@@ -33,4 +34,8 @@ render(FLAT, 256).save(
 
 # macOS.
 render(SVG, 1024).save("runo.icns")
+# The macOS menu bar glyph: drawn at 18pt, so 36px for Retina; macOS tints it.
+for name in ("runo-menubar", "runo-menubar-dot"):
+    svg = open(f"menubar/{name}.svg").read()
+    render(svg, 36).save(f"menubar/{name}.png")
 print("icons written")
