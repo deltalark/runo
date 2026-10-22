@@ -1099,6 +1099,23 @@ pub(crate) fn move_tab(tabs: &mut Vec<u64>, id: u64, target: u64) {
     tabs.insert(to, tab);
 }
 
+/// The usage the latest turn reported: the last reply after the latest prompt that
+/// carries any. A turn that ended before its agent replied, such as one stopped or failed
+/// at start, reported nothing, rather than the turn before it again.
+pub(crate) fn turn_usage(messages: &[store::Message]) -> store::Usage {
+    let start = messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or(0);
+    messages[start..]
+        .iter()
+        .rev()
+        .filter(|m| m.role == Role::Agent)
+        .find(|m| !m.usage.is_empty() || m.usage.cost_cents > 0.0)
+        .map(|m| m.usage)
+        .unwrap_or_default()
+}
+
 /// Totals shown in the top bar and on Home.
 #[derive(Default)]
 pub(crate) struct Counts {
@@ -1107,10 +1124,6 @@ pub(crate) struct Counts {
     pub needs_you: usize,
     /// Idle sessions with uncommitted changes.
     pub review: usize,
-    /// Spend reported by the agents today.
-    pub spend_today: f64,
-    /// Spend over every session ever, for the tooltip.
-    pub spend_cents: f64,
 }
 
 /// A tab being dragged to a new place in the strip.
@@ -1240,33 +1253,19 @@ impl RunoApp {
                 _ => {}
             }
         }
-        counts.spend_cents = self
-            .state
-            .sessions
-            .iter()
-            .flat_map(|s| s.messages.iter())
-            .map(|m| m.usage.cost_cents)
-            .sum();
-        counts.spend_today = self
-            .state
-            .spend
-            .get(&store::today())
-            .copied()
-            .unwrap_or_default();
         counts
     }
 
-    /// Note a finished turn's cost and tokens under today, for the top bar's spend and
-    /// the daily limits.
+    /// Note a finished turn's cost and tokens under today, for the daily limits and the
+    /// Usage popover.
     pub(crate) fn record_spend(&mut self, id: u64) {
-        let usage = self
-            .state
-            .session(id)
-            .and_then(|s| s.messages.iter().rev().find(|m| m.role == Role::Agent))
-            .map(|m| m.usage)
-            .unwrap_or_default();
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        let provider = session.provider.clone();
+        let usage = turn_usage(&session.messages);
         let today = store::today();
-        self.state.add_spend(&today, usage.cost_cents);
+        self.state.add_spend(&today, &provider, usage.cost_cents);
         self.state
             .add_tokens(&today, crate::health::turn_tokens(&usage));
     }
@@ -2083,12 +2082,16 @@ impl RunoApp {
                     .overflow_hidden()
                     .when(mode == Mode::Sessions, |el| {
                         el.child(
-                            self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_sidebar = !this.show_sidebar;
-                                    this.save();
-                                    cx.notify();
-                                })),
+                            self.ghost_button(
+                                "toggle-sidebar",
+                                IconName::PanelLeft,
+                                "Toggle sidebar",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_sidebar = !this.show_sidebar;
+                                this.save();
+                                cx.notify();
+                            })),
                         )
                     })
                     .child(
@@ -2110,11 +2113,12 @@ impl RunoApp {
                                     .when(menu_open, |el| el.bg(tint(c_active())))
                                     .hover(|el| el.bg(tint(c_subtle())))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.menu = if this.menu.as_deref() == Some("project-switch") {
-                                            None
-                                        } else {
-                                            Some("project-switch".into())
-                                        };
+                                        this.menu =
+                                            if this.menu.as_deref() == Some("project-switch") {
+                                                None
+                                            } else {
+                                                Some("project-switch".into())
+                                            };
                                         cx.notify();
                                     }))
                                     .when_some(project, |el, p| el.child(project_mark(p, 20.)))
@@ -2148,7 +2152,8 @@ impl RunoApp {
                                 .cursor_pointer()
                                 .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
                                 .tooltip(|window, cx| {
-                                    Tooltip::new("Branch: changes, terminal, worktrees").build(window, cx)
+                                    Tooltip::new("Branch: changes, terminal, worktrees")
+                                        .build(window, cx)
                                 })
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -2189,74 +2194,81 @@ impl RunoApp {
                                     .child(mode.label()),
                             )
                             .when_some(crumb, |el, title| {
-                                el.child(icon(IconName::ChevronRight, 12., c_muted())).child(
-                                    div()
-                                        .id("crumb-session")
-                                        .min_w_0()
-                                        .max_w(px(220.))
-                                        .truncate()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .cursor_pointer()
-                                        .text_color(rgb(c_text()))
-                                        .hover(|el| el.bg(tint(c_subtle())))
-                                        .tooltip(|window, cx| {
-                                            Tooltip::new("Rename this session").build(window, cx)
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.start_rename(window, cx);
-                                            cx.notify();
-                                        }))
-                                        .child(title),
-                                )
+                                el.child(icon(IconName::ChevronRight, 12., c_muted()))
+                                    .child(
+                                        div()
+                                            .id("crumb-session")
+                                            .min_w_0()
+                                            .max_w(px(220.))
+                                            .truncate()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .text_color(rgb(c_text()))
+                                            .hover(|el| el.bg(tint(c_subtle())))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("Rename this session")
+                                                    .build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.start_rename(window, cx);
+                                                cx.notify();
+                                            }))
+                                            .child(title),
+                                    )
                             }),
-                    )
+                    ),
             )
             .child(
-                div().flex_shrink(1.).min_w(px(160.)).flex().justify_center().child(
-                    div()
-                        .id("top-search")
-                        .relative()
-                        .child(tour::anchor(&self.anchors, "palette"))
-                        .w(px(420.))
-                        .min_w(px(160.))
-                        .flex_shrink(1.)
-                        .h(px(28.))
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(divider())
-                        .bg(tint(c_subtle()))
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_muted()))
-                        .hover(|el| el.border_color(rgb(c_secondary())))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_palette(window, cx);
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::Search, 13., c_muted()))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child("Search sessions, projects, files, commands"),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .px(px(5.))
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(divider())
-                                .text_size(px(11.))
-                                .child(keymap::label(cx, "quick-open")),
-                        ),
-                ),
+                div()
+                    .flex_shrink(1.)
+                    .min_w(px(160.))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("top-search")
+                            .relative()
+                            .child(tour::anchor(&self.anchors, "palette"))
+                            .w(px(420.))
+                            .min_w(px(160.))
+                            .flex_shrink(1.)
+                            .h(px(28.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(divider())
+                            .bg(tint(c_subtle()))
+                            .cursor_pointer()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_muted()))
+                            .hover(|el| el.border_color(rgb(c_secondary())))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_palette(window, cx);
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::Search, 13., c_muted()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child("Search sessions, projects, files, commands"),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .px(px(5.))
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(divider())
+                                    .text_size(px(11.))
+                                    .child(keymap::label(cx, "quick-open")),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -2300,22 +2312,6 @@ impl RunoApp {
                             )
                             .when(agents_open, |el| el.child(self.agents_menu(cx))),
                     )
-                    .when(counts.spend_cents > 0.0, |el| {
-                        let total = counts.spend_cents;
-                        el.child(
-                            self.bar_pill("top-spend")
-                                .cursor_default()
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(format!(
-                                        "Spend reported by the agents today. ${:.2} across every session. {}",
-                                        total / 100.0,
-                                        agent::cost_note()
-                                    ))
-                                    .build(window, cx)
-                                })
-                                .child(format!("${:.2} today", counts.spend_today / 100.0)),
-                        )
-                    })
                     .child(
                         div()
                             .relative()
@@ -2343,7 +2339,10 @@ impl RunoApp {
                                         .text_size(px(9.5))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0xffffff))
-                                        .child(pop(inbox.to_string(), format!("top-inbox-{inbox}"))),
+                                        .child(pop(
+                                            inbox.to_string(),
+                                            format!("top-inbox-{inbox}"),
+                                        )),
                                 )
                             }),
                     )
@@ -3614,6 +3613,27 @@ mod tests {
                 mode.label()
             );
         }
+    }
+
+    #[test]
+    fn a_turn_without_a_reply_reports_no_usage() {
+        let reply = |cents: f64| {
+            let mut m = Message::new(Role::Agent, "done");
+            m.usage.output = 10;
+            m.usage.cost_cents = cents;
+            m
+        };
+        let mut messages = vec![Message::new(Role::User, "one"), reply(40.0)];
+        assert_eq!(turn_usage(&messages).cost_cents, 40.0);
+        // Stopped or failed before replying: the earlier reply isn't counted again.
+        messages.push(Message::new(Role::User, "two"));
+        messages.push(Message::new(Role::System, "The agent stopped."));
+        assert_eq!(turn_usage(&messages).cost_cents, 0.0);
+        // An error between two replies of one turn: the later one carries the usage.
+        messages.push(reply(15.0));
+        messages.push(Message::new(Role::System, "warning"));
+        messages.push(Message::new(Role::Agent, "more"));
+        assert_eq!(turn_usage(&messages).cost_cents, 15.0);
     }
 
     #[test]

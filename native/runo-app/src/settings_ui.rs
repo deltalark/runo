@@ -3341,7 +3341,7 @@ impl RunoApp {
                     .flex()
                     .gap(px(22.))
                     .child(meter(
-                        "Spent today",
+                        "Est. spend today",
                         dollars(spent),
                         (limits.day_cents > 0.).then(|| dollars(limits.day_cents)),
                         share(spent, limits.day_cents),
