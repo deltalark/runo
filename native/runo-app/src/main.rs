@@ -272,6 +272,9 @@ struct RunoApp {
     /// What the last git step did, shown at the foot of the Git place for a moment.
     git_toast: Option<(String, std::time::Instant)>,
     selected: Option<u64>,
+    /// A chat asked from a Design or Architecture canvas, open in a panel floating over
+    /// the canvas so the diagram stays in view.
+    canvas_chat: Option<u64>,
     view: View,
     right_tab: RightTab,
     /// The Threads tab's finished threads are folded away.
@@ -1524,6 +1527,7 @@ impl RunoApp {
             git_working: None,
             git_toast: None,
             selected,
+            canvas_chat: None,
             right_tab: RightTab::Changes,
             threads_done_shut: false,
             threads_done_all: false,
@@ -5603,101 +5607,7 @@ impl RunoApp {
         let working = self.handles.contains_key(&Target::Session(session.id));
         let id = session.id;
         let isolated = session.isolated;
-        let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
-        let mut list = div()
-            .w_full()
-            .when_some(cx.global::<AppSettings>().content_max_width(), |el, w| {
-                el.max_w(px(w))
-            })
-            .mx_auto()
-            .v_flex()
-            .gap_6()
-            .px_8()
-            .pt_6()
-            .pb_8();
-        if session.race != 0 {
-            list = list.child(self.race_strip(session, cx));
-        }
-        if let Some(card) = self.kept_card(id, cx) {
-            list = list.child(card);
-        }
-        if let Some(first) = session.messages.first().filter(|m| !m.time.is_empty()) {
-            list = list.child(
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(rgb(c_muted()))
-                    .text_size(px(11.5))
-                    .child(format!("Started {}", first.time)),
-            );
-        }
-        if let Some(strip) = self.thread_strip(session, cx) {
-            list = list.child(strip);
-        }
-        for (i, message) in session.messages.iter().enumerate() {
-            if self.crew_news_repeats(session, i) {
-                continue;
-            }
-            if let Some(card) = self.crew_card(session.id, i, message, cx) {
-                list = list.child(card);
-                continue;
-            }
-            let show = Some(i) == last_agent && !self.turn_changes(message).is_empty();
-            list = list.child(
-                div()
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        self.on_context(ctxmenu::CtxTarget::Message(i), cx),
-                    )
-                    .child(self.message_view(
-                        i,
-                        message,
-                        handoff::provider_at(session, i),
-                        show,
-                        working && Some(i) == last_agent,
-                        cx,
-                    )),
-            );
-        }
-        if let Some(task) = self.pending_start.get(&session.id) {
-            list = list.child(
-                div()
-                    .p_4()
-                    .v_flex()
-                    .gap_2()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(divider())
-                    .bg(tint(c_subtle()))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(icon(IconName::Loader, 14., c_blue()))
-                            .child("Preparing the worktree"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(c_secondary()))
-                            .child(format!(
-                                "The setup command is running in the Setup terminal tab, where you can answer what it asks. {} starts on “{}” when it finishes.",
-                                provider.name,
-                                task.lines().next().unwrap_or_default()
-                            )),
-                    ),
-            );
-        }
-        // While the agent works, the chat ends with what it is doing and for how long.
-        if working && !self.pending_start.contains_key(&id) {
-            let since = self.started.get(&id).map(|start| elapsed(start.elapsed()));
-            list = list.child(div().text_size(px(13.)).child(working_indicator(since)));
-        }
+        let list = self.chat_list(session, working, false, cx);
         let header = div()
             .h(px(44.))
             .flex_none()
@@ -5937,6 +5847,114 @@ impl RunoApp {
             .flex()
             .child(main)
             .into_any_element()
+    }
+
+    /// A session's conversation, top to bottom, ending with what the agent is doing while
+    /// it works. `compact` is the narrower spacing of the panel floating over a canvas.
+    fn chat_list(
+        &self,
+        session: &Session,
+        working: bool,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = session.id;
+        let provider = agent::provider(&session.provider);
+        let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
+        let mut list = div()
+            .w_full()
+            .when_some(cx.global::<AppSettings>().content_max_width(), |el, w| {
+                el.max_w(px(w))
+            })
+            .mx_auto()
+            .v_flex()
+            .gap_6()
+            .when(compact, |el| el.px_4().pt_4().pb_4())
+            .when(!compact, |el| el.px_8().pt_6().pb_8());
+        if session.race != 0 {
+            list = list.child(self.race_strip(session, cx));
+        }
+        if let Some(card) = self.kept_card(id, cx) {
+            list = list.child(card);
+        }
+        if let Some(first) = session.messages.first().filter(|m| !m.time.is_empty()) {
+            list = list.child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgb(c_muted()))
+                    .text_size(px(11.5))
+                    .child(format!("Started {}", first.time)),
+            );
+        }
+        if let Some(strip) = self.thread_strip(session, cx) {
+            list = list.child(strip);
+        }
+        for (i, message) in session.messages.iter().enumerate() {
+            if self.crew_news_repeats(session, i) {
+                continue;
+            }
+            if let Some(card) = self.crew_card(session.id, i, message, cx) {
+                list = list.child(card);
+                continue;
+            }
+            let show = Some(i) == last_agent && !self.turn_changes(message).is_empty();
+            list = list.child(
+                div()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        self.on_context(ctxmenu::CtxTarget::Message(i), cx),
+                    )
+                    .child(self.message_view(
+                        i,
+                        message,
+                        handoff::provider_at(session, i),
+                        show,
+                        working && Some(i) == last_agent,
+                        cx,
+                    )),
+            );
+        }
+        if let Some(task) = self.pending_start.get(&session.id) {
+            list = list.child(
+                div()
+                    .p_4()
+                    .v_flex()
+                    .gap_2()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(divider())
+                    .bg(tint(c_subtle()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(icon(IconName::Loader, 14., c_blue()))
+                            .child("Preparing the worktree"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(c_secondary()))
+                            .child(format!(
+                                "The setup command is running in the Setup terminal tab, where you can answer what it asks. {} starts on “{}” when it finishes.",
+                                provider.name,
+                                task.lines().next().unwrap_or_default()
+                            )),
+                    ),
+            );
+        }
+        // While the agent works, the chat ends with what it is doing and for how long.
+        if working && !self.pending_start.contains_key(&id) {
+            let since = self.started.get(&id).map(|start| elapsed(start.elapsed()));
+            list = list.child(div().text_size(px(13.)).child(working_indicator(since)));
+        }
+        list
     }
 
     fn menu_button(

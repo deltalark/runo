@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- A chat opened from the Chats menu on the Architecture or Design canvas now slides in from the right as a panel floating over the canvas, instead of leaving it. Read what the agent did, ask it more from the panel's composer, open it as a full chat, or close it to get back to the diagram. An ask from the canvas's AI bar while the panel is open shows up in it.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added

@@ -271,6 +271,14 @@ impl RunoApp {
                         + 12.))
                     .child(chats)
             }))
+            // A chat opened from the Chats menu floats over the canvas's right, under
+            // the menu's button.
+            .children(self.canvas_chat_panel(
+                pid,
+                View::Design,
+                (46., crate::shell::GUTTER + 8., crate::shell::GUTTER + 8.),
+                cx,
+            ))
             .into_any_element()
     }
 
