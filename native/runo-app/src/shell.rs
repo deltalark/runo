@@ -932,6 +932,8 @@ pub(crate) enum Mode {
     Sessions,
     Design,
     Architecture,
+    /// The project's databases.
+    Data,
     /// What waits to ship and the project's GitHub, as two tabs of one place.
     Git,
     Playbooks,
@@ -964,7 +966,7 @@ impl Mode {
 
     /// The current project's own modes, grouped under its badge below the main ones; ⌘7
     /// and ⌘8.
-    pub(crate) const PLAN: [Mode; 2] = [Mode::Design, Mode::Architecture];
+    pub(crate) const PLAN: [Mode; 3] = [Mode::Design, Mode::Architecture, Mode::Data];
 
     /// Whether the mode shows one project at a time, or a chooser under All projects.
     pub(crate) fn per_project(self) -> bool {
@@ -977,6 +979,7 @@ impl Mode {
             Mode::Sessions => "Sessions",
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
+            Mode::Data => "Data",
             Mode::Git => "Git",
             Mode::Playbooks => "Playbooks",
             Mode::History => "History",
@@ -993,6 +996,7 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
+            Mode::Data => "go-data",
             // Git's Changes tab; `go-reviews` opens its GitHub tab.
             Mode::Git => "go-review",
             Mode::Playbooks => "go-playbooks",
@@ -1009,6 +1013,7 @@ impl Mode {
             Mode::Sessions => IconName::CodeXml,
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
+            Mode::Data => IconName::Database,
             Mode::Git => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
             Mode::History => IconName::RotateCcwClock,
@@ -1024,6 +1029,7 @@ impl Mode {
             View::Home => Mode::Home,
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
+            View::Data => Mode::Data,
             View::Automations => Mode::Playbooks,
             View::Review | View::GitHistory | View::Branches | View::GitHub => Mode::Git,
             View::History => Mode::History,
@@ -1219,6 +1225,7 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
+            Mode::Data => self.view = View::Data,
             Mode::Git => match self.git_tab {
                 View::GitHub => self.load_github(),
                 View::Branches => self.open_branches(),
@@ -3783,7 +3790,11 @@ mod tests {
 
     #[test]
     fn only_design_and_architecture_show_one_project() {
-        assert!(Mode::Design.per_project() && Mode::Architecture.per_project());
+        assert!(
+            Mode::Design.per_project()
+                && Mode::Architecture.per_project()
+                && Mode::Data.per_project()
+        );
         assert!(Mode::MAIN.iter().all(|m| !m.per_project()));
     }
 

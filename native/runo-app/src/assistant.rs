@@ -59,6 +59,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/guide/files-terminal.md"),
     ),
     ("browser", include_str!("../../../docs/guide/browser.md")),
+    ("data", include_str!("../../../docs/guide/data.md")),
     ("github", include_str!("../../../docs/guide/github.md")),
     (
         "playbooks",
@@ -282,6 +283,7 @@ pub(crate) fn jump_for(open: &str) -> Option<Jump> {
         "github" => Jump::View(View::GitHub),
         "playbooks" => Jump::View(View::Automations),
         "history" => Jump::View(View::History),
+        "data" => Jump::View(View::Data),
         "tour" => Jump::Tour,
         _ => return None,
     })
@@ -302,6 +304,7 @@ pub(crate) fn open_label(open: &str) -> String {
         "playbooks" => "Go to Playbooks".into(),
         "github" => "Go to GitHub".into(),
         "history" => "Go to History".into(),
+        "data" => "Go to Data".into(),
         "review" => "Go to Git".into(),
         "git-history" => "Go to Git: History".into(),
         "branches" => "Go to Git: Branches".into(),
@@ -598,6 +601,7 @@ impl RunoApp {
             View::GitHistory => "Git history",
             View::Design => "Design",
             View::Architecture => "Architecture",
+            View::Data => "Data",
         };
         let mut parts = vec![format!("the {view} view")];
         if let Some(project) = self

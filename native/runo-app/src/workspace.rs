@@ -89,6 +89,7 @@ impl RunoApp {
             "Home" => View::Home,
             "Design" => View::Design,
             "Architecture" => View::Architecture,
+            "Data" => View::Data,
             "Playbooks" => View::Automations,
             "Inbox" => View::Inbox,
             // "Reviews" is what GitHub was called before Review got its own page.
