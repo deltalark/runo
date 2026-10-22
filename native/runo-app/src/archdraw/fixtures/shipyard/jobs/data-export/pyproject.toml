@@ -1,0 +1,3 @@
+[project]
+name = "data-export"
+dependencies = ["psycopg2", "boto3"]

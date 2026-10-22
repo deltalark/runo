@@ -369,6 +369,23 @@ pub fn apply(info: &mut ThreadInfo, kind: &EventKind, at: u64) -> bool {
     }
 }
 
+/// A thread's turn ended cleanly with nothing asked of the person, so its agent is done:
+/// steps it never ticked off are taken as done rather than left hanging. Returns whether
+/// anything changed.
+pub fn settle(info: &mut ThreadInfo) -> bool {
+    if info.decision.is_some() {
+        return false;
+    }
+    let mut changed = false;
+    for step in &mut info.checklist {
+        if step.mark != Mark::Done {
+            step.mark = Mark::Done;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Kinds of fenced block an agent with no MCP may write: ```runo-checklist and so on.
 pub const BLOCK_KINDS: [&str; 4] = ["checklist", "report", "decision", "actions"];
 
@@ -984,9 +1001,9 @@ Each message may open with a Threads section: what changed in this project's thr
 /// Told to a thread with its first prompt: how it reports back.
 pub fn thread_rules(tools: bool) -> String {
     let how = if tools {
-        "Use Runo's tools: set_checklist with your plan and, the first time, a 2 to 5 word title for the task (update it as steps start and finish), report when you finish or find something the person should know (open with a short sentence on the outcome, such as \"Fixed the export crash.\" or \"No changes needed.\", then a few sentences, with links), ask_decision when a choice changes what the person gets or can't be undone, and message_crew to ask Crew for something another thread has."
+        "Use Runo's tools: set_checklist with your plan and, the first time, a 2 to 5 word title for the task (update it as steps start and finish, and once more before you finish so every step shows how it ended; your own todo list shows there too), report when you finish or find something the person should know (open with a short sentence on the outcome, such as \"Fixed the export crash.\" or \"No changes needed.\", then a few sentences, with links), ask_decision when a choice changes what the person gets or can't be undone, and message_crew to ask Crew for something another thread has."
     } else {
-        "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with a first line such as \"title: Settings spacing pass\" naming the task in 2 to 5 words, then one step per line (- [x] done, - [~] doing, - [ ] to do), ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
+        "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with a first line such as \"title: Settings spacing pass\" naming the task in 2 to 5 words, then one step per line (- [x] done, - [~] doing, - [ ] to do), written again at the end so every step shows how it ended, ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
     };
     format!(
         "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\n## Your task\n"
@@ -1135,6 +1152,30 @@ mod tests {
         }
         assert!(!seen.first(&SEEN_LIMIT.to_string()));
         assert!(seen.first("0"));
+    }
+
+    #[test]
+    fn a_finished_turn_ticks_off_what_is_left() {
+        let step = |text: &str, mark| Step {
+            text: text.into(),
+            mark,
+        };
+        let mut info = ThreadInfo {
+            checklist: vec![
+                step("Read docs", Mark::Done),
+                step("Start docker", Mark::Doing),
+                step("Verify", Mark::Todo),
+            ],
+            ..Default::default()
+        };
+        assert!(settle(&mut info));
+        assert!(info.checklist.iter().all(|s| s.mark == Mark::Done));
+        assert!(!settle(&mut info));
+        // A thread waiting on the person isn't done yet.
+        info.checklist[1].mark = Mark::Doing;
+        info.decision = Some(Decision::default());
+        assert!(!settle(&mut info));
+        assert_eq!(info.checklist[1].mark, Mark::Doing);
     }
 
     #[test]

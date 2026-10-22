@@ -133,7 +133,8 @@ impl RunoApp {
     }
 
     /// Crew's open threads under its row in the sidebar, each on one line. Finished ones
-    /// fold into a single "N done" row until it is opened.
+    /// fold into a single "N done" row until it is opened. Selecting a thread only
+    /// highlights it: rows keep their place.
     pub(crate) fn crew_children(
         &self,
         pid: u64,
@@ -143,10 +144,12 @@ impl RunoApp {
         let unfolded = self.sidebar_done_open.contains(&pid);
         let mut open: Vec<AnyElement> = Vec::new();
         let mut finished: Vec<AnyElement> = Vec::new();
+        // The open thread stays in view even once finished and folded: it shows just
+        // under the "N done" row rather than jumping above it.
+        let mut selected_done: Option<AnyElement> = None;
         for t in threads {
             let status = thread_status(self.thread_working(t.id), t);
-            // The open thread stays in view even once finished.
-            let done = status == "done" && self.selected != Some(t.id);
+            let done = status == "done";
             let row = self
                 .child_row(
                     t,
@@ -155,13 +158,15 @@ impl RunoApp {
                     cx,
                 )
                 .into_any_element();
-            if done {
-                finished.push(row);
-            } else {
+            if !done {
                 open.push(row);
+            } else if !unfolded && self.selected == Some(t.id) {
+                selected_done = Some(row);
+            } else {
+                finished.push(row);
             }
         }
-        let n = finished.len();
+        let n = finished.len() + usize::from(selected_done.is_some());
         if n > 0 {
             open.push(
                 div()
@@ -204,6 +209,8 @@ impl RunoApp {
             );
             if unfolded {
                 open.extend(finished);
+            } else {
+                open.extend(selected_done);
             }
         }
         Self::child_rail(open).into_any_element()
@@ -336,7 +343,8 @@ impl RunoApp {
                 .map(|st| crew::plain(&st.text)),
             _ => crew::outcome(&info),
         });
-        let selected = self.selected == Some(thread) && self.view == View::Session;
+        let selected = (self.selected == Some(thread) && self.view == View::Session)
+            || self.peek == Some(thread);
         // A finished row says what changed with a chip; its outcome shows when it is open.
         let result = finished.then(|| self.thread_result(thread, &info));
         let line = if finished && !selected { None } else { line };
@@ -351,8 +359,13 @@ impl RunoApp {
             .gap(px(3.))
             .rounded_lg()
             .cursor_pointer()
+            // Beside Crew's chat a thread opens in the panel, so the chat stays put.
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.select(thread);
+                if this.current().is_some_and(|s| s.canvas == crew::CANVAS) {
+                    this.open_peek(thread);
+                } else {
+                    this.select(thread);
+                }
                 cx.notify();
             }));
         let row = if selected {
@@ -620,9 +633,11 @@ impl RunoApp {
     }
 
     /// At the top of a thread: who started it and why, its checklist, and its open decision.
+    /// `panel` leaves out the way back to Crew, for a thread open beside Crew's chat.
     pub(crate) fn thread_strip(
         &self,
         session: &Session,
+        panel: bool,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let info = session.crew.as_ref()?;
@@ -638,26 +653,29 @@ impl RunoApp {
                 .border_1()
                 .border_color(divider())
                 .bg(tint(c_subtle()))
-                .child(
-                    div()
-                        .id("thread-from")
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_size(px(12.))
-                        .text_color(rgb(c_secondary()))
-                        .cursor_pointer()
-                        .hover(|el| el.text_color(rgb(c_text())))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_crew(pid, cx);
-                            cx.notify();
-                        }))
-                        .child(icon(CREW_ICON, 12., c_blue()))
-                        .child(match info.origin {
-                            crew::Origin::Crew { .. } => "Started by Crew. Back to Crew",
-                            crew::Origin::Person => "A Crew thread. Back to Crew",
-                        }),
-                )
+                .when(panel, |el| el.p_2().rounded_lg())
+                .when(!panel, |el| {
+                    el.child(
+                        div()
+                            .id("thread-from")
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(12.))
+                            .text_color(rgb(c_secondary()))
+                            .cursor_pointer()
+                            .hover(|el| el.text_color(rgb(c_text())))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_crew(pid, cx);
+                                cx.notify();
+                            }))
+                            .child(icon(CREW_ICON, 12., c_blue()))
+                            .child(match info.origin {
+                                crew::Origin::Crew { .. } => "Started by Crew. Back to Crew",
+                                crew::Origin::Person => "A Crew thread. Back to Crew",
+                            }),
+                    )
+                })
                 .when(!info.brief.is_empty(), |el| {
                     el.child(
                         div()
@@ -740,6 +758,13 @@ impl RunoApp {
             return div().into_any_element();
         };
         let threads = self.crew_threads(pid, false);
+        if let Some(view) = self
+            .peek
+            .filter(|t| self.state.session(*t).is_some_and(|s| s.project_id == pid))
+            .and_then(|t| self.peek_view(t, cx))
+        {
+            return view;
+        }
         if threads.is_empty() {
             return div()
                 .p_4()
