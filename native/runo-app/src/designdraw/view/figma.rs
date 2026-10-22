@@ -636,7 +636,10 @@ impl DesignCanvas {
 
     fn design_panel(&self, cx: &mut Context<Self>) -> Div {
         let Some(s) = self.screen.as_ref().and_then(|id| self.canvas.screen(id)) else {
-            return div().px_3().child(self.add_screen_panel(cx));
+            return div()
+                .px_3()
+                .children(self.uncommitted_section(cx))
+                .child(self.add_screen_panel(cx));
         };
         match &self.element {
             None => self.frame_panel(s, cx),
@@ -739,6 +742,18 @@ impl DesignCanvas {
                     true,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.use_variant(&id, cx))),
+            );
+        }
+        if self.screen_uncommitted(&s.id) {
+            actions = actions.child(
+                text_btn(
+                    "design-discard-screen",
+                    "Discard changes",
+                    Some(IconName::Undo2),
+                    false,
+                )
+                .tooltip(tip("Put this screen back as the last commit has it"))
+                .on_click(cx.listener(|this, _, _, cx| this.discard_screen(cx))),
             );
         }
         actions = actions.child(
