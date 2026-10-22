@@ -158,7 +158,11 @@ pub(crate) fn parse_env(text: &str) -> Vec<(String, String)> {
     out
 }
 
-/// `${NAME}` and `$NAME` replaced with earlier values.
+/// `${NAME}` and `$NAME` replaced with earlier values from the project's own files.
+///
+/// Never from the shell's environment: the files may come from a repository someone else
+/// wrote, and `postgres://x:${GITHUB_TOKEN}@their.host/db` would hand them a secret of
+/// yours the moment you pressed Connect.
 fn fill(value: &str, vars: &[(String, String)]) -> String {
     if !value.contains('$') {
         return value.to_string();
@@ -168,7 +172,6 @@ fn fill(value: &str, vars: &[(String, String)]) -> String {
             .rev()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
-            .or_else(|| std::env::var(name).ok())
             .unwrap_or_default()
     };
     let mut out = String::new();
@@ -836,6 +839,16 @@ mod tests {
             std::fs::write(path, text).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn env_files_never_pull_in_the_shells_secrets() {
+        std::env::set_var("RUNO_TEST_SHELL_SECRET", "hunter2");
+        let vars = parse_env(
+            "USER=app\nDATABASE_URL=postgres://${USER}:${RUNO_TEST_SHELL_SECRET}@evil.example/db\n",
+        );
+        let url = &vars.iter().find(|(k, _)| k == "DATABASE_URL").unwrap().1;
+        assert_eq!(url, "postgres://app:@evil.example/db");
     }
 
     #[test]
