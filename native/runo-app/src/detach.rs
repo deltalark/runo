@@ -168,6 +168,29 @@ pub fn spawn_live(
     start(id, turn, host, &command, dir, tx)
 }
 
+/// Start an ACP agent's turn under Runo's agent host, with `config` in the turn folder
+/// and `prompt` as its first message (see `harness::acp`). `command`, the print-mode
+/// command, lends the turn its environment.
+pub fn spawn_acp(
+    root: &Path,
+    id: u64,
+    config: &crate::harness::acp::Config,
+    command: Command,
+    prompt: &str,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
+    let turn = fresh_turn(root, id)?;
+    config
+        .write(&turn)
+        .and_then(|_| crate::harness::host::send(&turn, prompt))
+        .map_err(|e| format!("could not set up the turn: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("could not find Runo: {e}"))?;
+    let mut host = Command::new(exe);
+    host.arg("--agent-host").arg(MARK).arg(&turn).arg("--acp");
+    start(id, turn, host, &command, dir, tx)
+}
+
 /// An empty folder for session `id`'s next turn.
 fn fresh_turn(root: &Path, id: u64) -> Result<PathBuf, String> {
     let turn = turn_dir(root, id);

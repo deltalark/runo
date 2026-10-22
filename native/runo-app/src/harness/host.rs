@@ -28,6 +28,10 @@ pub fn main(args: &[String]) -> i32 {
         eprintln!("usage: Runo --agent-host runo-turn <turn folder> <agent> [args…]");
         return 2;
     };
+    // An agent that speaks ACP, with its command in the turn folder.
+    if program == "--acp" {
+        return super::acp::main(Path::new(turn));
+    }
     run(Path::new(turn), program, &args[3..], IDLE)
 }
 
@@ -55,11 +59,16 @@ pub fn run(turn: &Path, program: &str, args: &[String], idle: Duration) -> i32 {
             127
         }
     };
+    finish(turn, code);
+    code
+}
+
+/// Record how the turn ended, for Runo to read from `turn/exit`.
+pub(super) fn finish(turn: &Path, code: i32) {
     let tmp = turn.join("exit.tmp");
     if std::fs::write(&tmp, format!("{code}\n")).is_ok() {
         let _ = std::fs::rename(&tmp, turn.join("exit"));
     }
-    code
 }
 
 fn host(turn: &Path, program: &str, args: &[String], idle: Duration) -> std::io::Result<i32> {
@@ -179,7 +188,7 @@ fn watch_idle(
 }
 
 /// New complete, non-empty lines of `path` from `offset` on.
-fn new_lines(path: &Path, offset: &mut u64) -> Vec<String> {
+pub(super) fn new_lines(path: &Path, offset: &mut u64) -> Vec<String> {
     let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
     };

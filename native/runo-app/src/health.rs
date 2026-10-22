@@ -291,8 +291,7 @@ impl RunoApp {
                         &session.dir,
                         start.saturating_sub(1),
                     );
-                    running.live =
-                        crate::harness::host::is_live(&crate::detach::turn_dir(root, id));
+                    running.follow(&crate::detach::turn_dir(root, id));
                     self.turns.insert(id, running);
                     self.handles.insert(Target::Session(id), handle);
                     picked += 1;
