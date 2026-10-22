@@ -4,6 +4,8 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
 ### Added
 
 - Proof of done: each project can list checks (tests, lint, typecheck, build), suggested from its manifests, that run after every turn that changes files. A card under the reply shows which passed and the end of the output of any that failed, with Run again and Fix it, which sends the failures to the agent. Failures can also go back on their own for up to 1, 2, 3 or 5 rounds, stopping when the same failure comes back. Second opinion asks an agent from another vendor to review the turn's diff read-only, and its comments land as diff notes ready for Send notes.

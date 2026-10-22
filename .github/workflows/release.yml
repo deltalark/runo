@@ -1,5 +1,7 @@
 # Builds Runo.app for Apple silicon and Intel Macs and packages a zip and a disk image of
-# each. Every run uploads them as workflow artifacts. On a version tag (v1.2.3) they are
+# each, builds Runo for x86_64 and arm64 Linux as a .deb and a tarball, and builds Runo.exe
+# for 64-bit Windows as a zip. Every run
+# uploads them as workflow artifacts. On a version tag (v1.2.3) they are
 # also attached to the GitHub release, which Runo's in-app updater downloads from.
 # Run it by hand from the Actions tab for a test build of any branch. Signing and
 # notarization run only when their secrets are set.
@@ -129,6 +131,164 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.app.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  linux:
+    # The oldest supported Ubuntu, so the binary runs on older glibc too.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libfontconfig-dev libfreetype-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-render0-dev libxcb-shm0-dev libxcb-xkb-dev \
+            libwayland-dev libvulkan-dev
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ matrix.arch }}
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --locked
+
+      - name: Build Runo
+        working-directory: native/runo-app
+        run: cargo bundle --release --format deb
+
+      - name: Name the build
+        id: build
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            name="Runo-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}"
+          else
+            # Test builds carry the commit so they never look like a release.
+            name="Runo-$version-linux-${{ matrix.arch }}-${GITHUB_SHA::7}"
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Package a .deb and a tarball
+        run: |
+          mkdir -p dist
+          deb=$(ls target/release/bundle/deb/*.deb | head -1)
+          test -n "$deb"
+          # Match the window's app id so docks pair the window with the launcher's icon.
+          root="$RUNNER_TEMP/deb"
+          dpkg-deb -R "$deb" "$root"
+          for desktop in "$root"/usr/share/applications/*.desktop; do
+            grep -q '^StartupWMClass=' "$desktop" || echo 'StartupWMClass=runo' >> "$desktop"
+          done
+          dpkg-deb --root-owner-group -b "$root" "dist/${{ steps.build.outputs.name }}.deb"
+          dpkg-deb -I "dist/${{ steps.build.outputs.name }}.deb"
+
+          dir="$RUNNER_TEMP/${{ steps.build.outputs.name }}"
+          mkdir -p "$dir"
+          cp target/release/Runo "$dir/"
+          cp native/runo-app/assets/linux/runo.desktop "$dir/"
+          cp native/runo-app/assets/icon/png/runo-512.png "$dir/runo.png"
+          cp LICENSE "$dir/"
+          tar -C "$RUNNER_TEMP" -czf "dist/${{ steps.build.outputs.name }}.tar.gz" "${{ steps.build.outputs.name }}"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-x86_64
+
+      - name: Build Runo.exe
+        run: cargo build --release -p runo
+
+      - name: Name the build
+        id: build
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            name="Runo-${GITHUB_REF_NAME#v}-windows-x86_64"
+          else
+            # Test builds carry the commit so they never look like a release.
+            name="Runo-$version-windows-x86_64-${GITHUB_SHA::7}"
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Package a zip
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP/${{ steps.build.outputs.name }}"
+          New-Item -ItemType Directory -Force -Path $dir, dist | Out-Null
+          Copy-Item target/release/Runo.exe, LICENSE -Destination $dir
+          Compress-Archive -Path $dir -DestinationPath "dist/${{ steps.build.outputs.name }}.zip"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.name }}
           path: dist/*
           if-no-files-found: error
 
