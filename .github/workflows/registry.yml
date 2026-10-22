@@ -1,0 +1,68 @@
+# Publishes the agent manifest (native/runo-app/src/agents.json) for Runo to download:
+# signed with the REGISTRY_SIGNING_KEY secret and attached to the `agent-registry`
+# release, a pre-release that isn't a Runo version. Runo keeps a download only when its
+# signature checks out against agents.pub and its version is newer than the one it has,
+# so raise "version" with every change. Make the key once with scripts/registry-key.sh.
+name: Agent registry
+
+on:
+  push:
+    branches: [main]
+    paths: ["native/runo-app/src/agents.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-registry
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY_SIGNING_KEY: ${{ secrets.REGISTRY_SIGNING_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      MANIFEST: native/runo-app/src/agents.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check there is a key
+        if: env.REGISTRY_SIGNING_KEY == ''
+        run: echo "::notice::REGISTRY_SIGNING_KEY isn't set, so nothing is published. Run scripts/registry-key.sh."
+
+      - name: Check the version went up
+        if: env.REGISTRY_SIGNING_KEY != ''
+        run: |
+          new=$(python3 -c 'import json,os; print(int(json.load(open(os.environ["MANIFEST"]))["version"]))')
+          old=$(gh release download agent-registry -p agents.json -O - 2>/dev/null \
+            | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["version"]))' 2>/dev/null || echo 0)
+          if [ "$new" -le "$old" ]; then
+            echo "::error::agents.json is version $new, but version $old is already published. Raise \"version\"."
+            exit 1
+          fi
+
+      - name: Sign and check against agents.pub
+        if: env.REGISTRY_SIGNING_KEY != ''
+        run: |
+          umask 077
+          printf '%s\n' "$REGISTRY_SIGNING_KEY" > key.pem
+          cp "$MANIFEST" agents.json
+          openssl pkeyutl -sign -inkey key.pem -rawin -in agents.json | base64 -w0 > agents.json.sig
+          rm key.pem
+          python3 - <<'PY'
+          import base64, subprocess
+          pub = base64.b64decode(open("native/runo-app/src/agents.pub").read().strip())
+          der = bytes.fromhex("302a300506032b6570032100") + pub
+          open("pub.der", "wb").write(der)
+          open("sig.bin", "wb").write(base64.b64decode(open("agents.json.sig").read()))
+          PY
+          openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in agents.json -sigfile sig.bin
+
+      - name: Publish
+        if: env.REGISTRY_SIGNING_KEY != ''
+        run: |
+          gh release view agent-registry >/dev/null 2>&1 || gh release create agent-registry \
+            --title "Agent registry" --prerelease --latest=false \
+            --notes "Signed agent manifests that Runo downloads. Not a Runo release."
+          gh release upload agent-registry agents.json.sig agents.json --clobber

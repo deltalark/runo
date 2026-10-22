@@ -345,6 +345,8 @@ impl RunoApp {
             self.health.release_checked = Some(Instant::now());
             let slot = self.health.release.clone();
             std::thread::spawn(move || {
+                // Newer agent manifests come with the same check, used from the next start.
+                crate::registry::fetch();
                 if let Some(release) = crate::applog::check_release() {
                     if let Ok(mut slot) = slot.lock() {
                         *slot = Some(release);

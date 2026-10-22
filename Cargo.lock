@@ -5902,6 +5902,7 @@ dependencies = [
  "qrcode",
  "raw-window-handle",
  "resvg 0.45.1",
+ "ring",
  "roxmltree 0.21.1",
  "rusqlite",
  "rustls",
