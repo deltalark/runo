@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Dot matrix, a background for the window. A fine grid of dots lies on the frame round your work (the top bar, the rail, the gutters and the status bar), warming into your accent toward the top-left corner. With glass on it shows through the sidebars and panels too, like dotted glass. It follows the colour theme and accent. Turn it on in Settings > Appearance > Background.
+
 ### Changed
 
 - Steps from Codex, Cursor, Gemini and Copilot now show as running until they finish, and a step whose tool failed is marked with a cross, as Claude's already were. Each step also records what kind of work it was and how long it took.

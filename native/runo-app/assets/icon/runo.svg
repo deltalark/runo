@@ -3,8 +3,8 @@
 <linearGradient id="t" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#232327"/><stop offset="1" stop-color="#0E0E10"/></linearGradient>
 <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.04"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.08"/></linearGradient>
 <linearGradient id="rb" gradientUnits="userSpaceOnUse" x1="164" y1="860" x2="860" y2="164"><stop offset="0" stop-color="#34D399"/><stop offset="0.25" stop-color="#22D3EE"/><stop offset="0.5" stop-color="#6366F1"/><stop offset="0.75" stop-color="#A855F7"/><stop offset="1" stop-color="#F472B6"/></linearGradient>
-<radialGradient id="tl" gradientUnits="userSpaceOnUse" cx="190" cy="190" r="520"><stop offset="0" stop-color="#FFFFFF"/><stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.55"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
-<radialGradient id="br" gradientUnits="userSpaceOnUse" cx="834" cy="834" r="520"><stop offset="0" stop-color="#FFFFFF"/><stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.55"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
+<radialGradient id="tl" gradientUnits="userSpaceOnUse" cx="190" cy="190" r="440"><stop offset="0" stop-color="#FFFFFF"/><stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.55"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
+<radialGradient id="br" gradientUnits="userSpaceOnUse" cx="834" cy="834" r="440"><stop offset="0" stop-color="#FFFFFF"/><stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.55"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
 <mask id="lit" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="url(#tl)"/><rect width="1024" height="1024" fill="url(#br)"/></mask>
 <filter id="glow" filterUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><feGaussianBlur stdDeviation="18"/></filter>
 </defs>

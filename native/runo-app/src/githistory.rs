@@ -116,7 +116,7 @@ fn graph_cell(row: GraphRow, lanes: usize, merge: bool) -> impl IntoElement {
             let top = bounds.origin.y;
             let mid = top + px(ROW / 2.);
             let bottom = top + px(ROW);
-            let mut line = |from: usize, to: usize, y0: Pixels, y1: Pixels| {
+            let mut line = |from: usize, to: usize, y0: Pixels, y1: Pixels, color: usize| {
                 let mut b = PathBuilder::stroke(px(1.6));
                 b.move_to(point(x(from), y0));
                 if from == to {
@@ -130,15 +130,16 @@ fn graph_cell(row: GraphRow, lanes: usize, merge: bool) -> impl IntoElement {
                     );
                 }
                 if let Ok(p) = b.build() {
-                    // A line keeps the colour of the lane it runs down to.
-                    window.paint_path(p, rgb(lane_color(from.max(to))));
+                    window.paint_path(p, rgb(lane_color(color)));
                 }
             };
+            // A line keeps its lane's colour down to the dot it meets, and takes the
+            // colour of the lane it runs on in below it.
             for &(from, to) in &row.top {
-                line(from, to, top, mid);
+                line(from, to, top, mid, from);
             }
             for &(from, to) in &row.bottom {
-                line(from, to, mid, bottom);
+                line(from, to, mid, bottom, to);
             }
             let r = if merge { 4.5 } else { 3.5 };
             let c = point(x(row.lane), mid);

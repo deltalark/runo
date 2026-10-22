@@ -853,6 +853,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
                 row("Color theme", "Each theme has a light and a dark version; Theme above picks which one shows.", Ctl::Dropdown(crate::themes::THEMES.iter().map(|t| (t.id.to_string(), t.name.to_string())).collect(), st.color_theme.clone(), Rc::new(|s, v| s.color_theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
+                row("Background", "A fine grid of dots on the window's frame, warming into your accent at the top-left. With glass on it shows through the panels too.", Ctl::Segment(options(&[("off", "None"), ("dots", "Dot matrix")]), st.pattern.clone(), Rc::new(|s, v| s.pattern = v))),
             ]),
             section("Glass", "A translucent window over a blurred desktop, like macOS glass.", vec![
                 row("Window glass", "", Ctl::Glass(st.glass.clone())),
