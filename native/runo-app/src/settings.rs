@@ -62,6 +62,8 @@ impl AgentOptions {
 pub struct AppSettings {
     pub agents: HashMap<String, AgentOptions>,
     pub theme: String,
+    /// The colour theme, by id from `themes::THEMES`; it has a light and a dark version.
+    pub color_theme: String,
     pub accent: String,
     pub diff_colors: String,
     pub animations: bool,
@@ -192,6 +194,7 @@ impl Default for AppSettings {
             agents: HashMap::new(),
             usage_detailed: false,
             theme: "dark".into(),
+            color_theme: "runo".into(),
             accent: "indigo".into(),
             diff_colors: "default".into(),
             animations: true,
@@ -308,6 +311,7 @@ impl AppSettings {
             .map(|a| a.2)
             .unwrap_or(ACCENTS[0].2);
         ACCENT.store(accent, Ordering::Relaxed);
+        crate::themes::set(&self.color_theme);
         DIFF.store(
             match self.diff_colors.as_str() {
                 "colorblind" => 1,
@@ -722,55 +726,59 @@ pub fn mix(a: u32, b: u32, t: f32) -> u32 {
     (ch(16) << 16) | (ch(8) << 8) | ch(0)
 }
 
-// Light is a neutral zinc scale; dark is Tokyo Night.
+/// The colour theme for the current mode, from Settings > Appearance.
+fn theme() -> &'static crate::themes::Palette {
+    crate::themes::current()
+}
+
 pub fn c_canvas() -> u32 {
-    pick(0xffffff, 0x1a1b26)
+    theme().canvas
 }
 pub fn c_sidebar() -> u32 {
-    pick(0xf7f7f8, 0x16161e)
+    theme().sidebar
 }
 /// The mode rail: the deepest layer, so the open place's tab, cut from the sheet beside
 /// it, stands out from it.
 pub fn c_rail() -> u32 {
-    pick(0xe4e4e8, 0x111118)
+    theme().rail
 }
 /// The sheet the rail's tab is cut from: the list beside the rail, raised a step above
 /// both the rail and the page, so the tab and the selected row's join to the page read.
 pub fn c_sheet() -> u32 {
-    pick(0xf4f4f6, 0x1f2030)
+    theme().sheet
 }
 pub fn c_subtle() -> u32 {
-    pick(0xf1f1f3, 0x222436)
+    theme().subtle
 }
 pub fn c_border() -> u32 {
-    pick(0xe5e5e8, 0x2a2e42)
+    theme().border
 }
 /// Text is a step stronger in glass mode, at every level: the translucent layers let
 /// the desktop through under the text too, so its contrast depends on the wallpaper, and
 /// a light or busy one would otherwise wash it out.
 pub fn c_text() -> u32 {
     if glass_on() {
-        pick(0x0f0f12, 0xdce2fa)
+        theme().glass_text()
     } else {
-        pick(0x18181b, 0xc0caf5)
+        theme().text
     }
 }
 pub fn c_secondary() -> u32 {
     if glass_on() {
-        pick(0x2c2c33, 0xcbd0e6)
+        theme().glass_secondary()
     } else {
-        pick(0x55555e, 0xa9b1d6)
+        theme().secondary
     }
 }
 pub fn c_muted() -> u32 {
     if glass_on() {
-        pick(0x4f4f58, 0x969bb9)
+        theme().glass_muted()
     } else {
-        pick(0x8a8a94, 0x737aa2)
+        theme().muted
     }
 }
 pub fn c_term_bg() -> u32 {
-    pick(0xfafafa, 0x16161e)
+    theme().term_bg
 }
 /// Behind an agent's CLI and other terminal screens: the terminal's own shade on a solid
 /// window, and in glass mode a shade over the glass, so the CLI is part of the window
@@ -784,23 +792,19 @@ pub fn term_fill() -> Rgba {
 }
 /// Neutral fill for the selected row, so selection does not compete with status colours.
 pub fn c_active() -> u32 {
-    pick(0xe9e9ec, 0x2b3047)
+    theme().active
 }
 /// Raised surfaces such as the composer, menus and cards.
 pub fn c_raised() -> u32 {
-    pick(0xffffff, 0x1f2335)
+    theme().raised
 }
 pub fn c_blue() -> u32 {
     let accent = ACCENT.load(Ordering::Relaxed);
-    if is_dark() {
-        // Dark mode uses Tokyo Night's blue unless another accent was picked.
-        if accent == ACCENTS[0].2 {
-            0x7aa2f7
-        } else {
-            mix(accent, 0xffffff, 0.8)
-        }
-    } else {
-        accent
+    // A theme with its own accent uses it unless another accent was picked.
+    match theme().accent {
+        Some(own) if accent == ACCENTS[0].2 => own,
+        _ if is_dark() => mix(accent, 0xffffff, 0.8),
+        _ => accent,
     }
 }
 /// Background of a selected row or option: neutral, so the accent stays for text and focus.
@@ -808,13 +812,13 @@ pub fn c_selected() -> u32 {
     c_active()
 }
 pub fn c_green() -> u32 {
-    pick(0x16a34a, 0x9ece6a)
+    theme().green
 }
 pub fn c_amber() -> u32 {
-    pick(0xf0a020, 0xe0af68)
+    theme().amber
 }
 pub fn c_red() -> u32 {
-    pick(0xdc2626, 0xf7768e)
+    theme().red
 }
 
 /// Text colour for added / removed lines, honouring the diff palette.

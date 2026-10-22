@@ -78,6 +78,7 @@ mod signin;
 mod store;
 mod stream;
 mod terminal;
+mod themes;
 mod timemachine;
 mod tour;
 mod turns;
@@ -355,7 +356,8 @@ struct RunoApp {
     cleanup: settings_ui::CleanupView,
     settings_menu: Option<String>,
     discovered: Option<Discovered>,
-    applied_dark: Option<bool>,
+    /// The mode and colour theme the component library was last set up for.
+    applied_dark: Option<(bool, &'static str)>,
     applied_font: Option<&'static str>,
     applied_glass: Option<bool>,
     applied_enter: Option<bool>,
@@ -9122,8 +9124,9 @@ impl Render for RunoApp {
                 WindowBackgroundAppearance::Opaque
             });
         }
-        if self.applied_dark != Some(dark) {
-            self.applied_dark = Some(dark);
+        let theme = crate::themes::get(dark).id;
+        if self.applied_dark != Some((dark, theme)) {
+            self.applied_dark = Some((dark, theme));
             gpui_kit::component::Theme::change(
                 if dark {
                     gpui_kit::component::ThemeMode::Dark
@@ -9136,8 +9139,8 @@ impl Render for RunoApp {
             if glass {
                 gpui_kit::component::Theme::update(cx, |theme| theme.muted = code_wash().into());
             }
-            // Inputs, menus and editors take Runo's dark palette too.
-            if dark {
+            // Inputs, menus and editors take the colour theme too.
+            if dark || theme != "runo" {
                 gpui_kit::component::Theme::update(cx, |theme| {
                     theme.background = rgb(c_canvas()).into();
                     theme.foreground = rgb(c_text()).into();
