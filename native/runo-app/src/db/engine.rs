@@ -27,6 +27,47 @@ pub(crate) struct Opened {
     pub server: String,
     /// The server says the session can't write.
     pub read_only: bool,
+    /// How the connection travels.
+    pub transport: Transport,
+    /// Signed in as a role that bypasses every permission check.
+    pub superuser: bool,
+}
+
+/// How a session reaches its database.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Transport {
+    /// A file on this computer.
+    #[default]
+    File,
+    /// TLS with the server's certificate checked.
+    Verified,
+    /// TLS without checking the certificate.
+    Encrypted,
+    /// No TLS: fine on this computer, readable on the network elsewhere.
+    Plain,
+}
+
+/// How long a statement waits for a lock before giving up, so a read never queues behind
+/// a migration and holds up everything that queues behind it.
+const LOCK_WAIT: Duration = Duration::from_secs(3);
+
+/// `text` with the password in `target` taken out, for errors that might echo it.
+pub(crate) fn scrub(text: &str, target: &str) -> String {
+    let Ok(url) = url::Url::parse(target) else {
+        return text.to_string();
+    };
+    let Some(pw) = url.password().filter(|p| !p.is_empty()) else {
+        return text.to_string();
+    };
+    let decoded = url::form_urlencoded::parse(format!("p={pw}").as_bytes())
+        .next()
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_default();
+    let mut out = text.replace(pw, "•••");
+    if decoded.len() > 1 {
+        out = out.replace(&decoded, "•••");
+    }
+    out
 }
 
 /// `name` as a quoted SQL identifier.
@@ -182,8 +223,9 @@ pub(crate) enum TlsCheck {
 }
 
 /// The TLS check for `target` and the URL the driver gets. A database elsewhere is
-/// checked unless its URL asks for less; the driver only knows `disable`, `prefer` and
-/// `require`, so the stricter modes become `require` with the check on.
+/// checked unless its URL asks for less, and never falls back to no TLS unless the URL
+/// says `sslmode=disable`; the driver only knows `disable`, `prefer` and `require`, so
+/// the stricter modes become `require` with the check on.
 pub(crate) fn tls_plan(target: &str) -> (TlsCheck, String) {
     let mode = target
         .split(['?', '&'])
@@ -197,8 +239,14 @@ pub(crate) fn tls_plan(target: &str) -> (TlsCheck, String) {
         _ if super::local_host(&host) => TlsCheck::Encrypt,
         _ => TlsCheck::Verify,
     };
+    let remote = !super::local_host(&host);
     let url = match mode.as_str() {
         "verify-full" | "verify-ca" => {
+            target.replace(&format!("sslmode={mode}"), "sslmode=require")
+        }
+        // Elsewhere, "use TLS if offered" would quietly send everything in the clear to
+        // whoever answers, so it has to be TLS. `sslmode=disable` still means no TLS.
+        "allow" | "prefer" if remote => {
             target.replace(&format!("sslmode={mode}"), "sslmode=require")
         }
         "allow" => target.replace("sslmode=allow", "sslmode=prefer"),
@@ -313,15 +361,21 @@ impl Session {
         match kind {
             Kind::Postgres => {
                 let (check, url) = tls_plan(target);
-                let mut config: postgres::Config =
-                    url.parse().map_err(|e: postgres::Error| e.to_string())?;
+                let scrubbed = |e: String| scrub(&e, &url);
+                let mut config: postgres::Config = url
+                    .parse()
+                    .map_err(|e: postgres::Error| scrubbed(e.to_string()))?;
                 config.application_name("Runo");
                 config.connect_timeout(Duration::from_secs(10));
-                let mut client = config.connect(tls(check)?).map_err(pg_error)?;
+                let mut client = config
+                    .connect(tls(check)?)
+                    .map_err(|e| scrubbed(pg_error(e)))?;
                 client
                     .batch_execute(&format!(
-                        "SET default_transaction_read_only = on; SET statement_timeout = {}; SET standard_conforming_strings = on;",
-                        TIMEOUT.as_millis()
+                        "SET default_transaction_read_only = on; SET statement_timeout = {}; SET lock_timeout = {}; SET idle_in_transaction_session_timeout = {}; SET standard_conforming_strings = on;",
+                        TIMEOUT.as_millis(),
+                        LOCK_WAIT.as_millis(),
+                        TIMEOUT.as_millis() * 2,
                     ))
                     .map_err(pg_error)?;
                 let read_only = client
@@ -344,11 +398,31 @@ impl Session {
                     })
                     .unwrap_or_default();
                 let version = version.split_whitespace().next().unwrap_or("").to_string();
+                let first = |client: &mut postgres::Client, sql: &str| {
+                    client.simple_query(sql).ok().and_then(|ms| {
+                        ms.iter().find_map(|m| match m {
+                            postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
+                            _ => None,
+                        })
+                    })
+                };
+                let superuser = first(&mut client, "SHOW is_superuser").as_deref() == Some("on");
+                let ssl = first(
+                    &mut client,
+                    "SELECT ssl::text FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+                );
+                let transport = match (ssl.as_deref(), check) {
+                    (Some("true"), TlsCheck::Verify) => Transport::Verified,
+                    (Some("true"), TlsCheck::Encrypt) => Transport::Encrypted,
+                    _ => Transport::Plain,
+                };
                 Ok((
                     Session::Postgres(client, check),
                     Opened {
                         server: format!("Postgres {version}").trim().to_string(),
                         read_only,
+                        transport,
+                        superuser,
                     },
                 ))
             }
@@ -367,6 +441,16 @@ impl Session {
                 .map_err(|e| e.to_string())?;
                 conn.pragma_update(None, "query_only", 1)
                     .map_err(|e| e.to_string())?;
+                // A file from anywhere is untrusted: its views and triggers can't call
+                // functions with side effects, and its schema can't be bent to corrupt
+                // memory.
+                use rusqlite::config::DbConfig;
+                conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)
+                    .map_err(|e| e.to_string())?;
+                conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+                    .map_err(|e| e.to_string())?;
+                conn.pragma_update(None, "cell_size_check", 1)
+                    .map_err(|e| e.to_string())?;
                 conn.busy_timeout(Duration::from_secs(3))
                     .map_err(|e| e.to_string())?;
                 let read_only = conn
@@ -378,6 +462,8 @@ impl Session {
                     Opened {
                         server: format!("SQLite {}", rusqlite::version()),
                         read_only,
+                        transport: Transport::File,
+                        superuser: false,
                     },
                 ))
             }
@@ -421,7 +507,8 @@ impl Session {
         let start = Instant::now();
         let mut rows = match self {
             Session::Postgres(client, _) => {
-                let messages = client.simple_query(&shown).map_err(pg_error)?;
+                let messages =
+                    super::query::read_only(client, |c| c.simple_query(&shown).map_err(pg_error))?;
                 let mut rows = pg_text_rows(messages, |_, name| {
                     types.get(name).copied().unwrap_or(CellKind::Text)
                 });
@@ -601,6 +688,7 @@ fn sqlite_tables(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Table>> {
                     nullable: r.get::<_, i64>(3)? == 0,
                     primary: r.get::<_, i64>(5)? > 0,
                     refers: None,
+                    hidden: false,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -801,6 +889,34 @@ mod tests {
     }
 
     #[test]
+    fn remote_databases_never_drop_to_plain_text() {
+        for mode in ["prefer", "allow"] {
+            let (check, url) = tls_plan(&format!("postgres://u@db.example.com/app?sslmode={mode}"));
+            assert_eq!(check, TlsCheck::Encrypt);
+            assert_eq!(url, "postgres://u@db.example.com/app?sslmode=require");
+        }
+        // Asked for in so many words, it's allowed (and the page says so).
+        let (_, url) = tls_plan("postgres://u@db.example.com/app?sslmode=disable");
+        assert!(url.ends_with("sslmode=disable"));
+        // On this computer, prefer stays prefer.
+        let (_, url) = tls_plan("postgres://u@localhost/app?sslmode=prefer");
+        assert!(url.ends_with("sslmode=prefer"));
+    }
+
+    #[test]
+    fn passwords_never_reach_an_error() {
+        let url = "postgres://app:s3cr%40t!@db.example.com/app";
+        assert_eq!(
+            scrub("bad password s3cr%40t! and s3cr@t! here", url),
+            "bad password ••• and ••• here"
+        );
+        assert_eq!(
+            scrub("nothing to hide", "postgres://app@db/app"),
+            "nothing to hide"
+        );
+    }
+
+    #[test]
     fn certificates_are_checked_away_from_this_machine() {
         let (check, url) = tls_plan("postgres://u@localhost/app");
         assert_eq!(
@@ -848,9 +964,19 @@ mod tests {
         };
         let (mut s, opened) = Session::open(Kind::Postgres, &url).unwrap();
         assert!(opened.read_only, "{opened:?}");
+        // A local server's certificate isn't checked, and the test role is a superuser.
+        assert!(matches!(
+            opened.transport,
+            Transport::Encrypted | Transport::Plain
+        ));
+        assert!(opened.superuser);
         let Session::Postgres(client, _) = &mut s else {
             unreachable!()
         };
+        let lock_wait = client.simple_query("SHOW lock_timeout").unwrap();
+        assert!(lock_wait
+            .iter()
+            .any(|m| matches!(m, postgres::SimpleQueryMessage::Row(r) if r.get(0) == Some("3s"))));
         let err = client
             .batch_execute("CREATE TABLE runo_should_not_exist (id int)")
             .unwrap_err();

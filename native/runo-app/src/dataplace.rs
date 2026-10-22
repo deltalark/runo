@@ -493,6 +493,52 @@ pub(crate) fn small_button(
     }
 }
 
+/// One line of the connection page's facts: an icon and a sentence.
+fn note_row(glyph: IconName, color: u32, text: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(12.5))
+        .text_color(rgb(c_muted()))
+        .child(icon(glyph, 13., color))
+        .child(text.into())
+}
+
+/// How the session travels, warning when it crosses the network in the clear.
+fn transport_row(t: db::engine::Transport, local: bool) -> Div {
+    use db::engine::Transport;
+    let (glyph, color, text) = match t {
+        Transport::File => (IconName::Lock, c_green(), "A file on this computer.".to_string()),
+        Transport::Verified => (
+            IconName::Lock,
+            c_green(),
+            "Encrypted, with the server's certificate verified.".into(),
+        ),
+        Transport::Encrypted if local => (
+            IconName::Lock,
+            c_muted(),
+            "Encrypted. The certificate isn't checked for a database on this computer.".into(),
+        ),
+        Transport::Encrypted => (
+            IconName::LockOpen,
+            c_amber(),
+            "Encrypted, but the server's certificate isn't checked (sslmode=require), so another machine could stand in for it.".into(),
+        ),
+        Transport::Plain if local => (
+            IconName::LockOpen,
+            c_muted(),
+            "Not encrypted, which is fine on this computer.".into(),
+        ),
+        Transport::Plain => (
+            IconName::TriangleAlert,
+            c_amber(),
+            "Not encrypted: rows and the password cross the network in the clear (sslmode=disable).".into(),
+        ),
+    };
+    note_row(glyph, color, text)
+}
+
 pub(crate) fn centered(text: impl Into<SharedString>) -> AnyElement {
     div()
         .size_full()
@@ -536,7 +582,23 @@ impl RunoApp {
         });
         self.scan_data(cx);
         if let Some(id) = self.data.selected.clone() {
-            self.open_data_conn(&id, cx);
+            self.open_or_hold(&id, cx);
+        }
+    }
+
+    /// Open connection `id`, unless it's production: that waits on its page for the
+    /// person to say connect, so a click in the list or a project switch never opens one.
+    fn open_or_hold(&mut self, id: &str, cx: &mut Context<Self>) {
+        let prod = self
+            .data
+            .saved
+            .iter()
+            .any(|s| s.id == id && s.env == Env::Prod);
+        if prod {
+            self.data.conns.entry(id.to_string()).or_default();
+            cx.notify();
+        } else {
+            self.open_data_conn(id, cx);
         }
     }
 
@@ -585,13 +647,18 @@ impl RunoApp {
         });
         if let Some(id) = existing.map(|s| s.id.clone()) {
             self.select_data_conn(&id, cx);
+            if self.data.conns.get(&id).is_none_or(|c| c.opened.is_none()) {
+                self.open_data_conn(&id, cx);
+            }
             return;
         }
         let saved = db::saved::from_found(pid, found);
         let id = saved.id.clone();
         self.data.saved.push(saved);
         self.save_data_conns();
+        // Pressing Connect on it is the go-ahead, production or not.
         self.select_data_conn(&id, cx);
+        self.open_data_conn(&id, cx);
     }
 
     /// Add a connection the person typed. Returns whether it was added.
@@ -610,6 +677,7 @@ impl RunoApp {
                 self.data.adding = false;
                 self.data.add_error = None;
                 self.select_data_conn(&id, cx);
+                self.open_data_conn(&id, cx);
                 true
             }
             Err(e) => {
@@ -629,7 +697,7 @@ impl RunoApp {
         self.data.activity = db::saved::activity(id, crate::dataask::SHOWN);
         let open = self.data.conns.get(id).is_some_and(|c| c.opened.is_some());
         if !open {
-            self.open_data_conn(id, cx);
+            self.open_or_hold(id, cx);
         }
         cx.notify();
     }
@@ -1135,7 +1203,7 @@ impl RunoApp {
             Some(c) if c.error.is_some() => {
                 self.data_error_page(c.error.clone().unwrap_or_default(), cx)
             }
-            Some(c) if c.opened.is_none() => centered("Not connected."),
+            Some(c) if c.opened.is_none() => self.data_hold_page(cx),
             Some(c) => match (self.data.tab, self.data.table_of()) {
                 (DataTab::Query, _) => self.data_query_page(cx),
                 (DataTab::Diagram, _) => self.data_diagram(c, cx),
@@ -1652,6 +1720,70 @@ impl RunoApp {
         }))
     }
 
+    /// A connection that isn't open: production waits here for a go.
+    fn data_hold_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let saved = self
+            .data
+            .selected
+            .as_ref()
+            .and_then(|id| self.data.saved.iter().find(|s| &s.id == id));
+        let Some(saved) = saved else {
+            return centered("Not connected.");
+        };
+        let prod = saved.env == Env::Prod;
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .max_w(px(440.))
+                    .v_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .when(prod, |el| el.child(icon(IconName::ShieldAlert, 15., c_red())))
+                            .child(if prod {
+                                format!("Connect to {}, a production database?", saved.name)
+                            } else {
+                                format!("{} isn't connected.", saved.name)
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_muted()))
+                            .font_family(self.mono_font.clone())
+                            .child(saved.shown.clone()),
+                    )
+                    .when(prod, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(rgb(c_secondary()))
+                                .child("It opens read-only, so nothing here can change it. Reads that would scan a big table ask first, and agents get hidden columns masked."),
+                        )
+                    })
+                    .child(
+                        div().flex().child(
+                            small_button("data-hold-connect", if prod { "Connect read-only" } else { "Connect" }, true)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(id) = this.data.selected.clone() {
+                                        this.open_data_conn(&id, cx);
+                                    }
+                                })),
+                        ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// A connected database before a table is picked: what it is, and its biggest tables.
     fn data_overview(&self, conn: &Conn, cx: &mut Context<Self>) -> AnyElement {
         let opened = conn.opened.clone();
@@ -1748,7 +1880,20 @@ impl RunoApp {
                                             n => format!(" and {n} views"),
                                         }
                                     )),
-                            ),
+                            )
+                            .children(opened.as_ref().map(|o| {
+                                let local = saved.is_none_or(|s| {
+                                    db::local_host(&db::url_parts(&s.shown).0)
+                                });
+                                transport_row(o.transport, local)
+                            }))
+                            .when(opened.as_ref().is_some_and(|o| o.superuser), |el| {
+                                el.child(note_row(
+                                    IconName::ShieldAlert,
+                                    c_amber(),
+                                    "Signed in as a superuser. Runo keeps the session read-only, but a role that can only read these tables is safer, above all for agents.",
+                                ))
+                            }),
                     )
                     .child(
                         div()

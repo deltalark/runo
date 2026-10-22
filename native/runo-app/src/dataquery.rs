@@ -340,7 +340,7 @@ impl CompletionProvider for SqlCompletions {
 }
 
 /// A result's columns as a table the grid can show: no keys, types as the database
-/// named them, and the same hidden-by-name rule as tables.
+/// named them, and hidden where the result's own rule says (see `hidden_columns`).
 pub(crate) fn result_table(ran: &Ran) -> Table {
     Table {
         columns: ran
@@ -352,6 +352,7 @@ pub(crate) fn result_table(ran: &Ran) -> Table {
                 name: name.clone(),
                 data_type: ran.types.get(i).cloned().unwrap_or_default(),
                 nullable: true,
+                hidden: ran.hidden.get(i).copied().unwrap_or(false),
                 ..Column::default()
             })
             .collect(),
@@ -473,7 +474,9 @@ impl RunoApp {
                                 return Err(Stop::Heavy(warning));
                             }
                         }
-                        s.run(&sql, MAX_ROWS).map_err(Stop::Failed)
+                        let mut ran = s.run(&sql, MAX_ROWS).map_err(Stop::Failed)?;
+                        ran.hidden = db::query::hidden_columns(&ran, &sql, &tables);
+                        Ok(ran)
                     })
                 }
             },
@@ -673,8 +676,12 @@ impl RunoApp {
                 ran.rows
                     .columns
                     .iter()
-                    .filter(|c| db::sensitive_name(c) && !self.data.revealed.contains(*c))
-                    .cloned()
+                    .enumerate()
+                    .filter(|(i, c)| {
+                        ran.hidden.get(*i).copied().unwrap_or(true)
+                            && !self.data.revealed.contains(*c)
+                    })
+                    .map(|(_, c)| c.clone())
                     .collect()
             })
             .unwrap_or_default()
