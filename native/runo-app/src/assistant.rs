@@ -312,7 +312,7 @@ pub(crate) fn open_label(open: &str) -> String {
 }
 
 pub(crate) struct Msg {
-    you: bool,
+    pub you: bool,
     /// What the answer offers to do, and what became of each.
     actions: Vec<(Action, Outcome)>,
     text: String,
@@ -322,16 +322,31 @@ pub(crate) struct Msg {
     open: Option<String>,
 }
 
+impl Msg {
+    /// A message Runo writes itself, or the person's question to it.
+    pub(crate) fn new(you: bool, text: String, actions: Vec<(Action, Outcome)>) -> Self {
+        Self {
+            you,
+            actions,
+            text,
+            sources: Vec::new(),
+            open: None,
+        }
+    }
+}
+
 pub(crate) struct Assistant {
     pub open: bool,
     input: Entity<InputState>,
-    chat: Vec<Msg>,
+    pub(crate) chat: Vec<Msg>,
     /// The question being answered by the agent, by its run key.
     asking: Option<String>,
     asked: u64,
     /// The agent answering the question being asked.
     answerer: &'static str,
-    scroll: ScrollHandle,
+    pub(crate) scroll: ScrollHandle,
+    /// Nudges waved off or followed, so each shows once.
+    pub(crate) nudged: HashSet<String>,
     /// Whether the pointer is over the mark in the corner, and since when.
     hover: Option<(bool, std::time::Instant)>,
     /// The answer so far, while the agent writes it.
@@ -368,6 +383,7 @@ impl Assistant {
                 hover: None,
                 streamed: String::new(),
                 stopper: None,
+                nudged: HashSet::new(),
             },
             subs,
         )
@@ -601,7 +617,8 @@ impl RunoApp {
                         Outcome::Failed(why) => format!("it failed: {why}"),
                         Outcome::Dismissed => "the person dismissed it".to_string(),
                     };
-                    line.push_str(&format!("\n  (offered {action:?}; {what})"));
+                    let json = serde_json::to_string(action).unwrap_or_default();
+                    line.push_str(&format!("\n  (offered ACTION: {json}; {what})"));
                 }
                 line
             })
@@ -612,6 +629,9 @@ impl RunoApp {
     /// Answer `question`: from the agent when one is set to answer, otherwise from the guide.
     pub(crate) fn ask_runo(&mut self, question: String, cx: &mut Context<Self>) {
         if self.assistant.asking.is_some() {
+            return;
+        }
+        if self.assistant_command(&question, cx) {
             return;
         }
         let found = search(&question);
@@ -640,7 +660,14 @@ impl RunoApp {
             &question,
             &articles,
             &self.assistant_context(),
-            &self.assistant_snapshot(cx),
+            &format!(
+                "{}{}",
+                self.assistant_snapshot(cx),
+                Some(self.assistant_mentioned(&question))
+                    .filter(|m| !m.is_empty())
+                    .map(|m| format!("Named in the question with @:\n{m}"))
+                    .unwrap_or_default()
+            ),
             &self.assistant_history(),
             cx,
         );
@@ -936,6 +963,40 @@ impl RunoApp {
             .into_any_element()
     }
 
+    /// Commands after `/` and names after `@`, over the input; a click fills it in.
+    fn assistant_suggest_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let typed = self.assistant.input.read(cx).value().to_string();
+        let found = self.assistant_suggestions(&typed);
+        if found.is_empty() {
+            return None;
+        }
+        let mut list = div().p_1().v_flex();
+        for (i, s) in found.into_iter().enumerate() {
+            let fill = s.fill.clone();
+            list = list.child(
+                menu_row(("assistant-suggest", i), s.label, s.detail, false, None).on_click(
+                    cx.listener(move |this, _, window, cx| {
+                        let fill = fill.clone();
+                        this.assistant.input.update(cx, |input, cx| {
+                            input.set_value(fill, window, cx);
+                            input.focus(window, cx);
+                        });
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+        Some(
+            div()
+                .absolute()
+                .bottom(px(40.))
+                .left_0()
+                .right_0()
+                .child(menu_box("assistant-suggest", list))
+                .into_any_element(),
+        )
+    }
+
     fn assistant_follow(&mut self, open: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(jump) = jump_for(open) else { return };
         self.assistant.open = false;
@@ -987,6 +1048,8 @@ impl RunoApp {
         let mut layer = div().absolute().top_0().left_0().size_full().child(mark);
         if self.assistant.open {
             layer = layer.child(self.assistant_panel(cx));
+        } else if let Some(nudge) = self.assistant_nudge_view(cx) {
+            layer = layer.child(nudge);
         }
         Some(layer.into_any_element())
     }
@@ -1250,7 +1313,12 @@ impl RunoApp {
             .pb_3()
             .v_flex()
             .gap_2()
-            .child(Input::new(&self.assistant.input).bordered(true).h(px(36.)))
+            .child(
+                div()
+                    .relative()
+                    .child(Input::new(&self.assistant.input).bordered(true).h(px(36.)))
+                    .children(self.assistant_suggest_view(cx)),
+            )
             .child(
                 div()
                     .flex()

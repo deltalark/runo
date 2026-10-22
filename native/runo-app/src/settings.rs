@@ -176,6 +176,8 @@ pub struct AppSettings {
     pub assistant_agent: String,
     /// Its model; empty is a fast one where Runo knows it, else the agent's default.
     pub assistant_model: String,
+    /// The mark offers the next step when a run finishes, a race is ready or a clash shows.
+    pub assistant_nudges: bool,
     /// Show Runo in the macOS menu bar with what agents are doing.
     pub menu_bar: bool,
 }
@@ -261,6 +263,7 @@ impl Default for AppSettings {
             assistant_answers: "agent".into(),
             assistant_agent: String::new(),
             assistant_model: String::new(),
+            assistant_nudges: true,
             menu_bar: true,
         }
     }
