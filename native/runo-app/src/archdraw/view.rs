@@ -232,6 +232,10 @@ pub(crate) struct ArchEditor {
     /// The agent the ask bar hands its task to.
     pick: crate::agent_pick::AgentPick,
     review: Option<Review>,
+    /// Files under architecture/ that differ from the project's last commit.
+    uncommitted: Vec<String>,
+    /// Changes just thrown away: what, and the folder as it was, to put back.
+    discarded: Option<(String, Snapshot)>,
     /// Bumped to stop watching the files for an agent's edit.
     poll_gen: u64,
     /// The list of checks on the diagram is open.
@@ -612,6 +616,8 @@ impl ArchEditor {
             waiting: None,
             pick: crate::agent_pick::AgentPick::new(cx),
             review: None,
+            uncommitted: Vec::new(),
+            discarded: None,
             poll_gen: 0,
             check_open: false,
             pending_picture: None,
@@ -630,6 +636,7 @@ impl ArchEditor {
     }
 
     pub(crate) fn reload_if_clean(&mut self, cx: &mut Context<Self>) {
+        self.refresh_uncommitted(cx);
         if self.ed.dirty || !exists(&self.root) || self.waiting.is_some() || self.review.is_some() {
             return;
         }
@@ -681,6 +688,8 @@ impl ArchEditor {
 
     /// Something changed: save shortly, once the edits settle.
     fn changed(&mut self, cx: &mut Context<Self>) {
+        // An edit after a discard is kept: Undo would throw it away.
+        self.discarded = None;
         self.save_gen += 1;
         let gen = self.save_gen;
         cx.spawn(async move |this, cx| {
@@ -705,10 +714,197 @@ impl ArchEditor {
             Ok(()) => {
                 self.ed.dirty = false;
                 self.saved_at = Some(Instant::now());
+                self.refresh_uncommitted(cx);
             }
             Err(e) => self.note(format!("Couldn't save the diagram: {e}"), true),
         }
         cx.notify();
+    }
+
+    /// What's changed since the last commit, and the ways to throw it away.
+    fn uncommitted_section(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.uncommitted.is_empty() {
+            return None;
+        }
+        let n = self.uncommitted.len();
+        Some(
+            div()
+                .v_flex()
+                .gap_1()
+                .child(section("Since the last commit"))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .child(format!(
+                            "{n} file{} in {FOLDER}/ changed. Discarding puts them back as the last commit has them, so git shows no changes; nothing is committed.",
+                            if n == 1 { "" } else { "s" }
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_1()
+                        .when(self.view_uncommitted(), |el| {
+                            el.child(
+                                text_btn("arch-discard-view", "Discard this diagram's changes", Some(IconName::Undo2), false)
+                                    .tooltip(tip("Put this diagram, and the parts only it shows, back as the last commit has them"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.discard_view(cx))),
+                            )
+                        })
+                        .child(
+                            text_btn("arch-discard-all", "Discard all diagram changes", Some(IconName::Trash), false)
+                                .tooltip(tip("Put architecture/ back as the last commit has it"))
+                                .on_click(cx.listener(|this, _, _, cx| this.discard_all(cx))),
+                        ),
+                ),
+        )
+    }
+
+    /// Look again, off the UI thread, at which diagram files differ from the last commit.
+    pub(crate) fn refresh_uncommitted(&mut self, cx: &mut Context<Self>) {
+        let dir = self.root.to_string_lossy().into_owned();
+        cx.spawn(async move |this, cx| {
+            let files = cx
+                .background_spawn(async move {
+                    if crate::git::is_repo(&dir) {
+                        crate::git::changed_under(&dir, FOLDER)
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.uncommitted != files {
+                    this.uncommitted = files;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether the diagram open now, or the model, differs from the last commit.
+    fn view_uncommitted(&self) -> bool {
+        let view = format!("{FOLDER}/views/{}.toml", self.ed.view);
+        let model = format!("{FOLDER}/model.toml");
+        self.uncommitted.iter().any(|f| *f == view || *f == model)
+    }
+
+    /// The folder as it was before what's thrown away now, for Undo: before an earlier
+    /// discard still on the bar, so Undo takes back both. None while an agent's edit is
+    /// awaited or under review.
+    fn before_discard(&mut self, cx: &mut Context<Self>) -> Option<Snapshot> {
+        if self.waiting.is_some() || self.review.is_some() {
+            self.note("Accept or reject the AI change first.".into(), false);
+            cx.notify();
+            return None;
+        }
+        self.save_now(cx);
+        Some(match self.discarded.take() {
+            Some((_, snap)) => snap,
+            None => snapshot(&self.root),
+        })
+    }
+
+    /// Put the diagram open now back as the last commit has it, with the parts only it
+    /// shows; a diagram the commit didn't have goes. Undo puts it back.
+    fn discard_view(&mut self, cx: &mut Context<Self>) {
+        if self.waiting.is_some() || self.review.is_some() {
+            self.note("Accept or reject the AI change first.".into(), false);
+            cx.notify();
+            return;
+        }
+        let id = self.ed.view.clone();
+        let (then, was) = match committed(&self.root, &id) {
+            Ok(c) => c,
+            Err(e) => {
+                self.note(format!("Couldn't read the last commit: {e}"), true);
+                cx.notify();
+                return;
+            }
+        };
+        // The only diagram, new since the commit: nothing is left, so the folder goes back.
+        if was.is_none() && self.ed.doc.views.len() < 2 {
+            self.discard_all(cx);
+            return;
+        }
+        let name = self.ed.cur().name.clone();
+        let Some(snap) = self.before_discard(cx) else {
+            return;
+        };
+        let doc = revert_view(&self.ed.doc, &id, &then, was);
+        self.ed.replace_doc(doc);
+        self.ed.open_view(&id);
+        self.ed.dirty = true;
+        self.save_now(cx);
+        if let Err(e) = match_commit(&self.root, &self.ed.doc) {
+            self.note(format!("Couldn't write the diagram: {e}"), true);
+        }
+        self.generation += 1;
+        self.text_loaded = None;
+        self.fitted = false;
+        self.discarded = Some((format!("Put “{name}” back as the last commit has it"), snap));
+        self.refresh_uncommitted(cx);
+        cx.notify();
+    }
+
+    /// Put architecture/ back as the last commit has it, so git shows no changes there; a
+    /// folder never committed goes. Undo puts it back.
+    fn discard_all(&mut self, cx: &mut Context<Self>) {
+        let Some(snap) = self.before_discard(cx) else {
+            return;
+        };
+        let dir = self.root.to_string_lossy();
+        if let Err(e) = crate::git::discard_under(&dir, FOLDER) {
+            self.discarded = Some(("Put the diagrams back as they were".into(), snap));
+            self.note(format!("Couldn't discard the diagram changes: {e}"), true);
+            cx.notify();
+            return;
+        }
+        self.reread();
+        self.discarded = Some((
+            "Discarded the diagram changes since the last commit".into(),
+            snap,
+        ));
+        self.refresh_uncommitted(cx);
+        cx.notify();
+    }
+
+    /// Put back what the last discard threw away.
+    fn undo_discard(&mut self, cx: &mut Context<Self>) {
+        let Some((_, snap)) = self.discarded.take() else {
+            return;
+        };
+        if let Err(e) = restore(&self.root, &snap) {
+            self.note(format!("Couldn't put the diagrams back: {e}"), true);
+        }
+        self.reread();
+        self.refresh_uncommitted(cx);
+        cx.notify();
+    }
+
+    /// Start over from the files, keeping the diagram open when it's still there.
+    fn reread(&mut self) {
+        let view = self.ed.view.clone();
+        let doc = if exists(&self.root) {
+            match load(&self.root) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    self.load_error = Some(e);
+                    return;
+                }
+            }
+        } else {
+            Doc::default()
+        };
+        self.ed = Editor::new(doc);
+        self.ed.open_view(&view);
+        self.load_error = None;
+        self.generation += 1;
+        self.text_loaded = None;
+        self.fitted = false;
     }
 
     fn note(&mut self, text: String, error: bool) {
@@ -1803,6 +1999,7 @@ impl ArchEditor {
         self.ed.open_view(&view);
         self.generation += 1;
         self.text_loaded = None;
+        self.refresh_uncommitted(cx);
         cx.notify();
     }
 
@@ -1887,7 +2084,31 @@ impl ArchEditor {
                     ))
             })
         };
-        let body = if let Some(r) = &self.review {
+        let body = if let Some((what, _)) = &self.discarded {
+            div().child(
+                bar.border_color(rgb(c_border()))
+                    .child(icon(IconName::Undo2, 14., c_secondary()))
+                    .child(
+                        div()
+                            .px_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(c_text()))
+                            .child(what.clone()),
+                    )
+                    .child(
+                        text_btn("arch-discard-undo", "Undo", Some(IconName::Undo2), false)
+                            .on_click(cx.listener(|this, _, _, cx| this.undo_discard(cx))),
+                    )
+                    .child(
+                        text_btn("arch-discard-keep", "Keep", Some(IconName::Check), true)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.discarded = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+        } else if let Some(r) = &self.review {
             let text = if r.changes.is_empty() {
                 "The agent's change leaves this diagram as it was".to_string()
             } else {
@@ -2036,8 +2257,12 @@ impl ArchEditor {
         // A change under review sits at the top, clear of the status line and the map.
         div()
             .absolute()
-            .when(self.review.is_some(), |el| el.top(px(10.)))
-            .when(self.review.is_none(), |el| el.bottom(px(10.)))
+            .when(self.review.is_some() || self.discarded.is_some(), |el| {
+                el.top(px(10.))
+            })
+            .when(self.review.is_none() && self.discarded.is_none(), |el| {
+                el.bottom(px(10.))
+            })
             .left_0()
             .right_0()
             .flex()
@@ -6463,6 +6688,7 @@ impl ArchEditor {
                             el.child(text_btn("arch-del-view", "Delete diagram", Some(IconName::Trash), false).on_click(cx.listener(|this, _, _, cx| this.act(cx, |ed| ed.delete_view()))))
                         }),
                 )
+                .children(self.uncommitted_section(cx))
                 .child(self.layers_section(cx))
                 .child(self.stories_section(cx))
                 .child(section("Shortcuts"))

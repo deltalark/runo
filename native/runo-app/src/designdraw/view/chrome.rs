@@ -933,6 +933,17 @@ impl DesignCanvas {
                 this.move_screen_to(p, cx)
             }));
             items.push(Item::Line);
+            if self
+                .screen
+                .as_ref()
+                .is_some_and(|id| self.screen_uncommitted(id))
+            {
+                items.push(Item::new(
+                    "Discard changes since last commit",
+                    "",
+                    |this, _, cx| this.discard_screen(cx),
+                ));
+            }
             items.push(Item::new("Delete", "⌫", |this, _, cx| this.delete_screen(cx)).danger());
             return items;
         };

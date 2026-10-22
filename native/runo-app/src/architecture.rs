@@ -1559,6 +1559,7 @@ impl RunoApp {
         if let Some((agent, model)) = self.canvas_agent(project.id, View::Architecture) {
             editor.update(cx, |e, _| e.use_agent(agent, model));
         }
+        editor.update(cx, |e, cx| e.refresh_uncommitted(cx));
         self.arch.editors.insert(project.id, editor);
     }
 
