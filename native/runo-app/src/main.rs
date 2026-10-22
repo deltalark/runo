@@ -5,6 +5,7 @@ mod agentcmds;
 mod alerts;
 mod applog;
 mod approvals;
+mod arcade;
 mod archdraw;
 mod architecture;
 mod askbar;
@@ -64,6 +65,7 @@ mod modelcheck;
 mod models;
 mod notes;
 mod parts;
+mod pattern;
 mod pbfile;
 mod pbrunner;
 mod pbshare;
@@ -193,6 +195,7 @@ enum Jump {
     Session(u64),
     File(String),
     Tour,
+    Arcade,
     /// Run a playbook in the current project.
     Playbook(u64),
     /// Switch the top bar to a project.
@@ -466,6 +469,11 @@ struct RunoApp {
     ctx_menu: Option<(Point<Pixels>, ctxmenu::CtxTarget)>,
     /// The first-run tour's current step.
     tour: Option<usize>,
+    /// The Arcade's games, made the first time it opens and kept so a round can resume;
+    /// whether it is showing; and how many agents were working when it opened.
+    arcade: Option<Entity<arcade::Arcade>>,
+    arcade_open: bool,
+    arcade_waiting: usize,
     /// Where the tour's highlighted parts are drawn this frame, and where they were last frame.
     anchors: tour::Anchors,
     tour_rects: HashMap<&'static str, Bounds<Pixels>>,
@@ -1706,6 +1714,9 @@ impl RunoApp {
             switch_preview: false,
             ctx_menu: None,
             tour: (!cx.global::<AppSettings>().tour_seen).then_some(0),
+            arcade: None,
+            arcade_open: false,
+            arcade_waiting: 0,
             anchors: Default::default(),
             tour_rects: HashMap::new(),
             race_mode: false,
@@ -1964,7 +1975,7 @@ impl RunoApp {
         app._subscriptions.extend(assistant_subs);
         app._subscriptions.extend(arch_subs);
         app._subscriptions.extend(data_subs);
-        cx.set_global(MainApp(cx.entity().downgrade()));
+        cx.set_global(MainApp(cx.entity().downgrade(), window.window_handle()));
         app.init_github(window, cx);
         app.restore_layout();
         // The Browser tab's live page: pick up frames at display rate while it is open.
@@ -2003,6 +2014,11 @@ impl RunoApp {
         // layout is saved either way.
         let app_entity = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {
+            // With Runo in the menu bar, closing hides it there and agents keep running.
+            if menubar::keeps_running(cx) {
+                menubar::to_background(cx);
+                return false;
+            }
             app_entity
                 .update(cx, |this, cx| {
                     this.save_now();
@@ -2885,6 +2901,7 @@ impl RunoApp {
         match jump {
             Jump::Action => {}
             Jump::Tour => self.start_tour(),
+            Jump::Arcade => self.open_arcade(window, cx),
             Jump::Playbook(id) => {
                 let here = self.current_project();
                 self.run_playbook(id, here, cx);
@@ -3006,6 +3023,13 @@ impl RunoApp {
                 .keywords(["welcome", "help", "guide", "onboarding"]),
         );
         command_jumps.push(Jump::Tour);
+        commands = commands.item(
+            CommandItem::new()
+                .label("Open the Arcade")
+                .icon(IconName::Gamepad2)
+                .keywords(["game", "play", "break", "snake", "2048", "flappy", "spark"]),
+        );
+        command_jumps.push(Jump::Arcade);
         if Self::assistant_enabled(cx) {
             commands = commands.item(
                 CommandItem::new()
@@ -6041,7 +6065,15 @@ impl RunoApp {
         // While the agent works, the chat ends with what it is doing and for how long.
         if working && !self.pending_start.contains_key(&id) {
             let since = self.started.get(&id).map(|start| elapsed(start.elapsed()));
-            list = list.child(div().text_size(px(13.)).child(working_indicator(since)));
+            list = list.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_size(px(13.))
+                    .child(working_indicator(since))
+                    .child(self.arcade_chip(cx)),
+            );
         }
         list
     }
@@ -9503,6 +9535,8 @@ impl Render for RunoApp {
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if this.tour.is_some() {
                     this.end_tour(cx);
+                } else if this.arcade_open {
+                    this.close_arcade(window, cx);
                 } else if this.remove_copy.is_some() {
                     this.remove_copy = None;
                 } else if this.install_confirm.is_some() {
@@ -9652,6 +9686,8 @@ impl Render for RunoApp {
             .text_color(rgb(c_text()))
             .text_size(px(13.))
             .font_family(cx.theme().font_family.clone())
+            .children(pattern::backdrop())
+            .children(pattern::under())
             .child(self.top_bar(cx))
             .child(
                 div()
@@ -9689,6 +9725,8 @@ impl Render for RunoApp {
                     .items_center()
                     .justify_between()
                     .bg(settings::frame())
+                    .relative()
+                    .child(pattern::chrome())
                     .text_size(px(11.5))
                     .gap_4()
                     .child(fade(
@@ -9848,6 +9886,7 @@ impl Render for RunoApp {
             .children(self.delete_session_modal(cx))
             .children(self.playbook_run_form(cx))
             .children(self.playbook_ask_modal(cx))
+            .children(self.arcade_view(cx))
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx))
             .children(self.whats_new_view(cx));
@@ -10046,14 +10085,20 @@ fn main() {
     });
 }
 
-/// The open main window's app, so quitting can warn about running agents first.
-struct MainApp(WeakEntity<RunoApp>);
+/// The open main window's app, so quitting can warn about running agents first, and the
+/// window it is in.
+struct MainApp(WeakEntity<RunoApp>, AnyWindowHandle);
 
 impl Global for MainApp {}
 
 /// Quit from the shortcut, the menu or the command palette. With agents running in the
 /// window, this warns first, the same as closing the window.
 fn quit(_: &Quit, cx: &mut App) {
+    // With Runo in the menu bar, ⌘Q hides it there and agents keep running.
+    if menubar::keeps_running(cx) && cx.has_global::<MainApp>() {
+        menubar::to_background(cx);
+        return;
+    }
     let app = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade());
     let go = app.is_none_or(|app| {
         app.update(cx, |this, cx| {
@@ -10068,19 +10113,7 @@ fn quit(_: &Quit, cx: &mut App) {
 
 /// A clicked notification: bring the window forward on its session.
 fn open_session_from_notification(id: u64, cx: &mut App) {
-    let Some(app) = cx.try_global::<MainApp>().and_then(|m| m.0.upgrade()) else {
-        open_main_window(cx);
-        return;
-    };
-    app.update(cx, |this, cx| {
-        if this.state.session(id).is_some() {
-            this.select(id);
-            cx.notify();
-        }
-    });
-    for window in cx.windows() {
-        let _ = window.update(cx, |_, window, _| window.activate_window());
-    }
+    menubar::go(menubar::Go::Open(id), cx);
 }
 
 /// The menu bar: the app menu with Settings and Quit, and the main commands with their

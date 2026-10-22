@@ -2910,12 +2910,21 @@ pub struct GraphRow {
     pub bottom: Vec<(usize, usize)>,
 }
 
-/// Lay commits (children before parents) out in lanes. Each lane waits for one commit;
-/// a commit takes the first lane waiting for it, the others waiting for it join it,
-/// its first parent carries the lane on and other parents get a lane of their own.
+/// Lay commits (children before parents) out in lanes. Each lane waits for one commit, and
+/// no two lanes wait for the same one: a commit takes the lane waiting for it, its first
+/// parent carries the lane on, and other parents get a lane of their own. A parent some
+/// other lane already waits for joins that lane instead, the two meeting in whichever is
+/// further left, so branches started from one commit don't each keep a line down to it.
 pub fn graph(rows: &[LogRow]) -> Vec<GraphRow> {
     let mut lanes: Vec<Option<String>> = Vec::new();
     let mut out = Vec::with_capacity(rows.len());
+    let free = |lanes: &mut Vec<Option<String>>| match lanes.iter().position(Option::is_none) {
+        Some(i) => i,
+        None => {
+            lanes.push(None);
+            lanes.len() - 1
+        }
+    };
     for row in rows {
         let waiting: Vec<usize> = lanes
             .iter()
@@ -2925,13 +2934,7 @@ pub fn graph(rows: &[LogRow]) -> Vec<GraphRow> {
             .collect();
         let lane = match waiting.first() {
             Some(&l) => l,
-            None => match lanes.iter().position(Option::is_none) {
-                Some(free) => free,
-                None => {
-                    lanes.push(None);
-                    lanes.len() - 1
-                }
-            },
+            None => free(&mut lanes),
         };
         let mut top = Vec::new();
         for (i, l) in lanes.iter().enumerate() {
@@ -2944,26 +2947,43 @@ pub fn graph(rows: &[LogRow]) -> Vec<GraphRow> {
         }
         let mut bottom = Vec::new();
         let mut parents = row.parents.iter();
-        lanes[lane] = parents.next().cloned();
+        let mut first = parents.next().cloned();
+        // A lane to the right already waiting for the first parent moves into this one.
+        let mut moved = None;
+        if let Some(k) = first
+            .as_ref()
+            .and_then(|p| lanes.iter().position(|l| l.as_ref() == Some(p)))
+        {
+            if k < lane {
+                bottom.push((lane, k));
+                first = None;
+            } else {
+                moved = Some(k);
+            }
+        }
+        lanes[lane] = first;
+        // Lanes opened here for the other parents, which nothing above runs down.
+        let mut opened = Vec::new();
         for parent in parents {
             let to = match lanes.iter().position(|l| l.as_deref() == Some(parent)) {
                 Some(existing) => existing,
                 None => {
-                    let free = match lanes.iter().position(Option::is_none) {
-                        Some(free) => free,
-                        None => {
-                            lanes.push(None);
-                            lanes.len() - 1
-                        }
-                    };
-                    lanes[free] = Some(parent.clone());
-                    free
+                    let to = free(&mut lanes);
+                    lanes[to] = Some(parent.clone());
+                    opened.push(to);
+                    to
                 }
             };
-            bottom.push((lane, to));
+            if !bottom.contains(&(lane, to)) {
+                bottom.push((lane, to));
+            }
+        }
+        if let Some(k) = moved {
+            lanes[k] = None;
+            bottom.push((k, lane));
         }
         for (i, l) in lanes.iter().enumerate() {
-            if l.is_some() && !bottom.iter().any(|(_, to)| *to == i) {
+            if l.is_some() && !opened.contains(&i) && !bottom.contains(&(i, i)) {
                 bottom.push((i, i));
             }
         }
@@ -4565,6 +4585,207 @@ index 1..2 100644
             std::fs::read_to_string(repo.join("draft.txt")).unwrap(),
             "second\n"
         );
+    }
+
+    /// Follow every line the graph draws out of each commit, row by row, and check it
+    /// arrives at that commit's parents, or runs off the bottom for parents not listed.
+    fn assert_graph_joins_up(rows: &[LogRow], lanes: &[GraphRow]) {
+        use std::collections::{HashMap, HashSet};
+        assert_eq!(rows.len(), lanes.len());
+        let at: HashMap<&str, usize> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.sha.as_str(), i))
+            .collect();
+        for (r, g) in lanes.iter().enumerate() {
+            for &(_, to) in &g.top {
+                if to != g.lane {
+                    assert!(
+                        g.bottom.iter().filter(|(from, _)| *from == to).count() == 1,
+                        "row {r}: the line down lane {to} breaks at the dot"
+                    );
+                }
+            }
+            if let Some(next) = lanes.get(r + 1) {
+                let mut ends: Vec<usize> = g.bottom.iter().map(|(_, to)| *to).collect();
+                let mut starts: Vec<usize> = next.top.iter().map(|(from, _)| *from).collect();
+                ends.sort();
+                ends.dedup();
+                starts.sort();
+                assert_eq!(ends, starts, "rows {r} and {} don't meet", r + 1);
+            }
+        }
+        for (r, row) in rows.iter().enumerate() {
+            let mut reached = HashSet::new();
+            for &(_, mut lane) in lanes[r]
+                .bottom
+                .iter()
+                .filter(|(from, _)| *from == lanes[r].lane)
+            {
+                let mut below = r + 1;
+                loop {
+                    let Some(g) = lanes.get(below) else {
+                        reached.insert("below".to_string());
+                        break;
+                    };
+                    let (_, to) = *g.top.iter().find(|(from, _)| *from == lane).unwrap();
+                    if to == g.lane {
+                        reached.insert(rows[below].sha.clone());
+                        break;
+                    }
+                    lane = g.bottom.iter().find(|(from, _)| *from == to).unwrap().1;
+                    below += 1;
+                }
+            }
+            let want: HashSet<String> = row
+                .parents
+                .iter()
+                .map(|p| {
+                    if at.contains_key(p.as_str()) {
+                        p.clone()
+                    } else {
+                        "below".to_string()
+                    }
+                })
+                .collect();
+            assert_eq!(
+                reached, want,
+                "commit {} doesn't reach its parents",
+                row.sha
+            );
+        }
+    }
+
+    #[test]
+    fn history_graph_draws_tangled_histories() {
+        let row = |sha: &str, parents: &[&str]| LogRow {
+            sha: sha.into(),
+            parents: parents.iter().map(|p| p.to_string()).collect(),
+            ..Default::default()
+        };
+        // A criss-cross: each merge's other parent sits in a lane running past it.
+        let criss = vec![
+            row("m3", &["m2", "x2"]),
+            row("x3", &["x2", "m2"]),
+            row("x2", &["x1"]),
+            row("m2", &["m1", "x1"]),
+            row("x1", &["base"]),
+            row("m1", &["base"]),
+            row("base", &[]),
+        ];
+        let lanes = graph(&criss);
+        assert_graph_joins_up(&criss, &lanes);
+        // Pull requests all started from one commit join its lane, not one lane each.
+        let mut prs = Vec::new();
+        for i in 0..8 {
+            prs.push(row(
+                &format!("merge{i}"),
+                &[&format!("merge{}", i + 1), &format!("pr{i}")],
+            ));
+            prs.push(row(&format!("pr{i}"), &["fork"]));
+        }
+        prs.push(row("merge8", &["fork"]));
+        prs.push(row("fork", &[]));
+        let lanes = graph(&prs);
+        assert_graph_joins_up(&prs, &lanes);
+        assert!(lanes
+            .iter()
+            .all(|g| g.bottom.iter().all(|(a, b)| *a < 3 && *b < 3)));
+        // An octopus merge, a second root, and parents cut off by the limit.
+        let octopus = vec![
+            row("oct", &["a", "b", "c", "d"]),
+            row("d", &["a"]),
+            row("c", &["gone"]),
+            row("b", &["root2"]),
+            row("a", &["root"]),
+            row("root2", &[]),
+            row("root", &[]),
+        ];
+        assert_graph_joins_up(&octopus, &graph(&octopus));
+        // Many random histories, in many orders children come before parents.
+        let mut seed = 7u64;
+        let mut next = |n: u64| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        for _ in 0..1500 {
+            let n = 2 + next(50) as usize;
+            let mut parents: Vec<Vec<usize>> = Vec::new();
+            for i in 0..n {
+                let mut ps = Vec::new();
+                if i > 0 && next(30) != 0 {
+                    ps.push(i - 1 - next(i.min(4) as u64) as usize);
+                    for _ in 0..[0, 0, 0, 1, 1, 3][next(6) as usize] {
+                        let p = next(i as u64) as usize;
+                        if !ps.contains(&p) {
+                            ps.push(p);
+                        }
+                    }
+                }
+                parents.push(ps);
+            }
+            let mut children = vec![0; n];
+            for ps in &parents {
+                for &p in ps {
+                    children[p] += 1;
+                }
+            }
+            let mut ready: Vec<usize> = (0..n).filter(|&i| children[i] == 0).collect();
+            let mut rows = Vec::new();
+            while !ready.is_empty() {
+                let i = ready.remove(next(ready.len() as u64) as usize);
+                let ps: Vec<String> = parents[i].iter().map(|p| p.to_string()).collect();
+                rows.push(LogRow {
+                    sha: i.to_string(),
+                    parents: ps,
+                    ..Default::default()
+                });
+                for &p in &parents[i] {
+                    children[p] -= 1;
+                    if children[p] == 0 {
+                        ready.push(p);
+                    }
+                }
+            }
+            rows.truncate(1 + next(rows.len() as u64) as usize);
+            assert_graph_joins_up(&rows, &graph(&rows));
+        }
+    }
+
+    #[test]
+    fn history_graph_follows_a_real_criss_cross() {
+        let (repo, _remote) = with_origin("crisscross");
+        let dir = repo.to_str().unwrap();
+        let commit = |file: &str| {
+            std::fs::write(repo.join(file), file).unwrap();
+            sh(&repo, &["add", "."]);
+            sh(&repo, &["commit", "-qm", file]);
+        };
+        new_branch(dir, "x", "main").unwrap();
+        switch(dir, "x").unwrap();
+        commit("x1.txt");
+        switch(dir, "main").unwrap();
+        commit("m1.txt");
+        switch(dir, "x").unwrap();
+        sh(&repo, &["merge", "-q", "--no-edit", "main"]);
+        switch(dir, "main").unwrap();
+        sh(&repo, &["merge", "-q", "--no-edit", "x~1"]);
+        switch(dir, "x").unwrap();
+        commit("x2.txt");
+        switch(dir, "main").unwrap();
+        commit("m2.txt");
+        sh(&repo, &["merge", "-q", "--no-edit", "x"]);
+        switch(dir, "x").unwrap();
+        sh(&repo, &["merge", "-q", "--no-edit", "main~1"]);
+        let all = LogFilter {
+            all: true,
+            ..Default::default()
+        };
+        let rows = log(dir, &all, 50);
+        assert!(rows.iter().filter(|r| r.parents.len() == 2).count() >= 4);
+        assert_graph_joins_up(&rows, &graph(&rows));
     }
 
     #[test]
