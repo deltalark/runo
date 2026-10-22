@@ -1306,7 +1306,9 @@ impl ArchEditor {
             let doc = cx
                 .background_spawn(async move {
                     let map = crate::architecture::scan(&root);
-                    io::from_scan(&map, &project)
+                    let mut doc = io::from_scan(&map, &project);
+                    super::infra::attach_logos(&mut doc, &root);
+                    doc
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -1315,6 +1317,7 @@ impl ArchEditor {
                     this.note("No packages found to draw. Start from the palette instead.".into(), false);
                 } else {
                     let empty = this.ed.doc.elements.is_empty();
+                    let doc_views = doc.views.len();
                     io::merge(&mut this.ed, doc);
                     if empty {
                         // The blank starter diagram isn't needed any more.
@@ -1322,8 +1325,13 @@ impl ArchEditor {
                         this.ed.doc.views.retain(|v| v.id == keep || !v.nodes.is_empty());
                     }
                     this.fitted = false;
+                    let what = if doc_views > 1 {
+                        "Drew what the project runs, from its Compose, Terraform and ECS files, and its packages"
+                    } else {
+                        "Drew the packages and the services they use"
+                    };
                     this.note(
-                        "Drew the packages and the services they use. Rearrange and rename freely; it's your diagram now.".into(),
+                        format!("{what}. Rearrange and rename freely; it's your diagram now."),
                         false,
                     );
                     this.after_edit(cx);
@@ -2925,8 +2933,9 @@ struct ReviewDraw {
     wires_removed: Vec<Vec<Pt>>,
 }
 
-/// Below this zoom connectors stop moving: the motion is too small to see.
-const MOTION_MIN_ZOOM: f32 = 0.25;
+/// Below this zoom connectors stop moving: the motion is too small to see. Low enough
+/// that a big diagram fitted to the window (after Beautify, say) keeps moving.
+const MOTION_MIN_ZOOM: f32 = 0.1;
 /// Below this zoom a box shows only its name, not its kind, technology or description.
 const DETAIL_MIN_ZOOM: f32 = 0.4;
 
@@ -4609,18 +4618,24 @@ impl ArchEditor {
         self.commit_layer_name(cx);
         self.menu = None;
         self.beautify_open = false;
+        let was = self.ed.cur().clone();
         let (before, after) = self.ed.beautify(how);
+        let changed = *self.ed.cur() != was;
         self.after_edit(cx);
-        if before != after {
+        if changed {
             self.fit(false);
         }
-        let text = if before == after {
+        let grouped = matches!(how, Beautify::Grouped | Beautify::Compact)
+            && self.ed.cur().nodes.len() > was.nodes.len();
+        let text = if !changed {
             format!(
                 "This is already the cleanest layout Runo found: {}.",
                 after.describe()
             )
         } else if after.is_clean() {
-            if before.is_clean() {
+            if before.is_clean() && grouped {
+                "Beautified: grouped by role and laid out. ⌘Z undoes it.".to_string()
+            } else if before.is_clean() {
                 "Beautified: lined up and spaced out. ⌘Z undoes it.".to_string()
             } else {
                 format!(
@@ -4739,7 +4754,7 @@ impl ArchEditor {
                 item(
                     "arch-beautify-best",
                     "Beautify",
-                    "Tries tidying and each layout, and keeps the cleanest",
+                    "Tries tidying, grouping and each layout, and keeps the cleanest",
                     true,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.run_beautify(Beautify::Best, cx))),
@@ -4755,9 +4770,27 @@ impl ArchEditor {
             )
             .child(
                 item(
+                    "arch-beautify-grouped",
+                    "Group by role",
+                    "Boxes clients, edge, services, jobs, messaging, data and outside systems, in the order a request flows",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.run_beautify(Beautify::Grouped, cx))),
+            )
+            .child(
+                item(
+                    "arch-beautify-compact",
+                    "Compact",
+                    "Grouped by role and packed close to a square, to see it all at once",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.run_beautify(Beautify::Compact, cx))),
+            )
+            .child(
+                item(
                     "arch-beautify-down",
                     "Rearrange top to bottom",
-                    "Callers above what they call, in layers",
+                    "Callers above what they call, tiers in order, long rows wrapped",
                     false,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.run_beautify(Beautify::Down, cx))),
