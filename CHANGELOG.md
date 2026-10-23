@@ -4,6 +4,8 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-23
+
 ### Fixed
 
 - The SQL editor in Data's Query tab, and the file viewer, sit on the page's own surface: no more black gutter and current-line bar on glass, and the line numbers and current line take the theme's colours in light and dark.
