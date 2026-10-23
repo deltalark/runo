@@ -16,89 +16,32 @@ pub struct Provider {
     pub color: u32,
 }
 
-pub const PROVIDERS: [Provider; 10] = [
-    Provider {
-        id: "claude",
-        name: "Claude Code",
-        bin: "claude",
-        mark: "✳",
-        color: 0xd9633f,
-    },
-    Provider {
-        id: "codex",
-        name: "Codex",
-        bin: "codex",
-        mark: "◆",
-        color: 0x1767e8,
-    },
-    Provider {
-        id: "opencode",
-        name: "OpenCode",
-        bin: "opencode",
-        mark: ">_",
-        color: 0x258a5b,
-    },
-    Provider {
-        id: "cursor",
-        name: "Cursor",
-        bin: "cursor-agent",
-        mark: "▲",
-        color: 0x7c7c86,
-    },
-    Provider {
-        id: "gemini",
-        name: "Gemini",
-        bin: "gemini",
-        mark: "✦",
-        color: 0x4f7cf7,
-    },
-    Provider {
-        id: "copilot",
-        name: "Copilot",
-        bin: "copilot",
-        mark: "◎",
-        color: 0x8957e5,
-    },
-    Provider {
-        id: "amp",
-        name: "Amp",
-        bin: "amp",
-        mark: "∿",
-        color: 0xe5484d,
-    },
-    Provider {
-        id: "droid",
-        name: "Droid",
-        bin: "droid",
-        mark: "◈",
-        color: 0xf27b2a,
-    },
-    Provider {
-        id: "qwen",
-        name: "Qwen Code",
-        bin: "qwen",
-        mark: "◇",
-        color: 0x615ced,
-    },
-    Provider {
-        id: "grok",
-        name: "Grok",
-        bin: "grok",
-        mark: "𝕏",
-        color: 0x9a9aa3,
-    },
-];
+/// Every agent Runo can run, from the manifest (see `registry`): the built-in ones in
+/// a fixed order, then any the person added.
+pub static PROVIDERS: Providers = Providers;
+
+pub struct Providers;
+
+impl std::ops::Deref for Providers {
+    type Target = [Provider];
+    fn deref(&self) -> &[Provider] {
+        crate::registry::providers()
+    }
+}
+
+/// Whether a fact of the manifest holds for the installed CLI.
+fn holds(
+    provider: &str,
+    fact: impl Fn(&crate::registry::AgentSpec) -> &crate::registry::Gate,
+) -> bool {
+    crate::registry::spec(provider).is_some_and(|s| fact(s).holds(provider))
+}
 
 /// Whether the CLI keeps its own conversation that a follow-up can resume. Others get
 /// the recent conversation written into each follow-up prompt instead. Grok does once
 /// its help lists `--session`; older releases start fresh every turn.
 pub fn resumes(provider: &str) -> bool {
-    match provider {
-        "claude" | "codex" | "opencode" | "gemini" | "qwen" | "cursor" | "copilot" | "amp"
-        | "droid" => true,
-        "grok" => crate::caps::mentions("grok", "--session <"),
-        _ => false,
-    }
+    holds(provider, |s| &s.resumes)
 }
 
 /// The conversation id a CLI names on stderr: Grok's headless runs start with
@@ -140,12 +83,7 @@ pub(crate) fn strip_ansi(text: &str) -> String {
 /// CLIs that take a conversation id chosen by Runo on the first run. Copilot and Gemini
 /// do once their help lists `--session-id`; otherwise the id comes from their output.
 pub fn names_conversation(provider: &str) -> bool {
-    match provider {
-        "claude" | "qwen" => true,
-        "gemini" => crate::caps::mentions("gemini", "--session-id"),
-        "copilot" => crate::caps::mentions("copilot", "--session-id"),
-        _ => false,
-    }
+    holds(provider, |s| &s.names_conversation)
 }
 
 pub fn provider(id: &str) -> &'static Provider {
@@ -240,7 +178,7 @@ pub struct RunSpec<'a> {
     pub opts: &'a AgentOptions,
     /// Whether the working directory is a git repository.
     pub in_git: bool,
-    /// Claude Code conversation id for this session; empty for sessions saved before ids.
+    /// Claude Code conversation id for this session; empty until it has one.
     pub session_id: &'a str,
     /// Image files attached to the prompt.
     pub images: &'a [String],
@@ -248,6 +186,9 @@ pub struct RunSpec<'a> {
     pub memory: Option<(&'a str, &'a str)>,
     /// The run is on this machine, so MCP servers that are local programs can start.
     pub local: bool,
+    /// The session's id when it is a Crew thread, whose memory server adds the tools
+    /// threads report through; 0 otherwise.
+    pub thread: u64,
 }
 
 /// A random version-4 UUID, for naming a Claude Code conversation up front.
@@ -279,23 +220,22 @@ pub fn new_uuid() -> String {
 }
 
 /// How a CLI reports a run: Claude Code's stream-json (which Amp and Qwen Code also
-/// speak), its own JSON lines, or plain text.
+/// speak), its own JSON lines, Pi's events, or plain text.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Output {
     Claude,
     Json,
+    Pi,
     Text,
 }
 
 /// The output format Runo asks the CLI for. Formats only newer releases have are used
 /// once the installed CLI's help lists them.
 pub fn output(provider: &str) -> Output {
-    match provider {
-        "claude" | "amp" => Output::Claude,
-        "qwen" if crate::caps::mentions("qwen", "stream-json") => Output::Claude,
-        "codex" | "cursor" | "droid" | "opencode" => Output::Json,
-        "gemini" if crate::caps::mentions("gemini", "stream-json") => Output::Json,
-        "copilot" if crate::caps::mentions("copilot", "--output-format") => Output::Json,
+    match crate::registry::spec(provider).map(|s| s.format()) {
+        Some("claude") => Output::Claude,
+        Some("json") => Output::Json,
+        Some("pi") => Output::Pi,
         _ => Output::Text,
     }
 }
@@ -303,28 +243,26 @@ pub fn output(provider: &str) -> Output {
 /// Runo's permission levels a CLI can hold to, given its `--help`. Grok runs every tool
 /// without asking; Amp has no read-only mode; Cursor's print mode either only proposes
 /// changes or, with `--force`, also runs commands, so it has no edit-only level.
-pub fn modes(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "grok" => &["full"],
-        "amp" => &["edit", "full"],
-        "cursor" => &["plan", "full"],
-        _ => &["edit", "plan", "full"],
+pub fn modes(provider: &str) -> Vec<&'static str> {
+    match crate::registry::spec(provider) {
+        Some(spec) => spec.modes.iter().map(String::as_str).collect(),
+        None => vec!["edit", "plan", "full"],
     }
 }
 
 /// The level a CLI really runs at for the session's mode, for agents that have no exact
-/// match: Grok always runs everything, and Cursor's edits come with commands.
+/// match: one without Auto edit (Grok, whose tools always run, and Cursor, whose edits
+/// come with commands) runs at Full access.
 pub fn effective_mode<'a>(provider: &str, mode: &'a str) -> &'a str {
-    match (provider, mode) {
-        ("grok", "" | "edit") => "full",
-        ("cursor", "" | "edit") => "full",
+    match mode {
+        "" | "edit" if !modes(provider).contains(&"edit") => "full",
         _ => mode,
     }
 }
 
 /// Why the agent can't run in this mode, when it has no way to stay read-only.
 pub fn mode_error(provider: &str, mode: &str) -> Option<String> {
-    if mode != "plan" || !matches!(provider, "grok" | "amp") {
+    if mode != "plan" || modes(provider).contains(&"plan") {
         return None;
     }
     Some(format!(
@@ -336,11 +274,7 @@ pub fn mode_error(provider: &str, mode: &str) -> Option<String> {
 /// Whether images can be attached for this agent: it takes them as files or reads them
 /// from the paths listed in the prompt.
 pub fn takes_images(provider: &str) -> bool {
-    match provider {
-        "claude" | "codex" | "opencode" | "gemini" | "amp" => true,
-        "copilot" => crate::caps::mentions("copilot", "--attachment"),
-        _ => false,
-    }
+    holds(provider, |s| &s.images)
 }
 
 /// MCP servers for one run: the ones the person shares, then Cove's and Runo's memory
@@ -363,12 +297,41 @@ fn mcp_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
             MEMORY_SERVER.into(),
             McpSpec {
                 command: exe.to_string(),
-                args: vec!["--mcp-memory".into(), dir.to_string()],
+                args: if spec.thread == 0 {
+                    vec!["--mcp-memory".into(), dir.to_string()]
+                } else {
+                    vec![
+                        "--mcp-memory".into(),
+                        dir.to_string(),
+                        "--thread".into(),
+                        spec.thread.to_string(),
+                    ]
+                },
                 ..Default::default()
             },
         ));
     }
     out
+}
+
+/// Runo's own tools an agent may call without being asked: memory and reading
+/// playbooks, and a thread's reports back. Starting a playbook as a new session asks.
+fn unasked_tools(spec: &RunSpec) -> Vec<&'static str> {
+    if spec.memory.is_none() {
+        return Vec::new();
+    }
+    let mut tools = vec![
+        "read_memory",
+        "search_history",
+        "save_note",
+        "list_playbooks",
+        "get_playbook",
+        "list_connections",
+    ];
+    if spec.thread != 0 {
+        tools.extend(crate::memory_mcp::THREAD_TOOLS);
+    }
+    tools
 }
 
 /// MCP servers for a CLI that reads them from a project file. That file is in the
@@ -411,7 +374,23 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
     let mode = effective_mode(spec.provider, &mode).to_string();
     let knows = |flag: &str| crate::caps::mentions(spec.provider, flag);
     let mut args: Vec<String> = Vec::new();
+    // An agent Runo knows only from the manifest: its print command, if it gave one.
+    if let Some(agent) = crate::registry::spec(spec.provider).filter(|a| a.driver == "acp") {
+        let print = agent.print.clone().unwrap_or_default();
+        args.extend(print.args);
+        if let (Some(flag), false) = (print.model, model.is_empty()) {
+            args.extend([flag, model]);
+        }
+        args.extend(split_args(&opts.extra_args));
+        args.push(with_images(spec));
+        return args;
+    }
     match spec.provider {
+        "pi" => {
+            args.extend([s("--mode"), s("json")]);
+            args.extend(pi_args(spec, &model, &effort, &mode));
+            args.push(spec.prompt.to_string());
+        }
         "codex" => {
             args.extend([s("exec"), s("--json")]);
             // `-i` takes several files; the flag after it ends the list, so the prompt is
@@ -451,6 +430,13 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 for over in server.codex_overrides(&name) {
                     args.extend([s("-c"), over]);
                 }
+            }
+            // `exec` can't ask, so a tool call that would ask is cancelled instead.
+            for tool in unasked_tools(spec) {
+                args.extend([
+                    s("-c"),
+                    format!("mcp_servers.{MEMORY_SERVER}.tools.{tool}.approval_mode=\"approve\""),
+                ]);
             }
             args.extend(split_args(&opts.extra_args));
             if spec.resume {
@@ -693,19 +679,8 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 .into_iter()
                 .map(|(name, server)| (name, server.claude_json()))
                 .collect();
-            if spec.memory.is_some() {
-                // Memory and reading playbooks need no approval; starting a playbook as a
-                // new session asks first.
-                for tool in [
-                    "read_memory",
-                    "search_history",
-                    "save_note",
-                    "list_playbooks",
-                    "get_playbook",
-                    "list_connections",
-                ] {
-                    allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
-                }
+            for tool in unasked_tools(spec) {
+                allowed.push(format!("mcp__{MEMORY_SERVER}__{tool}"));
             }
             if !servers.is_empty() {
                 let config = serde_json::json!({ "mcpServers": servers });
@@ -748,6 +723,34 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             args.push(with_images(spec));
         }
     }
+    args
+}
+
+/// Pi's flags for a turn, in JSON or RPC mode: the conversation (named by Runo, which
+/// Pi creates when it doesn't have it yet), the model and thinking level, and the tools
+/// Runo's mode allows. Pi asks nothing before it acts, so Plan only gives it only tools
+/// that read and Auto edit adds the ones that edit, but no shell.
+fn pi_args(spec: &RunSpec, model: &str, effort: &str, mode: &str) -> Vec<String> {
+    let s = |v: &str| v.to_string();
+    let mut args = Vec::new();
+    if !spec.session_id.is_empty() {
+        args.extend([s("--session-id"), spec.session_id.to_string()]);
+    }
+    if !model.is_empty() {
+        args.extend([s("--model"), model.to_string()]);
+    }
+    if !effort.is_empty() {
+        args.extend([s("--thinking"), effort.to_string()]);
+    }
+    match mode {
+        "plan" => args.extend([s("--tools"), s("read,grep,find,ls")]),
+        "full" => {}
+        _ => args.extend([s("--tools"), s("read,edit,write,grep,find,ls")]),
+    }
+    if !spec.opts.append_prompt.trim().is_empty() {
+        args.extend([s("--append-system-prompt"), spec.opts.append_prompt.clone()]);
+    }
+    args.extend(split_args(&spec.opts.extra_args));
     args
 }
 
@@ -819,6 +822,13 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
         args
     };
     let resume = spec.resume && !id.is_empty();
+    if let Some(agent) = crate::registry::spec(spec.provider).filter(|a| a.driver == "acp") {
+        let flag = agent.print.as_ref().and_then(|p| p.model.clone());
+        return match flag {
+            Some(flag) => with_model(Vec::new(), &flag),
+            None => split_args(&spec.opts.extra_args),
+        };
+    }
     match spec.provider {
         "gemini" | "qwen" => {
             let mut args = with_model(Vec::new(), "-m");
@@ -855,6 +865,17 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             } else {
                 Vec::new()
             };
+        }
+        "pi" => {
+            let mut args = Vec::new();
+            if !id.is_empty() {
+                args.extend([s("--session-id"), id]);
+            }
+            let mut args = with_model(args, "--model");
+            if !spec.prompt.is_empty() {
+                args.push(spec.prompt.to_string());
+            }
+            return args;
         }
         "grok" => {
             let mut args = with_model(Vec::new(), "-m");
@@ -953,6 +974,7 @@ mod interactive_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         let claude = interactive_args(&spec("claude", true, ""));
         assert!(!claude
@@ -1020,6 +1042,8 @@ pub enum Event {
     Done(Target, bool),
     /// Result of a one-off background command, by the key it was started with.
     Output(String, Result<String, String>),
+    /// The reply so far of a command started with `oneshot_streamed`, by its key.
+    Partial(String, String),
     /// An interactive shell has new output, or exited.
     Pty(u64),
 }
@@ -1047,6 +1071,128 @@ pub fn oneshot(key: String, mut command: Command, dir: &str, tx: Sender<Event>) 
         };
         let _ = tx.send(Event::Output(key, result));
     });
+}
+
+/// Stops a run started with `oneshot_streamed`.
+#[derive(Clone)]
+pub struct Stopper(std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>);
+
+impl Stopper {
+    /// Stop the run; what it said so far still arrives as its result.
+    pub fn stop(&self) {
+        if let Some(child) = self.0.lock().ok().as_mut().and_then(|c| c.as_mut()) {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// Like `oneshot`, but the reply arrives as it is written: `Event::Partial` with the text
+/// so far, at most every `PARTIAL_EVERY`, then `Event::Output` with all of it. `parser`
+/// reads the CLI's structured output (only its reply text is kept); without one, stdout is
+/// the reply. The run is killed after `limit`.
+pub fn oneshot_streamed(
+    key: String,
+    mut command: Command,
+    dir: &str,
+    mut parser: Option<crate::stream::Parser>,
+    limit: std::time::Duration,
+    tx: Sender<Event>,
+) -> Stopper {
+    use std::io::BufRead;
+    const PARTIAL_EVERY: std::time::Duration = std::time::Duration::from_millis(60);
+    command
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let stopper = Stopper(slot.clone());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let program = command.get_program().to_owned();
+            let _ = tx.send(Event::Output(
+                key,
+                Err(format!("could not start {program:?}: {error}")),
+            ));
+            return stopper;
+        }
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    if let Ok(mut s) = slot.lock() {
+        *s = Some(child);
+    }
+    // Past the limit, stop it as the person would.
+    let watchdog = stopper.clone();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = done.clone();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        while start.elapsed() < limit {
+            if finished.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        watchdog.stop();
+    });
+    std::thread::spawn(move || {
+        let err = std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = stderr {
+                let _ = std::io::Read::read_to_string(&mut pipe, &mut text);
+            }
+            text
+        });
+        let mut reply = String::new();
+        let mut failure = None;
+        let mut sent = std::time::Instant::now();
+        if let Some(out) = stdout {
+            for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                match parser.as_mut() {
+                    Some(p) => {
+                        for update in p.feed(&line) {
+                            match update {
+                                crate::harness::AgentEvent::Text(t) => reply.push_str(&t),
+                                crate::harness::AgentEvent::Error(e) => failure = Some(e),
+                                _ => {}
+                            }
+                        }
+                    }
+                    None => {
+                        reply.push_str(&line);
+                        reply.push('\n');
+                    }
+                }
+                if sent.elapsed() >= PARTIAL_EVERY && !reply.trim().is_empty() {
+                    sent = std::time::Instant::now();
+                    let _ = tx.send(Event::Partial(key.clone(), reply.clone()));
+                }
+            }
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let status = slot
+            .lock()
+            .ok()
+            .and_then(|mut c| c.take())
+            .and_then(|mut c| c.wait().ok());
+        let err = err.join().unwrap_or_default();
+        let reply = reply.trim().to_string();
+        let result = match (status, failure) {
+            (_, Some(e)) if reply.is_empty() => Err(e),
+            (Some(s), _) if s.success() => Ok(reply),
+            // Stopped or failed partway: what it said so far is still the answer.
+            _ if !reply.is_empty() => Ok(reply),
+            _ => Err(if err.trim().is_empty() {
+                "it stopped without answering".to_string()
+            } else {
+                err.trim().to_string()
+            }),
+        };
+        let _ = tx.send(Event::Output(key, result));
+    });
+    stopper
 }
 
 /// Like `oneshot`, but the command is killed after `limit` and reported as an error.
@@ -1256,7 +1402,7 @@ pub fn sign_in_help(provider: &str) -> String {
 
 /// Whether the CLI reports what a turn cost, which spending limits count.
 pub fn reports_cost(provider: &str) -> bool {
-    matches!(provider, "claude" | "opencode")
+    matches!(provider, "claude" | "opencode" | "pi")
 }
 
 /// Whether Runo reads the tokens a turn used from the CLI's output, which the token limit
@@ -1332,42 +1478,56 @@ pub fn waits_for_sign_in(line: &str) -> bool {
 /// A plain, one-shot run of an agent CLI with a prompt, for small jobs such as
 /// writing a commit message. Read-only where the CLI supports it.
 pub fn ask_command(provider: &str, configured_bin: &str, prompt: &str) -> Command {
+    ask_command_on(provider, configured_bin, prompt, "")
+}
+
+/// The flag an agent's one-shot ask takes a model with, if it takes one.
+pub fn ask_model_flag(provider: &str) -> Option<&'static str> {
+    match provider {
+        "claude" | "copilot" => Some("--model"),
+        "amp" => None,
+        _ => Some("-m"),
+    }
+}
+
+/// `ask_command` on `model`; empty leaves the agent on its own default.
+pub fn ask_command_on(provider: &str, configured_bin: &str, prompt: &str, model: &str) -> Command {
     let bin = if configured_bin.trim().is_empty() {
         self::provider(provider).bin
     } else {
         configured_bin.trim()
     };
     let mut command = Command::new(bin);
+    let model_args: Vec<&str> = match ask_model_flag(provider) {
+        Some(flag) if !model.trim().is_empty() => vec![flag, model.trim()],
+        _ => Vec::new(),
+    };
     match provider {
         "codex" => {
-            command.args([
-                "exec",
-                "--sandbox",
-                "read-only",
-                "--skip-git-repo-check",
-                prompt,
-            ]);
+            command.args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"]);
+            command.args(&model_args).arg(prompt);
         }
         "opencode" => {
-            command.args(["run", prompt]);
+            command.arg("run").args(&model_args).arg(prompt);
         }
         "cursor" => {
             command.args(["-p", "--output-format", "text"]);
             command.args(cursor_trust());
             command.args(cursor_mode("ask"));
-            command.arg(prompt);
+            command.args(&model_args).arg(prompt);
         }
         "amp" => {
             command.args(["-x", prompt]);
         }
         "droid" => {
-            command.args(["exec", prompt]);
+            command.arg("exec").args(&model_args).arg(prompt);
         }
         "claude" => {
-            command.args(["-p", "--permission-mode", "plan", "--", prompt]);
+            command.args(["-p", "--permission-mode", "plan"]);
+            command.args(&model_args).args(["--", prompt]);
         }
         _ => {
-            command.args(["-p", prompt]);
+            command.args(&model_args).args(["-p", prompt]);
         }
     }
     command
@@ -1469,6 +1629,187 @@ pub fn prepare_folder(spec: &RunSpec, dir: &str, sandboxed: bool) {
     }
 }
 
+/// Whether Runo talks to the agent while it works: Claude Code takes its prompt, and
+/// any message sent while it runs, on stdin (`--input-format stream-json`), and so does
+/// Amp, in the same format, once its help lists `--stream-json-input`.
+pub fn takes_live_input(provider: &str) -> bool {
+    live_form(provider).is_some()
+}
+
+/// The manifest's way for the installed CLI to take messages on stdin.
+fn live_form(provider: &str) -> Option<&'static crate::registry::Live> {
+    crate::registry::spec(provider)?.live.iter().find(|l| {
+        l.when
+            .as_deref()
+            .is_none_or(|w| crate::caps::mentions(provider, w))
+    })
+}
+
+/// A turn's command made live: the prompt at the end of its arguments (after `--` for
+/// Claude Code, `-x` for Amp) goes instead as the first message on stdin. Returns the
+/// command and that prompt, or `None` when the arguments don't end that way.
+pub fn live_command(provider: &str, command: &Command) -> Option<(Command, String)> {
+    let args: Vec<String> = command
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let [rest @ .., flag, prompt] = args.as_slice() else {
+        return None;
+    };
+    // The form that matches how the command ends; whether the installed CLI takes
+    // messages this way at all is `takes_live_input`.
+    let form = crate::registry::spec(provider)?
+        .live
+        .iter()
+        .find(|form| form.flag == *flag)?;
+    let mut live = Command::new(command.get_program());
+    live.args(rest).args(&form.args);
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => live.env(key, value),
+            None => live.env_remove(key),
+        };
+    }
+    Some((live, prompt.clone()))
+}
+
+/// The arguments that run `provider` as an ACP agent, once the installed CLI's help
+/// lists them. `RUNO_NO_ACP` set in Runo's environment keeps every agent in print mode.
+pub fn acp_args(provider: &str) -> Option<Vec<String>> {
+    if std::env::var_os("RUNO_NO_ACP").is_some() {
+        return None;
+    }
+    let spec = crate::registry::spec(provider)?;
+    spec.pick(&spec.acp).map(<[String]>::to_vec)
+}
+
+/// An ACP turn's settings, with `fallback` (the print-mode command) to run if the agent
+/// can't open a session. Returns them and the prompt, which goes as the first message.
+pub fn acp_config(
+    spec: &RunSpec,
+    dir: &str,
+    fallback: &Command,
+) -> Option<(crate::harness::acp::Config, String)> {
+    let args = acp_args(spec.provider)?;
+    let get = |id: &str| spec.sel.get(id).cloned().unwrap_or_default();
+    let model = match get("model") {
+        m if m.is_empty() => spec.opts.model_override.clone(),
+        m => m,
+    };
+    let argv = |c: &Command| -> Vec<String> {
+        std::iter::once(c.get_program())
+            .chain(c.get_args())
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    };
+    let mut command = vec![program(spec).to_string()];
+    command.extend(args);
+    let config = crate::harness::acp::Config {
+        provider: spec.provider.to_string(),
+        command,
+        fallback: argv(fallback),
+        cwd: dir.to_string(),
+        session: if spec.resume {
+            spec.session_id.to_string()
+        } else {
+            String::new()
+        },
+        model,
+        mode: get("mode"),
+        servers: mcp_servers(spec)
+            .into_iter()
+            .map(|(name, server)| server.acp_json(&name))
+            .collect(),
+    };
+    Some((config, with_images(spec)))
+}
+
+/// A Codex turn's settings for its app server, once the installed Codex has one, with
+/// `fallback` (the `exec` command) to run if it can't start. The `-c` settings of the
+/// `exec` command (MCP servers, effort, service tier) go along.
+pub fn codex_app_config(
+    spec: &RunSpec,
+    dir: &str,
+    fallback: &Command,
+) -> Option<crate::harness::codex::Config> {
+    if spec.provider != "codex" || std::env::var_os("RUNO_NO_APP_SERVER").is_some() {
+        return None;
+    }
+    let agent = crate::registry::spec("codex")?;
+    let server = agent.pick(&agent.rpc)?;
+    let args: Vec<String> = fallback
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let mut command = vec![program(spec).to_string()];
+    command.extend(server.iter().cloned());
+    for pair in args.windows(2) {
+        match pair[0].as_str() {
+            "-c" => command.extend(["-c".to_string(), pair[1].clone()]),
+            "-p" => command.extend(["-c".to_string(), format!("profile={:?}", pair[1])]),
+            _ => {}
+        }
+    }
+    let get = |id: &str| spec.sel.get(id).cloned().unwrap_or_default();
+    let or = |a: String, b: &str| if a.is_empty() { b.to_string() } else { a };
+    Some(crate::harness::codex::Config {
+        command,
+        fallback: std::iter::once(fallback.get_program().to_string_lossy().into_owned())
+            .chain(args)
+            .collect(),
+        cwd: dir.to_string(),
+        session: if spec.resume {
+            spec.session_id.to_string()
+        } else {
+            String::new()
+        },
+        model: or(get("model"), &spec.opts.model_override),
+        effort: or(get("effort"), &spec.opts.effort),
+        mode: get("mode"),
+    })
+}
+
+/// A Pi turn's settings for its RPC mode, once the installed Pi has it, with `fallback`
+/// (the `--mode json` command) to run if it can't start. Returns them and the prompt,
+/// which goes as the first message.
+pub fn pi_config(
+    spec: &RunSpec,
+    dir: &str,
+    fallback: &Command,
+) -> Option<(crate::harness::pi::Config, String)> {
+    let agent = crate::registry::spec(spec.provider).filter(|a| a.driver == "pi")?;
+    if std::env::var_os("RUNO_NO_RPC").is_some() {
+        return None;
+    }
+    let rpc = agent.pick(&agent.rpc)?;
+    let args: Vec<String> = fallback
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    // `--mode json … <prompt>` becomes `--mode rpc …`: the prompt goes as a message.
+    let [rest @ .., _prompt] = args.as_slice() else {
+        return None;
+    };
+    let mut command = vec![program(spec).to_string()];
+    command.extend(rpc.iter().cloned());
+    let mut flags = rest.iter();
+    while let Some(arg) = flags.next() {
+        if arg == "--mode" {
+            flags.next();
+        } else {
+            command.push(arg.clone());
+        }
+    }
+    let config = crate::harness::pi::Config {
+        command,
+        fallback: std::iter::once(fallback.get_program().to_string_lossy().into_owned())
+            .chain(args.iter().cloned())
+            .collect(),
+        cwd: dir.to_string(),
+    };
+    Some((config, with_images(spec)))
+}
+
 /// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
 pub fn run_agent(
     target: Target,
@@ -1479,12 +1820,54 @@ pub fn run_agent(
 ) -> Result<Handle, String> {
     let bin = program(spec);
     let mut command = turn_command(spec);
-    prepare_folder(spec, dir, sandbox.is_some());
+    let acp = match (target, crate::detach::root(), sandbox) {
+        (Target::Session(_), Some(_), None) => acp_config(spec, dir, &command),
+        _ => None,
+    };
+    if acp.is_some() {
+        // The servers go in the session instead; nothing is merged into project files.
+        if spec.provider == "gemini" {
+            crate::gemini::trust(dir, &spec.opts.env);
+        }
+        crate::mcp::clean_project(std::path::Path::new(dir));
+    } else {
+        prepare_folder(spec, dir, sandbox.is_some());
+    }
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
     } else if let (Target::Session(id), Some(root)) = (target, crate::detach::root()) {
         // Local turns outlive Runo, so closing or a crash doesn't stop them.
         if crate::updater::resolve(bin).is_some() {
+            if let Some((config, prompt)) = acp {
+                let setup = |turn: &std::path::Path| config.write(turn);
+                return crate::detach::spawn_driver(
+                    root, id, "--acp", setup, command, &prompt, dir, tx,
+                );
+            }
+            if let Some((config, prompt)) = pi_config(spec, dir, &command) {
+                let setup = |turn: &std::path::Path| config.write(turn);
+                return crate::detach::spawn_driver(
+                    root, id, "--pi", setup, command, &prompt, dir, tx,
+                );
+            }
+            if let Some(config) = codex_app_config(spec, dir, &command) {
+                let setup = |turn: &std::path::Path| config.write(turn);
+                return crate::detach::spawn_driver(
+                    root,
+                    id,
+                    "--codex",
+                    setup,
+                    command,
+                    &with_images(spec),
+                    dir,
+                    tx,
+                );
+            }
+            if takes_live_input(spec.provider) {
+                if let Some((live, prompt)) = live_command(spec.provider, &command) {
+                    return crate::detach::spawn_live(root, id, live, &prompt, dir, tx);
+                }
+            }
             return crate::detach::spawn(root, id, command, dir, tx);
         }
     }
@@ -1685,7 +2068,7 @@ mod tests {
                     assert!(ok);
                     break;
                 }
-                Event::Output(..) | Event::Pty(_) => {}
+                Event::Output(..) | Event::Partial(..) | Event::Pty(_) => {}
             }
         }
         lines.sort();
@@ -1724,6 +2107,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         })
     }
 
@@ -1743,6 +2127,7 @@ mod arg_tests {
                 images: &[],
                 memory: None,
                 local: true,
+                thread: 0,
             })
         };
         assert!(run("0199-id").ends_with(&["resume".into(), "0199-id".into(), "hi".into()]));
@@ -1764,6 +2149,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         let id = "0b7c6a52-3f7e-4f3a-9d61-2a1c9b3e8f10";
         let first = provider_args(&spec(false, id));
@@ -1774,6 +2160,179 @@ mod arg_tests {
         assert!(!next.contains(&"--continue".to_string()));
         // The prompt always comes last, after `--`.
         assert_eq!(&next[next.len() - 2..], ["--", "hi"]);
+    }
+
+    #[test]
+    fn codex_runs_its_app_server_with_the_exec_settings() {
+        let sel: std::collections::HashMap<String, String> = [
+            ("mode".to_string(), "plan".to_string()),
+            ("effort".to_string(), "high".to_string()),
+        ]
+        .into();
+        let o = AgentOptions {
+            profile: "work".into(),
+            ..AgentOptions::default()
+        };
+        let spec = RunSpec {
+            provider: "codex",
+            prompt: "Fix it",
+            resume: true,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "01a1",
+            images: &[],
+            memory: None,
+            local: true,
+            thread: 0,
+        };
+        let exec = turn_command(&spec);
+        // Without an app server in the installed Codex's help, `exec` runs as before.
+        assert!(codex_app_config(&spec, "/w", &exec).is_none());
+        crate::caps::set(
+            "codex",
+            crate::caps::Caps {
+                help: "Commands:\n  exec  Run non-interactively\n  app-server  Run the app server"
+                    .into(),
+                ..Default::default()
+            },
+        );
+        let config = codex_app_config(&spec, "/w", &exec).unwrap();
+        assert_eq!(config.command[1], "app-server");
+        assert!(config
+            .command
+            .windows(2)
+            .any(|w| w == ["-c", "model_reasoning_effort=\"high\""]));
+        assert!(config
+            .command
+            .windows(2)
+            .any(|w| w == ["-c", "profile=\"work\""]));
+        assert_eq!(config.fallback.last().map(String::as_str), Some("Fix it"));
+        assert_eq!(
+            (config.session.as_str(), config.mode.as_str()),
+            ("01a1", "plan")
+        );
+        assert_eq!(config.effort, "high");
+    }
+
+    #[test]
+    fn pi_gets_the_tools_its_mode_allows_and_runs_over_rpc() {
+        let o = AgentOptions::default();
+        let plan = args(
+            "pi",
+            false,
+            &[("mode", "plan"), ("model", "anthropic/sonnet")],
+            &o,
+            true,
+        );
+        assert_eq!(&plan[..2], ["--mode", "json"]);
+        assert!(plan
+            .windows(2)
+            .any(|w| w == ["--tools", "read,grep,find,ls"]));
+        assert!(plan
+            .windows(2)
+            .any(|w| w == ["--model", "anthropic/sonnet"]));
+        assert_eq!(plan.last().map(String::as_str), Some("hi"));
+        let edit = args("pi", false, &[], &o, true);
+        assert!(edit
+            .windows(2)
+            .any(|w| w == ["--tools", "read,edit,write,grep,find,ls"]));
+        let full = args(
+            "pi",
+            false,
+            &[("mode", "full"), ("effort", "high")],
+            &o,
+            true,
+        );
+        assert!(!full.iter().any(|a| a == "--tools"));
+        assert!(full.windows(2).any(|w| w == ["--thinking", "high"]));
+
+        let sel = std::collections::HashMap::new();
+        let spec = RunSpec {
+            provider: "pi",
+            prompt: "Fix it",
+            resume: true,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "pi-1",
+            images: &[],
+            memory: None,
+            local: true,
+            thread: 0,
+        };
+        let json_mode = turn_command(&spec);
+        // A Pi whose help doesn't list `--mode` runs each prompt in print mode.
+        assert!(pi_config(&spec, "/w", &json_mode).is_none());
+        crate::caps::set(
+            "pi",
+            crate::caps::Caps {
+                help: "--mode <mode>  text, json or rpc".into(),
+                ..Default::default()
+            },
+        );
+        let (config, prompt) = pi_config(&spec, "/w", &json_mode).unwrap();
+        assert_eq!(&config.command[..3], ["pi", "--mode", "rpc"]);
+        assert!(!config.command.iter().any(|a| a == "json" || a == "Fix it"));
+        assert!(config
+            .command
+            .windows(2)
+            .any(|w| w == ["--session-id", "pi-1"]));
+        assert_eq!(config.fallback.last().map(String::as_str), Some("Fix it"));
+        assert_eq!(prompt, "Fix it");
+        assert!(resumes("pi") && names_conversation("pi"));
+        assert_eq!(output("pi"), Output::Pi);
+    }
+
+    #[test]
+    fn modes_come_from_the_manifest() {
+        assert_eq!(effective_mode("grok", "edit"), "full");
+        assert_eq!(effective_mode("cursor", ""), "full");
+        assert_eq!(effective_mode("amp", "edit"), "edit");
+        assert!(mode_error("amp", "plan").is_some());
+        assert!(mode_error("cursor", "plan").is_none());
+        assert!(mode_error("claude", "plan").is_none());
+    }
+
+    #[test]
+    fn a_live_claude_turn_sends_its_prompt_on_stdin() {
+        let mut command = Command::new("claude");
+        command
+            .args(["-p", "--output-format", "stream-json", "--", "Fix it"])
+            .env("RUNO_X", "1");
+        let (live, prompt) = live_command("claude", &command).unwrap();
+        assert_eq!(prompt, "Fix it");
+        let args: Vec<_> = live
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json"
+            ]
+        );
+        assert!(live.get_envs().any(|(k, v)| k == "RUNO_X" && v.is_some()));
+        // Without a trailing prompt there's nothing to move.
+        let mut bare = Command::new("claude");
+        bare.args(["-p", "hi"]);
+        assert!(live_command("claude", &bare).is_none());
+        assert!(takes_live_input("claude") && !takes_live_input("codex"));
+        // Amp takes its messages the same way once its help lists the flag.
+        let mut amp = Command::new("amp");
+        amp.args(["--stream-json", "-x", "Fix it"]);
+        let (live, prompt) = live_command("amp", &amp).unwrap();
+        assert_eq!(prompt, "Fix it");
+        let args: Vec<_> = live
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["--stream-json", "-x", "--stream-json-input"]);
+        assert!(live_command("claude", &amp).is_none());
     }
 
     #[test]
@@ -1838,6 +2397,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         run_agent(Target::Session(5), &spec, dir.to_str().unwrap(), None, tx).unwrap();
         let (mut out, mut err) = (vec![], vec![]);
@@ -1850,7 +2410,7 @@ mod arg_tests {
                     assert!(!ok);
                     break;
                 }
-                Event::Output(..) | Event::Pty(_) => unreachable!(),
+                Event::Output(..) | Event::Partial(..) | Event::Pty(_) => unreachable!(),
             }
         }
         assert_eq!(out[0], "env=from-env");
@@ -1882,6 +2442,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         let error = run_agent(Target::Session(1), &spec, "/", None, tx)
             .err()
@@ -2115,6 +2676,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         let has = |p, resume, pair: [&str; 2]| {
             provider_args(&spec(p, resume))
@@ -2147,6 +2709,7 @@ mod arg_tests {
             images,
             memory: None,
             local: true,
+            thread: 0,
         })
     }
 
@@ -2229,6 +2792,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         });
         assert!(opencode.windows(2).any(|w| w == ["--agent", "plan"]));
         assert!(!opencode.contains(&"build".to_string()));
@@ -2273,6 +2837,7 @@ mod arg_tests {
             images: &[],
             memory: Some(("/bin/runo", "/work/app")),
             local: true,
+            thread: 0,
         };
         let claude = provider_args(&spec("claude"));
         let config = claude[claude.iter().position(|a| a == "--mcp-config").unwrap() + 1].clone();
@@ -2286,6 +2851,16 @@ mod arg_tests {
             .any(|a| a.contains("permission-prompt")));
         let codex = provider_args(&spec("codex"));
         assert!(codex.contains(&"mcp_servers.runo.command=\"/bin/runo\"".to_string()));
+        assert!(codex
+            .contains(&"mcp_servers.runo.tools.read_memory.approval_mode=\"approve\"".to_string()));
+        let mut thread = spec("codex");
+        thread.thread = 7;
+        let thread = provider_args(&thread);
+        for tool in crate::memory_mcp::THREAD_TOOLS {
+            assert!(thread.contains(&format!(
+                "mcp_servers.runo.tools.{tool}.approval_mode=\"approve\""
+            )));
+        }
         let amp = provider_args(&spec("amp"));
         let config = &amp[amp.iter().position(|a| a == "--mcp-config").unwrap() + 1];
         let config: serde_json::Value = serde_json::from_str(config).unwrap();
@@ -2310,6 +2885,35 @@ mod arg_tests {
             file_servers(&remote).is_empty(),
             "no local programs elsewhere"
         );
+    }
+
+    #[test]
+    fn asks_take_a_model_before_the_prompt() {
+        let args = |provider: &str, model: &str| -> Vec<String> {
+            ask_command_on(provider, "", "why?", model)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            args("claude", "haiku"),
+            [
+                "-p",
+                "--permission-mode",
+                "plan",
+                "--model",
+                "haiku",
+                "--",
+                "why?"
+            ]
+        );
+        let codex = args("codex", "gpt-5-mini");
+        assert_eq!(codex[0], "exec");
+        assert!(codex.ends_with(&["-m".into(), "gpt-5-mini".into(), "why?".into()]));
+        assert_eq!(args("gemini", "flash"), ["-m", "flash", "-p", "why?"]);
+        // No model leaves each ask as it always was.
+        assert_eq!(args("gemini", ""), ["-p", "why?"]);
+        assert_eq!(args("amp", "anything"), ["-x", "why?"]);
     }
 
     #[test]
@@ -2388,6 +2992,7 @@ mod arg_tests {
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         };
         assert_eq!(
             interactive_args(&spec(true, "")),
@@ -2464,7 +3069,7 @@ mod arg_tests {
         assert!(model_hint("codex", "Model metadata for `x` not found.").is_some());
         assert!(model_hint("codex", "file not found").is_none());
         let note = cost_note();
-        assert!(note.starts_with("Only Claude Code and OpenCode report a cost; Codex, "));
+        assert!(note.starts_with("Only Claude Code, OpenCode and Pi report a cost; Codex, "));
         assert!(note.contains(" and Grok report none"));
         assert!(note.contains("spending limits don't hold them"));
         assert!(note.contains("turn limits") && note.contains("token limit"));

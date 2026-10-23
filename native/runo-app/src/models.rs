@@ -274,6 +274,45 @@ pub(crate) fn parse_model_list(text: &str) -> Vec<ModelInfo> {
     out
 }
 
+/// Models from a CLI's model table, whose header names its columns, such as Pi's
+/// `provider  model  context …`: each row's model, as `provider/model` when the table
+/// has a provider column.
+pub(crate) fn parse_model_table(text: &str) -> Vec<ModelInfo> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let Some(header) = lines.next() else {
+        return Vec::new();
+    };
+    let columns: Vec<&str> = header.split_whitespace().collect();
+    let Some(model) = columns.iter().position(|c| *c == "model") else {
+        return Vec::new();
+    };
+    let provider = columns.iter().position(|c| *c == "provider");
+    let mut out: Vec<ModelInfo> = Vec::new();
+    for line in lines {
+        let cells: Vec<&str> = line.split_whitespace().collect();
+        if cells.len() != columns.len() {
+            continue;
+        }
+        let id = cells[model];
+        let value = match provider {
+            Some(p) => format!("{}/{id}", cells[p]),
+            None => id.to_string(),
+        };
+        if out.iter().any(|m| m.choice.value == value) {
+            continue;
+        }
+        out.push(ModelInfo {
+            choice: Choice {
+                label: id.to_string(),
+                desc: provider.map(|p| cells[p].to_string()).unwrap_or_default(),
+                value,
+            },
+            ..Default::default()
+        });
+    }
+    out
+}
+
 /// `--model` choices listed in a CLI's help, like `(choices: "gpt-5", "claude-sonnet-4.5")`.
 pub(crate) fn help_model_choices(help: &str) -> Vec<ModelInfo> {
     let mut block = String::new();

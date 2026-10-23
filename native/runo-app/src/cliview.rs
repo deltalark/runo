@@ -81,6 +81,9 @@ fn parse_divider(meta: &str) -> Option<(&str, Option<usize>)> {
 /// Why a session can't show its CLI view without losing context, if it can't.
 pub(crate) fn cli_blocker(session: &Session) -> Option<String> {
     let name = agent::provider(&session.provider).name;
+    if session.canvas == crate::crew::CANVAS {
+        return Some("Crew stays in Chat, where Runo reads what it asks for. Its threads open in the CLI like any session.".into());
+    }
     if session.elsewhere() && session.sandbox().is_none() {
         return Some(format!(
             "This session runs on a connection that no longer exists ({}). Move it to this machine to use the CLI.",
@@ -176,7 +179,7 @@ impl RunoApp {
         } else {
             session.has_conversation() && !conversation.is_empty()
         };
-        if !resume && session.has_conversation() && !self.demo {
+        if !resume && session.has_conversation() {
             // Opening a fresh CLI would drop the context; refuse rather than lose it.
             if let Some(s) = self.state.session_mut(id) {
                 s.cli = false;
@@ -204,9 +207,7 @@ impl RunoApp {
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| {
-                !self.demo && memory_server() && crate::connections::mcp_reachable(sandbox.as_ref())
-            });
+            .filter(|_| memory_server() && crate::connections::mcp_reachable(sandbox.as_ref()));
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: if resume { "" } else { first_prompt },
@@ -218,6 +219,7 @@ impl RunoApp {
             images: &[],
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
+            thread: 0,
         };
         let mut program = pty::Program {
             bin: if opts.binary.trim().is_empty() {
@@ -333,7 +335,7 @@ impl RunoApp {
             run.shell.kill();
             self.import_cli_turns(id, &run);
             // Files the CLI changed show up in the Changes panel right away.
-            if self.selected == Some(id) && !self.demo {
+            if self.selected == Some(id) {
                 self.refresh();
             }
         }
@@ -421,7 +423,7 @@ impl RunoApp {
         for m in &mut turns {
             m.time = time.clone();
             for step in &mut m.steps {
-                *step = step.replace(&prefix, "");
+                step.label = step.label.replace(&prefix, "");
             }
         }
         if let Some(s) = self.state.session_mut(id) {
@@ -519,28 +521,27 @@ impl RunoApp {
                 .text_size(px(12.))
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
+                .relative()
                 .when(active, |el| {
-                    el.bg(rgb(c_canvas())).text_color(rgb(c_text())).shadow_sm()
+                    el.child(crate::shell::seg_pill(format!("{key}-fill")))
+                        .text_color(rgb(c_text()))
                 })
                 .when(!active, |el| {
                     el.text_color(rgb(c_muted()))
                         .hover(|el| el.text_color(rgb(c_text())))
                 })
-                .child(icon(glyph, 12., if active { c_text() } else { c_muted() }))
+                .child(if active {
+                    crate::shell::pop(icon(glyph, 12., c_text()), format!("{key}-icon"))
+                } else {
+                    icon(glyph, 12., c_muted()).into_any_element()
+                })
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_cli_view(id, on, cx)))
         };
-        div()
+        crate::shell::seg_track()
             .id("view-toggle")
             .flex_none()
             .p(px(2.))
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .rounded_lg()
-            .bg(tint(c_subtle()))
-            .border_1()
-            .border_color(rgb(c_border()))
             .when(!supported, |el| el.opacity(0.5))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(match &blocker {
@@ -576,7 +577,7 @@ impl RunoApp {
             .items_center()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_subtle()))
             .text_size(px(12.))
             .text_color(rgb(c_secondary()))
@@ -623,7 +624,7 @@ impl RunoApp {
             .flex_1()
             .min_h_0()
             .v_flex()
-            .bg(rgb(c_term_bg()))
+            .bg(term_fill())
             .child(banner)
             .child(
                 div()
@@ -640,7 +641,7 @@ impl RunoApp {
     pub(crate) fn cli_divider(&self, index: usize, meta: &str) -> Option<AnyElement> {
         let (provider, turns) = parse_divider(meta)?;
         let provider = agent::provider(provider);
-        let line = || div().flex_1().h(px(1.)).bg(rgb(c_border()));
+        let line = || div().flex_1().h(px(1.)).bg(divider());
         Some(
             rise(
                 div()
@@ -659,7 +660,7 @@ impl RunoApp {
                             .py(px(5.))
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(rgb(c_raised()))
                             .text_size(px(12.))
                             .child(icon(IconName::SquareTerminal, 13., c_secondary()))

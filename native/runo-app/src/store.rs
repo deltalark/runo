@@ -35,21 +35,17 @@ impl Status {
     }
 }
 
-/// How a tool step in an agent turn stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StepState {
-    Running,
-    Done,
-    Failed,
-}
+pub use crate::harness::{StepState, ToolStep};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub text: String,
-    /// Completed tool steps shown above the reply (e.g. "Explored 8 files").
-    #[serde(default)]
-    pub steps: Vec<String>,
+    /// Agent turns: the tool calls shown above the reply, such as "Read src/main.rs",
+    /// each with its kind and how it stands. Sessions saved when steps were plain labels
+    /// load those as finished steps.
+    #[serde(default, deserialize_with = "steps_or_labels")]
+    pub steps: Vec<ToolStep>,
     #[serde(default)]
     pub time: String,
     /// Run summary shown under the reply, such as "12s · 3 turns · $0.04".
@@ -59,6 +55,10 @@ pub struct Message {
     /// so the turn can be undone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub checkpoint: String,
+    /// Agent turns: the files the turn changed, found at its end by comparing the folder
+    /// with the checkpoint taken before it ran. Its files changed card lists only these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed: Vec<String>,
     /// Agent turns: "kept" or "undone" once the person decided on the turn's changes.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub resolved: String,
@@ -87,13 +87,9 @@ pub struct Message {
     /// User turns run from a playbook: what the person typed with it, if anything.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
-    /// Agent turns: steps (by index into `steps`) whose tool reported an error.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub failed_steps: Vec<usize>,
-    /// Agent turns: steps still waiting for their result, as (index into `steps`, the
-    /// tool call's id). Only meaningful while the turn runs, so it isn't saved.
-    #[serde(skip)]
-    pub running_steps: Vec<(usize, String)>,
+    /// In a Crew chat: a card drawn with the message, such as the threads it started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew: Option<crate::crew::Card>,
 }
 
 /// Token use of one agent turn.
@@ -129,16 +125,36 @@ pub struct Question {
 }
 
 impl Session {
-    /// Current selections, including values saved by older versions.
+    /// Current selections: model, effort, mode, tier and the rest.
     pub fn selections(&self) -> HashMap<String, String> {
-        let mut sel = self.opts.clone();
-        if !sel.contains_key("model") && !self.model.is_empty() {
-            sel.insert("model".into(), self.model.clone());
-        }
-        if !sel.contains_key("mode") && !self.mode.is_empty() {
-            sel.insert("mode".into(), self.mode.clone());
-        }
-        sel
+        self.opts.clone()
+    }
+
+    /// For a session that works in a folder it doesn't have to itself, the files its
+    /// agent changed, turn by turn. Anything else uncommitted there came from somewhere
+    /// else: the person, another session, or Runo's Design and Architecture modes. An
+    /// isolated session owns its whole worktree, so it gets `None`.
+    pub fn touched(&self) -> Option<std::collections::HashSet<String>> {
+        (!self.isolated).then(|| {
+            self.messages
+                .iter()
+                .flat_map(|m| m.changed.iter().cloned())
+                .collect()
+        })
+    }
+}
+
+/// Changes cut down to the files in `touched`, when there is such a set.
+pub fn only_touched(
+    changes: Vec<crate::git::Change>,
+    touched: Option<&std::collections::HashSet<String>>,
+) -> Vec<crate::git::Change> {
+    match touched {
+        Some(t) => changes
+            .into_iter()
+            .filter(|c| t.contains(&c.path))
+            .collect(),
+        None => changes,
     }
 }
 
@@ -158,7 +174,6 @@ impl Session {
     pub fn set_model(&mut self, model: String) {
         self.opts.remove("effort");
         self.opts.remove("tier");
-        self.model.clear();
         self.opts.insert("model".into(), model);
     }
 
@@ -170,8 +185,6 @@ impl Session {
         self.switched_from = None;
         self.provider = provider.to_string();
         self.opts.clear();
-        self.model.clear();
-        self.mode.clear();
         self.agent_session.clear();
         self.conversation_start = self.messages.len();
     }
@@ -185,8 +198,6 @@ impl Session {
         let from = SwitchedFrom {
             provider: self.provider.clone(),
             agent_session: self.agent_session.clone(),
-            model: self.model.clone(),
-            mode: self.mode.clone(),
             opts: self.opts.clone(),
             conversation_start: self.conversation_start,
             carried: self.carried.clone(),
@@ -219,8 +230,6 @@ impl Session {
         }
         self.provider = from.provider;
         self.agent_session = from.agent_session;
-        self.model = from.model;
-        self.mode = from.mode;
         self.opts = from.opts;
         self.conversation_start = from.conversation_start.min(self.messages.len());
         self.handoff.clear();
@@ -228,6 +237,23 @@ impl Session {
         self.switched_from = None;
         true
     }
+}
+
+/// Steps as saved now, or as the plain labels sessions were saved with before.
+fn steps_or_labels<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ToolStep>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Saved {
+        Label(String),
+        Step(ToolStep),
+    }
+    Ok(Vec::<Saved>::deserialize(d)?
+        .into_iter()
+        .map(|s| match s {
+            Saved::Label(label) => ToolStep::done(label),
+            Saved::Step(step) => step,
+        })
+        .collect())
 }
 
 impl Message {
@@ -239,6 +265,7 @@ impl Message {
             time: String::new(),
             meta: String::new(),
             checkpoint: String::new(),
+            changed: Vec::new(),
             resolved: String::new(),
             redo: String::new(),
             images: Vec::new(),
@@ -248,34 +275,47 @@ impl Message {
             questions: Vec::new(),
             playbook: String::new(),
             note: String::new(),
-            failed_steps: Vec::new(),
-            running_steps: Vec::new(),
+            crew: None,
         }
     }
 
     /// Where step `i` stands, for its icon: still running (only while the turn is live),
     /// failed, or done.
     pub fn step_state(&self, i: usize, live: bool) -> StepState {
-        if live && self.running_steps.iter().any(|(j, _)| *j == i) {
-            StepState::Running
-        } else if self.failed_steps.contains(&i) {
-            StepState::Failed
-        } else {
-            StepState::Done
+        match self.steps.get(i).map(|s| s.state) {
+            Some(StepState::Running) if !live => StepState::Done,
+            Some(state) => state,
+            None => StepState::Done,
         }
     }
 
-    /// A started step's result arrived: it is no longer running, and is marked failed
-    /// when its tool reported an error. Returns false when no step has that id.
+    /// A running step's result arrived: it is no longer running, and is marked failed
+    /// when its tool reported an error. Returns false when no running step has that id.
     pub fn finish_step(&mut self, id: &str, ok: bool) -> bool {
-        let Some(at) = self.running_steps.iter().position(|(_, s)| s == id) else {
+        let Some(step) = self
+            .steps
+            .iter_mut()
+            .rev()
+            .find(|s| s.state == StepState::Running && s.id == id)
+        else {
             return false;
         };
-        let (i, _) = self.running_steps.remove(at);
-        if !ok && !self.failed_steps.contains(&i) {
-            self.failed_steps.push(i);
-        }
+        step.finish(ok);
         true
+    }
+
+    /// The turn is over: steps whose result never came are taken as done.
+    pub fn settle_steps(&mut self) {
+        for step in &mut self.steps {
+            if step.state == StepState::Running {
+                step.finish(true);
+            }
+        }
+    }
+
+    /// The steps' labels, oldest first.
+    pub fn step_labels(&self) -> impl Iterator<Item = &str> {
+        self.steps.iter().map(|s| s.label.as_str())
     }
 
     /// A message stamped with the current local time, for the conversation header.
@@ -316,14 +356,14 @@ pub struct Project {
     /// How many times in a row failing checks go back to the agent on their own; 0 asks.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub fix_rounds: u32,
+    /// How the person works here: `crew` through Crew's chat, empty directly in
+    /// sessions. See `crew::is_crew`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
-}
-
-fn default_mode() -> String {
-    "edit".into()
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -336,10 +376,6 @@ pub struct Session {
     /// Directory the agent and terminal run in (a worktree, or the project itself).
     pub dir: String,
     pub isolated: bool,
-    #[serde(default = "default_mode")]
-    pub mode: String,
-    #[serde(default)]
-    pub model: String,
     /// Per-session choices for the agent's discovered options (model, effort, mode, tier…).
     #[serde(default)]
     pub opts: HashMap<String, String>,
@@ -384,10 +420,6 @@ pub struct Session {
     /// switching straight back resumes its own conversation instead of starting over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switched_from: Option<SwitchedFrom>,
-    /// Runs inside its own Cove VM (`runo-<id>`) instead of directly on this machine.
-    /// Replaced by `connection`; kept so older saves load.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub cove: bool,
     /// Where the session runs: a connection's id, or 0 for this machine.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub connection: u64,
@@ -428,14 +460,13 @@ pub struct Session {
     /// Proof of done for the last turn: its checks and the second opinion on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<crate::proof::Proof>,
-    /// The mission this session works for: one of its parts, or its own session.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub mission: u64,
+    /// What Crew keeps for this session when it is one of Crew's threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew: Option<crate::crew::ThreadInfo>,
 }
 
 /// A prompt waiting for the agent, with the images attached to it.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
-#[serde(from = "SavedQueued")]
 pub struct Queued {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -451,34 +482,11 @@ impl Queued {
     }
 }
 
-/// Older saves keep queued prompts as plain strings.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SavedQueued {
-    Text(String),
-    Full {
-        text: String,
-        #[serde(default)]
-        images: Vec<String>,
-    },
-}
-
-impl From<SavedQueued> for Queued {
-    fn from(saved: SavedQueued) -> Self {
-        match saved {
-            SavedQueued::Text(text) => Queued::new(text, Vec::new()),
-            SavedQueued::Full { text, images } => Queued::new(text, images),
-        }
-    }
-}
-
 /// What a switch replaced, enough to undo it before anything is sent.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
 pub struct SwitchedFrom {
     pub provider: String,
     pub agent_session: String,
-    pub model: String,
-    pub mode: String,
     pub opts: HashMap<String, String>,
     pub conversation_start: usize,
     pub carried: String,
@@ -558,13 +566,14 @@ pub struct State {
     /// Cost reported by the agents per day ("%Y-%m-%d"), in US cents; the last 31 days.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub spend: std::collections::BTreeMap<String, f64>,
+    /// The same cost split by agent ("claude", "opencode"), for the Usage popover; the
+    /// last 31 days. Days from before it was kept have only the total in `spend`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub agent_spend: std::collections::BTreeMap<String, std::collections::BTreeMap<String, f64>>,
     /// Turns started and tokens reported per day ("%Y-%m-%d"), for the turn and token
     /// limits; the last 31 days, like `spend`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub day_use: std::collections::BTreeMap<String, DayUse>,
-    /// Goals planned into parts that agents work on at once.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub missions: Vec<crate::mission::Mission>,
 }
 
 /// What agents did on one day, across every session.
@@ -904,13 +913,29 @@ pub fn today() -> String {
 }
 
 impl State {
-    /// Add a turn's cost to `day`, keeping a month of days.
-    pub fn add_spend(&mut self, day: &str, cents: f64) {
+    /// Add a turn's cost to `day`, in total and for `provider`, keeping a month of days.
+    pub fn add_spend(&mut self, day: &str, provider: &str, cents: f64) {
         if cents <= 0.0 {
             return;
         }
         *self.spend.entry(day.to_string()).or_default() += cents;
         keep_month(&mut self.spend);
+        *self
+            .agent_spend
+            .entry(day.to_string())
+            .or_default()
+            .entry(provider.to_string())
+            .or_default() += cents;
+        keep_month(&mut self.agent_spend);
+    }
+
+    /// What `provider` reported spending on `day`, in cents.
+    pub fn agent_spend_on(&self, day: &str, provider: &str) -> f64 {
+        self.agent_spend
+            .get(day)
+            .and_then(|by| by.get(provider))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Count a turn started on `day`, keeping a month of days.
@@ -1071,15 +1096,11 @@ impl State {
         Self::load_from(&state_path())
     }
 
-    /// Load the state whose index is at `path`, splitting a single-file state from
-    /// before into one file per session (the old file is kept as a backup).
+    /// Load the state whose index is at `path`, with the session files next to it.
     pub fn load_from(path: &Path) -> Self {
         let root = path.parent().unwrap_or(Path::new("."));
         let mut state = match crate::persist::read(path) {
-            Ok((mut state, mut written, old)) => {
-                if old {
-                    crate::persist::migrate(path, &mut state, &mut written);
-                }
+            Ok((state, written)) => {
                 crate::persist::seed(root, written);
                 state
             }
@@ -1138,14 +1159,15 @@ impl State {
     }
 }
 
+#[cfg(test)]
 impl State {
-    /// Sample workspace shown until the first real project is added.
-    pub fn demo() -> Self {
+    /// Five projects and seven sessions for tests.
+    pub fn sample() -> Self {
         // Each sample project gets its own color so the sidebar shows the project rails.
         let project = |id: u64, name: &str| Project {
             id,
             name: name.into(),
-            path: format!("/demo/{name}"),
+            path: format!("/sample/{name}"),
             color: ["blue", "violet", "teal", "orange", "pink"][(id as usize - 1) % 5].into(),
             ..Default::default()
         };
@@ -1158,8 +1180,6 @@ impl State {
                 branch: branch.into(),
                 dir: String::new(),
                 isolated: true,
-                mode: default_mode(),
-                model: String::new(),
                 opts: HashMap::new(),
                 status,
                 messages,
@@ -1248,7 +1268,7 @@ impl State {
             ],
             ..Default::default()
         };
-        // Show the inbox and pinning in the demo.
+        // One unread and one pinned session.
         state.sessions[1].unread = true;
         state.sessions[2].pinned = true;
         state
@@ -1256,8 +1276,41 @@ impl State {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_folder_counts_only_what_the_agent_changed() {
+        let change = |path: &str| crate::git::Change {
+            path: path.into(),
+            status: "A".into(),
+            added: 1,
+            removed: 0,
+            staged: false,
+            unstaged: true,
+            binary: false,
+        };
+        let mut reply = Message::new(Role::Agent, "Done.");
+        reply.changed = vec!["src/lib.rs".into()];
+        let mut session = Session {
+            messages: vec![
+                Message::new(Role::User, "Fix it"),
+                reply,
+                Message::new(Role::User, "Did you change any files?"),
+                Message::new(Role::Agent, "No."),
+            ],
+            ..Default::default()
+        };
+        let folder = vec![change("src/lib.rs"), change("architecture/model.toml")];
+        let touched = session.touched();
+        let mine = only_touched(folder.clone(), touched.as_ref());
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].path, "src/lib.rs");
+        // An isolated session owns its worktree, so everything in it counts.
+        session.isolated = true;
+        assert_eq!(session.touched(), None);
+        assert_eq!(only_touched(folder, None).len(), 2);
+    }
 
     #[test]
     fn schedules_say_when_they_run_next() {
@@ -1293,8 +1346,7 @@ mod tests {
 
     #[test]
     fn picking_a_model_resets_its_effort_and_speed() {
-        let mut session = State::demo().sessions[0].clone();
-        session.model = "old".into();
+        let mut session = State::sample().sessions[0].clone();
         session.opts.insert("effort".into(), "high".into());
         session.opts.insert("tier".into(), "priority".into());
         session.opts.insert("mode".into(), "read-only".into());
@@ -1303,7 +1355,7 @@ mod tests {
         assert_eq!(sel.get("model").map(String::as_str), Some("gpt-5.5"));
         assert!(!sel.contains_key("effort") && !sel.contains_key("tier"));
         assert_eq!(sel.get("mode").map(String::as_str), Some("read-only"));
-        // The agent's default is an explicit empty pick, not a fall back to the old model.
+        // The agent's default is an explicit empty pick.
         session.set_model(String::new());
         assert_eq!(
             session.selections().get("model").map(String::as_str),
@@ -1315,7 +1367,7 @@ mod tests {
     fn saves_and_loads_round_trip() {
         let dir = temp("roundtrip");
         let path = dir.join("state.json");
-        let mut state = State::demo();
+        let mut state = State::sample();
         state.sessions[1].agent_session = "abc".into();
         write_json(&path, &state);
         let loaded = State::load_from(&path);
@@ -1331,7 +1383,7 @@ mod tests {
     fn running_sessions_load_as_interrupted() {
         let dir = temp("interrupted");
         let path = dir.join("state.json");
-        write_json(&path, &State::demo());
+        write_json(&path, &State::sample());
         let loaded = State::load_from(&path);
         let session = loaded.session(11).unwrap();
         assert!(session.status == Status::Failed);
@@ -1349,7 +1401,7 @@ mod tests {
     fn turns_on_connections_stay_running_across_restarts() {
         let dir = temp("remote-turn");
         let path = dir.join("state.json");
-        let mut state = State::demo();
+        let mut state = State::sample();
         let session = state.session_mut(11).unwrap();
         session.connection = 3;
         session.remote_turn = true;
@@ -1396,28 +1448,8 @@ mod tests {
     }
 
     #[test]
-    fn older_state_files_still_load() {
-        let json = r#"{"next_id":3,"projects":[{"id":1,"name":"p","path":"/p"}],
-            "sessions":[{"id":2,"project_id":1,"title":"t","provider":"claude","branch":"b",
-            "dir":"/p","isolated":false,"model":"opus","status":"Done",
-            "messages":[{"role":"User","text":"hi"}]}]}"#;
-        let state: State = serde_json::from_str(json).unwrap();
-        let session = state.session(2).unwrap();
-        assert_eq!(session.mode, "edit");
-        assert_eq!(
-            session.selections().get("model").map(String::as_str),
-            Some("opus")
-        );
-        assert_eq!(
-            session.selections().get("mode").map(String::as_str),
-            Some("edit")
-        );
-        assert!(session.agent_session.is_empty());
-    }
-
-    #[test]
     fn switching_agents_starts_a_new_conversation() {
-        let mut state = State::demo();
+        let mut state = State::sample();
         let session = state.session_mut(12).unwrap();
         session.opts.insert("model".into(), "gpt".into());
         session.agent_session = "id".into();
@@ -1457,8 +1489,10 @@ mod tests {
     #[test]
     fn steps_run_until_finished_and_keep_failures() {
         let mut m = Message::new(Role::Agent, "");
-        m.steps = vec!["Ran sleep 60".into(), "Ran false".into()];
-        m.running_steps = vec![(0, "a".into()), (1, "b".into())];
+        m.steps = vec![
+            ToolStep::running("a", "Bash", "Ran sleep 60"),
+            ToolStep::running("b", "Bash", "Ran false"),
+        ];
         assert_eq!(m.step_state(0, true), StepState::Running);
         assert_eq!(
             m.step_state(0, false),
@@ -1471,18 +1505,30 @@ mod tests {
         assert!(m.finish_step("a", true));
         assert_eq!(m.step_state(0, true), StepState::Done);
         let saved: Message = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
-        assert_eq!(saved.failed_steps, [1]);
-        assert!(saved.running_steps.is_empty());
+        assert_eq!(saved.step_state(1, false), StepState::Failed);
+        assert_eq!(saved.steps[0].kind, crate::harness::ToolKind::Shell);
     }
 
     #[test]
-    fn queued_prompts_load_from_older_saves() {
-        let old: Vec<Queued> =
-            serde_json::from_str(r#"["Fix it",{"text":"Look","images":["a.png"]}]"#).unwrap();
-        assert_eq!(old[0], Queued::new("Fix it", Vec::new()));
-        assert_eq!(old[1].images, ["a.png"]);
-        let saved = serde_json::to_string(&old[0]).unwrap();
-        assert_eq!(saved, r#"{"text":"Fix it"}"#);
+    fn unfinished_steps_settle_as_done_when_the_turn_ends() {
+        let mut m = Message::new(Role::Agent, "");
+        m.steps = vec![ToolStep::running("a", "Bash", "Ran sleep 60")];
+        m.settle_steps();
+        assert_eq!(m.steps[0].state, StepState::Done);
+        assert!(!m.finish_step("a", false), "nothing is left running");
+    }
+
+    #[test]
+    fn steps_saved_as_plain_labels_still_load() {
+        let saved = r#"{"role":"Agent","text":"ok","steps":["Read a.rs",
+            {"label":"Ran false","kind":"shell","state":"failed"}],"failed_steps":[1]}"#;
+        let m: Message = serde_json::from_str(saved).unwrap();
+        assert_eq!(
+            m.step_labels().collect::<Vec<_>>(),
+            ["Read a.rs", "Ran false"]
+        );
+        assert_eq!(m.step_state(0, false), StepState::Done);
+        assert_eq!(m.step_state(1, false), StepState::Failed);
     }
 
     #[test]
@@ -1545,14 +1591,18 @@ mod tests {
     #[test]
     fn spend_adds_up_per_day_and_keeps_a_month() {
         let mut state = State::default();
-        state.add_spend("2026-10-13", 12.5);
-        state.add_spend("2026-10-13", 7.5);
-        state.add_spend("2026-10-13", 0.0);
+        state.add_spend("2026-10-13", "claude", 12.5);
+        state.add_spend("2026-10-13", "opencode", 7.5);
+        state.add_spend("2026-10-13", "claude", 0.0);
         assert_eq!(state.spend.get("2026-10-13"), Some(&20.0));
+        assert_eq!(state.agent_spend_on("2026-10-13", "claude"), 12.5);
+        assert_eq!(state.agent_spend_on("2026-10-13", "opencode"), 7.5);
+        assert_eq!(state.agent_spend_on("2026-10-13", "codex"), 0.0);
         for day in 1..=40 {
-            state.add_spend(&format!("2026-11-{day:02}"), 1.0);
+            state.add_spend(&format!("2026-11-{day:02}"), "claude", 1.0);
         }
         assert_eq!(state.spend.len(), 31);
+        assert_eq!(state.agent_spend.len(), 31);
         assert!(!state.spend.contains_key("2026-10-13"));
     }
 
@@ -1607,10 +1657,44 @@ mod tests {
                 tokens: 42
             }
         );
-        // A state saved before these counts reads as none.
-        let mut saved = serde_json::to_value(&back).unwrap();
-        saved.as_object_mut().unwrap().remove("day_use");
-        let old: State = serde_json::from_value(saved).unwrap();
-        assert!(old.day_use.is_empty());
+    }
+
+    /// Held by any test that changes process-wide environment variables,
+    /// since cargo runs tests on parallel threads.
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Puts the named variables back as they were when dropped.
+    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, old) in &self.0 {
+                match old {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn data_dir_uses_runo_home_else_falls_back_to_home_dot_runo() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = RestoreEnv(
+            ["RUNO_HOME", "HOME"]
+                .into_iter()
+                .map(|k| (k, std::env::var_os(k)))
+                .collect(),
+        );
+        let base = std::env::temp_dir().join(format!("runo-data-dir-{}", std::process::id()));
+
+        let runo_home = base.join("runo-home");
+        std::env::set_var("RUNO_HOME", &runo_home);
+        assert_eq!(data_dir(), runo_home);
+
+        let home = base.join("home");
+        std::env::remove_var("RUNO_HOME");
+        std::env::set_var("HOME", &home);
+        assert_eq!(data_dir(), home.join(".runo"));
     }
 }

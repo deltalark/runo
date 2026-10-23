@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Folders never read for the map: build output, dependencies and tool state.
-const SKIP_DIRS: [&str; 14] = [
+const SKIP_DIRS: [&str; 16] = [
     "node_modules",
     "target",
     "dist",
@@ -23,6 +23,9 @@ const SKIP_DIRS: [&str; 14] = [
     "site-packages",
     "third_party",
     "worktrees",
+    // Test inputs are examples, not the project.
+    "fixtures",
+    "testdata",
 ];
 
 /// Files read at most, so a huge repository still maps quickly.
@@ -70,6 +73,8 @@ pub(crate) struct ProjectMap {
     pub partial: bool,
     /// Folders holding Runo's own design screens and diagrams, left out of the code.
     pub runo: Vec<String>,
+    /// What the project runs, from Docker Compose, Terraform, ECS and Copilot files.
+    pub infra: crate::archdraw::infra::Infra,
 }
 
 /// The language of a source file, by extension.
@@ -931,6 +936,11 @@ pub(crate) fn scan(root: &Path) -> ProjectMap {
             modules,
         });
     }
+    let project = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    map.infra = crate::archdraw::infra::read(root, &files, &project);
     // Without a manifest, the project is mapped by its files and what they load: a
     // plain site, scripts or a folder of sources.
     if map.packages.is_empty() {
@@ -1559,6 +1569,7 @@ impl RunoApp {
         if let Some((agent, model)) = self.canvas_agent(project.id, View::Architecture) {
             editor.update(cx, |e, _| e.use_agent(agent, model));
         }
+        editor.update(cx, |e, cx| e.refresh_uncommitted(cx));
         self.arch.editors.insert(project.id, editor);
     }
 
@@ -1573,7 +1584,7 @@ impl RunoApp {
         else {
             return;
         };
-        if self.demo || !self.arch.scanning.insert(pid) {
+        if !self.arch.scanning.insert(pid) {
             return;
         }
         self.bg(
@@ -1588,7 +1599,7 @@ impl RunoApp {
 
     /// Write the notes back to their file as they change.
     fn arch_notes_changed(&mut self, cx: &mut Context<Self>) {
-        if self.arch.loading || self.demo {
+        if self.arch.loading {
             return;
         }
         let Some(file) = self.arch.file.clone() else {
@@ -1673,7 +1684,7 @@ fn chip(text: String, color: u32) -> Div {
         .items_center()
         .rounded_full()
         .border_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .text_size(px(11.5))
         .text_color(rgb(color))
         .child(text)
@@ -1709,7 +1720,7 @@ impl RunoApp {
             .v_flex()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_canvas()))
             .overflow_hidden()
             .child(
@@ -1813,7 +1824,7 @@ impl RunoApp {
                         .gap_2()
                         .text_size(px(12.))
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(
                             div()
                                 .w(px(150.))
@@ -1846,6 +1857,16 @@ impl RunoApp {
         }
         card = card.child(body);
         card.into_any_element()
+    }
+
+    /// Whether the diagram editor is open, which paints its own islands on the frame.
+    pub(crate) fn arch_diagram_open(&self) -> bool {
+        !self.all_scope()
+            && !self.arch.code_map
+            && self.arch.project.is_some_and(|pid| {
+                self.state.projects.iter().any(|p| p.id == pid)
+                    && self.arch.editors.contains_key(&pid)
+            })
     }
 
     pub(crate) fn architecture_view(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1895,7 +1916,7 @@ impl RunoApp {
             .p_4()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_raised()))
             .child(
                 div()
@@ -2014,7 +2035,7 @@ impl RunoApp {
                     .gap_1()
                     .rounded_full()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .text_size(px(12.))
                     .text_color(rgb(c_secondary()))
@@ -2033,7 +2054,7 @@ impl RunoApp {
             .p_4()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_raised()))
             .child(
                 div()
@@ -2087,7 +2108,7 @@ impl RunoApp {
             .v_flex()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_raised()))
             .overflow_hidden()
             .child(
@@ -2098,7 +2119,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(
                         div()
                             .flex_1()
@@ -2149,7 +2170,7 @@ impl RunoApp {
                     .px_4()
                     .py_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .text_size(px(11.5))
                     .text_color(rgb(if self.arch.error.is_some() {
                         c_red()
@@ -2219,15 +2240,16 @@ impl RunoApp {
             .h_full()
             .v_flex()
             .child(
+                // The header sits on the frame, so the canvas and the inspector below it
+                // read as two islands.
                 div()
                     .flex_none()
-                    .h(px(48.))
+                    .h(px(46.))
                     .px_4()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .bg(settings::frame())
                     .child(icon(Mode::Architecture.glyph(), 16., c_blue()))
                     .child(
                         div()
@@ -2240,7 +2262,26 @@ impl RunoApp {
                     .children(self.canvas_chats(pid, View::Architecture, cx))
                     .child(self.arch_tabs(cx)),
             )
-            .child(div().flex_1().min_h_0().child(editor))
+            .child(
+                shell::island(
+                    div()
+                        .size_full()
+                        .relative()
+                        .flex()
+                        .child(editor)
+                        // A chat opened from the Chats menu floats over the canvas's right.
+                        .children(self.canvas_chat_panel(
+                            pid,
+                            View::Architecture,
+                            (8., 8., 8.),
+                            cx,
+                        )),
+                    rgba(0),
+                    [true, false, false, false],
+                )
+                .flex_1()
+                .min_h_0(),
+            )
             .into_any_element()
     }
 }

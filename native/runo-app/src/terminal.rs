@@ -243,9 +243,6 @@ impl RunoApp {
     /// Run a quick command in its own tab of the current session. Running one again shows
     /// it while it is still going, and otherwise starts it over in the same tab.
     pub(crate) fn run_task(&mut self, name: String, command: String, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(session) = self.selected else {
             return;
         };
@@ -325,9 +322,6 @@ impl RunoApp {
 
     /// Send the end of a failed task's output to its session's agent.
     pub(crate) fn ask_fix(&mut self, shell: u64, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(task) = self.tasks.get(&shell) else {
             return;
         };
@@ -586,19 +580,29 @@ impl RunoApp {
         let tip = task.map(|t| t.command.clone());
         div()
             .flex_none()
-            .h(px(22.))
-            .pl_2()
+            .pl(px(10.))
             .pr_1()
             .flex()
             .items_center()
             .gap_1()
-            .rounded_md()
             .text_size(px(12.))
             .font_weight(FontWeight::MEDIUM)
+            .relative()
+            // The open tab is cut from the terminal's island below the strip.
             .when(selected, |el| {
-                el.bg(tint(c_active())).text_color(rgb(c_text()))
+                el.h(px(29.))
+                    .child(shell::strip_cut("term"))
+                    .text_color(rgb(c_text()))
             })
-            .when(!selected, |el| el.text_color(rgb(c_muted())))
+            .when(!selected, |el| {
+                let (rest, hover) = shell::tab_chip();
+                el.h(px(24.))
+                    .mb(px(3.))
+                    .rounded(px(7.))
+                    .bg(rest)
+                    .text_color(rgb(c_secondary()))
+                    .hover(move |el| el.bg(hover))
+            })
             .child(
                 div()
                     .id(SharedString::from(format!("shell-tab-{id}")))
@@ -683,7 +687,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .text_size(px(12.))
                     .child(icon(
                         if ok {
@@ -935,7 +939,7 @@ impl RunoApp {
                 .rounded_md()
                 .bg(float(c_raised()))
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .text_size(px(12.))
                 .child(icon(IconName::Search, 12., c_muted()))
                 .child(

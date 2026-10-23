@@ -176,7 +176,7 @@ fn now_ms() -> u64 {
 }
 
 impl Shell {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(all(test, unix)), allow(dead_code))]
     /// Start the user's login shell in `dir`. `wake` is called (at most once per
     /// repaint) when there is new output, and once more when the shell exits.
     pub fn spawn(
@@ -234,6 +234,16 @@ impl Shell {
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
         }
+        // Light text on a dark background, or the reverse, for programs that read it
+        // rather than ask the terminal.
+        cmd.env(
+            "COLORFGBG",
+            if crate::settings::is_dark() {
+                "15;0"
+            } else {
+                "0;15"
+            },
+        );
         let child = Arc::new(Mutex::new(
             pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?,
         ));
@@ -629,6 +639,10 @@ enum Query {
     Primary,
     /// `CSI > c`: which version?
     Secondary,
+    /// `OSC 10 ; ?` or `OSC 11 ; ?`: what are your text and background colours? CLIs
+    /// such as Claude Code ask, to pick shades that suit the theme; one left guessing
+    /// takes the terminal for a light one and paints light panels over a dark theme.
+    Color { background: bool, bel: bool },
 }
 
 impl Query {
@@ -643,6 +657,22 @@ impl Query {
             }
             Query::Primary => b"\x1b[?62;22c".to_vec(),
             Query::Secondary => b"\x1b[>0;10;1c".to_vec(),
+            Query::Color { background, bel } => {
+                let c = if background {
+                    crate::settings::c_term_bg()
+                } else {
+                    crate::settings::c_text()
+                };
+                // xterm's form: each channel as four hex digits.
+                let ch = |shift: u32| (c >> shift) & 0xff;
+                let (r, g, b) = (ch(16), ch(8), ch(0));
+                format!(
+                    "\x1b]{};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}{}",
+                    if background { 11 } else { 10 },
+                    if bel { "\x07" } else { "\x1b\\" }
+                )
+                .into_bytes()
+            }
         }
     }
 }
@@ -652,7 +682,8 @@ impl Query {
 /// one arrives, so a terminal that stays silent looks frozen, Ctrl-C included.
 #[derive(Default)]
 struct Queries {
-    /// 0 outside a sequence, 1 after ESC, 2 inside a CSI sequence.
+    /// 0 outside a sequence, 1 after ESC, 2 inside a CSI sequence, 3 inside an OSC
+    /// string, 4 after an ESC inside one.
     state: u8,
     params: Vec<u8>,
 }
@@ -661,6 +692,31 @@ impl Queries {
     /// Take one byte of output; returns the question it completes, if any.
     fn feed(&mut self, b: u8) -> Option<Query> {
         match (self.state, b) {
+            (3, 0x07) | (4, b'\\') => {
+                let bel = self.state == 3;
+                self.state = 0;
+                match self.params.as_slice() {
+                    b"10;?" => Some(Query::Color {
+                        background: false,
+                        bel,
+                    }),
+                    b"11;?" => Some(Query::Color {
+                        background: true,
+                        bel,
+                    }),
+                    _ => None,
+                }
+            }
+            (3, 0x1b) => {
+                self.state = 4;
+                None
+            }
+            (3, _) => {
+                if self.params.len() < 16 {
+                    self.params.push(b);
+                }
+                None
+            }
             (_, 0x1b) => {
                 self.state = 1;
                 self.params.clear();
@@ -668,6 +724,10 @@ impl Queries {
             }
             (1, b'[') => {
                 self.state = 2;
+                None
+            }
+            (1, b']') => {
+                self.state = 3;
                 None
             }
             (2, 0x20..=0x3f) => {
@@ -776,16 +836,8 @@ pub fn key_bytes(
 
 /// xterm's 256-colour palette, with the first 16 tuned to the app's theme.
 pub fn palette(i: u8, dark: bool) -> u32 {
-    const DARK: [u32; 16] = [
-        0x1e1e22, 0xf87171, 0x4ade80, 0xfacc15, 0x60a5fa, 0xc084fc, 0x22d3ee, 0xd4d4d8, 0x71717a,
-        0xfca5a5, 0x86efac, 0xfde047, 0x93c5fd, 0xd8b4fe, 0x67e8f9, 0xfafafa,
-    ];
-    const LIGHT: [u32; 16] = [
-        0x18181b, 0xdc2626, 0x16a34a, 0xca8a04, 0x2563eb, 0x9333ea, 0x0891b2, 0x52525b, 0x71717a,
-        0xef4444, 0x22c55e, 0xeab308, 0x3b82f6, 0xa855f7, 0x06b6d4, 0x27272a,
-    ];
     match i {
-        0..=15 => (if dark { DARK } else { LIGHT })[i as usize],
+        0..=15 => crate::themes::get(dark).ansi[i as usize],
         16..=231 => {
             let i = i - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v as u32 };
@@ -958,6 +1010,7 @@ fn set_size_keeping_cursor(p: &mut vt100::Parser, rows: u16, cols: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1029,6 +1082,20 @@ mod tests {
         assert_eq!(
             found(&mut q, b"\x1b[31m\x1b[2J\x1b[6;1H\x1b]0;t\x07"),
             vec![]
+        );
+        // Colour questions, ended by BEL or by ST.
+        assert_eq!(
+            found(&mut q, b"\x1b]11;?\x07\x1b]10;?\x1b\\"),
+            vec![
+                Query::Color {
+                    background: true,
+                    bel: true
+                },
+                Query::Color {
+                    background: false,
+                    bel: false
+                }
+            ]
         );
     }
 

@@ -118,15 +118,9 @@ pub(crate) const SHORTCUTS: [Shortcut; 33] = [
     },
     Shortcut {
         id: "go-review",
-        title: "Git: To ship",
-        desc: "Go to Git's To ship tab: check and ship the work agents finished.",
+        title: "Git: Changes",
+        desc: "Go to Git's Changes tab: check and ship the work agents finished.",
         default: &["secondary-3"],
-    },
-    Shortcut {
-        id: "go-missions",
-        title: "Missions",
-        desc: "Go to Missions: one goal, planned into parts that several agents work on at once.",
-        default: &["secondary-9"],
     },
     Shortcut {
         id: "go-reviews",
@@ -157,6 +151,12 @@ pub(crate) const SHORTCUTS: [Shortcut; 33] = [
         title: "Architecture",
         desc: "Go to Architecture on the mode rail.",
         default: &["secondary-8"],
+    },
+    Shortcut {
+        id: "go-data",
+        title: "Data",
+        desc: "Go to Data: the project's databases.",
+        default: &["secondary-9"],
     },
     Shortcut {
         id: "go-notes",
@@ -254,10 +254,10 @@ fn binding_in(id: &str, keys: &str, context: &str) -> Option<KeyBinding> {
         "go-sessions" => KeyBinding::new(keys, GoSessions, context),
         "go-design" => KeyBinding::new(keys, GoDesign, context),
         "go-architecture" => KeyBinding::new(keys, GoArchitecture, context),
+        "go-data" => KeyBinding::new(keys, GoData, context),
         "go-playbooks" => KeyBinding::new(keys, GoPlaybooks, context),
         "go-reviews" => KeyBinding::new(keys, GoReviews, context),
         "go-review" => KeyBinding::new(keys, GoReview, context),
-        "go-missions" => KeyBinding::new(keys, GoMissions, context),
         "go-history" => KeyBinding::new(keys, GoHistory, context),
         "go-notes" => KeyBinding::new(keys, GoNotes, context),
         "go-inbox" => KeyBinding::new(keys, GoInbox, context),

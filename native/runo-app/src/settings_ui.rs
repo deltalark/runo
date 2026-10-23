@@ -10,6 +10,8 @@ use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SettingsPage {
+    /// Where Settings opens: a card per area with what stands out in it.
+    Overview,
     General,
     Appearance,
     Terminal,
@@ -24,56 +26,103 @@ pub enum SettingsPage {
     Worktrees,
     Connections,
     Phone,
+    Safety,
 }
 
-impl SettingsPage {
-    const GROUPS: [(&'static str, &'static [SettingsPage]); 3] = [
-        (
-            "App",
-            &[
-                SettingsPage::General,
-                SettingsPage::Appearance,
-                SettingsPage::Terminal,
-                SettingsPage::Keybindings,
-            ],
-        ),
-        (
-            "Agents",
-            &[
-                SettingsPage::Chat,
+/// The tabs across the top of Settings. Each holds one or more pages, picked from the
+/// row under the tabs when there is more than one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsTab {
+    Overview,
+    General,
+    Look,
+    Agents,
+    Connections,
+    Safety,
+    Keys,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 7] = [
+        SettingsTab::Overview,
+        SettingsTab::General,
+        SettingsTab::Look,
+        SettingsTab::Agents,
+        SettingsTab::Connections,
+        SettingsTab::Safety,
+        SettingsTab::Keys,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::General => "General",
+            Self::Look => "Look",
+            Self::Agents => "Agents",
+            Self::Connections => "Connections",
+            Self::Safety => "Safety",
+            Self::Keys => "Keys",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Overview => IconName::LayoutGrid,
+            Self::General => IconName::Settings,
+            Self::Look => IconName::Palette,
+            Self::Agents => IconName::Layers,
+            Self::Connections => IconName::Server,
+            Self::Safety => IconName::ShieldCheck,
+            Self::Keys => IconName::Keyboard,
+        }
+    }
+
+    /// The tab's pages, in order; the first is where the tab opens.
+    fn pages(self) -> &'static [SettingsPage] {
+        match self {
+            Self::Overview => &[SettingsPage::Overview],
+            Self::General => &[SettingsPage::General, SettingsPage::Worktrees],
+            Self::Look => &[SettingsPage::Appearance, SettingsPage::Terminal],
+            Self::Agents => &[
                 SettingsPage::Providers,
+                SettingsPage::Chat,
                 SettingsPage::Mcp,
                 SettingsPage::Skills,
                 SettingsPage::Hooks,
             ],
-        ),
-        (
-            "Workspace",
-            &[
-                SettingsPage::Connections,
-                SettingsPage::Phone,
-                SettingsPage::Worktrees,
-            ],
-        ),
-    ];
+            Self::Connections => &[SettingsPage::Connections, SettingsPage::Phone],
+            Self::Safety => &[SettingsPage::Safety],
+            Self::Keys => &[SettingsPage::Keybindings],
+        }
+    }
 
-    /// The pages in the Settings sidebar, in order.
+    fn of(page: SettingsPage) -> Self {
+        match page {
+            SettingsPage::Agent(_) => Self::Agents,
+            page => Self::ALL
+                .into_iter()
+                .find(|t| t.pages().contains(&page))
+                .unwrap_or(Self::Overview),
+        }
+    }
+}
+
+impl SettingsPage {
+    /// Every page with a tab of its own or a place under one, in order.
     pub(crate) fn pages() -> impl Iterator<Item = SettingsPage> {
-        Self::GROUPS
-            .iter()
-            .flat_map(|(_, pages)| pages.iter().copied())
+        SettingsTab::ALL
+            .into_iter()
+            .flat_map(|t| t.pages().iter().copied())
     }
 
     /// Every page, including each agent's, for searching.
     fn all() -> impl Iterator<Item = SettingsPage> {
-        Self::GROUPS
-            .iter()
-            .flat_map(|(_, pages)| pages.iter().copied())
-            .chain(agent::PROVIDERS.iter().map(|p| SettingsPage::Agent(p.id)))
+        Self::pages().chain(agent::PROVIDERS.iter().map(|p| SettingsPage::Agent(p.id)))
     }
 
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::Overview => "Overview",
             Self::General => "General",
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
@@ -87,11 +136,13 @@ impl SettingsPage {
             Self::Worktrees => "Worktrees",
             Self::Connections => "Connections",
             Self::Phone => "Phone",
+            Self::Safety => "Safety",
         }
     }
 
     fn subtitle(self) -> &'static str {
         match self {
+            Self::Overview => "Everything at a glance. Pick a card or a tab to change it.",
             Self::General => "Alerts, the built-in browser, the Runo assistant, motion and how deleting works.",
             Self::Appearance => "Theme, glass, fonts and how wide conversations run.",
             Self::Terminal => "Text size, font, scrolling and mouse behavior in the terminal panel and agent CLIs.",
@@ -108,6 +159,7 @@ impl SettingsPage {
             Self::Worktrees => "Where isolated sessions and Runo's data live.",
             Self::Connections => "Places sessions can run besides this machine: Cove VMs and your own servers. Sessions can move between them at any time.",
             Self::Phone => "Follow every session from the Runo mobile app and answer it: permission requests, plans, questions, follow-ups and Stop.",
+            Self::Safety => "Keep agents from running away with time, money or tokens.",
         }
     }
 
@@ -120,6 +172,7 @@ impl SettingsPage {
 
     pub(crate) fn icon(self) -> IconName {
         match self {
+            Self::Overview => IconName::LayoutGrid,
             Self::General => IconName::Settings,
             Self::Appearance => IconName::Palette,
             Self::Terminal => IconName::SquareTerminal,
@@ -132,6 +185,7 @@ impl SettingsPage {
             Self::Worktrees => IconName::GitBranch,
             Self::Connections => IconName::Server,
             Self::Phone => IconName::Smartphone,
+            Self::Safety => IconName::ShieldCheck,
             _ => IconName::Bot,
         }
     }
@@ -140,6 +194,7 @@ impl SettingsPage {
 type SetBool = Rc<dyn Fn(&mut AppSettings, bool)>;
 type SetStr = Rc<dyn Fn(&mut AppSettings, String)>;
 type Action = Rc<dyn Fn(&mut RunoApp, &mut Context<RunoApp>)>;
+type Listener = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 enum Ctl {
     Switch(bool, SetBool),
@@ -152,6 +207,8 @@ enum Ctl {
         set: SetStr,
     },
     Accent(String),
+    /// The window glass styles as cards, each showing a small window over a desktop.
+    Glass(String),
     Button(String, Action),
     /// Several buttons side by side; the last one is the primary.
     Buttons(Vec<(String, Action)>),
@@ -319,6 +376,43 @@ fn browser_options(chosen: &str) -> Vec<(String, String)> {
         let name = browser_engine::browser_name(&p);
         (p.to_string_lossy().to_string(), name)
     }));
+    out
+}
+
+/// The agents the assistant can answer with: the default, then each one installed, and
+/// the chosen one even if it has since been removed.
+fn assistant_agents(st: &AppSettings) -> Vec<(String, String)> {
+    let mut out = vec![(String::new(), "Same as new sessions".to_string())];
+    out.extend(
+        agent::PROVIDERS
+            .iter()
+            .filter(|p| {
+                p.id == st.assistant_agent || agent::available(p.bin, &st.agent(p.id).binary)
+            })
+            .map(|p| (p.id.to_string(), p.name.to_string())),
+    );
+    out
+}
+
+/// The models the assistant's agent offers. The first means the agent's default, or on
+/// Claude, a fast small model.
+fn assistant_models(st: &AppSettings) -> Vec<(String, String)> {
+    let i = crate::assistant::assistant_provider(st);
+    let first = if agent::PROVIDERS[i].id == "claude" {
+        "Fast default · Haiku"
+    } else {
+        "Default"
+    };
+    let mut out = vec![(String::new(), first.to_string())];
+    out.extend(
+        crate::agent_pick::AgentPick::models(i)
+            .into_iter()
+            .filter(|c| !c.value.is_empty())
+            .map(|c| (c.value, c.label)),
+    );
+    if !st.assistant_model.is_empty() && !out.iter().any(|(v, _)| *v == st.assistant_model) {
+        out.push((st.assistant_model.clone(), st.assistant_model.clone()));
+    }
     out
 }
 
@@ -679,9 +773,12 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("Getting started", "A one-minute walk through the window and what each part does.", vec![
                 row("Welcome tour", "Highlights each part of Runo with a short explanation. Also in the palette as Take the tour.", Ctl::Button("Take the tour".into(), Rc::new(|this, _| this.start_tour()))),
             ]),
-            section("Runo assistant", "A Runo mark in the corner of the window that answers questions about Runo from its built-in guide. It never changes anything.", vec![
+            section("Runo assistant", "A Runo mark in the corner of the window that answers questions about Runo from its built-in guide and what's happening in the app, and asks before changing anything.", vec![
                 switch_row("Show the Runo assistant", "Click the mark or press the Ask Runo shortcut, then ask how to do something. Off, the mark is hidden.", st.assistant, |s, v| s.assistant = v),
-                row("Answers with", "Your default agent writes answers from the guide on a fast model, and it counts toward usage. Guide only answers offline with the best matching article.", Ctl::Dropdown(options(&[("agent", "Default agent"), ("guide", "Guide only")]), st.assistant_answers.clone(), Rc::new(|s, v| s.assistant_answers = v))),
+                row("Answers with", "An agent writes answers from the guide and what's happening in the app, and can offer to do things for you; it counts toward usage. Guide only answers offline with the best matching article.", Ctl::Dropdown(options(&[("agent", "An agent"), ("guide", "Guide only")]), st.assistant_answers.clone(), Rc::new(|s, v| s.assistant_answers = v))),
+                row("Assistant agent", "Which agent answers the assistant's questions.", Ctl::Dropdown(assistant_agents(st), st.assistant_agent.clone(), Rc::new(|s, v| { if s.assistant_agent != v { s.assistant_model.clear(); } s.assistant_agent = v; }))),
+                row("Assistant model", "The model it answers on. A small, fast one keeps answers quick and cheap.", Ctl::Dropdown(assistant_models(st), st.assistant_model.clone(), Rc::new(|s, v| s.assistant_model = v))),
+                switch_row("Nudges", "While the assistant is closed, its mark offers the next step when a run finishes, a race is ready to compare or the clash radar finds something.", st.assistant_nudges, |s, v| s.assistant_nudges = v),
             ]),
             section("Browser", "Show pages in the Browser tab with a headless copy of a Chromium-based browser on this machine (Chrome, Edge, Brave, Arc, Vivaldi, Opera and others), using its own profile.", vec![
                 switch_row("Built-in browser", "Adds the Browser tab: open your dev server beside the conversation and click and type in it. Off, the tab is hidden.", st.browser_enabled, |s, v| s.browser_enabled = v),
@@ -691,24 +788,28 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     None => row("Uses", "No Chromium-based browser found. Install Chrome, Edge, Brave or another, or set CHROME_PATH.", Ctl::Chip("Not found".into(), 1)),
                 },
             ]),
-            section("Alerts", "How Runo reaches you while you are looking somewhere else.", vec![
-                switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
-            ]),
-            section("Behavior", "Motion and safety around destructive actions.", vec![
+            section("Alerts", "How Runo reaches you while you are looking somewhere else.", {
+                let mut rows = vec![
+                    switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
+                ];
+                if cfg!(target_os = "macos") {
+                    rows.push(switch_row("Show Runo in the menu bar", "A Runo glyph by the clock counts what needs you and what's working. Click it to allow or stop agents and Ask Runo without opening the window.", st.menu_bar, |s, v| s.menu_bar = v));
+                    if st.menu_bar {
+                        rows.push(switch_row("Keep running in the menu bar", "⌘Q and closing the window hide Runo to the menu bar, and agents keep working. Quit from the menu bar to quit.", st.run_in_background, |s, v| s.run_in_background = v));
+                    }
+                }
+                rows
+            }),
+            section("Behavior", "Motion, sleep and how the sidebar groups sessions.", vec![
                 switch_row("Animations", "Fade, slide and pulse effects. Turn off for instant changes.", st.animations, |s, v| s.animations = v),
-                switch_row("Confirm before deleting", "Ask in a popup before deleting a session.", st.confirm_delete, |s, v| s.confirm_delete = v),
-                switch_row("Remove worktree with session", "Also delete the session's git worktree when the session is deleted. Uncommitted changes in it are lost.", st.remove_worktree_on_delete, |s, v| s.remove_worktree_on_delete = v),
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
                 switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
             ]),
-            section("Limits", "Keep agents from running away with time, money or tokens.", vec![
-                row("Flag a quiet agent after", "An agent that prints nothing for this long gets a card with Stop. A long build or test run can be quiet too.", Ctl::Dropdown(options(&[("5", "5 minutes"), ("10", "10 minutes"), ("20", "20 minutes"), ("60", "1 hour"), ("0", "Never")]), st.stuck_after_mins.to_string(), Rc::new(|s, v| s.stuck_after_mins = v.parse().unwrap_or(10)))),
-                row("Spending limit per session", &format!("Counts the cost agents report. Once a session reaches it, new turns wait until you raise the limit or send anyway. {}", agent::cost_note()), Ctl::Dropdown(options(&[("0", "No limit"), ("1", "$1"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100")]), st.session_limit_usd.to_string(), Rc::new(|s, v| s.session_limit_usd = v.parse().unwrap_or(0)))),
-                row("Spending limit per day", "Across every session. New turns wait once today's reported cost reaches it; agents that report no cost don't count toward it, so Turns per day and Tokens per day below hold them instead.", Ctl::Dropdown(options(&[("0", "No limit"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100"), ("250", "$250")]), st.daily_limit_usd.to_string(), Rc::new(|s, v| s.daily_limit_usd = v.parse().unwrap_or(0)))),
-                row("Turns per session", "Works for every agent. Once a session has had this many turns, its next one waits until you raise the limit or send anyway.", Ctl::Dropdown(options(&[("0", "No limit"), ("10", "10"), ("20", "20"), ("50", "50"), ("100", "100"), ("200", "200")]), st.session_turn_limit.to_string(), Rc::new(|s, v| s.session_turn_limit = v.parse().unwrap_or(0)))),
-                row("Turns per day", "Across every session and every agent. New turns wait once this many have started today.", Ctl::Dropdown(options(&[("0", "No limit"), ("25", "25"), ("50", "50"), ("100", "100"), ("200", "200"), ("500", "500")]), st.daily_turn_limit.to_string(), Rc::new(|s, v| s.daily_turn_limit = v.parse().unwrap_or(0)))),
-                row("Tokens per day", "Across every session. Counts the input and output tokens agents report, not cached ones; agents that report no tokens, such as Grok, don't count toward it. New turns wait once today's count reaches it.", Ctl::Dropdown(options(&[("0", "No limit"), ("1000", "1M"), ("5000", "5M"), ("10000", "10M"), ("25000", "25M"), ("50000", "50M"), ("100000", "100M")]), st.daily_token_limit_k.to_string(), Rc::new(|s, v| s.daily_token_limit_k = v.parse().unwrap_or(0)))),
-                row("Agents running at once", "Turns past this many wait for a free slot, shown as Waiting for a slot, and start in order.", Ctl::Dropdown(options(&[("0", "No cap"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("6", "6"), ("8", "8")]), st.max_running.to_string(), Rc::new(|s, v| s.max_running = v.parse().unwrap_or(0)))),
+            section("Rail", "Pin places out on the rail so they're one click away. The rest stay in its ⋯ menu.", vec![
+                switch_row("Playbooks", "Saved tasks you run in any project.", st.pinned("Playbooks"), |s, v| s.pin("Playbooks", v)),
+                switch_row("History", "Past Claude Code and Codex conversations on this machine.", st.pinned("History"), |s, v| s.pin("History", v)),
+                switch_row("Notes", "Each project's notes.", st.pinned("Notes"), |s, v| s.pin("Notes", v)),
+                switch_row("Inbox", "What needs you, also under the bell in the top bar.", st.pinned("Inbox"), |s, v| s.pin("Inbox", v)),
             ]),
             section("Updates", "Runo looks for a newer release on GitHub and offers to download it. Nothing installs without you.", vec![
                 switch_row("Check for Runo updates", "Checks at start and every few hours.", st.check_runo_updates, |s, v| s.check_runo_updates = v),
@@ -730,17 +831,43 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 ),
             ]),
         ],
+        SettingsPage::Overview => Vec::new(),
+        SettingsPage::Safety => vec![
+            section("Limits", "Once one is reached, new turns wait until you raise it or send anyway.", vec![
+                row("Flag a quiet agent after", "An agent that prints nothing for this long gets a card with Stop. A long build or test run can be quiet too.", Ctl::Dropdown(options(&[("5", "5 minutes"), ("10", "10 minutes"), ("20", "20 minutes"), ("60", "1 hour"), ("0", "Never")]), st.stuck_after_mins.to_string(), Rc::new(|s, v| s.stuck_after_mins = v.parse().unwrap_or(10)))),
+                row("Spending limit per session", &format!("Counts the cost agents report. Once a session reaches it, new turns wait until you raise the limit or send anyway. {}", agent::cost_note()), Ctl::Dropdown(options(&[("0", "No limit"), ("1", "$1"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100")]), st.session_limit_usd.to_string(), Rc::new(|s, v| s.session_limit_usd = v.parse().unwrap_or(0)))),
+                row("Spending limit per day", "Across every session. New turns wait once today's reported cost reaches it; agents that report no cost don't count toward it, so Turns per day and Tokens per day below hold them instead.", Ctl::Dropdown(options(&[("0", "No limit"), ("5", "$5"), ("10", "$10"), ("25", "$25"), ("50", "$50"), ("100", "$100"), ("250", "$250")]), st.daily_limit_usd.to_string(), Rc::new(|s, v| s.daily_limit_usd = v.parse().unwrap_or(0)))),
+                row("Turns per session", "Works for every agent. Once a session has had this many turns, its next one waits until you raise the limit or send anyway.", Ctl::Dropdown(options(&[("0", "No limit"), ("10", "10"), ("20", "20"), ("50", "50"), ("100", "100"), ("200", "200")]), st.session_turn_limit.to_string(), Rc::new(|s, v| s.session_turn_limit = v.parse().unwrap_or(0)))),
+                row("Turns per day", "Across every session and every agent. New turns wait once this many have started today.", Ctl::Dropdown(options(&[("0", "No limit"), ("25", "25"), ("50", "50"), ("100", "100"), ("200", "200"), ("500", "500")]), st.daily_turn_limit.to_string(), Rc::new(|s, v| s.daily_turn_limit = v.parse().unwrap_or(0)))),
+                row("Tokens per day", "Across every session. Counts the input and output tokens agents report, not cached ones; agents that report no tokens, such as Grok, don't count toward it. New turns wait once today's count reaches it.", Ctl::Dropdown(options(&[("0", "No limit"), ("1000", "1M"), ("5000", "5M"), ("10000", "10M"), ("25000", "25M"), ("50000", "50M"), ("100000", "100M")]), st.daily_token_limit_k.to_string(), Rc::new(|s, v| s.daily_token_limit_k = v.parse().unwrap_or(0)))),
+                row("Agents running at once", "Turns past this many wait for a free slot, shown as Waiting for a slot, and start in order.", Ctl::Dropdown(options(&[("0", "No cap"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("6", "6"), ("8", "8")]), st.max_running.to_string(), Rc::new(|s, v| s.max_running = v.parse().unwrap_or(0)))),
+            ]),
+            section("Permissions", "What agents may do without asking you first.", vec![
+                row("Default permission level", "Maps to each agent's closest mode: auto edit, read-only, or full access.", Ctl::Segment(options(&[("edit", "Auto edit"), ("plan", "Plan only"), ("full", "Full access")]), st.default_mode.clone(), Rc::new(|s, v| s.default_mode = v))),
+                switch_row("Ask before agents start playbooks", "When an agent asks Runo to start a playbook, show what it may do and wait for you. Off starts it right away.", st.confirm_agent_playbooks, |s, v| s.confirm_agent_playbooks = v),
+            ]),
+            section("Deleting", "Safety around actions that can't be undone.", vec![
+                switch_row("Confirm before deleting", "Ask in a popup before deleting a session.", st.confirm_delete, |s, v| s.confirm_delete = v),
+                switch_row("Remove worktree with session", "Also delete the session's git worktree when the session is deleted. Uncommitted changes in it are lost.", st.remove_worktree_on_delete, |s, v| s.remove_worktree_on_delete = v),
+            ]),
+        ],
         SettingsPage::Appearance => vec![
-            section("Interface", "System follows your OS appearance.", vec![
+            section("Colors", "System follows your OS appearance.", vec![
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
+                row("Color theme", "Each theme has a light and a dark version; Theme above picks which one shows.", Ctl::Dropdown(crate::themes::THEMES.iter().map(|t| (t.id.to_string(), t.name.to_string())).collect(), st.color_theme.clone(), Rc::new(|s, v| s.color_theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
-                row("Glass", "A translucent window over a blurred desktop, like macOS glass. Clear shows the most of what is behind.", Ctl::Segment(options(&[("off", "Off"), ("subtle", "Subtle"), ("frosted", "Frosted"), ("clear", "Clear")]), st.glass.clone(), Rc::new(|s, v| s.glass = v))),
+                row("Background", "A fine grid of dots on the window's frame, warming into your accent at the top-left. With glass on it shows through the panels too.", Ctl::Segment(options(&[("off", "None"), ("dots", "Dot matrix")]), st.pattern.clone(), Rc::new(|s, v| s.pattern = v))),
+            ]),
+            section("Glass", "A translucent window over a blurred desktop, like macOS glass.", vec![
+                row("Window glass", "", Ctl::Glass(st.glass.clone())),
+                row("Menus and dialogs too", "Popups, menus and dialogs are translucent with a light rim.", Ctl::Switch(st.glass_cards, Rc::new(|s, v| s.glass_cards = v))),
+            ]),
+            section("Type", "", vec![
                 row("Interface font", "Runo's own font is tuned for sharp text at small sizes. System uses your operating system's font.", Ctl::Segment(options(&[("bundled", "Runo"), ("system", "System")]), st.font.clone(), Rc::new(|s, v| s.font = v))),
                 row("Font smoothing", "Thickens text strokes, like older macOS. Off keeps text crisp and light. Applies after you restart Runo.", Ctl::Switch(st.font_smoothing, Rc::new(|s, v| s.font_smoothing = v))),
-                row("Glass menus and dialogs", "Popups, menus and dialogs are translucent with a light rim too.", Ctl::Switch(st.glass_cards, Rc::new(|s, v| s.glass_cards = v))),
-                row("Diff colors", "Colorblind uses blue and orange instead of green and red. High contrast uses stronger tints.", Ctl::Segment(options(&[("default", "Default"), ("colorblind", "Colorblind"), ("contrast", "High contrast")]), st.diff_colors.clone(), Rc::new(|s, v| s.diff_colors = v))),
             ]),
-            section("Conversation", "How replies, errors and code use the space in a session.", vec![
+            section("Code and conversation", "How diffs, replies, errors and code use the space in a session.", vec![
+                row("Diff colors", "Colorblind uses blue and orange instead of green and red. High contrast uses stronger tints.", Ctl::Segment(options(&[("default", "Default"), ("colorblind", "Colorblind"), ("contrast", "High contrast")]), st.diff_colors.clone(), Rc::new(|s, v| s.diff_colors = v))),
                 row("Content width", "Full uses the whole width of the window so long output needs less scrolling. Comfortable keeps lines short for reading.", Ctl::Segment(options(&[("comfortable", "Comfortable"), ("wide", "Wide"), ("full", "Full")]), st.content_width.clone(), Rc::new(|s, v| s.content_width = v))),
             ]),
         ],
@@ -812,10 +939,8 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("New sessions", "What a session starts with before you change it in the composer.", vec![
                 row("Default view", "How new sessions open. CLI shows the agent's own command line on the same conversation (Claude Code and Codex); switch any time from the session header at no token cost.", Ctl::Segment(vec![("chat".into(), "Chat".into()), ("cli".into(), "CLI".into())], st.default_view.clone(), Rc::new(|s, v| s.default_view = v))),
                 row("Default agent", "Preselected in New session.", Ctl::Dropdown(agent::PROVIDERS.iter().map(|p| (p.id.to_string(), p.name.to_string())).collect(), st.default_provider.clone(), Rc::new(|s, v| s.default_provider = v))),
-                row("Default permission level", "Maps to each agent's closest mode: auto edit, read-only, or full access.", Ctl::Segment(options(&[("edit", "Auto edit"), ("plan", "Plan only"), ("full", "Full access")]), st.default_mode.clone(), Rc::new(|s, v| s.default_mode = v))),
             ]),
             section("Playbooks", "Saved tasks that run as their own sessions, by hand, on a schedule or when an agent asks.", vec![
-                switch_row("Ask before agents start playbooks", "When an agent asks Runo to start a playbook, show what it may do and wait for you. Off starts it right away.", st.confirm_agent_playbooks, |s, v| s.confirm_agent_playbooks = v),
                 row("Scheduled runs to keep", "Older runs of each scheduled playbook are deleted, with their worktrees. Pinned and unread runs stay.", Ctl::Dropdown(options(&[("5", "5"), ("10", "10"), ("20", "20"), ("50", "50"), ("0", "All")]), st.playbook_keep_runs.to_string(), Rc::new(|s, v| s.playbook_keep_runs = v.parse().unwrap_or(10)))),
                 switch_row("Catch up on missed runs", "When a scheduled playbook came due while Runo was closed, run it once when Runo opens. Off skips it until its next time.", st.playbook_catch_up, |s, v| s.playbook_catch_up = v),
             ].into_iter().chain(cfg!(any(target_os = "macos", target_os = "linux", windows)).then(|| {
@@ -908,13 +1033,13 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 ),
             ]));
             if !installed.is_empty() {
-                sections.push(section("Installed", "Pick an agent to change its model, flags and environment. Installed agents are also listed under Providers on the left.", installed));
+                sections.push(section("Installed", "Pick an agent to change its model, flags and environment. Installed agents also have a page of their own in the tabs above.", installed));
             }
             for p in agent::PROVIDERS.iter() {
                 sections.extend(copies_section(p.id, &format!("{} copies", p.name)));
             }
             if !available.is_empty() {
-                sections.push(section("More agents", "Install any of these with the vendor's official installer, or point Runo at a copy you already have. Once found it appears in the list above and in the sidebar.", available));
+                sections.push(section("More agents", "Install any of these with the vendor's official installer, or point Runo at a copy you already have. Once found it appears in the list above and gets a page of its own.", available));
             }
             sections
         }
@@ -1210,6 +1335,108 @@ fn conn_switch(
     )
 }
 
+/// One row per agent Cove can keep the login of: signed in on that server or not, with
+/// Sign in or Sign out. Agents not installed here show only once signed in there.
+/// Set up: install or update Cove on the server over SSH, open the tunnel and pair.
+fn server_setup_row(c: &Connection) -> Row {
+    use crate::coveserver::Step;
+    let id = c.id;
+    let paired = !c.api_key.trim().is_empty();
+    let set_up = |label: &str| {
+        Ctl::Button(
+            label.into(),
+            Rc::new(move |this: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                this.set_up_cove_server(id, cx)
+            }),
+        )
+    };
+    match crate::coveserver::step(id) {
+        Some(Step::Running(text)) => row("Set up", &text, Ctl::Chip("Working…".into(), 1)),
+        Some(Step::NeedsPassword) => row(
+            "Set up",
+            "sudo on the server asks for a password. Continue opens a terminal window where you type it once; Runo does the rest and carries on here.",
+            Ctl::Button(
+                "Continue in Terminal".into(),
+                Rc::new(move |this, cx| this.set_up_cove_in_terminal(id, cx)),
+            ),
+        ),
+        Some(Step::Failed(e)) => row("Set up", &e, set_up("Try again")),
+        _ if paired => row(
+            "Set up",
+            "Set up and paired. Runo keeps the SSH tunnel open by itself. Set up again updates Cove there.",
+            set_up("Set up again"),
+        ),
+        _ => row(
+            "Set up",
+            "Checks the SSH login, installs Cove there (or updates it), opens a tunnel and pairs. Then sign the agents in below.",
+            set_up("Set up"),
+        ),
+    }
+}
+
+fn agent_login_rows(c: &Connection) -> Vec<Row> {
+    let id = c.id;
+    let known = crate::cove::logins(c);
+    if let Some(Err(e)) = &known {
+        return vec![row("Agent logins", e, Ctl::Chip("Unavailable".into(), 0))];
+    }
+    let logins = known.and_then(Result::ok);
+    crate::agent::PROVIDERS
+        .iter()
+        .filter(|p| crate::cove::keeps_login(p.id))
+        .filter_map(|p| {
+            let login = logins
+                .as_ref()
+                .and_then(|l| l.iter().find(|l| l.agent == p.id));
+            let signed_in = login.is_some_and(|l| l.signed_in);
+            if !signed_in && !crate::caps::get(p.id).installed {
+                return None;
+            }
+            let provider = p.id;
+            let title = format!("{} login", p.name);
+            Some(match (&logins, signed_in) {
+                (None, _) => row(&title, "Checking the server…", Ctl::Chip("…".into(), 0)),
+                (Some(_), true) => row(
+                    &title,
+                    "Signed in on this server. Every session's VM here gets this login, and tokens the agent refreshes come back.",
+                    Ctl::Button(
+                        "Sign out".into(),
+                        Rc::new(move |this, cx| this.sign_out_on_connection(id, provider, cx)),
+                    ),
+                ),
+                (Some(_), false) if crate::cove::has_local_login(provider) => row(
+                    &title,
+                    &format!(
+                        "Not signed in on this server. This Mac is signed in to {}: copy its login there, or sign in there with another account.",
+                        p.name
+                    ),
+                    Ctl::Buttons(vec![
+                        (
+                            "Sign in".into(),
+                            Rc::new(move |this, cx| this.sign_in_on_connection(id, provider, cx)),
+                        ),
+                        (
+                            "Use this Mac's login".into(),
+                            Rc::new(move |this, cx| this.import_login_to(id, provider, cx)),
+                        ),
+                    ]),
+                ),
+                (Some(_), false) => row(
+                    &title,
+                    &format!(
+                        "Not signed in on this server. Sign in once in a terminal there, with {}'s own login, and every session's VM here uses it.",
+                        p.name
+                    ),
+                    Ctl::Button(
+                        "Sign in".into(),
+                        Rc::new(move |this, cx| this.sign_in_on_connection(id, provider, cx)),
+                    ),
+                ),
+            })
+        })
+        .collect()
+}
+
 fn connection_sections(st: &AppSettings) -> Vec<Section> {
     let mut out = Vec::new();
     let mut list: Vec<Row> = vec![row(
@@ -1301,16 +1528,57 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
                 ));
             }
             _ => {
-                rows.push(conn_text(c, "Server", "Empty for Cove on this machine, which shares the session folder with the VM. A URL (http://my-vps:7457) uses a Cove server elsewhere; the session's files are synced to it.", "Cove on this machine", c.url.clone(), |c, v| c.url = v));
-                if c.remote() {
+                rows.push(conn_text(
+                    c,
+                    "SSH login",
+                    "A Linux server or VPS you can ssh into with a key, such as ubuntu@203.0.113.7. Runo installs Cove there, keeps a tunnel to it open and pairs by itself. Empty for Cove on this Mac.",
+                    "ubuntu@203.0.113.7",
+                    c.ssh.clone(),
+                    |c, v| c.ssh = v,
+                ));
+                if c.ssh.trim().is_empty() {
+                    rows.push(conn_text(c, "Server", "Empty for Cove on this machine, which shares the session folder with the VM. A URL (http://my-vps:7457) uses a Cove server elsewhere; the session's files are synced to it.", "Cove on this machine", c.url.clone(), |c, v| c.url = v));
+                    if c.remote() {
+                        rows.push(conn_text(
+                            c,
+                            "Pairing code",
+                            "Run cove pair on the server and type the code it prints. Runo gets a key of its own, which cove keys rm there revokes.",
+                            "ABCD-EFGH",
+                            c.pair_code.clone(),
+                            |c, v| c.pair_code = v,
+                        ));
+                        let paired = match connections::pair_result(id) {
+                            Some((_, text)) => text,
+                            None if c.api_key.trim().is_empty() => "Not paired yet.".into(),
+                            None => "Runo has a key for this server.".into(),
+                        };
+                        rows.push(row(
+                            "Pair",
+                            &paired,
+                            Ctl::Button(
+                                "Pair".into(),
+                                Rc::new(move |this, cx| this.pair_connection(id, cx)),
+                            ),
+                        ));
+                        rows.push(conn_text(
+                            c,
+                            "API key",
+                            "Filled in by pairing. Or run cove key on the server and paste it here.",
+                            "",
+                            c.api_key.clone(),
+                            |c, v| c.api_key = v,
+                        ));
+                    }
+                } else {
                     rows.push(conn_text(
                         c,
-                        "API key",
-                        "Run cove key on the server.",
-                        "",
-                        c.api_key.clone(),
-                        |c, v| c.api_key = v,
+                        "Key file",
+                        "Empty uses your SSH agent and ~/.ssh/config.",
+                        "~/.ssh/id_ed25519",
+                        c.identity.clone(),
+                        |c, v| c.identity = v,
                     ));
+                    rows.push(server_setup_row(c));
                 }
                 rows.push(conn_choice(
                     c,
@@ -1342,8 +1610,26 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
                         }
                     })),
                 ));
-                rows.push(conn_choice(c, "Stop when idle", "Stop a session's VM when nothing has run in it for a while. It starts again on the next message.", options(&[("0", "Never"), ("15", "After 15 min"), ("30", "After 30 min"), ("60", "After 1 hour"), ("240", "After 4 hours")]), c.idle_stop.to_string(), |c, v| c.idle_stop = v.parse().unwrap_or(0)));
+                rows.push(conn_choice(c, "When idle", "Pause or stop a session's VM when nothing has run in it for a while. It carries on with the next message.", options(&[("0", "Keep running"), ("15", "After 15 min"), ("30", "After 30 min"), ("60", "After 1 hour"), ("240", "After 4 hours")]), c.idle_stop.to_string(), |c, v| c.idle_stop = v.parse().unwrap_or(0)));
+                if c.idle_stop > 0 {
+                    rows.push(row(
+                        "Idle VMs",
+                        "Pause keeps the VM's memory and running programs, so it picks up exactly where it was, and on a Linux server it uses no memory while paused. Stop shuts it down; the next message boots it again.",
+                        Ctl::Segment(
+                            options(&[("pause", "Pause"), ("stop", "Stop")]),
+                            if c.idle_pause { "pause" } else { "stop" }.into(),
+                            Rc::new(move |s, v| {
+                                if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                                    c.idle_pause = v == "pause";
+                                }
+                            }),
+                        ),
+                    ));
+                }
             }
+        }
+        if c.kind == connections::Kind::Cove {
+            rows.extend(agent_login_rows(c));
         }
         rows.push(conn_text(c, "Keys passed in", "Environment variables from this machine the agent gets there, comma separated. Nothing else reaches it.", connections::DEFAULT_KEYS, c.keys.clone(), |c, v| c.keys = v));
         rows.push(conn_switch(c, "GitHub access", "Give the agent your GitHub login (from gh auth token) for its own work there, such as cloning or opening PRs. Syncing never needs it. Passed per command, never saved there.", c.github, |c, v| c.github = v));
@@ -1360,28 +1646,72 @@ fn connection_sections(st: &AppSettings) -> Vec<Section> {
     }
 
     let installed = crate::cove::binary().is_some();
+    let setup = crate::cove::setup_status();
+    let busy = crate::cove::setting_up();
+    // While installing or starting, and after a failure, say what happened.
+    let said = |default: &str| match &setup {
+        Some((None, text)) | Some((Some(false), text)) => text.clone(),
+        _ => default.to_string(),
+    };
     let mut cove_rows = vec![if !installed {
         row(
             "Cove",
-            "Not installed. Cove gives each session its own Linux VM on this machine or your server.",
-            Ctl::Button(
-                "Get Cove".into(),
-                Rc::new(|_, cx| cx.open_url("https://github.com/deltalark/cove#install")),
-            ),
+            &said("Not installed. Cove gives each session its own Linux VM, on this Mac or on your server. Install sets it up here in one step (vfkit and the guest agent included) and starts it at login."),
+            if busy {
+                Ctl::Chip("Installing…".into(), 1)
+            } else {
+                Ctl::Buttons(vec![
+                    (
+                        "Learn more".into(),
+                        Rc::new(|_, cx| cx.open_url("https://github.com/deltalark/cove#readme")),
+                    ),
+                    (
+                        "Install".into(),
+                        Rc::new(|this, cx| this.set_up_cove(false, cx)),
+                    ),
+                ])
+            },
         )
     } else if crate::cove::available() {
         row(
             "Cove",
-            "Installed, and its server is running.",
+            &match &setup {
+                Some((Some(true), text)) => text.clone(),
+                _ => "Installed, and its server is running.".into(),
+            },
             Ctl::Chip("Ready".into(), 2),
         )
     } else {
         row(
             "Cove",
-            "Installed, but its server isn't running. Start it with cove serve.",
-            Ctl::Chip("Not running".into(), 1),
+            &said("Installed, but its server isn't running."),
+            if busy {
+                Ctl::Chip("Starting…".into(), 1)
+            } else {
+                Ctl::Button(
+                    "Start".into(),
+                    Rc::new(|this, cx| this.set_up_cove(true, cx)),
+                )
+            },
         )
     }];
+    let install_line = crate::cove::server_install_command();
+    cove_rows.push(row(
+        "Run Cove on a server",
+        "For sessions that keep going while your Mac sleeps. Add server, type its SSH login (such as ubuntu@203.0.113.7) and press Set up: Runo installs Cove there, keeps an SSH tunnel to it open, pairs, and then helps you sign the agents in. Nothing new is opened on the server.",
+        Ctl::Buttons(vec![
+            (
+                "Copy install command".into(),
+                Rc::new(move |_, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(install_line.clone()))
+                }),
+            ),
+            (
+                "Add server".into(),
+                Rc::new(|this, cx| this.add_cove_server(cx)),
+            ),
+        ]),
+    ));
     cove_rows.push(switch_row(
         "Let agents use Cove",
         "Gives agents on this machine Cove's own tools (cove mcp), so they can make scratch VMs, run commands, move files and share ports on their own.",
@@ -1755,42 +2085,21 @@ impl RunoApp {
                 })
                 .into_any_element(),
             Ctl::Segment(opts, current, set) => {
-                let mut group = div()
-                    .flex()
-                    .items_center()
-                    .p(px(3.))
-                    .gap(px(2.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(c_border()))
-                    .bg(rgb(c_canvas()));
+                let mut group = crate::shell::seg_track();
                 for (j, (value, label)) in opts.into_iter().enumerate() {
                     let selected = value == current;
                     let set = set.clone();
                     group = group.child(
-                        div()
-                            .id(("setting-seg", ix * 16 + j))
-                            .h(px(28.))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_sm()
-                            .when(selected, |el| {
-                                el.bg(tint(c_selected()))
-                                    .text_color(rgb(c_blue()))
-                                    .font_weight(FontWeight::MEDIUM)
-                            })
-                            .when(!selected, |el| {
-                                el.text_color(rgb(c_secondary()))
-                                    .hover(|el| el.bg(tint(c_subtle())))
-                            })
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                let (set, value) = (set.clone(), value.clone());
-                                settings::update(cx, move |s| set(s, value));
-                            }))
-                            .child(label),
+                        crate::shell::seg_choice(
+                            ("setting-seg", ix * 16 + j),
+                            format!("setting-seg-{ix}-{j}"),
+                            selected,
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            let (set, value) = (set.clone(), value.clone());
+                            settings::update(cx, move |s| set(s, value));
+                        }))
+                        .child(label),
                     );
                 }
                 group.into_any_element()
@@ -1894,7 +2203,7 @@ impl RunoApp {
                                                     .max_h(px(320.))
                                                     .rounded_xl()
                                                     .border_1()
-                                                    .border_color(rgb(c_border()))
+                                                    .border_color(divider())
                                                     .bg(rgb(c_canvas()))
                                                     .shadow_lg()
                                                     .occlude()
@@ -1988,6 +2297,112 @@ impl RunoApp {
                 }
                 dots.into_any_element()
             }
+            Ctl::Glass(current) => {
+                let mut cards = div().flex().gap(px(10.));
+                for (j, (value, name, note, alpha)) in [
+                    ("off", "Off", "Solid", 1.),
+                    ("subtle", "Subtle", "A hint of the desktop", 0.82),
+                    ("frosted", "Frosted", "Blurred", 0.6),
+                    ("clear", "Clear", "The most see-through", 0.38),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let on = value == current;
+                    let key = format!("setting-glass-{ix}-{j}");
+                    let window_fill = |c: u32| {
+                        let mut fill = rgb(c);
+                        fill.a = alpha;
+                        fill
+                    };
+                    let bar = |w: f32| {
+                        div()
+                            .h(px(5.))
+                            .w(relative(w))
+                            .rounded_full()
+                            .bg(tint(c_active()))
+                    };
+                    cards = cards.child(
+                        div()
+                            .id(("setting-glass", ix * 16 + j))
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .gap(px(8.))
+                            .p(px(7.))
+                            .rounded(px(11.))
+                            .cursor_pointer()
+                            .bg(tint(c_canvas()))
+                            .border_1()
+                            .border_color(if on { rgb(c_blue()) } else { divider() })
+                            .when(!on, |el| el.hover(|el| el.bg(tint(c_active()))))
+                            .when(on, |el| el.child(crate::shell::accent_bracket(key, 11.)))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                settings::update(cx, move |s| s.glass = value.into());
+                            }))
+                            .child(
+                                // A desktop: the wallpaper's colours, with a window over it.
+                                div()
+                                    .relative()
+                                    .h(px(72.))
+                                    .rounded(px(7.))
+                                    .overflow_hidden()
+                                    .bg(linear_gradient(
+                                        120.,
+                                        linear_color_stop(rgb(0x5a3d8a), 0.),
+                                        linear_color_stop(rgb(0xd9875a), 1.),
+                                    ))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top(px(8.))
+                                            .right(px(10.))
+                                            .size(px(44.))
+                                            .rounded_full()
+                                            .bg(rgb(0xf5d0a9)),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .inset(px(8.))
+                                            .left(px(12.))
+                                            .rounded(px(5.))
+                                            .bg(window_fill(c_canvas()))
+                                            .p(px(7.))
+                                            .v_flex()
+                                            .gap(px(5.))
+                                            .child(bar(0.6))
+                                            .child(
+                                                div()
+                                                    .h(px(11.))
+                                                    .rounded(px(3.))
+                                                    .bg(window_fill(c_active())),
+                                            )
+                                            .child(bar(0.8)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px(px(2.))
+                                    .v_flex()
+                                    .child(
+                                        div()
+                                            .text_size(px(12.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(if on {
+                                                c_text()
+                                            } else {
+                                                c_secondary()
+                                            }))
+                                            .child(name),
+                                    )
+                                    .child(div().text_xs().text_color(rgb(c_muted())).child(note)),
+                            ),
+                    );
+                }
+                cards.into_any_element()
+            }
             Ctl::Button(label, action) => self
                 .button(("setting-btn", ix), label, false)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2034,7 +2449,7 @@ impl RunoApp {
                             ))
                         })
                         .when(!on, |el| {
-                            el.border_color(rgb(c_border()))
+                            el.border_color(divider())
                                 .bg(rgb(c_canvas()))
                                 .hover(|el| el.border_color(rgb(c_secondary())))
                         })
@@ -2060,7 +2475,7 @@ impl RunoApp {
                     .text_color(rgb(color))
                     .bg(rgb(c_canvas()))
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(text)
                     .into_any_element()
             }
@@ -2077,7 +2492,7 @@ impl RunoApp {
                             .justify_center()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(rgb(c_canvas()))
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
@@ -2188,9 +2603,7 @@ impl RunoApp {
                                     .cursor_pointer()
                                     .border_1()
                                     .border_color(gpui_kit::transparent_black())
-                                    .hover(|el| {
-                                        el.border_color(rgb(c_border())).bg(tint(c_subtle()))
-                                    })
+                                    .hover(|el| el.border_color(divider()).bg(tint(c_subtle())))
                                     .tooltip(move |window, cx| {
                                         gpui_kit::component::tooltip::Tooltip::new(if recording {
                                             "Press Esc to cancel"
@@ -2289,7 +2702,7 @@ impl RunoApp {
                             .py(px(2.))
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(rgb(c_raised()))
                             .text_xs()
                             .text_color(rgb(c_green()))
@@ -2366,18 +2779,16 @@ impl RunoApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut card = div()
-            .v_flex()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_subtle()))
-            .overflow_hidden();
-        let count = sec.rows.len();
+        let mut card = div().v_flex();
         for (i, r) in sec.rows.into_iter().enumerate() {
             *counter += 1;
+            // A picker of previews is too wide to sit beside its title, so it goes under.
+            let stacked = matches!(r.ctl, Ctl::Glass(_));
             let control = self.control(*counter, r.ctl, window, cx);
             let open = r.open;
+            if i > 0 {
+                card = card.child(crate::shell::card_rule());
+            }
             card = card.child(
                 div()
                     .id(("setting-row", *counter))
@@ -2392,20 +2803,16 @@ impl RunoApp {
                             }))
                     })
                     .px_5()
-                    .py_4()
+                    .py(px(11.))
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_8()
-                    .when(i + 1 < count, |el| {
-                        el.border_b_1().border_color(rgb(c_border()))
-                    })
+                    .when(stacked, |el| el.flex_col().items_stretch().gap_3())
+                    .when(!stacked, |el| el.items_center().justify_between().gap_8())
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .v_flex()
-                            .gap(px(3.))
+                            .gap(px(2.))
                             .child(
                                 div()
                                     .text_sm()
@@ -2417,7 +2824,7 @@ impl RunoApp {
                                 el.child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(c_secondary()))
+                                        .text_color(rgb(c_muted()))
                                         .whitespace_normal()
                                         .child(r.desc),
                                 )
@@ -2426,80 +2833,121 @@ impl RunoApp {
                     .child(div().flex_none().child(control)),
             );
         }
-        div()
+        // Wide windows put the section's name on a tab notched into the card's top left,
+        // so no line holds only a title.
+        let wide = window.viewport_size().width > px(1100.);
+        let fill = tint(c_subtle());
+        let label = div()
             .v_flex()
-            .gap_3()
+            .gap(px(3.))
+            .when(wide, |el| {
+                el.px(px(20.)).py(px(14.)).rounded_l(px(NOTCH_R)).bg(fill)
+            })
+            .when(!wide, |el| el.px_1())
             .child(
                 div()
-                    .v_flex()
-                    .gap(px(2.))
-                    .px_1()
-                    .child(
-                        div()
-                            .text_base()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
-                            .child(sec.title),
-                    )
-                    .when(!sec.desc.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .text_sm()
-                                .text_color(rgb(c_secondary()))
-                                .child(sec.desc),
-                        )
-                    }),
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(c_text()))
+                    .child(sec.title),
             )
-            .child(card)
+            .when(!sec.desc.is_empty(), |el| {
+                el.child(div().text_xs().text_color(rgb(c_muted())).child(sec.desc))
+            });
+        let card = card.flex_1().min_w_0();
+        if wide {
+            // Stretched, so a card shorter than its tab still reaches past the notch.
+            div()
+                .flex()
+                .child(
+                    div()
+                        .w(px(230.))
+                        .flex_none()
+                        .v_flex()
+                        .child(label)
+                        .child(div().flex().justify_end().child(notch(fill))),
+                )
+                .child(card.rounded_tr(px(NOTCH_R)).rounded_b(px(NOTCH_R)).bg(fill))
+                .into_any_element()
+        } else {
+            div()
+                .v_flex()
+                .gap(px(10.))
+                .child(label)
+                .child(crate::shell::card().overflow_hidden().child(card))
+                .into_any_element()
+        }
+    }
+
+    /// One tab across the top of Settings, chosen on a raised pill with the accent's
+    /// bracket at its edge, the way the open session tab is marked.
+    fn settings_tab(&self, tab: SettingsTab, cx: &mut Context<Self>) -> AnyElement {
+        let on = SettingsTab::of(self.settings_page) == tab;
+        let key = format!("stab-{}", tab.label());
+        // An installed agent that isn't signed in is the one thing a tab calls out.
+        let alert = tab == SettingsTab::Agents
+            && agent::PROVIDERS
+                .iter()
+                .any(|p| caps::get(p.id).installed && signin::get(p.id) == Some(false));
+        crate::shell::seg_choice(SharedString::from(key.clone()), key.clone(), on)
+            .h(px(30.))
+            .px(px(12.))
+            .gap(px(6.))
+            .when(on, |el| {
+                el.child(crate::shell::accent_bracket(format!("{key}-rule"), 7.))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.settings_page = tab.pages()[0];
+                this.settings_menu = None;
+                this.settings_search
+                    .update(cx, |s, cx| s.set_value("", window, cx));
+                cx.notify();
+            }))
+            .child(icon(
+                tab.icon(),
+                14.,
+                if on { c_text() } else { c_secondary() },
+            ))
+            .child(tab.label())
+            .when(alert, |el| {
+                el.child(div().size(px(6.)).rounded_full().bg(rgb(c_amber())))
+            })
             .into_any_element()
     }
 
-    fn settings_nav_item(&self, page: SettingsPage, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.settings_page == page;
-        let lead: AnyElement = match page.agent() {
-            Some(id) => self
-                .provider_badge(agent::provider(id), 20.)
-                .into_any_element(),
-            None => icon(
-                page.icon(),
-                16.,
-                if selected { c_blue() } else { c_secondary() },
-            )
-            .into_any_element(),
-        };
-        div()
-            .id(SharedString::from(format!("snav-{}", page.label())))
-            .h(px(34.))
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_3()
-            .rounded_lg()
-            .cursor_pointer()
-            .text_sm()
-            .when(selected, |el| {
-                el.bg(tint(c_selected()))
-                    .text_color(rgb(c_blue()))
-                    .font_weight(FontWeight::MEDIUM)
+    /// The pages of the open tab as underlined tabs along the page's title line; the
+    /// Agents tab lists each installed agent after Providers.
+    fn settings_subnav(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let tab = SettingsTab::of(self.settings_page);
+        let mut pages: Vec<SettingsPage> = tab.pages().to_vec();
+        if tab == SettingsTab::Agents {
+            let agents = agent::PROVIDERS
+                .iter()
+                .filter(|p| caps::get(p.id).installed)
+                .map(|p| SettingsPage::Agent(p.id));
+            pages.splice(1..1, agents);
+        }
+        let many = pages.len() > 1;
+        pages
+            .into_iter()
+            .map(|page| {
+                let on = self.settings_page == page;
+                let lead = page.agent().map(|id| {
+                    self.provider_badge(agent::provider(id), 18.)
+                        .into_any_element()
+                });
+                page_tab(format!("ssub-{}", page.label()), lead, page.label(), on)
+                    .when(many, |el| {
+                        el.cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.settings_page = page;
+                                this.settings_menu = None;
+                                cx.notify();
+                            }))
+                    })
+                    .into_any_element()
             })
-            .when(!selected, |el| {
-                el.text_color(rgb(c_text()))
-                    .hover(|el| el.bg(tint(c_subtle())))
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.settings_page = page;
-                this.settings_menu = None;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    .w(px(20.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(lead),
-            )
-            .child(page.label())
+            .collect()
     }
 
     pub(crate) fn settings_view(
@@ -2511,302 +2959,936 @@ impl RunoApp {
         let data = self.discovered.clone().unwrap_or_default();
         let query = self.settings_search.read(cx).value().trim().to_lowercase();
 
-        // Navigation
-        let mut nav = div()
-            .w(px(252.))
-            .flex_none()
-            .h_full()
-            .v_flex()
-            .p_3()
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()));
-        let mut groups = div()
-            .id("settings-nav")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .v_flex()
-            .gap_4();
-        for (title, pages) in SettingsPage::GROUPS.iter() {
-            let group = div().v_flex().gap(px(2.)).child(
-                div()
-                    .px_3()
-                    .pb_1()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(c_muted()))
-                    .child(title.to_uppercase()),
-            );
-            // Pages hang off their group like a file tree; agent pages hang off Providers.
-            let mut items = div()
-                .ml(px(14.))
-                .pl(px(6.))
-                .border_l_1()
-                .border_color(rgb(c_border()))
-                .v_flex()
-                .gap(px(2.));
-            let mut i = 0;
-            while i < pages.len() {
-                let page = pages[i];
-                items = items.child(self.settings_nav_item(page, cx));
-                // Installed agents hang off Providers.
-                let children: Vec<SettingsPage> = if page == SettingsPage::Providers {
-                    agent::PROVIDERS
-                        .iter()
-                        .filter(|p| caps::get(p.id).installed)
-                        .map(|p| SettingsPage::Agent(p.id))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                if !children.is_empty() {
-                    let last = children.len() - 1;
-                    let mut sub = div().ml(px(24.)).v_flex().gap(px(2.));
-                    for (n, child) in children.iter().enumerate() {
-                        sub = sub.child(
-                            div()
-                                .relative()
-                                // The elbow into this row.
-                                .child(
-                                    div()
-                                        .absolute()
-                                        .left(px(-12.))
-                                        .top(px(-2.))
-                                        .w(px(10.))
-                                        .h(px(20.))
-                                        .border_l_1()
-                                        .border_b_1()
-                                        .border_color(rgb(c_border()))
-                                        .rounded_bl(px(6.)),
-                                )
-                                // The trunk on to the next sibling.
-                                .when(n < last, |el| {
-                                    el.child(
-                                        div()
-                                            .absolute()
-                                            .left(px(-12.))
-                                            .top(px(-2.))
-                                            .bottom(px(-2.))
-                                            .w(px(1.))
-                                            .bg(rgb(c_border())),
-                                    )
-                                })
-                                .child(self.settings_nav_item(*child, cx)),
-                        );
-                    }
-                    items = items.child(sub);
-                }
-                i += 1;
-            }
-            groups = groups.child(group.child(items));
+        // The header: a tab per area and the search, over the page.
+        let mut tabs = crate::shell::seg_track();
+        for tab in SettingsTab::ALL {
+            tabs = tabs.child(self.settings_tab(tab, cx));
         }
-        nav = nav.child(groups).child(
-            div()
-                .pt_2()
-                .border_t_1()
-                .border_color(rgb(c_border()))
-                .child(
-                    div()
-                        .id("settings-back")
-                        .h(px(38.))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .text_sm()
-                        .text_color(rgb(c_secondary()))
-                        .hover(|el| el.bg(tint(c_subtle())))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.view = View::Session;
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::ArrowLeft, 16., c_secondary()))
-                        .child("Back to workspace"),
-                ),
-        );
-
-        // Content
-        let mut counter = 0usize;
-        let (title, subtitle, sections): (String, String, Vec<Section>) = if query.is_empty() {
-            (
-                self.settings_page.label().into(),
-                self.settings_page.subtitle().into(),
-                page_sections(self.settings_page, &st, &data),
-            )
-        } else {
-            let mut found = Vec::new();
-            for page in SettingsPage::all() {
-                for sec in page_sections(page, &st, &data) {
-                    let rows: Vec<Row> = sec
-                        .rows
-                        .into_iter()
-                        .filter(|r| {
-                            r.title.to_lowercase().contains(&query)
-                                || r.desc.to_lowercase().contains(&query)
-                        })
-                        .collect();
-                    if !rows.is_empty() {
-                        found.push(Section {
-                            title: format!("{}  ›  {}", page.label(), sec.title),
-                            desc: String::new(),
-                            rows,
-                        });
-                    }
-                }
-            }
-            (
-                "Search results".into(),
-                format!("Matches for “{query}” across all settings."),
-                found,
-            )
-        };
-        let mut body = div()
-            .max_w(px(920.))
-            .mx_auto()
-            .px_10()
-            .py_8()
-            .v_flex()
-            .gap_8()
-            .child(
-                div()
-                    .v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_3xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(c_text()))
-                            .child(title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(c_secondary()))
-                            .child(subtitle),
-                    ),
-            );
-        if sections.is_empty() {
-            body = body.child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(c_muted()))
-                    .child("No settings match your search."),
-            );
-        }
-        let mut sections = sections;
-        if let Some(form) = self
-            .mcp_form
-            .as_ref()
-            .filter(|_| query.is_empty() && self.settings_page == SettingsPage::Mcp)
-        {
-            // Just above Runo's own list.
-            let at = sections
-                .iter()
-                .position(|s| s.title == "Runo's servers")
-                .unwrap_or(sections.len());
-            sections.insert(at, mcp_form_section(form));
-        }
-        if query.is_empty() && self.settings_page == SettingsPage::Worktrees {
-            sections.extend(self.cleanup_sections());
-        }
-        for sec in sections {
-            body = body.child(self.settings_card(sec, &mut counter, window, cx));
-        }
-
         let header = div()
-            .h(px(52.))
-            .flex_none()
-            .px_8()
             .flex()
             .items_center()
-            .justify_between()
-            .border_b_1()
-            .border_color(rgb(c_border()))
+            .gap(px(16.))
+            .child(tabs)
+            .child(div().flex_1())
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_sm()
-                    .child(div().text_color(rgb(c_muted())).child("Settings"))
-                    .child(icon(IconName::ChevronRight, 14., c_muted()))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(c_text()))
-                            .child(if query.is_empty() {
-                                self.settings_page.label().to_string()
-                            } else {
-                                "Search".to_string()
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(300.))
+                    .w(px(260.))
                     .h(px(34.))
                     .px_3()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(c_border()))
+                    .rounded(px(9.))
                     .bg(tint(c_subtle()))
                     .child(icon(IconName::Search, 14., c_muted()))
                     .child(
-                        Input::new(&self.settings_search)
-                            .appearance(false)
-                            .h(px(30.)),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&self.settings_search)
+                                .appearance(false)
+                                .h(px(30.)),
+                        ),
                     ),
+            )
+            .child(
+                div()
+                    .id("settings-back")
+                    .size(px(34.))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(9.))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.view = View::Session;
+                        cx.notify();
+                    }))
+                    .child(icon(IconName::X, 16., c_secondary()))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Back to workspace  Esc")
+                            .build(window, cx)
+                    }),
             );
 
-        let main = div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
+        // Content
+        let overview = query.is_empty() && self.settings_page == SettingsPage::Overview;
+        let mut body = div()
+            .w_full()
+            .max_w(px(1480.))
+            .mx_auto()
+            .px(px(24.))
+            .pt(px(16.))
+            .pb_8()
             .v_flex()
-            .child(header)
-            .child({
-                // Pages cross-fade inside Settings, but opening Settings shows it at once.
-                let still = self.settings_switching();
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(body)
-                    .animated(
-                        SharedString::from(format!(
-                            "settings-page-{}",
-                            if query.is_empty() {
-                                self.settings_page.label()
-                            } else {
-                                "search"
-                            }
-                        )),
-                        Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
-                        move |el, d| if still { el } else { el.opacity(d) },
+            .gap(px(20.));
+        if overview {
+            body = body.child(self.settings_overview(&st, &data, window, cx));
+        } else {
+            let mut counter = 0usize;
+            let (lead, title, subtitle, sections): (AnyElement, String, String, Vec<Section>) =
+                if query.is_empty() {
+                    (
+                        tile(SettingsTab::of(self.settings_page).icon(), 28.).into_any_element(),
+                        self.settings_page.label().into(),
+                        self.settings_page.subtitle().into(),
+                        page_sections(self.settings_page, &st, &data),
                     )
-            });
+                } else {
+                    let mut found = Vec::new();
+                    for page in SettingsPage::all() {
+                        for sec in page_sections(page, &st, &data) {
+                            let rows: Vec<Row> = sec
+                                .rows
+                                .into_iter()
+                                .filter(|r| {
+                                    r.title.to_lowercase().contains(&query)
+                                        || r.desc.to_lowercase().contains(&query)
+                                })
+                                .collect();
+                            if !rows.is_empty() {
+                                found.push(Section {
+                                    title: format!(
+                                        "{}  ›  {}  ›  {}",
+                                        SettingsTab::of(page).label(),
+                                        page.label(),
+                                        sec.title
+                                    ),
+                                    desc: String::new(),
+                                    rows,
+                                });
+                            }
+                        }
+                    }
+                    let matches: usize = found.iter().map(|s| s.rows.len()).sum();
+                    (
+                        tile(IconName::Search, 28.).into_any_element(),
+                        "Search results".into(),
+                        format!(
+                            "{} for “{query}”. Change them right here.",
+                            plural(matches, "match")
+                        ),
+                        found,
+                    )
+                };
+            let tabs = if query.is_empty() {
+                self.settings_subnav(cx)
+            } else {
+                vec![page_tab("ssub-search".into(), None, title, true).into_any_element()]
+            };
+            body = body.child(
+                // One line over a rule: the page's mark, its pages as tabs, and what the
+                // open one holds.
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(22.))
+                    .border_b_1()
+                    .border_color(divider())
+                    .child(div().pb(px(8.)).child(lead))
+                    .children(tabs)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pb(px(8.))
+                            .flex()
+                            .justify_end()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(rgb(c_muted()))
+                                    .child(subtitle),
+                            ),
+                    ),
+            );
+            if sections.is_empty() && !query.is_empty() {
+                body = body.child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(c_muted()))
+                        .child("No settings match your search."),
+                );
+            }
+            let mut sections = sections;
+            if let Some(form) = self
+                .mcp_form
+                .as_ref()
+                .filter(|_| query.is_empty() && self.settings_page == SettingsPage::Mcp)
+            {
+                // Just above Runo's own list.
+                let at = sections
+                    .iter()
+                    .position(|s| s.title == "Runo's servers")
+                    .unwrap_or(sections.len());
+                sections.insert(at, mcp_form_section(form));
+            }
+            if query.is_empty() && self.settings_page == SettingsPage::Worktrees {
+                sections.extend(self.cleanup_sections());
+            }
+            for sec in sections {
+                body = body.child(self.settings_card(sec, &mut counter, window, cx));
+            }
+        }
+
+        // Each page shows at once; keyed by page so each keeps its own scroll.
+        let scroll = div()
+            .id("settings-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(body)
+            .animated(
+                SharedString::from(format!(
+                    "settings-page-{}",
+                    if query.is_empty() {
+                        self.settings_page.label()
+                    } else {
+                        "search"
+                    }
+                )),
+                Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()),
+                |el, _| el,
+            );
+        let page = div()
+            .size_full()
+            .relative()
+            .v_flex()
+            .child(crate::home::home_glow())
+            .child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .px(px(24.))
+                    .pt(px(16.))
+                    .v_flex()
+                    .gap(px(12.))
+                    .child(header),
+            )
+            .child(scroll);
         div()
             .size_full()
             .flex()
-            .child(nav)
             .child(
+                // The page paints the island's corners over its own fill.
                 div()
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
                     .flex()
                     .bg(glass_fill(c_canvas()))
-                    .child(main),
+                    .child(page)
+                    .child(crate::shell::frame_corner(
+                        true,
+                        true,
+                        glass_fill(c_canvas()),
+                    ))
+                    .child(crate::shell::frame_corner(
+                        true,
+                        false,
+                        glass_fill(c_canvas()),
+                    ))
+                    // No bottom-left corner: the rail's Settings tab joins the island
+                    // there, level with its bottom edge.
+                    .child(crate::shell::frame_corner(
+                        false,
+                        false,
+                        glass_fill(c_canvas()),
+                    )),
             )
             .into_any_element()
     }
+
+    /// Settings > Overview: a card per area showing what is set and what needs you, each
+    /// leading to its page.
+    fn settings_overview(
+        &mut self,
+        st: &AppSettings,
+        data: &Discovered,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Look: a small window in the current look, what is picked and the accent.
+        let label_of = |items: &[(&str, &str)], value: &str| {
+            items
+                .iter()
+                .find(|(v, _)| *v == value)
+                .map(|(_, l)| l.to_string())
+                .unwrap_or_else(|| value.to_string())
+        };
+        let theme = label_of(
+            &[("system", "System"), ("light", "Light"), ("dark", "Dark")],
+            &st.theme,
+        );
+        let glass = label_of(
+            &[
+                ("off", "Off"),
+                ("subtle", "Subtle"),
+                ("frosted", "Frosted"),
+                ("clear", "Clear"),
+            ],
+            &st.glass,
+        );
+        let font = label_of(&[("bundled", "Runo"), ("system", "System")], &st.font);
+        let fact = |name: &'static str, value: String| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .v_flex()
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(px(9.))
+                .bg(tint(c_subtle()))
+                .child(div().text_xs().text_color(rgb(c_muted())).child(name))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c_text()))
+                        .child(value),
+                )
+        };
+        let accent = self.control(9000, Ctl::Accent(st.accent.clone()), window, cx);
+        let look = ov_card("ov-look", IconName::Palette, "Look", "Customize")
+            .on_click(open_page(SettingsPage::Appearance, cx))
+            .flex_1()
+            .child(look_preview())
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .child(fact("Theme", theme))
+                    .child(fact("Glass", glass))
+                    .child(fact("Font", font)),
+            )
+            .child(accent);
+
+        // Agents: each installed one with its version and whether it is signed in.
+        let mut agents = ov_card("ov-agents", IconName::Layers, "Agents", "All agents")
+            .on_click(open_page(SettingsPage::Providers, cx))
+            .flex_1();
+        let installed: Vec<&agent::Provider> = agent::PROVIDERS
+            .iter()
+            .filter(|p| caps::get(p.id).installed)
+            .collect();
+        if installed.is_empty() {
+            agents = agents.child(ov_note(
+                "No agent CLIs found yet. Install one from Providers.",
+            ));
+        }
+        for (i, p) in installed.iter().take(4).enumerate() {
+            let caps = caps::get(p.id);
+            let mut detail = Vec::new();
+            if !caps.version.is_empty() {
+                detail.push(caps.version.trim_start_matches('v').to_string());
+            }
+            if !caps.default_model.is_empty() {
+                detail.push(caps.default_model.clone());
+            }
+            let state = match signin::get(p.id) {
+                Some(false) => status_pill("Not signed in", c_amber()),
+                Some(true) => status_pill("Signed in", c_green()),
+                None => status_pill("Installed", c_muted()),
+            };
+            agents = agents.child(ov_line(
+                i > 0,
+                self.provider_badge(p, 26.).into_any_element(),
+                p.name.to_string(),
+                detail.join(" · "),
+                state,
+            ));
+        }
+
+        // Connections: this machine, then each server, with how its last test went.
+        let mut conns = ov_card("ov-conns", IconName::Server, "Connections", "Manage")
+            .on_click(open_page(SettingsPage::Connections, cx))
+            .flex_1()
+            .child(ov_line(
+                false,
+                small_tile(IconName::Cpu),
+                "This machine".into(),
+                "Always available".into(),
+                status_pill("Ready", c_green()),
+            ));
+        for c in st.connections.iter().take(3) {
+            let state = match connections::test_result(c.id) {
+                Some((Some(true), _)) => status_pill("Connected", c_green()),
+                Some((Some(false), _)) => status_pill("Can't reach", c_red()),
+                Some((None, _)) => status_pill("Testing…", c_muted()),
+                None => status_pill("Not tested", c_muted()),
+            };
+            let glyph = if c.remote() {
+                IconName::Cloud
+            } else {
+                IconName::Server
+            };
+            conns = conns.child(ov_line(
+                true,
+                small_tile(glyph),
+                c.name.clone(),
+                c.summary(),
+                state,
+            ));
+        }
+
+        // Safety: today against the limits, and how many agents may run at once.
+        let today = store::today();
+        let spent = self.state.spend.get(&today).copied().unwrap_or_default();
+        let day = self.state.used_on(&today);
+        let limits = settings::limits();
+        let dollars = |cents: f64| format!("${:.2}", cents / 100.);
+        let meter =
+            |name: &'static str, used: String, of: Option<String>, share: f32| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .v_flex()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_sm()
+                            .text_color(rgb(c_secondary()))
+                            .child(name)
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(4.))
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(c_text()))
+                                            .child(used),
+                                    )
+                                    .child(div().text_color(rgb(c_muted())).child(
+                                        of.map_or("no limit".into(), |of| format!("of {of}")),
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div().h(px(6.)).rounded_full().bg(tint(c_subtle())).child(
+                            div()
+                                .h_full()
+                                .w(relative(share.clamp(0., 1.)))
+                                .rounded_full()
+                                .bg(rgb(if share >= 0.9 { c_amber() } else { c_blue() })),
+                        ),
+                    )
+            };
+        let on_off = |on: bool, yes: &str, no: &str| if on { yes } else { no }.to_string();
+        let share = |used: f64, of: f64| if of > 0. { (used / of) as f32 } else { 0. };
+        let running = self.counts().running;
+        let cap = settings::max_running();
+        let safety = ov_card("ov-safety", IconName::ShieldCheck, "Safety", "Limits")
+            .on_click(open_page(SettingsPage::Safety, cx))
+            .flex_1()
+            .gap(px(14.))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(22.))
+                    .child(meter(
+                        "Est. spend today",
+                        dollars(spent),
+                        (limits.day_cents > 0.).then(|| dollars(limits.day_cents)),
+                        share(spent, limits.day_cents),
+                    ))
+                    .child(meter(
+                        "Turns today",
+                        day.turns.to_string(),
+                        (limits.day_turns > 0).then(|| limits.day_turns.to_string()),
+                        share(day.turns as f64, limits.day_turns as f64),
+                    ))
+                    .child(meter(
+                        "Tokens today",
+                        crate::health::token_count(day.tokens),
+                        (limits.day_tokens > 0)
+                            .then(|| crate::health::token_count(limits.day_tokens)),
+                        share(day.tokens as f64, limits.day_tokens as f64),
+                    ))
+                    .child(meter(
+                        "Running now",
+                        running.to_string(),
+                        (cap > 0).then(|| cap.to_string()),
+                        share(running as f64, cap as f64),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .child(fact(
+                        "Permission level",
+                        label_of(
+                            &[
+                                ("edit", "Auto edit"),
+                                ("plan", "Plan only"),
+                                ("full", "Full access"),
+                            ],
+                            &st.default_mode,
+                        ),
+                    ))
+                    .child(fact(
+                        "Playbooks",
+                        on_off(st.confirm_agent_playbooks, "Ask first", "Start right away"),
+                    ))
+                    .child(fact(
+                        "Deleting",
+                        on_off(st.confirm_delete, "Confirm first", "No popup"),
+                    ))
+                    .child(fact(
+                        "Worktree on delete",
+                        on_off(st.remove_worktree_on_delete, "Removed", "Kept"),
+                    )),
+            );
+
+        // The small cards along the bottom.
+        let phones = phone::phones(&store::data_dir());
+        let phone_card = ov_card("ov-phone", IconName::Smartphone, "Phone", "")
+            .on_click(open_page(SettingsPage::Phone, cx))
+            .flex_1()
+            .child(ov_big(if phones.is_empty() {
+                "Not paired".into()
+            } else {
+                plural(phones.len(), "phone")
+            }))
+            .child(ov_note(match (phones.is_empty(), phone::bridge()) {
+                (true, _) => "Follow and answer sessions from the Runo app",
+                (false, phone::Bridge::Off) => "Paired · the bridge is off",
+                (false, _) => "Paired · the bridge is on",
+            }));
+        let (left, size) = self
+            .cleanup
+            .items
+            .as_ref()
+            .map(|items| (items.len(), items.iter().map(|i| i.size).sum::<u64>()))
+            .unwrap_or_default();
+        let worktrees = ov_card("ov-worktrees", IconName::GitBranch, "Worktrees", "")
+            .on_click(open_page(SettingsPage::Worktrees, cx))
+            .flex_1()
+            .when(left > 0, |el| {
+                el.border_1().border_color(rgba((c_amber() << 8) | 0x66))
+            })
+            .child(ov_big(match &self.cleanup.items {
+                None => "Not scanned".into(),
+                Some(_) if left == 0 => "All tidy".into(),
+                Some(_) => format!("{left} left over"),
+            }))
+            .child(ov_note(&match &self.cleanup.items {
+                None => "Find worktrees no session uses".to_string(),
+                Some(_) if left == 0 => "Every worktree belongs to a session".to_string(),
+                Some(_) => format!("{} you can free", cleanup::human(size)),
+            }));
+        let changed = st.keybindings.len();
+        let keys = ov_card("ov-keys", IconName::Keyboard, "Keys", "")
+            .on_click(open_page(SettingsPage::Keybindings, cx))
+            .flex_1()
+            .child(ov_big(if changed == 0 {
+                "Defaults".into()
+            } else {
+                format!("{changed} changed")
+            }))
+            .child(ov_note(&format!(
+                "{} shortcuts you can change",
+                crate::keymap::SHORTCUTS.len()
+            )));
+        let tools = ov_card("ov-tools", IconName::Plug, "Tools", "")
+            .on_click(open_page(SettingsPage::Mcp, cx))
+            .flex_1()
+            .child(ov_big(format!(
+                "{} · {} · {}",
+                data.mcp.len(),
+                data.skills.len(),
+                data.hooks.len()
+            )))
+            .child(ov_note("MCP servers · skills · hooks"));
+
+        // Every on/off setting outside the agents' own pages, to flip right here.
+        let mut grid = div().grid().grid_cols(3).gap_x(px(28.));
+        let mut n = 0usize;
+        for page in SettingsTab::ALL
+            .iter()
+            .filter(|t| **t != SettingsTab::Agents)
+            .flat_map(|t| t.pages().iter().copied())
+            .chain([SettingsPage::Chat])
+        {
+            for r in page_sections(page, st, data)
+                .into_iter()
+                .flat_map(|s| s.rows)
+            {
+                if !matches!(r.ctl, Ctl::Switch(..)) {
+                    continue;
+                }
+                let control = self.control(9100 + n, r.ctl, window, cx);
+                grid = grid.child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .py(px(9.))
+                        .when(n >= 3, |el| el.border_t_1().border_color(divider()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .v_flex()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(c_text()))
+                                        .truncate()
+                                        .child(r.title),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(c_muted()))
+                                        .child(page.label()),
+                                ),
+                        )
+                        .child(control),
+                );
+                n += 1;
+            }
+        }
+        let switches = div()
+            .v_flex()
+            .gap(px(4.))
+            .p(px(16.))
+            .rounded(px(14.))
+            .bg(tint(c_subtle()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon(IconName::ToggleRight, 15., c_muted()))
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(c_text()))
+                            .child("Quick switches"),
+                    ),
+            )
+            .child(grid);
+
+        div()
+            .v_flex()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(div().w(relative(0.3)).flex().child(look))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .gap(px(12.))
+                            .child(div().flex().gap(px(12.)).child(agents).child(conns))
+                            .child(safety),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(phone_card)
+                    .child(worktrees)
+                    .child(keys)
+                    .child(tools),
+            )
+            .child(switches)
+            .into_any_element()
+    }
+}
+
+/// A page's tab on the title line: its name, the open one underlined in the accent.
+fn page_tab(
+    key: String,
+    lead: Option<AnyElement>,
+    label: impl Into<SharedString>,
+    on: bool,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(key))
+        .relative()
+        .pb(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .text_size(px(15.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(if on { c_text() } else { c_muted() }))
+        .when(!on, |el| el.hover(|el| el.text_color(rgb(c_secondary()))))
+        .children(lead)
+        .child(label.into())
+        .when(on, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(-1.))
+                    .h(px(2.))
+                    .rounded_full()
+                    .bg(rgb(c_blue())),
+            )
+        })
+}
+
+const NOTCH_R: f32 = 12.;
+
+/// The inward curve under a section's tab, where the tab meets its card: a square in the
+/// card's fill with a quarter circle cut from its bottom left.
+fn notch(fill: Rgba) -> Div {
+    let r = NOTCH_R;
+    div().size(px(r)).flex_none().child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let k = 0.5523;
+                let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                let mut f = PathBuilder::fill();
+                f.move_to(p(r, 0.));
+                f.line_to(p(r, r));
+                f.cubic_bezier_to(p(0., 0.), p(r, r - k * r), p(k * r, 0.));
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, Hsla::from(fill));
+                }
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// Open a page of Settings when clicked.
+fn open_page(page: SettingsPage, cx: &mut Context<RunoApp>) -> Listener {
+    Box::new(cx.listener(move |this, _, _, cx| {
+        this.settings_page = page;
+        cx.notify();
+    }))
+}
+
+/// A rounded square in a wash of the accent, holding an icon: the mark of a page.
+fn tile(glyph: IconName, size: f32) -> Div {
+    div()
+        .size(px(size))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(size * 0.28))
+        .bg(rgb(mix(
+            c_blue(),
+            c_canvas(),
+            if is_dark() { 0.2 } else { 0.12 },
+        )))
+        .child(icon(glyph, size * 0.5, c_blue()))
+}
+
+/// A quiet square holding an icon, at the start of a line in a card.
+fn small_tile(glyph: IconName) -> AnyElement {
+    div()
+        .size(px(26.))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .bg(tint(c_subtle()))
+        .child(icon(glyph, 14., c_secondary()))
+        .into_any_element()
+}
+
+/// A card on Settings > Overview: its icon and name, and on the right a link to its page.
+fn ov_card(
+    id: &'static str,
+    glyph: IconName,
+    title: &'static str,
+    link: &'static str,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .min_w_0()
+        .v_flex()
+        .gap(px(10.))
+        .p(px(16.))
+        .rounded(px(14.))
+        .bg(tint(c_subtle()))
+        .cursor_pointer()
+        .hover(|el| el.bg(tint(c_active())))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(icon(glyph, 15., c_muted()))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(13.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child(title),
+                )
+                .when(!link.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(3.))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(c_blue()))
+                            .child(link)
+                            .child(icon(IconName::ChevronRight, 12., c_blue())),
+                    )
+                }),
+        )
+}
+
+/// One line in an Overview card: a mark, a name over a detail, and a status on the right.
+fn ov_line(rule: bool, lead: AnyElement, name: String, detail: String, end: AnyElement) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .when(rule, |el| {
+            el.pt(px(10.)).border_t_1().border_color(divider())
+        })
+        .child(lead)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .v_flex()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c_text()))
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(c_muted()))
+                        .truncate()
+                        .child(detail),
+                ),
+        )
+        .child(end)
+}
+
+/// A dot and a word in a soft pill of the same colour, such as "Signed in".
+fn status_pill(text: &'static str, color: u32) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(6.))
+        .h(px(24.))
+        .px(px(9.))
+        .rounded_full()
+        .bg(rgb(mix(
+            color,
+            c_canvas(),
+            if is_dark() { 0.16 } else { 0.12 },
+        )))
+        .text_xs()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(c_text()))
+        .child(div().size(px(7.)).rounded_full().bg(rgb(color)))
+        .child(text)
+        .into_any_element()
+}
+
+/// The headline of a small Overview card.
+fn ov_big(text: String) -> Div {
+    div()
+        .text_size(px(20.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(c_text()))
+        .child(text)
+}
+
+fn ov_note(text: &str) -> Div {
+    div()
+        .text_xs()
+        .text_color(rgb(c_muted()))
+        .child(text.to_string())
+}
+
+/// A small window drawn in the current theme, glass and accent: the Look card's preview.
+fn look_preview() -> Div {
+    let bar = |w: f32, color: Rgba| div().h(px(6.)).w(relative(w)).rounded_full().bg(color);
+    let line = tint(c_active());
+    div()
+        .h(px(150.))
+        .rounded(px(10.))
+        .p(px(10.))
+        .bg(rgb(c_rail()))
+        .flex()
+        .child(div().w(px(18.)).flex_none())
+        .child(
+            div()
+                .w(px(70.))
+                .flex_none()
+                .rounded_l(px(7.))
+                .bg(pane(c_sheet()))
+                .p(px(7.))
+                .v_flex()
+                .gap(px(5.))
+                .child(
+                    div()
+                        .relative()
+                        .h(px(14.))
+                        .rounded(px(4.))
+                        .bg(tint(c_active()))
+                        .child(crate::shell::accent_bracket("look-preview-rule", 4.)),
+                )
+                .child(bar(0.8, line))
+                .child(bar(0.6, line)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .rounded_r(px(7.))
+                .bg(glass_fill(c_canvas()))
+                .p(px(10.))
+                .v_flex()
+                .gap(px(7.))
+                .child(
+                    div().flex().justify_end().child(
+                        div()
+                            .w(relative(0.5))
+                            .h(px(14.))
+                            .rounded(px(5.))
+                            .bg(tint(c_subtle())),
+                    ),
+                )
+                .child(bar(0.9, line))
+                .child(bar(0.7, line))
+                .child(bar(0.8, line))
+                .child(
+                    div()
+                        .mt_1()
+                        .h(px(26.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(rgb(c_blue())),
+                ),
+        )
 }
 
 /// Settings > Worktrees > Clean up: what the last scan found and what is picked.
@@ -2865,10 +3947,6 @@ impl RunoApp {
         if self.cleanup.scanning || self.cleanup.removing {
             return;
         }
-        if self.demo {
-            self.cleanup.items = Some(Vec::new());
-            return;
-        }
         self.cleanup.scanning = true;
         self.cleanup.confirming = false;
         let (projects, uses) = self.cleanup_inputs();
@@ -2909,7 +3987,7 @@ impl RunoApp {
     fn remove_cleanup(&mut self) {
         self.cleanup.confirming = false;
         let picked = self.picked_cleanup();
-        if picked.is_empty() || self.cleanup.removing || self.demo {
+        if picked.is_empty() || self.cleanup.removing {
             return;
         }
         self.cleanup.removing = true;

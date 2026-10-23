@@ -121,7 +121,7 @@ pub fn take(base: &Path) -> Vec<Request> {
 pub struct Phone {
     pub name: String,
     pub token: String,
-    /// When it was paired, in seconds since 1970; 0 for the phone of an older config.
+    /// When it was paired, in seconds since 1970.
     #[serde(default)]
     pub created: u64,
 }
@@ -146,41 +146,22 @@ impl Phone {
 #[serde(default)]
 struct Config {
     phones: Vec<Phone>,
-    /// The one token older versions shared between every phone; read as a phone named
-    /// "Phone" and not written again.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    token: String,
 }
 
 fn config_path(base: &Path) -> PathBuf {
     base.join("phone.json")
 }
 
-/// The bridge's config. A config from before per-phone tokens becomes one phone named
-/// "Phone", so a phone paired then stays paired, and is saved in the new shape.
+/// The bridge's config, keeping only phones with a full-length token.
 fn load(base: &Path) -> Config {
     let mut config: Config = store::read_json_or_backup(&config_path(base));
-    let old = std::mem::take(&mut config.token);
     config.phones.retain(|p| p.token.len() >= 32);
-    if old.len() >= 32 {
-        if !config.phones.iter().any(|p| p.token == old) {
-            config.phones.insert(
-                0,
-                Phone {
-                    name: "Phone".into(),
-                    token: old,
-                    created: 0,
-                },
-            );
-        }
-        save(base, &config);
-    }
     config
 }
 
 /// Write the config readable only by you, from the moment the file exists.
 fn save(base: &Path, config: &Config) {
-    // Request threads may migrate an old config at the same moment; one writes at a time.
+    // Request threads may save at the same moment; one writes at a time.
     static WRITING: Mutex<()> = Mutex::new(());
     let _writing = WRITING.lock().unwrap_or_else(|e| e.into_inner());
     let path = config_path(base);
@@ -856,6 +837,10 @@ fn needs(s: &Session, pending: &[approvals::Request]) -> Value {
         Some((_, alerts::Waiting::Plan)) => {
             json!({ "kind": "plan", "text": "Proposed a plan and waits for your go-ahead" })
         }
+        // Answered in the app, or by replying in the thread.
+        Some((_, alerts::Waiting::Decision(d))) => {
+            json!({ "kind": "decision", "text": d.question })
+        }
         None => Value::Null,
     }
 }
@@ -904,7 +889,9 @@ fn session(base: &Path, id: u64) -> Option<Value> {
             // A playbook's message holds the whole prompt; the phone shows its name.
             "text": if m.playbook.is_empty() { m.text.clone() } else { m.note.clone() },
             "playbook": m.playbook,
-            "steps": m.steps,
+            "steps": m.step_labels().collect::<Vec<_>>(),
+            // Beside each label: "running", "done" or "failed".
+            "step_states": m.steps.iter().map(|s| s.state).collect::<Vec<_>>(),
             "time": m.time,
             "meta": m.meta,
             "plan": m.plan,
@@ -927,9 +914,6 @@ fn session(base: &Path, id: u64) -> Option<Value> {
 impl RunoApp {
     /// Carry out what the phone asked for, as if it were typed here.
     pub(crate) fn take_phone_requests(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         for request in take(&store::data_dir()) {
             let id = request.session();
             let Some(session) = self.state.session(id) else {
@@ -1105,31 +1089,10 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_old_shared_token_as_one_phone() {
-        let base = temp("migrate");
-        let old = "ab".repeat(32);
-        std::fs::write(
-            base.join("phone.json"),
-            format!(r#"{{ "token": "{old}" }}"#),
-        )
-        .unwrap();
-        let listed = phones(&base);
-        assert_eq!(
-            listed,
-            vec![Phone {
-                name: "Phone".into(),
-                token: old.clone(),
-                created: 0,
-            }]
-        );
-        assert_eq!(listed[0].paired_on(), "");
-        assert_eq!(hello(&base, &old), 200);
-        // Saved in the new shape, once.
-        let saved: Value =
-            serde_json::from_slice(&std::fs::read(base.join("phone.json")).unwrap()).unwrap();
-        assert!(saved.get("token").is_none());
-        assert_eq!(saved["phones"][0]["token"], old.as_str());
-        assert_eq!(phones(&base).len(), 1);
+    fn the_config_is_readable_only_by_you() {
+        let base = temp("private");
+        let first = pair(&base);
+        assert_eq!(phones(&base), vec![first]);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1139,11 +1102,6 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
-        assert_eq!(pair(&base).name, "Phone 2");
-        // A short token was never valid and isn't carried over.
-        let short = temp("migrate-short");
-        std::fs::write(short.join("phone.json"), r#"{ "token": "abc" }"#).unwrap();
-        assert!(phones(&short).is_empty());
     }
 
     #[test]

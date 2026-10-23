@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::store::Queued;
+use gpui_kit::component::input;
 
 /// An entry of the composer's `/` menu.
 #[derive(Clone)]
@@ -11,7 +12,17 @@ pub(crate) enum SlashPick {
     Command(agentcmds::Command),
 }
 
+/// An entry of the composer's `@` menu.
+#[derive(Clone)]
+pub(crate) enum MentionPick {
+    /// A Crew thread, in Crew's chat when the message starts with `@`.
+    Thread(u64),
+    File(String),
+}
+
 /// Most recent conversation, written into follow-ups for CLIs that cannot resume.
+/// Marks a message sent to the agent while its turn ran.
+pub(crate) const STEER: &str = "sent while working";
 const CONTEXT_MESSAGES: usize = 8;
 const CONTEXT_CHARS: usize = 1500;
 /// Earlier requests summed up in one line each, before the recent conversation.
@@ -27,6 +38,13 @@ impl RunoApp {
         images: Vec<String>,
         opts: &AgentOptions,
     ) {
+        // Whatever goes to a Crew thread next answers the decision it waits on: a choice,
+        // a reply typed in the thread, or a message from Crew.
+        if let Some(info) = self.state.session_mut(id).and_then(|s| s.crew.as_mut()) {
+            if info.decision.take().is_some() {
+                info.attention = None;
+            }
+        }
         // The worktree is still being made: the turn starts once it is ready.
         if let Some(waiting) = self.preparing.get_mut(&id) {
             waiting.push(crate::ship::Deferred {
@@ -42,8 +60,11 @@ impl RunoApp {
             return;
         }
         // One run per session: a prompt that arrives while the agent or the worktree setup
-        // command is running waits its turn.
+        // command is running waits its turn, unless the agent takes it as it works.
         if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+            if images.is_empty() && self.steer(id, &prompt) {
+                return;
+            }
             if let Some(s) = self.state.session_mut(id) {
                 s.queue.push(Queued::new(prompt, images));
             }
@@ -75,7 +96,8 @@ impl RunoApp {
             self.info = Some((why, std::time::Instant::now()));
             return;
         }
-        let demo = self.demo;
+        // Crew's rules and what changed in its threads, or a thread's rules: unseen context.
+        let preface = self.crew_preface(id);
         // Notes the person shared with agents open each new conversation in the project.
         let notes = self
             .state
@@ -126,7 +148,7 @@ impl RunoApp {
         }
         let resume = has;
         let dir = session.dir.clone();
-        let in_git = !demo && git::is_repo(&dir);
+        let in_git = git::is_repo(&dir);
         // Agents that cannot resume their own conversation get it written into the prompt.
         let handoff = std::mem::take(&mut session.handoff);
         // Once a message goes out the switch is final.
@@ -174,6 +196,10 @@ impl RunoApp {
         } else {
             format!("{undo_note}\n\n{sent}")
         };
+        let sent = match preface {
+            Some(preface) => format!("{preface}\n{sent}"),
+            None => sent,
+        };
         let mut user = Message::now(Role::User, prompt.clone());
         user.images = images.clone();
         user.playbook = playbook.unwrap_or_default();
@@ -186,7 +212,7 @@ impl RunoApp {
         let agent_session = session.agent_session.clone();
         let sandbox = session.sandbox();
         // A signed-out agent says so before its turn fails, not after.
-        if sandbox.is_none() && !demo && crate::signin::get(&provider) == Some(false) {
+        if sandbox.is_none() && crate::signin::get(&provider) == Some(false) {
             let mut hint = Message::new(Role::System, agent::sign_in_help(&provider));
             hint.meta = "warning".into();
             let at = session.messages.len() - 1;
@@ -200,9 +226,7 @@ impl RunoApp {
         let exe = std::env::current_exe()
             .ok()
             .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| {
-                !demo && memory_server() && crate::connections::mcp_reachable(sandbox.as_ref())
-            });
+            .filter(|_| memory_server() && crate::connections::mcp_reachable(sandbox.as_ref()));
         // Images inside the session folder go by their place in it, which is the same on
         // a connection; others by their full path.
         let attached: Vec<String> = images
@@ -225,6 +249,11 @@ impl RunoApp {
             images: &attached,
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
+            thread: if session.crew.is_some() && sandbox.is_none() {
+                id
+            } else {
+                0
+            },
         };
         match agent::run_agent(
             Target::Session(id),
@@ -237,17 +266,22 @@ impl RunoApp {
                 session.status = Status::Working;
                 session.remote_turn =
                     matches!(sandbox, Some(crate::connections::Sandbox::Remote(_)));
-                match stream::Parser::for_provider(&provider, &dir) {
-                    Some(parser) => self.streams.insert(id, parser),
-                    None => self.streams.remove(&id),
-                };
+                let turn = session
+                    .messages
+                    .iter()
+                    .rposition(|m| m.role == Role::User)
+                    .unwrap_or(0);
+                let model = sel.get("model").map(String::as_str).unwrap_or("");
+                let mut running =
+                    crate::harness::turn::Turn::start(id, &provider, &dir, turn, model);
+                if let Some(root) = crate::detach::root() {
+                    running.follow(&crate::detach::turn_dir(root, id));
+                }
+                self.turns.insert(id, running);
                 self.handles.insert(Target::Session(id), handle);
-                self.started.insert(id, std::time::Instant::now());
                 self.turn_files.remove(&id);
                 // Counted as it starts, so turns running side by side can't pass the limit.
-                if !demo {
-                    self.state.add_turn(&store::today());
-                }
+                self.state.add_turn(&store::today());
                 crate::applog::info(
                     "turn",
                     format!(
@@ -285,8 +319,10 @@ impl RunoApp {
     /// The CLI is waiting for a browser sign-in, which never completes without a terminal:
     /// stop the run and say how to sign in.
     pub(crate) fn sign_in_wait(&mut self, id: u64, line: &str) {
-        if !self.signed_out.insert(id) {
-            return;
+        if let Some(turn) = self.turns.get_mut(&id) {
+            if std::mem::replace(&mut turn.signed_out, true) {
+                return;
+            }
         }
         self.stderr.entry(id).or_default().push(line.to_string());
         if let Some(handle) = self.handles.get(&Target::Session(id)) {
@@ -336,6 +372,68 @@ impl RunoApp {
         }
     }
 
+    /// Send `text` to the agent of a running live turn, which reads it as it works. The
+    /// message shows in the conversation at once and the reply carries on below it.
+    /// Returns false when the turn doesn't take messages, and the prompt should queue.
+    pub(crate) fn steer(&mut self, id: u64, text: &str) -> bool {
+        if !self.turns.get(&id).is_some_and(|t| t.live && !t.stopping) {
+            return false;
+        }
+        let Some(root) = crate::detach::root() else {
+            return false;
+        };
+        if let Err(e) = crate::harness::host::send(&crate::detach::turn_dir(root, id), text) {
+            crate::applog::warn(
+                "turn",
+                format!("session #{id}: couldn't send a message to the running agent: {e}"),
+            );
+            return false;
+        }
+        let Some(session) = self.state.session_mut(id) else {
+            return true;
+        };
+        // Undo still goes back to where the turn started.
+        let checkpoint = session
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.checkpoint.clone())
+            .unwrap_or_default();
+        let mut message = Message::now(Role::User, text);
+        message.meta = STEER.into();
+        message.checkpoint = checkpoint;
+        session.messages.push(message);
+        crate::applog::info(
+            "turn",
+            format!("session #{id}: message sent to the running agent"),
+        );
+        self.save();
+        true
+    }
+
+    /// The messages a live turn's agent never read, because it finished first: they leave
+    /// the conversation and go to the front of the queue, to be sent as the next turn.
+    pub(crate) fn requeue_unsent(&mut self, id: u64) {
+        let Some(root) = crate::detach::root() else {
+            return;
+        };
+        let unsent = crate::harness::host::unsent(&crate::detach::turn_dir(root, id));
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        take_unsent(session, &unsent);
+        if !unsent.is_empty() {
+            crate::applog::info(
+                "turn",
+                format!(
+                    "session #{id}: {} message(s) came after the agent finished; queued",
+                    unsent.len()
+                ),
+            );
+        }
+    }
+
     /// After a turn: count what it changed, then send the next queued prompt. With `hold`
     /// (the agent isn't signed in) the queue waits for the person.
     pub(crate) fn finish_turn(
@@ -346,6 +444,7 @@ impl RunoApp {
         hold: bool,
         cx: &mut Context<Self>,
     ) {
+        self.crew_turn_ended(id, ok, stopped, cx);
         // Servers Runo merged into the agent's project file go before the snapshot.
         if let Some(s) = self.state.session(id) {
             crate::mcp::clean_project(std::path::Path::new(&s.dir));
@@ -369,34 +468,35 @@ impl RunoApp {
                 .state
                 .session(id)
                 .is_some_and(|s| s.canvas.is_empty() && !s.cli);
-        // A mission's part is proved even when it changed nothing, and then moves on.
-        let mission = self
-            .state
-            .session(id)
-            .map(|s| s.mission)
-            .unwrap_or_default();
+        // The reply the files are recorded on, found now: a queued prompt may add more
+        // messages before the comparison is done.
+        let reply = self.state.session(id).and_then(|s| {
+            let user = s.messages.iter().rposition(|m| m.role == Role::User)?;
+            s.messages[user..]
+                .iter()
+                .rposition(|m| m.role == Role::Agent)
+                .map(|i| user + i)
+        });
         if let Some((cp, dir)) = checkpoint.filter(|(cp, _)| !cp.is_empty()) {
             self.bg(
-                move || (git::changed_since(&dir, &cp).len(), git::checkpoint(&dir)),
-                move |this, (files, end), cx| {
+                move || (git::changed_since(&dir, &cp), git::checkpoint(&dir)),
+                move |this, (changed, end), cx| {
+                    let files = changed.len();
                     this.turn_files.insert(id, files);
-                    if let (Ok(end), Some(s)) = (end, this.state.session_mut(id)) {
-                        s.snapshot = end;
+                    if let Some(s) = this.state.session_mut(id) {
+                        if let Some(m) = reply.and_then(|i| s.messages.get_mut(i)) {
+                            m.changed = changed;
+                        }
+                        if let Ok(end) = end {
+                            s.snapshot = end;
+                        }
                     }
                     this.save();
-                    if prove && (files > 0 || mission != 0) {
+                    if prove && files > 0 {
                         this.prove_turn(id, true, cx);
-                    }
-                    if mission != 0 {
-                        this.mission_check(id, cx);
                     }
                 },
             );
-        } else if mission != 0 {
-            if prove {
-                self.prove_turn(id, true, cx);
-            }
-            self.mission_check(id, cx);
         }
         let title = self
             .state
@@ -464,9 +564,6 @@ impl RunoApp {
 
     /// Prompts that were still queued when Runo last closed go out now, in order.
     pub(crate) fn send_waiting_queues(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         let ids: Vec<u64> = self
             .state
             .sessions
@@ -490,9 +587,6 @@ impl RunoApp {
 
     /// Send the composer's prompt, or queue it while the agent is busy.
     pub(crate) fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(id) = self.selected else { return };
         let typed = self.prompt.read(cx).value().trim().to_string();
         let playbook = self
@@ -521,15 +615,25 @@ impl RunoApp {
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
         self.drafts.remove(&id);
         self.mention = None;
+        self.thread_mention = None;
         let images = self.attachments.remove(&id).unwrap_or_default();
         let text = if text.is_empty() {
             "Look at the attached image.".to_string()
         } else {
             text
         };
-        // While the agent or its setup command runs, the prompt and its images wait.
+        // In a Crew chat an @thread or the New thread chip skips Crew.
+        if playbook.is_none() && self.crew_route_submit(id, &text, &images, cx) {
+            self.editing = None;
+            return;
+        }
+        // While the agent or its setup command runs, the prompt and its images wait,
+        // unless the agent takes messages as it works.
         if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
             self.editing = None;
+            if images.is_empty() && playbook.is_none() && self.steer(id, &text) {
+                return;
+            }
             if let Some(session) = self.state.session_mut(id) {
                 session.queue.push(Queued::new(text, images));
             }
@@ -882,6 +986,11 @@ impl RunoApp {
     pub(crate) fn update_mention(&mut self, cx: &mut Context<Self>) {
         let text = self.prompt.read(cx).value().to_string();
         self.mention = mention_query(&text);
+        self.thread_mention = self
+            .current()
+            .filter(|s| s.canvas == crew::CANVAS)
+            .and_then(|_| text.trim_start().strip_prefix('@'))
+            .map(str::to_lowercase);
         self.slash = slash_query(&text);
         if self.slash.is_some() {
             self.load_agent_commands();
@@ -1008,10 +1117,27 @@ impl RunoApp {
         });
     }
 
-    /// Files matching the `@query`, best first.
-    pub(crate) fn mention_matches(&self) -> Vec<String> {
+    /// Threads (in Crew's chat) and files matching the `@query`, best first.
+    pub(crate) fn mention_matches(&self) -> Vec<MentionPick> {
+        let mut out: Vec<MentionPick> = Vec::new();
+        if let (Some(q), Some(pid)) = (&self.thread_mention, self.current().map(|s| s.project_id)) {
+            out.extend(
+                self.crew_threads(pid, false)
+                    .iter()
+                    .filter(|t| {
+                        t.title.to_lowercase().contains(q.as_str())
+                            || format!("#{}", t.id).starts_with(q.as_str())
+                    })
+                    .take(5)
+                    .map(|t| MentionPick::Thread(t.id)),
+            );
+            // Past the first word it is a thread's name, not a file's.
+            if q.contains(char::is_whitespace) {
+                return out;
+            }
+        }
         let Some(query) = &self.mention else {
-            return Vec::new();
+            return out;
         };
         let q = query.to_lowercase();
         let mut hits: Vec<(usize, &String)> = self
@@ -1032,17 +1158,44 @@ impl RunoApp {
             })
             .collect();
         hits.sort_by_key(|(rank, f)| (*rank, f.len()));
-        hits.into_iter().take(8).map(|(_, f)| f.clone()).collect()
+        out.extend(
+            hits.into_iter()
+                .take(8)
+                .map(|(_, f)| MentionPick::File(f.clone())),
+        );
+        out
     }
 
-    pub(crate) fn pick_mention(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pick_mention(
+        &mut self,
+        pick: &MentionPick,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let text = self.prompt.read(cx).value().to_string();
-        let new = complete_mention(&text, path);
+        let new = match pick {
+            // A thread's name only routes at the start of the message.
+            MentionPick::Thread(id) => match self.state.session(*id) {
+                Some(t) => format!("@{} ", t.title),
+                None => return,
+            },
+            MentionPick::File(path) => complete_mention(&text, path),
+        };
+        let end = new.encode_utf16().count() as u32;
         self.prompt.update(cx, |p, cx| {
             p.set_value(new, window, cx);
+            p.set_cursor_position(
+                input::Position {
+                    line: 0,
+                    character: end,
+                },
+                window,
+                cx,
+            );
             p.focus(window, cx);
         });
         self.mention = None;
+        self.thread_mention = None;
     }
 
     /// Write a commit message for the current changes with the session's agent.
@@ -1050,10 +1203,6 @@ impl RunoApp {
         let Some(session) = self.current() else {
             return;
         };
-        if self.demo {
-            self.commit_suggestion = Some("Refine sidebar navigation and nav items".into());
-            return;
-        }
         let patch = git::patch_for_message(&session.dir, 24_000);
         if patch.trim().is_empty() {
             self.fail("turn", "There are no changes to describe.".into());
@@ -1077,6 +1226,18 @@ impl RunoApp {
 
     /// Results of one-off background commands.
     pub(crate) fn handle_output(&mut self, key: String, result: Result<String, String>) {
+        if key.starts_with("guide:") || key.starts_with("split:") {
+            self.handle_reviewable(&key, result);
+            return;
+        }
+        if key.starts_with("resolve:") {
+            self.handle_resolve(&key, result);
+            return;
+        }
+        if key.starts_with("explain:") {
+            self.handle_explain(&key, result);
+            return;
+        }
         if key.starts_with("assistant:") {
             return self.assistant_reply(key, result);
         }
@@ -1112,6 +1273,7 @@ impl RunoApp {
 
     /// Apply values produced outside of render (they need a window to reach inputs).
     pub(crate) fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.apply_folder_pending(window, cx);
         // Each session keeps its own unsent prompt while another one is on screen.
         if self.draft_for != self.selected {
             let text = self.prompt.read(cx).value().to_string();
@@ -1132,6 +1294,7 @@ impl RunoApp {
             }
             self.draft_for = self.selected;
             self.mention = None;
+            self.thread_mention = None;
             self.slash = None;
         }
         if let Some(message) = self.commit_suggestion.take() {
@@ -1159,7 +1322,7 @@ impl RunoApp {
         // A turn on a connection doesn't need this machine awake.
         let want = cx_keep_awake()
             && self
-                .started
+                .turns
                 .keys()
                 .any(|id| self.state.session(*id).is_some_and(|s| !s.remote_turn));
         match (&mut self.awake, want) {
@@ -1350,7 +1513,7 @@ impl RunoApp {
         div()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .overflow_hidden()
             .child(
                 div()
@@ -1383,7 +1546,7 @@ impl RunoApp {
                         .items_center()
                         .gap_2()
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .bg(rgb(settings::mix(c_amber(), c_canvas(), 0.08)))
                         .child(icon(IconName::ShieldAlert, 13., c_amber()))
                         .child(
@@ -1420,7 +1583,7 @@ impl RunoApp {
                         .justify_end()
                         .gap_2()
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(
                             self.button(("plan-more", index), "Keep planning", false)
                                 .child(icon(IconName::Pencil, 12., c_secondary()))
@@ -1520,7 +1683,7 @@ impl RunoApp {
             .gap_3()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()));
         for (qi, q) in questions.iter().enumerate() {
             let picked = picks.and_then(|p| p.get(qi)).cloned().flatten();
@@ -1803,7 +1966,7 @@ impl RunoApp {
                         .gap_2()
                         .rounded_md()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(
                             img(std::path::PathBuf::from(path))
                                 .size(px(40.))
@@ -1838,13 +2001,41 @@ impl RunoApp {
                 .p_1()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(rgb(c_raised()))
                 .shadow_lg();
-            for (i, path) in matches.into_iter().enumerate() {
-                let (dir, name) = match path.rsplit_once('/') {
-                    Some((d, n)) => (d.to_string(), n.to_string()),
-                    None => (String::new(), path.clone()),
+            for (i, pick) in matches.into_iter().enumerate() {
+                let (lead, name, detail) = match &pick {
+                    MentionPick::Thread(id) => {
+                        let Some(t) = self.state.session(*id) else {
+                            continue;
+                        };
+                        let status = crate::crew_ui::thread_status(
+                            self.handles.contains_key(&Target::Session(*id)),
+                            t,
+                        );
+                        (
+                            div()
+                                .size(px(8.))
+                                .mx(px(2.))
+                                .rounded_full()
+                                .bg(rgb(crate::crew_view::status_tone(status)))
+                                .into_any_element(),
+                            t.title.clone(),
+                            "Thread".to_string(),
+                        )
+                    }
+                    MentionPick::File(path) => {
+                        let (dir, name) = match path.rsplit_once('/') {
+                            Some((d, n)) => (d.to_string(), n.to_string()),
+                            None => (String::new(), path.clone()),
+                        };
+                        (
+                            icon(IconName::File, 12., c_muted()).into_any_element(),
+                            name,
+                            dir,
+                        )
+                    }
                 };
                 list = list.child(
                     div()
@@ -1860,12 +2051,12 @@ impl RunoApp {
                         .hover(|el| el.bg(tint(c_active())))
                         .text_size(px(12.5))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.pick_mention(&path, window, cx);
+                            this.pick_mention(&pick, window, cx);
                             cx.notify();
                         }))
-                        .child(icon(IconName::File, 12., c_muted()))
-                        .child(name)
-                        .child(div().truncate().text_color(rgb(c_muted())).child(dir)),
+                        .child(lead)
+                        .child(div().truncate().child(name))
+                        .child(div().truncate().text_color(rgb(c_muted())).child(detail)),
                 );
             }
             col = col.child(list);
@@ -1876,7 +2067,7 @@ impl RunoApp {
                 .p_1()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(rgb(c_raised()))
                 .shadow_lg();
             let heading = |text: String| {
@@ -2315,11 +2506,47 @@ fn mentions_folder(text: &str, dir: &str) -> bool {
     })
 }
 
+/// Move messages the agent never read out of the conversation and to the front of the
+/// queue, in the order they were sent.
+fn take_unsent(session: &mut store::Session, unsent: &[String]) {
+    for text in unsent.iter().rev() {
+        if let Some(i) = session
+            .messages
+            .iter()
+            .rposition(|m| m.role == Role::User && m.meta == STEER && m.text == *text)
+        {
+            session.messages.remove(i);
+        }
+        session
+            .queue
+            .insert(0, Queued::new(text.clone(), Vec::new()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    #[test]
+    fn messages_the_agent_never_read_go_back_to_the_queue() {
+        let mut session = store::Session::default();
+        session.messages.push(Message::new(Role::User, "Fix it"));
+        let mut read = Message::new(Role::User, "also the docs");
+        read.meta = STEER.into();
+        session.messages.push(read.clone());
+        session.messages.push(Message::new(Role::Agent, "Done."));
+        let mut late = Message::new(Role::User, "and the tests");
+        late.meta = STEER.into();
+        session.messages.push(late);
+        session.queue.push(Queued::new("later", Vec::new()));
+        take_unsent(&mut session, &["and the tests".to_string()]);
+        let texts: Vec<&str> = session.messages.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, ["Fix it", "also the docs", "Done."]);
+        let queued: Vec<&str> = session.queue.iter().map(|q| q.text.as_str()).collect();
+        assert_eq!(queued, ["and the tests", "later"]);
+    }
 
     #[test]
     fn copilot_sessions_match_their_own_folder_and_prompt() {

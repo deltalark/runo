@@ -114,7 +114,7 @@ impl RunoApp {
         let Some(dir) = self.current().map(|s| s.dir.clone()) else {
             return;
         };
-        if query.is_empty() || self.demo {
+        if query.is_empty() {
             self.file_hits = None;
             return;
         }
@@ -346,7 +346,7 @@ impl RunoApp {
                     .min_h_0()
                     .v_flex()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(self.file_view(false, cx)),
             )
             .into_any_element()

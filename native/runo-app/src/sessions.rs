@@ -112,6 +112,7 @@ pub(crate) struct Finder {
     pub filter: ListFilter,
     pub list_hits: Hits,
     pub palette_hits: Hits,
+    pub home_hits: Hits,
     /// The messages as of the last search, and what they looked like then.
     corpus: Option<(u64, Corpus)>,
 }
@@ -125,6 +126,7 @@ impl Finder {
             filter: ListFilter::default(),
             list_hits: Hits::default(),
             palette_hits: Hits::default(),
+            home_hits: Hits::default(),
             corpus: None,
         }
     }
@@ -135,6 +137,7 @@ impl Finder {
 pub(crate) enum HitsFor {
     List,
     Palette,
+    Home,
 }
 
 /// Sessions to list on the Sessions page (or only isolated ones), filtered and in order.
@@ -268,7 +271,7 @@ fn corpus_key(state: &State) -> u64 {
 
 impl RunoApp {
     /// Look through past conversations for `query` off the UI thread; the hits land in the
-    /// Sessions page's or quick open's results.
+    /// Sessions page's, quick open's or Home's results.
     pub(crate) fn search_transcripts(&mut self, query: String, into: HitsFor) {
         let query = query.trim().to_string();
         let key = corpus_key(&self.state);
@@ -289,6 +292,7 @@ impl RunoApp {
         let hits = match into {
             HitsFor::List => &mut self.finder.list_hits,
             HitsFor::Palette => &mut self.finder.palette_hits,
+            HitsFor::Home => &mut self.finder.home_hits,
         };
         hits.asked += 1;
         let asked = hits.asked;
@@ -306,6 +310,7 @@ impl RunoApp {
                 let hits = match into {
                     HitsFor::List => &mut this.finder.list_hits,
                     HitsFor::Palette => &mut this.finder.palette_hits,
+                    HitsFor::Home => &mut this.finder.home_hits,
                 };
                 if hits.asked == asked {
                     hits.query = query;
@@ -555,7 +560,7 @@ impl RunoApp {
     /// Load the branches of the New session form's project in the background, once per
     /// project, for the base branch menu.
     pub(crate) fn sync_new_branches(&mut self) {
-        if self.view != View::NewSession || self.demo {
+        if self.view != View::NewSession {
             return;
         }
         let Some(project) = self
@@ -707,7 +712,11 @@ impl RunoApp {
 }
 
 /// A menu opening downward from the chip above it, closed by clicking elsewhere.
-fn drop_menu(key: &str, list: impl IntoElement, cx: &mut Context<RunoApp>) -> AnyElement {
+pub(crate) fn drop_menu(
+    key: &str,
+    list: impl IntoElement,
+    cx: &mut Context<RunoApp>,
+) -> AnyElement {
     div()
         .absolute()
         .top(px(34.))

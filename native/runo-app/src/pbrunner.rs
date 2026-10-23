@@ -180,6 +180,7 @@ pub fn command(
         images: &[],
         memory: None,
         local: true,
+        thread: 0,
     };
     Ok(agent::turn_command(&spec))
 }
@@ -187,16 +188,17 @@ pub fn command(
 /// The reply in a run's output, read as Runo reads a turn: its text, the error it
 /// reported and the conversation it named. Plain output is the reply as it is.
 fn read_output(provider: &str, dir: &str, out: &str) -> (String, Option<String>, String) {
-    let Some(mut parser) = crate::stream::Parser::for_provider(provider, dir) else {
+    let mut turn = crate::harness::turn::Turn::unlogged(provider, dir);
+    if turn.plain() {
         return (out.trim().to_string(), None, String::new());
-    };
+    }
     let (mut text, mut error, mut conversation) = (String::new(), None, String::new());
     for line in out.lines() {
-        for update in parser.feed(line) {
+        for update in turn.feed(line) {
             match update {
-                crate::stream::Update::Text(t) => text.push_str(&t),
-                crate::stream::Update::Error(e) => error = Some(e),
-                crate::stream::Update::Conversation(c) => conversation = c,
+                crate::harness::AgentEvent::Text(t) => text.push_str(&t),
+                crate::harness::AgentEvent::Error(e) => error = Some(e),
+                crate::harness::AgentEvent::Conversation(c) => conversation = c,
                 _ => {}
             }
         }
@@ -373,6 +375,7 @@ fn run_one(auto: &Automation, project: &Project, settings: &AppSettings) -> Head
             images: &[],
             memory: None,
             local: true,
+            thread: 0,
         },
         &run.dir,
         false,

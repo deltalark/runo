@@ -41,7 +41,7 @@ pub struct SignIn {
     pub fix: &'static str,
 }
 
-pub const SIGN_INS: [SignIn; 10] = [
+pub const SIGN_INS: [SignIn; 11] = [
     SignIn {
         provider: "claude",
         keys: &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
@@ -108,6 +108,17 @@ pub const SIGN_INS: [SignIn; 10] = [
         file: None,
         fix: "export GROK_API_KEY (from console.x.ai)",
     },
+    SignIn {
+        provider: "pi",
+        keys: &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "OPENROUTER_API_KEY",
+        ],
+        file: None,
+        fix: "export a provider key such as ANTHROPIC_API_KEY or OPENROUTER_API_KEY in your shell profile",
+    },
 ];
 
 pub fn sign_in(provider: &str) -> Option<&'static SignIn> {
@@ -133,8 +144,12 @@ pub struct Connection {
     pub kind: Kind,
     /// Cove: the server's URL; empty for this machine's server.
     pub url: String,
-    /// Cove: the API key of a remote server (`cove key` on that server).
+    /// Cove: the API key of a remote server, from pairing (`cove pair` on that server)
+    /// or `cove key` there.
     pub api_key: String,
+    /// Cove: a pairing code typed in Settings, until it is traded for a key.
+    #[serde(skip)]
+    pub pair_code: String,
     /// Cove VM size and limits.
     pub cpus: u32,
     pub memory_mb: u64,
@@ -142,6 +157,14 @@ pub struct Connection {
     pub network: String,
     /// Stop an idle VM after this many minutes; 0 keeps it running.
     pub idle_stop: u32,
+    /// Pause an idle VM instead of stopping it: its memory and running programs are
+    /// kept, and it carries on as soon as it is used. Needs a Cove with auto-pause.
+    pub idle_pause: bool,
+    /// Cove: the server's SSH login (user@host). Set, Runo installs and pairs Cove over
+    /// SSH and reaches it through a tunnel it keeps open itself.
+    pub ssh: String,
+    /// Cove over SSH: the local port of the tunnel; `url` points at it.
+    pub tunnel_port: u16,
     /// SSH: a host from ~/.ssh/config, or user@host.
     pub host: String,
     /// SSH: 0 for the default port.
@@ -166,10 +189,14 @@ impl Default for Connection {
             kind: Kind::Cove,
             url: String::new(),
             api_key: String::new(),
+            pair_code: String::new(),
             cpus: 2,
             memory_mb: 4096,
             network: "full".into(),
             idle_stop: 0,
+            idle_pause: true,
+            ssh: String::new(),
+            tunnel_port: 0,
             host: String::new(),
             port: 0,
             identity: String::new(),
@@ -212,7 +239,9 @@ impl Connection {
     pub fn summary(&self) -> String {
         match self.kind {
             Kind::Cove => {
-                let place = if self.remote() {
+                let place = if !self.ssh.trim().is_empty() {
+                    self.ssh.trim().to_string()
+                } else if self.remote() {
                     self.url.trim().to_string()
                 } else {
                     "Cove on this machine".into()
@@ -306,8 +335,9 @@ impl Connection {
     }
 
     /// The `cove` command for this connection, pointed at its server.
-    fn cove(&self) -> Result<Command, String> {
+    pub(crate) fn cove(&self) -> Result<Command, String> {
         let bin = crate::cove::binary().ok_or("Cove is not installed on this machine.")?;
+        crate::coveserver::ensure_tunnel(self)?;
         let mut c = Command::new(bin);
         if self.remote() {
             c.env("COVE_URL", self.url.trim());
@@ -339,6 +369,11 @@ impl Connection {
             self.idle_stop
         };
         if idle > 0 {
+            // A Cove too old to pause gets only the stop timer; a newer one checks the
+            // pause timer first, and a server too old for it still stops the VM.
+            if self.idle_pause && crate::cove::has_auto_pause() {
+                args.extend(["--auto-pause".into(), idle.to_string()]);
+            }
             args.extend(["--idle-stop".into(), idle.to_string()]);
         }
         args
@@ -484,6 +519,7 @@ impl Connection {
             }
             Kind::Cove => {
                 let bin = crate::cove::binary().ok_or("Cove is not installed on this machine.")?;
+                crate::coveserver::ensure_tunnel(self)?;
                 let mut env = Vec::new();
                 if self.remote() {
                     env.push(("COVE_URL".into(), self.url.trim().to_string()));
@@ -679,6 +715,70 @@ pub fn name(id: u64) -> String {
         .unwrap_or_else(|| "A removed connection".into())
 }
 
+/// Trade a pairing code from `cove pair` on the server for an API key of Runo's own,
+/// named after this computer. The key is returned, not saved anywhere by Cove.
+pub fn pair(conn: &Connection, code: &str) -> Result<String, String> {
+    let bin = crate::cove::binary().ok_or("Cove is not installed on this machine.")?;
+    let url = conn.url.trim();
+    if url.is_empty() {
+        return Err("Pairing is for a Cove server elsewhere: fill in its URL first.".into());
+    }
+    let name = format!("Runo on {}", crate::cove::host_name());
+    let out = Command::new(bin)
+        .args([
+            "--json",
+            "login",
+            url,
+            code.trim(),
+            "--name",
+            &name,
+            "--no-save",
+        ])
+        .env_remove("COVE_URL")
+        .env_remove("COVE_API_KEY")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run cove: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let line = err
+            .lines()
+            .last()
+            .unwrap_or("")
+            .trim_start_matches("cove: ");
+        return Err(if line.contains("--no-save") {
+            "Update Cove on this machine to pair (cove login --no-save is new).".into()
+        } else if line.is_empty() {
+            "Pairing failed.".into()
+        } else {
+            line.to_string()
+        });
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|_| "Cove gave an answer Runo couldn't read.".to_string())?;
+    v["key"]
+        .as_str()
+        .filter(|k| !k.is_empty())
+        .map(String::from)
+        .ok_or_else(|| "The server sent no key.".into())
+}
+
+/// What the last pairing attempt per connection said (None while it runs).
+pub fn pair_result(id: u64) -> Option<TestResult> {
+    pairings().lock().ok()?.get(&id).cloned()
+}
+
+pub fn set_pair_result(id: u64, result: TestResult) {
+    if let Ok(mut p) = pairings().lock() {
+        p.insert(id, result);
+    }
+}
+
+fn pairings() -> &'static Mutex<std::collections::HashMap<u64, TestResult>> {
+    static P: OnceLock<Mutex<std::collections::HashMap<u64, TestResult>>> = OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
 /// A test's outcome (None while it runs) and what it found.
 type TestResult = (Option<bool>, String);
 
@@ -728,7 +828,14 @@ fn test_cove(conn: &Connection) -> TestResult {
             let mut lines = vec![format!(
                 "Connected to {place}. Agents install in each session's VM on first use."
             )];
-            lines.extend(sign_in_lines(conn, &[], &[]));
+            // Logins the server keeps count as signed in there.
+            let kept: Vec<String> = crate::cove::logins_now(conn)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| l.signed_in)
+                .map(|l| l.agent)
+                .collect();
+            lines.extend(sign_in_lines(conn, &[], &[], &kept));
             (Some(true), lines.join("\n"))
         }
         Ok(o) => (
@@ -781,7 +888,7 @@ fn test_server(conn: &Connection) -> TestResult {
                 "git will be installed on first sync"
             };
             let mut out = vec![format!("Connected: {host}, {git}.")];
-            out.extend(sign_in_lines(conn, &tools, &there));
+            out.extend(sign_in_lines(conn, &tools, &there, &[]));
             (Some(true), out.join("\n"))
         }
         Err(e) => (Some(false), e.lines().last().unwrap_or("").to_string()),
@@ -790,7 +897,12 @@ fn test_server(conn: &Connection) -> TestResult {
 
 /// One line per agent installed here or there: whether it is installed there and how it
 /// signs in, or what to do so it can.
-fn sign_in_lines(conn: &Connection, tools_there: &[String], files_there: &[String]) -> Vec<String> {
+fn sign_in_lines(
+    conn: &Connection,
+    tools_there: &[String],
+    files_there: &[String],
+    kept_there: &[String],
+) -> Vec<String> {
     let forwarded: Vec<String> = conn.forwarded_env().into_iter().map(|(k, _)| k).collect();
     let listed = conn.key_names();
     crate::agent::PROVIDERS
@@ -812,6 +924,8 @@ fn sign_in_lines(conn: &Connection, tools_there: &[String], files_there: &[Strin
                     .copied(),
                 local_file,
                 file_there: s.file.is_some_and(|f| files_there.iter().any(|t| t == f)),
+                kept_there: kept_there.iter().any(|k| k == p.id),
+                server_can_keep: conn.kind == Kind::Cove && crate::cove::keeps_login(p.id),
             };
             Some(agent_line(p.name, s, &check))
         })
@@ -827,6 +941,10 @@ struct AgentCheck<'a> {
     set_here_not_listed: Option<&'a str>,
     local_file: bool,
     file_there: bool,
+    /// The Cove server keeps a login for it (`cove agents`).
+    kept_there: bool,
+    /// The Cove server could keep one, once signed in there.
+    server_can_keep: bool,
 }
 
 fn agent_line(name: &str, s: &SignIn, c: &AgentCheck) -> String {
@@ -838,7 +956,7 @@ fn agent_line(name: &str, s: &SignIn, c: &AgentCheck) -> String {
     if let Some(key) = s.keys.iter().find(|k| c.forwarded.iter().any(|f| f == *k)) {
         return format!("✓ {name}: {install}signs in with {key}");
     }
-    if c.file_there {
+    if c.file_there || c.kept_there {
         return format!("✓ {name}: {install}signed in there");
     }
     if c.local_file {
@@ -850,6 +968,11 @@ fn agent_line(name: &str, s: &SignIn, c: &AgentCheck) -> String {
     if let Some(key) = c.set_here_not_listed {
         return format!(
             "✗ {name}: {install}not signed in there. {key} is set here; add it to Keys passed in"
+        );
+    }
+    if c.server_can_keep {
+        return format!(
+            "✗ {name}: {install}not signed in there. To fix: press Sign in at {name} login below"
         );
     }
     format!("✗ {name}: {install}not signed in there. To fix: {}", s.fix)
@@ -3134,28 +3257,6 @@ pub fn next_id(all: &[Connection]) -> u64 {
     all.iter().map(|c| c.id).max().unwrap_or(0) + 1
 }
 
-/// Sessions saved before connections existed have `cove: true`; point them at a Cove
-/// connection, creating one for this machine's Cove if needed. True if anything changed.
-pub fn migrate(sessions: &mut [crate::store::Session], all: &mut Vec<Connection>) -> bool {
-    if !sessions.iter().any(|s| s.cove) {
-        return false;
-    }
-    let id = match all.iter().find(|c| c.kind == Kind::Cove && !c.remote()) {
-        Some(c) => c.id,
-        None => {
-            let c = Connection::new_cove(next_id(all));
-            let id = c.id;
-            all.push(c);
-            id
-        }
-    };
-    for s in sessions.iter_mut().filter(|s| s.cove) {
-        s.cove = false;
-        s.connection = id;
-    }
-    true
-}
-
 /// Whether `origin` is a public repository, as far as `gh` can tell.
 fn public_repo(dir: &str) -> bool {
     Command::new("gh")
@@ -3426,6 +3527,9 @@ mod tests {
             .join(claude_folder_name(&remote.local_dir));
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("abc.jsonl"), "{\"x\":1}\n").unwrap();
+        let _env = crate::store::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let old_home = std::env::var_os("HOME");
         std::env::set_var("HOME", &home);
         remote.sync_up().unwrap();
@@ -3459,28 +3563,6 @@ mod tests {
         assert!(out.ends_with("[exit code 3]"));
         conn.agents = false;
         assert!(run_for_agent(&conn, "true").is_err());
-    }
-
-    #[test]
-    fn old_cove_sessions_get_a_cove_connection() {
-        let mut sessions = vec![
-            crate::store::Session {
-                id: 1,
-                cove: true,
-                ..Default::default()
-            },
-            crate::store::Session {
-                id: 2,
-                ..Default::default()
-            },
-        ];
-        let mut all = vec![Connection::new_ssh(4)];
-        assert!(migrate(&mut sessions, &mut all));
-        assert_eq!(all.len(), 2);
-        assert_eq!((all[1].id, all[1].kind), (5, Kind::Cove));
-        assert_eq!((sessions[0].connection, sessions[0].cove), (5, false));
-        assert_eq!(sessions[1].connection, LOCAL);
-        assert!(!migrate(&mut sessions, &mut all));
     }
 
     #[test]
@@ -3772,6 +3854,8 @@ mod tests {
                 set_here_not_listed: unlisted,
                 local_file,
                 file_there,
+                kept_there: false,
+                server_can_keep: false,
             }
         }
         assert_eq!(
@@ -3794,6 +3878,16 @@ mod tests {
         assert!(
             claude.starts_with("✗") && claude.contains("claude setup-token"),
             "{claude}"
+        );
+        // On a Cove server that can keep it, the fix is signing in there.
+        let mut on_cove = check(&[], false, false, None);
+        on_cove.server_can_keep = true;
+        let line = agent_line("Claude Code", sign_in("claude").unwrap(), &on_cove);
+        assert!(line.contains("Sign in at Claude Code login"), "{line}");
+        on_cove.kept_there = true;
+        assert!(
+            agent_line("Claude Code", sign_in("claude").unwrap(), &on_cove)
+                .starts_with("✓ Claude Code: installed, signed in there")
         );
         for p in crate::agent::PROVIDERS.iter() {
             assert!(sign_in(p.id).is_some(), "{} has no sign-in", p.id);
@@ -4094,10 +4188,19 @@ mod tests {
         c.network = "off".into();
         c.idle_stop = 30;
         c.cpus = 4;
+        c.idle_pause = false;
         assert_eq!(
             c.cove_ensure_args("runo-1").join(" "),
             "exec runo-1 --create --cpus 4 --memory 4096 --network off --idle-stop 30"
         );
+        // Pausing adds the pause timer, when this machine's Cove has it.
+        c.idle_pause = true;
+        let args = c.cove_ensure_args("runo-1").join(" ");
+        if crate::cove::has_auto_pause() {
+            assert!(args.ends_with("--auto-pause 30 --idle-stop 30"), "{args}");
+        } else {
+            assert!(args.ends_with("--idle-stop 30"), "{args}");
+        }
     }
 
     #[test]

@@ -53,8 +53,10 @@ pub(crate) fn target_chip(id: impl Into<ElementId>, lead: IconName, text: String
 
 /// A one-tap starting point for the ask, shown while the input is empty.
 pub(crate) fn suggestion(id: impl Into<ElementId>, text: &'static str) -> Stateful<Div> {
-    div()
-        .id(id)
+    let id = id.into();
+    let chip = div()
+        .id(id.clone())
+        .relative()
         .flex_none()
         .h(px(24.))
         .px_2()
@@ -62,12 +64,13 @@ pub(crate) fn suggestion(id: impl Into<ElementId>, text: &'static str) -> Statef
         .items_center()
         .rounded_full()
         .border_1()
-        .border_color(rgb(c_border()))
+        .border_color(divider())
         .text_size(px(11.5))
         .text_color(rgb(c_secondary()))
         .cursor_pointer()
-        .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
-        .child(text)
+        .hover(|el| el.text_color(rgb(c_text())))
+        .active(|el| el.opacity(0.75));
+    crate::shell::hover_wash(chip, id, tint(c_active()), 12.).child(text)
 }
 
 /// The round send button; dimmed while there's nothing to send.
@@ -86,6 +89,9 @@ pub(crate) fn send_button(id: &'static str, ready: bool) -> Stateful<Div> {
             col(c_blue(), 0.35)
         })
         .cursor_pointer()
+        .when(ready, |el| {
+            el.hover(|el| el.opacity(0.9)).active(|el| el.opacity(0.75))
+        })
         .child(icon(IconName::ArrowUp, 15., 0xffffff))
 }
 
@@ -260,7 +266,7 @@ pub(crate) fn busy_card(title: &'static str, line: String, secs: Option<u64>) ->
                 .gap_4()
                 .rounded_xl()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(float(c_canvas()))
                 .shadow_lg()
                 .child(sketch)

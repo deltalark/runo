@@ -37,11 +37,302 @@ pub fn binary() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Whether this machine's `cove` takes `--auto-pause` (Cove 0.1 with pause support).
+/// Asked once.
+pub fn has_auto_pause() -> bool {
+    static ANSWER: OnceLock<bool> = OnceLock::new();
+    *ANSWER.get_or_init(|| {
+        binary().is_some_and(|bin| {
+            Command::new(bin)
+                .args(["exec", "--help"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--auto-pause"))
+        })
+    })
+}
+
+/// This computer's name, for naming the key Runo pairs with.
+pub fn host_name() -> String {
+    Command::new("scutil")
+        .args(["--get", "ComputerName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            Command::new("hostname")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "this computer".into())
+}
+
+/// Cove's install script: the same one line for a Mac and for a server.
+pub const INSTALL_URL: &str =
+    "https://raw.githubusercontent.com/deltalark/cove/main/scripts/install.sh";
+
+/// What to run on a Linux server or VPS to install Cove there.
+pub fn server_install_command() -> String {
+    format!("curl -fsSL {INSTALL_URL} | sudo sh")
+}
+
+/// The search path for Cove's installer and server when Runo was started from the
+/// Dock, which gives apps almost no PATH: Homebrew (vfkit, zig) and cargo too.
+fn tool_path() -> String {
+    let mut dirs = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = Path::new(&home);
+        dirs.push(home.join(".cargo/bin").display().to_string());
+        dirs.push(home.join(".cove/bin").display().to_string());
+    }
+    if let Ok(path) = std::env::var("PATH") {
+        dirs.push(path);
+    }
+    dirs.push("/usr/bin:/bin:/usr/sbin:/sbin".into());
+    dirs.join(":")
+}
+
+/// What setting Cove up on this machine is doing: None while it runs, then whether
+/// it worked, and a line to show.
+pub type SetupStatus = (Option<bool>, String);
+
+fn setup() -> &'static Mutex<Option<SetupStatus>> {
+    static S: OnceLock<Mutex<Option<SetupStatus>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+pub fn setup_status() -> Option<SetupStatus> {
+    setup().lock().ok()?.clone()
+}
+
+fn set_setup(status: SetupStatus) {
+    if let Ok(mut s) = setup().lock() {
+        *s = Some(status);
+    }
+}
+
+/// Whether an install or start is running now.
+pub fn setting_up() -> bool {
+    matches!(setup_status(), Some((None, _)))
+}
+
+/// A line of installer output without terminal colours, for showing in Settings.
+fn plain(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Skip an escape sequence: ESC [ ... letter.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if c != '\r' {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Install Cove on this machine with its install script, in the background. Its
+/// progress shows in [`setup_status`]; `done` runs when it ends.
+pub fn install(done: impl FnOnce() + Send + 'static) {
+    if setting_up() {
+        return;
+    }
+    set_setup((None, "Installing Cove…".into()));
+    std::thread::spawn(move || {
+        let result = run_installer();
+        refresh();
+        set_setup(result);
+        done();
+    });
+}
+
+fn run_installer() -> SetupStatus {
+    use std::io::BufRead;
+    let child = Command::new("/bin/sh")
+        .args(["-c", &format!("curl -fsSL {INSTALL_URL} | sh")])
+        .env("PATH", tool_path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return (Some(false), format!("Couldn't run the installer: {e}")),
+    };
+    // Errors go to stderr; keep the last line of either to show.
+    let last = std::sync::Arc::new(Mutex::new(String::new()));
+    let err_last = last.clone();
+    let stderr = child.stderr.take();
+    let errors = std::thread::spawn(move || {
+        let Some(stderr) = stderr else {
+            return;
+        };
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let line = plain(&line);
+            if !line.is_empty() {
+                if let Ok(mut l) = err_last.lock() {
+                    *l = line;
+                }
+            }
+        }
+    });
+    if let Some(stdout) = child.stdout.take() {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let line = plain(&line);
+            if !line.is_empty() {
+                set_setup((
+                    None,
+                    format!("Installing Cove: {}", line.trim_start_matches("==> ")),
+                ));
+                if let Ok(mut l) = last.lock() {
+                    *l = line;
+                }
+            }
+        }
+    }
+    let _ = errors.join();
+    let ok = child.wait().is_ok_and(|s| s.success());
+    let last = last.lock().map(|l| l.clone()).unwrap_or_default();
+    if ok && binary().is_some() {
+        (
+            Some(true),
+            "Installed. Cove starts by itself when you log in.".into(),
+        )
+    } else if last.contains("rustup") || last.contains("needs Rust") {
+        (
+            Some(false),
+            "Cove has no release for this Mac yet, so it builds from source, which needs Rust: install it from rustup.rs, then Install again.".into(),
+        )
+    } else {
+        (Some(false), format!("The install didn't finish: {last}"))
+    }
+}
+
+/// Start this machine's Cove server: its launchd agent when the installer set one
+/// up, otherwise `cove serve` on its own.
+pub fn start(done: impl FnOnce() + Send + 'static) {
+    if setting_up() {
+        return;
+    }
+    set_setup((None, "Starting Cove…".into()));
+    std::thread::spawn(move || {
+        let result = start_server();
+        refresh();
+        set_setup(result);
+        done();
+    });
+}
+
+fn start_server() -> SetupStatus {
+    const LABEL: &str = "com.deltalark.cove";
+    let plist = std::env::var_os("HOME")
+        .map(|h| Path::new(&h).join(format!("Library/LaunchAgents/{LABEL}.plist")));
+    #[cfg(unix)]
+    let uid = unsafe { libc::getuid() };
+    // launchd is macOS only; elsewhere the plist never exists.
+    #[cfg(not(unix))]
+    let uid = 0;
+    let started = if plist.as_ref().is_some_and(|p| p.is_file()) {
+        let target = format!("gui/{uid}/{LABEL}");
+        let kick = Command::new("launchctl")
+            .args(["kickstart", "-k", &target])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        kick || plist.is_some_and(|p| {
+            Command::new("launchctl")
+                .args(["bootstrap", &format!("gui/{uid}")])
+                .arg(&p)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        })
+    } else if let Some(bin) = binary() {
+        let mut cmd = Command::new(bin);
+        cmd.arg("serve")
+            .env("PATH", tool_path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd.spawn().is_ok()
+    } else {
+        false
+    };
+    if !started {
+        return (
+            Some(false),
+            "Couldn't start Cove. Run cove serve in a terminal to see why.".into(),
+        );
+    }
+    // Give the server a moment to answer.
+    for _ in 0..20 {
+        if answers() {
+            return (Some(true), "Cove is running.".into());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    (
+        Some(false),
+        "Cove started but doesn't answer yet. Run cove doctor in a terminal to see what's missing."
+            .into(),
+    )
+}
+
+/// Whether this machine's Cove server answers now (not cached).
+fn answers() -> bool {
+    binary().is_some_and(|bin| {
+        Command::new(bin)
+            .args(["--json", "ls"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+fn availability() -> &'static Mutex<(Option<Instant>, bool)> {
+    static STATE: OnceLock<Mutex<(Option<Instant>, bool)>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new((None, false)))
+}
+
+/// Ask again on the next [`available`] call, after installing or starting Cove.
+pub fn refresh() {
+    let ok = answers();
+    if let Ok(mut g) = availability().lock() {
+        *g = (Some(Instant::now()), ok);
+    }
+}
+
 /// Whether Cove is installed and its server answers. Cached and refreshed in the
 /// background, so it is cheap to call while rendering.
 pub fn available() -> bool {
-    static STATE: OnceLock<Mutex<(Option<Instant>, bool)>> = OnceLock::new();
-    let state = STATE.get_or_init(|| Mutex::new((None, false)));
+    let state = availability();
     let Ok(mut guard) = state.lock() else {
         return false;
     };
@@ -51,19 +342,9 @@ pub fn available() -> bool {
     if stale {
         guard.0 = Some(Instant::now());
         std::thread::spawn(|| {
-            let ok = binary().is_some_and(|bin| {
-                Command::new(bin)
-                    .args(["--json", "ls"])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success())
-            });
-            if let Some(state) = STATE.get() {
-                if let Ok(mut g) = state.lock() {
-                    g.1 = ok;
-                }
+            let ok = answers();
+            if let Ok(mut g) = availability().lock() {
+                g.1 = ok;
             }
         });
     }
@@ -129,6 +410,185 @@ pub fn vm_action(action: &'static str, name: &str) {
             .stdin(std::process::Stdio::null())
             .output();
     });
+}
+
+/// Agents a Cove server keeps the login of (`cove agents`): signed in once there, every
+/// VM on it is signed in, and tokens the agent refreshes come back to the server.
+const SERVER_LOGINS: [&str; 5] = ["claude", "codex", "gemini", "opencode", "qwen"];
+
+pub fn keeps_login(provider: &str) -> bool {
+    SERVER_LOGINS.contains(&provider)
+}
+
+/// The VM Runo signs agents in from, on a Cove server.
+const SIGN_IN_VM: &str = "runo-signin";
+
+/// An agent's login as a Cove server keeps it (`cove --json agents ls`).
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct AgentLogin {
+    pub agent: String,
+    pub signed_in: bool,
+}
+
+type LoginCache = std::collections::HashMap<u64, (Instant, Result<Vec<AgentLogin>, String>)>;
+
+fn login_cache() -> &'static Mutex<LoginCache> {
+    static CACHE: OnceLock<Mutex<LoginCache>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Ask the server which agents are signed in there, now.
+fn fetch_logins(conn: &crate::connections::Connection) -> Result<Vec<AgentLogin>, String> {
+    let out = conn
+        .cove()?
+        .args(["--json", "agents", "ls"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run cove: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        if err.contains("unrecognized subcommand") {
+            return Err(format!(
+                "This Mac's Cove is too old to sign agents in on a server. Update it with: curl -fsSL {INSTALL_URL} | sh"
+            ));
+        }
+        if err.contains("404") || err.to_lowercase().contains("not found") {
+            return Err(format!(
+                "This Cove server is too old to keep agent logins. Update it with: {}",
+                server_install_command()
+            ));
+        }
+        return Err(err
+            .lines()
+            .last()
+            .unwrap_or("cove failed")
+            .trim()
+            .to_string());
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("cove said something unexpected: {e}"))
+}
+
+/// The agents signed in on a Cove connection's server, refreshed in the background every
+/// 30 seconds. None until the first answer is in.
+pub fn logins(conn: &crate::connections::Connection) -> Option<Result<Vec<AgentLogin>, String>> {
+    let Ok(mut cache) = login_cache().lock() else {
+        return None;
+    };
+    let stale = cache
+        .get(&conn.id)
+        .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(30));
+    let known = cache.get(&conn.id).map(|(_, r)| r.clone());
+    if stale {
+        // Asked again in 30 seconds at the earliest, whatever this answer is.
+        let at = Instant::now();
+        let held = known.clone().unwrap_or_else(|| Ok(Vec::new()));
+        cache.insert(conn.id, (at, held));
+        let conn = conn.clone();
+        std::thread::spawn(move || {
+            let answer = fetch_logins(&conn);
+            if let Ok(mut cache) = login_cache().lock() {
+                cache.insert(conn.id, (at, answer));
+            }
+            crate::caps::mark_updated();
+        });
+    }
+    known
+}
+
+/// Ask the server now, off the UI thread (as Test does), and keep the answer.
+pub fn logins_now(conn: &crate::connections::Connection) -> Result<Vec<AgentLogin>, String> {
+    let answer = fetch_logins(conn);
+    if let Ok(mut cache) = login_cache().lock() {
+        cache.insert(conn.id, (Instant::now(), answer.clone()));
+    }
+    answer
+}
+
+/// Ask every server again on the next [`logins`] call, after signing in or out.
+pub fn forget_logins() {
+    if let Ok(mut cache) = login_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// Whether `provider` is signed in on the connection's server, once known.
+pub fn signed_in_there(conn: &crate::connections::Connection, provider: &str) -> Option<bool> {
+    let logins = logins(conn)?.ok()?;
+    logins
+        .iter()
+        .find(|l| l.agent == provider)
+        .map(|l| l.signed_in)
+}
+
+/// The command that signs `provider` in on a Cove connection's server: the agent's own
+/// login in a terminal in a small VM there, after which the server keeps the login for
+/// every VM.
+pub fn sign_in_command(
+    conn: &crate::connections::Connection,
+    provider: &str,
+) -> Result<Command, String> {
+    if !keeps_login(provider) {
+        return Err(format!(
+            "Cove can't keep {}'s login yet. Pass its API key to the connection under Keys passed in.",
+            crate::agent::provider(provider).name
+        ));
+    }
+    let mut c = conn.cove()?;
+    c.args(["agents", "login", provider, "--vm", SIGN_IN_VM]);
+    Ok(c)
+}
+
+/// Whether this Mac has a login file for `provider` that Cove can copy to a server.
+pub fn has_local_login(provider: &str) -> bool {
+    keeps_login(provider)
+        && crate::connections::sign_in(provider)
+            .and_then(|s| s.file)
+            .zip(std::env::var_os("HOME"))
+            .is_some_and(|(f, home)| Path::new(&home).join(f).is_file())
+}
+
+/// Copy this Mac's login for `provider` to a Cove connection's server (`cove agents
+/// import`), for every VM there.
+pub fn import_login(conn: &crate::connections::Connection, provider: &str) -> Result<(), String> {
+    let out = conn
+        .cove()?
+        .args(["agents", "import", provider])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run cove: {e}"))?;
+    forget_logins();
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .trim_start_matches("cove: ")
+            .to_string())
+    }
+}
+
+/// Sign `provider` out on a Cove connection's server and its VMs.
+pub fn sign_out(conn: &crate::connections::Connection, provider: &str) -> Result<(), String> {
+    let out = conn
+        .cove()?
+        .args(["agents", "logout", provider])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("could not run cove: {e}"))?;
+    forget_logins();
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// What a failed turn says when the agent isn't signed in on a Cove server.
+pub fn sign_in_help(provider: &str, place: &str) -> String {
+    format!(
+        "{} isn't signed in on {place}. Press Sign in on {place} below: you sign in once in a terminal there, and every session on {place} uses that login.",
+        crate::agent::provider(provider).name
+    )
 }
 
 pub fn vm_name(session: u64) -> String {
@@ -283,10 +743,13 @@ fn install_command(program: &str) -> Option<String> {
             r#"runo_curl && curl -fsSL https://claude.ai/install.sh | bash -s "${want:-latest}""#
                 .to_string()
         }
-        "cursor" => "runo_curl && curl https://cursor.com/install -fsS | bash".into(),
-        "droid" => "runo_curl && curl -fsSL https://app.factory.ai/cli | sh".into(),
-        "grok" => format!("runo_curl && {}", crate::install::GROK),
-        id => format!("runo_npm {}", crate::alerts::npm_package(id)?),
+        id => match crate::alerts::npm_package(id) {
+            Some(package) => format!("runo_npm {package}"),
+            None => format!(
+                "runo_curl && {}",
+                crate::registry::spec(id)?.install.unix.as_deref()?
+            ),
+        },
     })
 }
 
@@ -347,6 +810,16 @@ fn git_common_dir(dir: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn installer_lines_lose_their_colours() {
+        assert_eq!(
+            plain("\u{1b}[1;34m==> Installing Cove\u{1b}[0m\r"),
+            "==> Installing Cove"
+        );
+        assert_eq!(plain("  plain  "), "plain");
+        assert!(server_install_command().ends_with("install.sh | sudo sh"));
+    }
+
     use super::*;
 
     fn sandbox() -> Sandbox {
@@ -359,6 +832,27 @@ mod tests {
                 "/code/app/.git:/code/app/.git:ro".into(),
             ],
         }
+    }
+
+    #[test]
+    fn agents_sign_in_on_the_server() {
+        let mut conn = crate::connections::Connection::new_cove(1);
+        conn.url = "http://127.0.0.1:17457".into();
+        conn.api_key = "cove_k".into();
+        if binary().is_some() {
+            let c = sign_in_command(&conn, "claude").unwrap();
+            let args: Vec<String> = c
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args.join(" "), "agents login claude --vm runo-signin");
+            assert!(c
+                .get_envs()
+                .any(|(k, v)| k == "COVE_URL" && v.is_some_and(|v| v == "http://127.0.0.1:17457")));
+        }
+        assert!(sign_in_command(&conn, "cursor").is_err());
+        assert!(keeps_login("codex") && !keeps_login("amp"));
+        assert!(sign_in_help("claude", "VPS").contains("isn't signed in on VPS"));
     }
 
     #[test]

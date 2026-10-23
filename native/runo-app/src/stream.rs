@@ -6,57 +6,47 @@
 
 use serde_json::Value;
 
+use crate::crew::{Mark, Step};
+use crate::harness::{AgentEvent, ToolKind, ToolStep};
 use crate::store::{Question, Usage};
-
-#[derive(Debug, PartialEq)]
-pub enum Update {
-    /// Reply text to append to the agent's message.
-    Text(String),
-    /// A finished tool step, such as "Read src/main.rs".
-    Step(String),
-    /// A tool step that has started and whose result will follow as `Finished` with
-    /// the same `id`, such as a Bash command that is still running.
-    Started { id: String, label: String },
-    /// The result of a `Started` step arrived: `ok` is false when the tool failed.
-    Finished { id: String, ok: bool },
-    /// The run's summary line, such as "12s · 3 turns · $0.04".
-    Summary(String),
-    /// The run failed; the CLI's own explanation.
-    Error(String),
-    /// A warning from the CLI that doesn't end the run, such as an unknown model.
-    Notice(String),
-    /// Token use: the context after the latest model call, then totals from the result.
-    Usage(Usage),
-    /// Tools the agent wanted but its permission mode did not allow.
-    Denied(Vec<String>),
-    /// A plan proposed in plan mode.
-    Plan(String),
-    /// Multiple-choice questions for the person.
-    Questions(Vec<Question>),
-    /// The CLI's own id for the conversation, so follow-ups resume exactly this one.
-    Conversation(String),
-}
 
 /// The parser for one run, by the format the agent prints.
 pub enum Parser {
     Claude(ClaudeStream),
-    Json(JsonStream),
+    Json(Box<JsonStream>),
+    /// An ACP session's output (see `harness::acp`).
+    Acp(Box<crate::harness::acp::AcpStream>),
+    /// A Codex app-server turn's output (see `harness::codex`).
+    Codex(Box<crate::harness::codex::CodexAppStream>),
+    /// Pi's events, from its RPC or JSON mode (see `harness::pi`).
+    Pi(Box<crate::harness::pi::PiStream>),
 }
 
 impl Parser {
     /// The parser for a run of `provider` in `cwd`, or `None` for plain text output.
     pub fn for_provider(provider: &str, cwd: &str) -> Option<Parser> {
-        match crate::agent::output(provider) {
+        Parser::for_format(crate::agent::output(provider), cwd)
+    }
+
+    /// The parser for output in `format`, or `None` for plain text.
+    pub fn for_format(format: crate::agent::Output, cwd: &str) -> Option<Parser> {
+        match format {
             crate::agent::Output::Claude => Some(Parser::Claude(ClaudeStream::new(cwd))),
-            crate::agent::Output::Json => Some(Parser::Json(JsonStream::new(cwd))),
+            crate::agent::Output::Json => Some(Parser::Json(Box::new(JsonStream::new(cwd)))),
+            crate::agent::Output::Pi => {
+                Some(Parser::Pi(Box::new(crate::harness::pi::PiStream::new(cwd))))
+            }
             crate::agent::Output::Text => None,
         }
     }
 
-    pub fn feed(&mut self, line: &str) -> Vec<Update> {
+    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match self {
             Parser::Claude(p) => p.feed(line),
             Parser::Json(p) => p.feed(line),
+            Parser::Acp(p) => p.feed(line),
+            Parser::Codex(p) => p.feed(line),
+            Parser::Pi(p) => p.feed(line),
         }
     }
 }
@@ -97,7 +87,7 @@ impl ClaudeStream {
     }
 
     /// Feed one stdout line. Lines that are not JSON pass through as text.
-    pub fn feed(&mut self, line: &str) -> Vec<Update> {
+    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             return if line.trim().is_empty() {
                 vec![]
@@ -110,7 +100,7 @@ impl ClaudeStream {
         if !self.named && matches!(kind, "system" | "result") {
             if let Some(id) = conversation_of(&event) {
                 self.named = true;
-                out.push(Update::Conversation(id));
+                out.push(AgentEvent::Conversation(id));
             }
         }
         match kind {
@@ -123,14 +113,14 @@ impl ClaudeStream {
                     "message_start" => self.streamed_text = false,
                     "content_block_start" if inner["content_block"]["type"] == "text" => {
                         if self.any_text {
-                            out.push(Update::Text("\n\n".into()));
+                            out.push(AgentEvent::Text("\n\n".into()));
                         }
                     }
                     "content_block_delta" if inner["delta"]["type"] == "text_delta" => {
                         if let Some(text) = inner["delta"]["text"].as_str() {
                             self.streamed_text = true;
                             self.any_text = true;
-                            out.push(Update::Text(text.to_string()));
+                            out.push(AgentEvent::Text(text.to_string()));
                         }
                     }
                     _ => {}
@@ -147,15 +137,18 @@ impl ClaudeStream {
                     self.usage.input = n("input_tokens");
                     self.usage.cached =
                         n("cache_read_input_tokens") + n("cache_creation_input_tokens");
-                    out.push(Update::Usage(self.usage));
+                    out.push(AgentEvent::Usage(self.usage));
                 }
                 for block in event["message"]["content"].as_array().into_iter().flatten() {
                     if block["type"] == "tool_use" {
                         match block["name"].as_str().unwrap_or("") {
                             "ExitPlanMode" => {
                                 if let Some(plan) = block["input"]["plan"].as_str() {
-                                    out.push(Update::Plan(plan.to_string()));
+                                    out.push(AgentEvent::Plan(plan.to_string()));
                                 }
+                            }
+                            name if is_todo_tool(name) => {
+                                out.extend(todos(&block["input"]).map(AgentEvent::Todos));
                             }
                             "AskUserQuestion" => {
                                 let questions: Vec<Question> = block["input"]["questions"]
@@ -176,7 +169,7 @@ impl ClaudeStream {
                                     .filter(|q| !q.question.is_empty())
                                     .collect();
                                 if !questions.is_empty() {
-                                    out.push(Update::Questions(questions));
+                                    out.push(AgentEvent::Questions(questions));
                                 }
                             }
                             _ => {}
@@ -190,17 +183,14 @@ impl ClaudeStream {
                             }
                         }
                         "tool_use" => {
-                            let label = self.step_label(
-                                block["name"].as_str().unwrap_or("tool"),
-                                &block["input"],
-                            );
-                            out.push(match block["id"].as_str().filter(|id| !id.is_empty()) {
-                                Some(id) => Update::Started {
-                                    id: id.to_string(),
-                                    label,
+                            let tool = block["name"].as_str().unwrap_or("tool");
+                            let label = self.step_label(tool, &block["input"]);
+                            out.push(AgentEvent::Tool(
+                                match block["id"].as_str().filter(|id| !id.is_empty()) {
+                                    Some(id) => ToolStep::running(id, tool, label),
+                                    None => ToolStep::of(tool, label),
                                 },
-                                None => Update::Step(label),
-                            });
+                            ));
                         }
                         _ => {}
                     }
@@ -216,9 +206,10 @@ impl ClaudeStream {
                         continue;
                     }
                     if let Some(id) = block["tool_use_id"].as_str().filter(|id| !id.is_empty()) {
-                        out.push(Update::Finished {
+                        out.push(AgentEvent::ToolDone {
                             id: id.to_string(),
                             ok: block["is_error"].as_bool() != Some(true),
+                            output: result_text(&block["content"]),
                         });
                     }
                 }
@@ -242,7 +233,7 @@ impl ClaudeStream {
                         .unwrap_or(0);
                 }
                 if !self.usage.is_empty() {
-                    out.push(Update::Usage(self.usage));
+                    out.push(AgentEvent::Usage(self.usage));
                 }
                 let mut denied: Vec<String> = Vec::new();
                 for d in event["permission_denials"].as_array().into_iter().flatten() {
@@ -256,7 +247,7 @@ impl ClaudeStream {
                     }
                 }
                 if !denied.is_empty() {
-                    out.push(Update::Denied(denied));
+                    out.push(AgentEvent::Denied(denied));
                 }
                 let mut parts = Vec::new();
                 if let Some(ms) = event["duration_ms"].as_u64() {
@@ -269,14 +260,14 @@ impl ClaudeStream {
                     parts.push(format!("${cost:.2}"));
                 }
                 if !parts.is_empty() {
-                    out.push(Update::Summary(parts.join(" · ")));
+                    out.push(AgentEvent::Summary(parts.join(" · ")));
                 }
                 if event["is_error"].as_bool() == Some(true) {
                     let reason = event["result"]
                         .as_str()
                         .or_else(|| event["subtype"].as_str())
                         .unwrap_or("The agent reported an error.");
-                    out.push(Update::Error(reason.to_string()));
+                    out.push(AgentEvent::Error(reason.to_string()));
                 } else if !self.any_text {
                     if let Some(text) = event["result"].as_str().filter(|t| !t.is_empty()) {
                         out.push(self.text(text.to_string()));
@@ -288,9 +279,9 @@ impl ClaudeStream {
         out
     }
 
-    fn text(&mut self, text: String) -> Update {
+    fn text(&mut self, text: String) -> AgentEvent {
         self.any_text = true;
-        Update::Text(text)
+        AgentEvent::Text(text)
     }
 
     fn step_label(&self, tool: &str, input: &Value) -> String {
@@ -308,9 +299,23 @@ fn short(text: &str, max: usize) -> String {
     }
 }
 
+/// What a tool printed, from a result given as text or as content blocks.
+pub(crate) fn result_text(content: &Value) -> String {
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str().or(b.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    };
+    crate::harness::event::tail(&text, 4096)
+}
+
 /// A short label for a tool call, such as "Read src/main.rs" or "Ran cargo test". Tool
 /// names and argument keys differ between CLIs; unknown tools read "Used <tool>".
-fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
+pub(crate) fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
     let s = |keys: &[&str]| {
         keys.iter()
             .find_map(|k| match &input[*k] {
@@ -374,11 +379,61 @@ fn step_label(cwd: &str, tool: &str, input: &Value) -> String {
             "Ran a subagent: {}",
             short(&s(&["description", "prompt"]), 60)
         ),
-        "TodoWrite" | "todowrite" | "write_todos" | "update_todo" => "Updated the plan".to_string(),
+        tool if is_todo_tool(tool) => "Updated the plan".to_string(),
         "ExitPlanMode" => "Proposed a plan".to_string(),
         "AskUserQuestion" => "Asked a question".to_string(),
         other => format!("Used {other}"),
     }
+}
+
+/// Whether `tool` is one of the CLIs' own todo tools.
+fn is_todo_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "TodoWrite" | "todowrite" | "write_todos" | "update_todo" | "todo_write" | "update_plan"
+    )
+}
+
+/// The todo list a todo tool was given, under any of the shapes the CLIs use:
+/// `{"todos":[{"content":…,"status":"in_progress"}]}` (Claude, Gemini, OpenCode, Cursor),
+/// `{"plan":[{"step":…,"status":…}]}` and Codex's `{"items":[{"text":…,"completed":true}]}`.
+pub(crate) fn todos(input: &Value) -> Option<Vec<Step>> {
+    let items = ["todos", "plan", "items"]
+        .iter()
+        .find_map(|k| input[*k].as_array())?;
+    let steps: Vec<Step> = items
+        .iter()
+        .filter_map(|item| {
+            let text = ["content", "text", "step", "description", "title", "task"]
+                .iter()
+                .find_map(|k| item[*k].as_str())
+                .or(item.as_str())?;
+            let status = ["status", "state"]
+                .iter()
+                .find_map(|k| item[*k].as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let mark = if item["completed"] == true
+                || status.contains("complete")
+                || status.contains("done")
+            {
+                Mark::Done
+            } else if status.contains("progress")
+                || status.contains("doing")
+                || status.contains("active")
+            {
+                Mark::Doing
+            } else {
+                Mark::Todo
+            };
+            Some(Step {
+                text: text.to_string(),
+                mark,
+            })
+        })
+        .collect();
+    let steps = crate::crew::clean_steps(steps);
+    (!steps.is_empty()).then_some(steps)
 }
 
 /// Per-run parser for the JSON lines of Codex (`exec --json`), Cursor and Droid
@@ -394,6 +449,8 @@ pub struct JsonStream {
     named: bool,
     /// Codex items already shown as a step, by id.
     shown: std::collections::HashSet<String>,
+    /// Codex calls shown while they ran, whose result is still to come, by id.
+    running: std::collections::HashSet<String>,
     /// How much of each Codex message is already shown, by item id.
     written: std::collections::HashMap<String, usize>,
     /// The last error reported, so the same failure isn't shown twice.
@@ -411,6 +468,7 @@ impl JsonStream {
             usage: Usage::default(),
             named: false,
             shown: Default::default(),
+            running: Default::default(),
             written: Default::default(),
             last_error: String::new(),
             notices: Default::default(),
@@ -418,26 +476,26 @@ impl JsonStream {
     }
 
     /// A warning, unless it was already shown in this run.
-    fn notice(&mut self, message: String) -> Option<Update> {
+    fn notice(&mut self, message: String) -> Option<AgentEvent> {
         let message = message.trim().to_string();
         if message.is_empty() || !self.notices.insert(message.clone()) {
             return None;
         }
-        Some(Update::Notice(message))
+        Some(AgentEvent::Notice(message))
     }
 
     /// An error, unless it repeats the one just reported.
-    fn error(&mut self, message: String) -> Option<Update> {
+    fn error(&mut self, message: String) -> Option<AgentEvent> {
         if message == self.last_error {
             return None;
         }
         self.last_error = message.clone();
-        Some(Update::Error(message))
+        Some(AgentEvent::Error(message))
     }
 
     /// A Codex item as it starts, grows (`done` false) or finishes. Messages stream in as
     /// their text grows; other items show as a step once, as soon as they can be named.
-    fn codex_item(&mut self, item: &Value, done: bool) -> Vec<Update> {
+    fn codex_item(&mut self, item: &Value, done: bool) -> Vec<AgentEvent> {
         let id = item["id"].as_str().unwrap_or("").to_string();
         let kind = item["type"].as_str().unwrap_or("");
         if kind == "agent_message" {
@@ -470,9 +528,29 @@ impl JsonStream {
                 ""
             };
             self.any_text = true;
-            return vec![Update::Text(format!("{sep}{rest}"))];
+            return vec![AgentEvent::Text(format!("{sep}{rest}"))];
+        }
+        // A todo list is named once but each change to it is passed on.
+        if kind == "todo_list" {
+            let mut out = Vec::new();
+            if id.is_empty() || self.shown.insert(id) {
+                out.push(AgentEvent::Tool(ToolStep::of(
+                    "update_plan",
+                    "Updated the plan",
+                )));
+            }
+            out.extend(todos(item).map(AgentEvent::Todos));
+            return out;
         }
         if !id.is_empty() && self.shown.contains(&id) {
+            // A call shown while it ran: its result.
+            if done && self.running.remove(&id) {
+                return vec![AgentEvent::ToolDone {
+                    ok: codex_ok(item),
+                    output: codex_output(item),
+                    id,
+                }];
+            }
             return vec![];
         }
         let mut out = Vec::new();
@@ -480,10 +558,8 @@ impl JsonStream {
             "command_execution" => {
                 let command = item["command"].as_str().unwrap_or("");
                 if !command.is_empty() {
-                    out.push(Update::Step(format!(
-                        "Ran {}",
-                        short(&shell_body(command), 70)
-                    )));
+                    let label = format!("Ran {}", short(&shell_body(command), 70));
+                    out.extend(self.codex_call(&id, "shell", label, item, done));
                 }
             }
             "file_change" => {
@@ -498,24 +574,36 @@ impl JsonStream {
                         .strip_prefix(&self.cwd)
                         .map(|p| p.trim_start_matches('/').to_string())
                         .unwrap_or(path);
-                    out.push(Update::Step(format!("{verb} {path}")));
+                    let kind = match verb {
+                        "Wrote" => ToolKind::Write,
+                        "Deleted" => ToolKind::Delete,
+                        _ => ToolKind::Edit,
+                    };
+                    let mut step = ToolStep::of("apply_patch", format!("{verb} {path}")).kind(kind);
+                    if !codex_ok(item) {
+                        step.finish(false);
+                    }
+                    out.push(AgentEvent::Tool(step));
                 }
             }
-            "mcp_tool_call" => out.push(Update::Step(format!(
-                "Used {} {}",
-                item["server"].as_str().unwrap_or(""),
-                item["tool"].as_str().unwrap_or("a tool")
-            ))),
+            "mcp_tool_call" => {
+                let tool = item["tool"].as_str().unwrap_or("a tool");
+                let label = format!("Used {} {tool}", item["server"].as_str().unwrap_or(""));
+                let calls = self.codex_call(&id, tool, label, item, done);
+                out.extend(calls.into_iter().map(|c| match c {
+                    AgentEvent::Tool(step) => AgentEvent::Tool(step.kind(ToolKind::Mcp)),
+                    other => other,
+                }));
+            }
             "web_search" => {
                 let query = item["query"].as_str().unwrap_or("");
                 if !query.is_empty() || done {
-                    out.push(Update::Step(format!(
-                        "Searched the web for {}",
-                        short(query, 50)
+                    out.push(AgentEvent::Tool(ToolStep::of(
+                        "web_search",
+                        format!("Searched the web for {}", short(query, 50)),
                     )));
                 }
             }
-            "todo_list" => out.push(Update::Step("Updated the plan".into())),
             // Warnings that don't stop the run, such as "Model metadata for … not found".
             "error" | "warning" => {
                 let message = error_message(&item["message"])
@@ -532,7 +620,10 @@ impl JsonStream {
                     .find(|l| !l.is_empty())
                     .unwrap_or("");
                 if !heading.is_empty() {
-                    out.push(Update::Step(format!("Thought: {}", short(heading, 70))));
+                    out.push(AgentEvent::Tool(
+                        ToolStep::done(format!("Thought: {}", short(heading, 70)))
+                            .kind(ToolKind::Think),
+                    ));
                 }
             }
             _ => {}
@@ -543,36 +634,78 @@ impl JsonStream {
         out
     }
 
+    /// A Codex call (a command, an MCP tool): running until its item completes, or
+    /// finished at once when it is first seen complete.
+    fn codex_call(
+        &mut self,
+        id: &str,
+        tool: &str,
+        label: String,
+        item: &Value,
+        done: bool,
+    ) -> Vec<AgentEvent> {
+        if id.is_empty() {
+            let mut step = ToolStep::of(tool, label);
+            if done && !codex_ok(item) {
+                step.finish(false);
+            }
+            return vec![AgentEvent::Tool(step)];
+        }
+        let mut out = vec![AgentEvent::Tool(ToolStep::running(id, tool, label))];
+        if done {
+            out.push(AgentEvent::ToolDone {
+                id: id.to_string(),
+                ok: codex_ok(item),
+                output: codex_output(item),
+            });
+        } else {
+            self.running.insert(id.to_string());
+        }
+        out
+    }
+
     /// A complete block of reply text, set apart from earlier ones.
-    fn block(&mut self, text: &str) -> Option<Update> {
+    fn block(&mut self, text: &str) -> Option<AgentEvent> {
         let text = text.trim();
         if text.is_empty() {
             return None;
         }
         let sep = if self.any_text { "\n\n" } else { "" };
         self.any_text = true;
-        Some(Update::Text(format!("{sep}{text}")))
+        Some(AgentEvent::Text(format!("{sep}{text}")))
     }
 
     /// A piece of reply text arriving as it is written.
-    fn piece(&mut self, text: &str) -> Option<Update> {
+    fn piece(&mut self, text: &str) -> Option<AgentEvent> {
         if text.is_empty() {
             return None;
         }
         self.any_text = true;
-        Some(Update::Text(text.to_string()))
+        Some(AgentEvent::Text(text.to_string()))
     }
 
-    fn step(&self, tool: &str, input: &Value) -> Update {
-        Update::Step(step_label(&self.cwd, tool, input))
+    /// A tool call's step, and the todo list it wrote when it is a todo tool. With an
+    /// `id` the call runs until a result names it; without, it is already done.
+    fn tool(&self, tool: &str, input: &Value, id: &str) -> Vec<AgentEvent> {
+        let label = step_label(&self.cwd, tool, input);
+        let step = if id.is_empty() {
+            ToolStep::of(tool, label)
+        } else {
+            ToolStep::running(id, tool, label)
+        };
+        let mut out = vec![AgentEvent::Tool(step)];
+        if is_todo_tool(tool) {
+            out.extend(todos(input).map(AgentEvent::Todos));
+        }
+        out
     }
 
-    pub fn feed(&mut self, line: &str) -> Vec<Update> {
+    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
             return if line.trim().is_empty() {
                 vec![]
             } else {
-                vec![Update::Text(line.to_string())]
+                vec![AgentEvent::Text(line.to_string())]
             };
         };
         let mut out = Vec::new();
@@ -582,7 +715,7 @@ impl JsonStream {
         if !self.named {
             if let Some(id) = conversation_of(&event) {
                 self.named = true;
-                out.push(Update::Conversation(id));
+                out.push(AgentEvent::Conversation(id));
             }
         }
         let num = |v: &Value| v.as_u64().unwrap_or(0);
@@ -601,7 +734,7 @@ impl JsonStream {
                 self.usage.cached = cached;
                 self.usage.output = num(&u["output_tokens"]);
                 if !self.usage.is_empty() {
-                    out.push(Update::Usage(self.usage));
+                    out.push(AgentEvent::Usage(self.usage));
                 }
             }
             "turn.failed" => out.extend(
@@ -615,24 +748,39 @@ impl JsonStream {
                 for block in event["message"]["content"].as_array().into_iter().flatten() {
                     match block["type"].as_str().unwrap_or("") {
                         "text" => out.extend(self.block(block["text"].as_str().unwrap_or(""))),
-                        "tool_use" => out.push(
-                            self.step(block["name"].as_str().unwrap_or("a tool"), &block["input"]),
-                        ),
+                        "tool_use" => out.extend(self.tool(
+                            block["name"].as_str().unwrap_or("a tool"),
+                            &block["input"],
+                            "",
+                        )),
                         _ => {}
                     }
                 }
             }
             "tool_call" => {
                 if let Some(call) = event["tool_call"].as_object() {
-                    // Cursor: {"subtype":"started","tool_call":{"readToolCall":{"args":{…}}}}.
-                    if event["subtype"] == "started" {
-                        if let Some((kind, call)) = call.iter().next() {
-                            out.push(self.cursor_step(kind, call));
+                    // Cursor: {"subtype":"started","call_id":…,"tool_call":{"readToolCall":
+                    // {"args":{…}}}}, then "completed" with the call's `result` added.
+                    let id = event["call_id"].as_str().unwrap_or("");
+                    if let Some((kind, call)) = call.iter().next() {
+                        if event["subtype"] == "started" {
+                            out.extend(self.cursor_step(kind, call, id));
+                        } else if event["subtype"] == "completed" && !id.is_empty() {
+                            let result = &call["result"];
+                            let failed = result.get("success").is_none()
+                                && ["error", "failure", "rejected", "permissionDenied"]
+                                    .iter()
+                                    .any(|k| result.get(*k).is_some());
+                            out.push(AgentEvent::ToolDone {
+                                id: id.to_string(),
+                                ok: !failed,
+                                output: String::new(),
+                            });
                         }
                     }
                 } else if let Some(tool) = event["toolName"].as_str() {
                     // Droid: {"type":"tool_call","toolName":"Read","parameters":{…}}.
-                    out.push(self.step(tool, &event["parameters"]));
+                    out.extend(self.tool(tool, &event["parameters"], ""));
                 }
             }
             // Droid and Gemini.
@@ -650,11 +798,33 @@ impl JsonStream {
             }
             "tool_use" => {
                 if let Some(tool) = event["tool_name"].as_str() {
-                    // Gemini.
-                    out.push(self.step(tool, &event["parameters"]));
+                    // Gemini; its result follows as `tool_result` under `tool_id`.
+                    let id = event["tool_id"].as_str().unwrap_or("");
+                    out.extend(self.tool(tool, &event["parameters"], id));
                 } else if let Some(tool) = event["part"]["tool"].as_str() {
-                    // OpenCode.
-                    out.push(self.step(tool, &event["part"]["state"]["input"]));
+                    // OpenCode, once the call is over.
+                    let state = &event["part"]["state"];
+                    let mut calls = self.tool(tool, &state["input"], "");
+                    if state["status"] == "error" {
+                        if let Some(AgentEvent::Tool(step)) = calls.first_mut() {
+                            step.finish(false);
+                        }
+                    }
+                    out.extend(calls);
+                }
+            }
+            // Gemini.
+            "tool_result" => {
+                if let Some(id) = event["tool_id"].as_str().filter(|id| !id.is_empty()) {
+                    let output = match &event["output"] {
+                        Value::String(text) => text.clone(),
+                        _ => error_message(&event["error"]).unwrap_or_default(),
+                    };
+                    out.push(AgentEvent::ToolDone {
+                        id: id.to_string(),
+                        ok: event["status"] != "error",
+                        output: crate::harness::event::tail(&output, 4096),
+                    });
                 }
             }
             // OpenCode.
@@ -671,7 +841,7 @@ impl JsonStream {
                 }
                 self.usage.cost_cents += part["cost"].as_f64().unwrap_or(0.0) * 100.0;
                 if !self.usage.is_empty() {
-                    out.push(Update::Usage(self.usage));
+                    out.push(AgentEvent::Usage(self.usage));
                 }
             }
             // Cursor and Gemini.
@@ -691,21 +861,21 @@ impl JsonStream {
                     self.usage.cached = cached;
                     self.usage.output = num(&usage["output_tokens"]);
                     if !self.usage.is_empty() {
-                        out.push(Update::Usage(self.usage));
+                        out.push(AgentEvent::Usage(self.usage));
                     }
                 }
                 let ms = event["duration_ms"]
                     .as_u64()
                     .or(stats["duration_ms"].as_u64());
                 if let Some(ms) = ms {
-                    out.push(Update::Summary(duration(ms)));
+                    out.push(AgentEvent::Summary(duration(ms)));
                 }
                 if event["is_error"] == true || event["status"] == "error" {
                     let reason = event["result"]
                         .as_str()
                         .or(event["error"]["message"].as_str())
                         .unwrap_or("The agent reported an error.");
-                    out.push(Update::Error(reason.to_string()));
+                    out.push(AgentEvent::Error(reason.to_string()));
                 } else if !self.any_text {
                     out.extend(self.block(event["result"].as_str().unwrap_or("")));
                 }
@@ -719,7 +889,7 @@ impl JsonStream {
                         num(&u["cache_read_input_tokens"]) + num(&u["cache_creation_input_tokens"]);
                     self.usage.output = num(&u["output_tokens"]);
                     if !self.usage.is_empty() {
-                        out.push(Update::Usage(self.usage));
+                        out.push(AgentEvent::Usage(self.usage));
                     }
                 }
                 let mut parts = Vec::new();
@@ -730,7 +900,7 @@ impl JsonStream {
                     parts.push(format!("{turns} turn{}", if turns == 1 { "" } else { "s" }));
                 }
                 if !parts.is_empty() {
-                    out.push(Update::Summary(parts.join(" · ")));
+                    out.push(AgentEvent::Summary(parts.join(" · ")));
                 }
                 if !self.any_text {
                     out.extend(self.block(event["finalText"].as_str().unwrap_or("")));
@@ -745,7 +915,7 @@ impl JsonStream {
                 if std::mem::take(&mut self.streamed) {
                     // Already shown piece by piece; keep the next message apart.
                     if self.any_text {
-                        out.push(Update::Text("\n\n".into()));
+                        out.push(AgentEvent::Text("\n\n".into()));
                     }
                 } else {
                     out.extend(self.block(data["content"].as_str().unwrap_or("")));
@@ -757,17 +927,27 @@ impl JsonStream {
                     Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
                     other => other.clone(),
                 };
-                out.push(self.step(tool, &args));
+                let id = data["toolCallId"].as_str().unwrap_or("");
+                out.extend(self.tool(tool, &args, id));
+            }
+            "tool.execution_complete" if data["parentToolCallId"].is_null() => {
+                if let Some(id) = data["toolCallId"].as_str().filter(|id| !id.is_empty()) {
+                    out.push(AgentEvent::ToolDone {
+                        id: id.to_string(),
+                        ok: data["success"] != false,
+                        output: result_text(&data["result"]["content"]),
+                    });
+                }
             }
             "assistant.usage" => {
                 self.usage.input = num(&data["inputTokens"]);
                 self.usage.cached = num(&data["cacheReadTokens"]) + num(&data["cacheWriteTokens"]);
                 self.usage.output += num(&data["outputTokens"]);
                 if !self.usage.is_empty() {
-                    out.push(Update::Usage(self.usage));
+                    out.push(AgentEvent::Usage(self.usage));
                 }
             }
-            "session.error" => out.push(Update::Error(
+            "session.error" => out.push(AgentEvent::Error(
                 data["message"]
                     .as_str()
                     .unwrap_or("The agent reported an error.")
@@ -789,7 +969,7 @@ impl JsonStream {
     }
 
     /// A Cursor tool call, keyed by its kind (`readToolCall`, `shellToolCall`…).
-    fn cursor_step(&self, kind: &str, call: &Value) -> Update {
+    fn cursor_step(&self, kind: &str, call: &Value, id: &str) -> Vec<AgentEvent> {
         let args = &call["args"];
         let tool = match kind {
             "readToolCall" => "Read",
@@ -802,22 +982,29 @@ impl JsonStream {
             "updateTodosToolCall" | "todoToolCall" => "TodoWrite",
             "deleteToolCall" => {
                 let path = args["path"].as_str().unwrap_or("");
-                return Update::Step(format!(
+                let label = format!(
                     "Deleted {}",
                     path.strip_prefix(&self.cwd)
                         .map(|p| p.trim_start_matches('/'))
                         .unwrap_or(path)
-                ));
+                );
+                return vec![AgentEvent::Tool(cursor_call(id, "delete", label))];
             }
             "function" => {
-                return Update::Step(format!(
-                    "Used {}",
-                    call["name"].as_str().unwrap_or("a tool")
-                ))
+                let name = call["name"].as_str().unwrap_or("a tool");
+                return vec![AgentEvent::Tool(cursor_call(
+                    id,
+                    name,
+                    format!("Used {name}"),
+                ))];
             }
             other => {
                 let name = other.strip_suffix("ToolCall").unwrap_or(other);
-                return Update::Step(format!("Used {name}"));
+                return vec![AgentEvent::Tool(cursor_call(
+                    id,
+                    name,
+                    format!("Used {name}"),
+                ))];
             }
         };
         let mut input = args.clone();
@@ -826,7 +1013,35 @@ impl JsonStream {
                 input["pattern"] = p.into();
             }
         }
-        self.step(tool, &input)
+        self.tool(tool, &input, id)
+    }
+}
+
+/// A Cursor call: running until its "completed" event when it has an id.
+fn cursor_call(id: &str, tool: &str, label: String) -> ToolStep {
+    if id.is_empty() {
+        ToolStep::of(tool, label)
+    } else {
+        ToolStep::running(id, tool, label)
+    }
+}
+
+/// Whether a Codex item finished well: not failed or declined, and a command that
+/// exited 0.
+fn codex_ok(item: &Value) -> bool {
+    !matches!(item["status"].as_str(), Some("failed" | "declined"))
+        && item["exit_code"].as_i64().is_none_or(|code| code == 0)
+        && item["error"].is_null()
+}
+
+/// The end of what a Codex command or MCP call printed.
+fn codex_output(item: &Value) -> String {
+    if let Some(output) = item["aggregated_output"].as_str() {
+        return crate::harness::event::tail(output, 4096);
+    }
+    match error_message(&item["error"]) {
+        Some(error) => error,
+        None => result_text(&item["result"]["content"]),
     }
 }
 
@@ -870,26 +1085,23 @@ pub fn readable_error(line: &str) -> String {
     }
 }
 
-/// The command inside Codex's `bash -lc '…'` wrapper.
+/// The command inside the shell wrapper Codex runs it in, such as `bash -lc '…'` or
+/// `/bin/zsh -lc …` on macOS.
 fn shell_body(command: &str) -> String {
-    for prefix in [
-        "bash -lc ",
-        "/bin/bash -lc ",
-        "sh -c ",
-        "/bin/sh -c ",
-        "zsh -lc ",
-    ] {
-        if let Some(rest) = command.strip_prefix(prefix) {
-            let rest = rest.trim();
-            return rest
-                .strip_prefix('\'')
-                .and_then(|r| r.strip_suffix('\''))
-                .or_else(|| rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')))
-                .unwrap_or(rest)
-                .to_string();
-        }
+    let mut words = command.splitn(3, ' ');
+    let (Some(shell), Some(flag), Some(rest)) = (words.next(), words.next(), words.next()) else {
+        return command.to_string();
+    };
+    let name = shell.rsplit('/').next().unwrap_or(shell);
+    if !matches!(name, "bash" | "sh" | "zsh") || !matches!(flag, "-c" | "-lc") {
+        return command.to_string();
     }
-    command.to_string()
+    let rest = rest.trim();
+    rest.strip_prefix('\'')
+        .and_then(|r| r.strip_suffix('\''))
+        .or_else(|| rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')))
+        .unwrap_or(rest)
+        .to_string()
 }
 
 fn duration(ms: u64) -> String {
@@ -919,33 +1131,77 @@ mod tests {
             cost_cents: 0.0,
             window: 0,
         };
-        assert_eq!(out[0], Update::Usage(usage));
-        assert_eq!(out[1], Update::Plan("1. Do it".into()));
-        assert_eq!(out[2], Update::Step("Proposed a plan".into()));
+        assert_eq!(out[0], AgentEvent::Usage(usage));
+        assert_eq!(out[1], AgentEvent::Plan("1. Do it".into()));
+        assert_eq!(out[2], done("Proposed a plan"));
         assert_eq!(
             out[3],
-            Update::Questions(vec![Question {
+            AgentEvent::Questions(vec![Question {
                 question: "Which DB?".into(),
                 options: vec!["Postgres".into(), "SQLite".into()]
             }])
         );
-        assert_eq!(out[4], Update::Step("Asked a question".into()));
+        assert_eq!(out[4], done("Asked a question"));
         assert_eq!(
             out[5],
-            Update::Usage(Usage {
+            AgentEvent::Usage(Usage {
                 output: 400,
                 cost_cents: 5.0,
                 window: 200_000,
                 ..usage
             })
         );
-        assert_eq!(out[6], Update::Denied(vec!["Bash".into()]));
+        assert_eq!(out[6], AgentEvent::Denied(vec!["Bash".into()]));
         assert_eq!(usage.context(), 2510);
     }
 
-    fn feed_all(lines: &[&str]) -> Vec<Update> {
+    fn feed_all(lines: &[&str]) -> Vec<AgentEvent> {
         let mut parser = ClaudeStream::new("/work/app/");
-        lines.iter().flat_map(|l| parser.feed(l)).collect()
+        lines
+            .iter()
+            .flat_map(|l| parser.feed(l))
+            .map(plain)
+            .collect()
+    }
+
+    /// Events as most tests write them: a step reduced to its id, label and state, a
+    /// result to its id and outcome. Kinds and outputs have tests of their own.
+    fn plain(event: AgentEvent) -> AgentEvent {
+        match event {
+            AgentEvent::Tool(s) => AgentEvent::Tool(ToolStep {
+                id: s.id,
+                label: s.label,
+                state: s.state,
+                ..ToolStep::default()
+            }),
+            AgentEvent::ToolDone { id, ok, .. } => AgentEvent::ToolDone {
+                id,
+                ok,
+                output: String::new(),
+            },
+            other => other,
+        }
+    }
+
+    fn done(label: &str) -> AgentEvent {
+        AgentEvent::Tool(ToolStep::done(label))
+    }
+
+    fn started(id: &str, label: &str) -> AgentEvent {
+        AgentEvent::Tool(ToolStep {
+            id: id.into(),
+            label: label.into(),
+            state: crate::harness::StepState::Running,
+            ..ToolStep::default()
+        })
+    }
+
+    fn finished(id: &str, ok: bool) -> AgentEvent {
+        AgentEvent::ToolDone {
+            id: id.into(),
+            ok,
+            output: String::new(),
+        }
     }
 
     #[test]
@@ -962,12 +1218,12 @@ mod tests {
         assert_eq!(
             out,
             [
-                Update::Step("Read src/main.rs".into()),
-                Update::Step("Ran cargo test…".into()),
-                Update::Step("Edited /elsewhere/x.rs".into()),
-                Update::Text("All done.".into()),
-                Update::Text("\n\nSecond block.".into()),
-                Update::Summary("12s · 3 turns · $0.04".into()),
+                done("Read src/main.rs"),
+                done("Ran cargo test…"),
+                done("Edited /elsewhere/x.rs"),
+                AgentEvent::Text("All done.".into()),
+                AgentEvent::Text("\n\nSecond block.".into()),
+                AgentEvent::Summary("12s · 3 turns · $0.04".into()),
             ]
         );
     }
@@ -983,22 +1239,10 @@ mod tests {
         assert_eq!(
             out,
             [
-                Update::Started {
-                    id: "toolu_a".into(),
-                    label: "Ran sleep 60".into()
-                },
-                Update::Started {
-                    id: "toolu_b".into(),
-                    label: "Ran false".into()
-                },
-                Update::Finished {
-                    id: "toolu_b".into(),
-                    ok: false
-                },
-                Update::Finished {
-                    id: "toolu_a".into(),
-                    ok: true
-                },
+                started("toolu_a", "Ran sleep 60"),
+                started("toolu_b", "Ran false"),
+                finished("toolu_b", false),
+                finished("toolu_a", true),
             ]
         );
     }
@@ -1018,10 +1262,10 @@ mod tests {
         assert_eq!(
             out,
             [
-                Update::Text("Hel".into()),
-                Update::Text("lo".into()),
-                Update::Text("\n\n".into()),
-                Update::Text("Bye".into()),
+                AgentEvent::Text("Hel".into()),
+                AgentEvent::Text("lo".into()),
+                AgentEvent::Text("\n\n".into()),
+                AgentEvent::Text("Bye".into()),
             ]
         );
     }
@@ -1035,8 +1279,8 @@ mod tests {
         assert_eq!(
             out,
             [
-                Update::Summary("900ms · 1 turn".into()),
-                Update::Error("error_max_turns".into())
+                AgentEvent::Summary("900ms · 1 turn".into()),
+                AgentEvent::Error("error_max_turns".into())
             ]
         );
     }
@@ -1051,19 +1295,23 @@ mod tests {
         assert_eq!(
             out,
             [
-                Update::Text("not json".into()),
-                Update::Summary("1m 1s".into()),
+                AgentEvent::Text("not json".into()),
+                AgentEvent::Summary("1m 1s".into()),
             ],
             "text already shown, so the result is not repeated"
         );
         let out =
             feed_all(&[r#"{"type":"result","is_error":false,"result":"Only the final answer"}"#]);
-        assert_eq!(out, [Update::Text("Only the final answer".into())]);
+        assert_eq!(out, [AgentEvent::Text("Only the final answer".into())]);
     }
 
-    fn json_all(lines: &[&str]) -> Vec<Update> {
+    fn json_all(lines: &[&str]) -> Vec<AgentEvent> {
         let mut parser = JsonStream::new("/work/app");
-        lines.iter().flat_map(|l| parser.feed(l)).collect()
+        lines
+            .iter()
+            .flat_map(|l| parser.feed(l))
+            .map(plain)
+            .collect()
     }
 
     #[test]
@@ -1082,13 +1330,14 @@ mod tests {
         assert_eq!(
             out,
             [
-                Update::Conversation("0199a213-81c0-7800-8aa1-bbab2a035a53".into()),
-                Update::Step("Thought: Looking".into()),
-                Update::Step("Ran ls -a".into()),
-                Update::Step("Edited src/lib.rs".into()),
-                Update::Step("Wrote NEW.md".into()),
-                Update::Text("Done.".into()),
-                Update::Usage(Usage {
+                AgentEvent::Conversation("0199a213-81c0-7800-8aa1-bbab2a035a53".into()),
+                done("Thought: Looking"),
+                started("item_1", "Ran ls -a"),
+                finished("item_1", true),
+                done("Edited src/lib.rs"),
+                done("Wrote NEW.md"),
+                AgentEvent::Text("Done.".into()),
+                AgentEvent::Usage(Usage {
                     input: 315,
                     cached: 24448,
                     output: 122,
@@ -1099,7 +1348,7 @@ mod tests {
         );
         assert_eq!(
             json_all(&[r#"{"type":"turn.failed","error":{"message":"usage limit reached"}}"#]),
-            [Update::Error("usage limit reached".into())]
+            [AgentEvent::Error("usage limit reached".into())]
         );
     }
 
@@ -1119,9 +1368,9 @@ mod tests {
         assert_eq!(
             out,
             [
-                Update::Notice(warning.into()),
-                Update::Notice("Heads up".into()),
-                Update::Text("Hi.".into()),
+                AgentEvent::Notice(warning.into()),
+                AgentEvent::Notice("Heads up".into()),
+                AgentEvent::Text("Hi.".into()),
             ]
         );
     }
@@ -1141,11 +1390,12 @@ mod tests {
         assert_eq!(
             out,
             [
-                Update::Text("First.".into()),
-                Update::Step("Ran cargo test".into()),
-                Update::Text("\n\nAll tests".into()),
-                Update::Text(" pass".into()),
-                Update::Text(".".into()),
+                AgentEvent::Text("First.".into()),
+                started("item_1", "Ran cargo test"),
+                AgentEvent::Text("\n\nAll tests".into()),
+                AgentEvent::Text(" pass".into()),
+                finished("item_1", true),
+                AgentEvent::Text(".".into()),
             ]
         );
     }
@@ -1171,7 +1421,7 @@ mod tests {
         ]);
         assert_eq!(
             codex,
-            [Update::Error(
+            [AgentEvent::Error(
                 "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
                     .into()
             )]
@@ -1180,7 +1430,7 @@ mod tests {
             json_all(&[
                 r#"{"type":"error","message":"unexpected status 401 Unauthorized: {\"detail\":\"Your token expired\"}"}"#
             ]),
-            [Update::Error("Your token expired".into())]
+            [AgentEvent::Error("Your token expired".into())]
         );
         let opencode = json_all(&[
             r#"{"type":"error","timestamp":1760000000000,"sessionID":"ses_9","error":{"name":"UnknownError","data":{"message":"Error: Token refresh failed: 401"}}}"#,
@@ -1188,14 +1438,69 @@ mod tests {
         assert_eq!(
             opencode,
             [
-                Update::Conversation("ses_9".into()),
-                Update::Error("Error: Token refresh failed: 401".into())
+                AgentEvent::Conversation("ses_9".into()),
+                AgentEvent::Error("Error: Token refresh failed: 401".into())
             ]
         );
         assert_eq!(
             json_all(&[r#"{"type":"error","error":{"name":"ProviderAuthError","data":{}}}"#]),
-            [Update::Error("ProviderAuthError".into())]
+            [AgentEvent::Error("ProviderAuthError".into())]
         );
+    }
+
+    fn step(text: &str, mark: Mark) -> Step {
+        Step {
+            text: text.into(),
+            mark,
+        }
+    }
+
+    #[test]
+    fn todo_tools_pass_on_the_whole_list() {
+        let out = feed_all(&[
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"Read docs","status":"completed","activeForm":"Reading docs"},{"content":"Start docker","status":"in_progress"},{"content":"Verify","status":"pending"}]}}]}}"#,
+        ]);
+        assert_eq!(
+            out,
+            [
+                AgentEvent::Todos(vec![
+                    step("Read docs", Mark::Done),
+                    step("Start docker", Mark::Doing),
+                    step("Verify", Mark::Todo),
+                ]),
+                done("Updated the plan"),
+            ]
+        );
+        // Codex names its list once, then passes on every change to it.
+        let codex = json_all(&[
+            r#"{"type":"item.started","item":{"id":"t1","type":"todo_list","items":[{"text":"Build","completed":false},{"text":"Test","completed":false}]}}"#,
+            r#"{"type":"item.updated","item":{"id":"t1","type":"todo_list","items":[{"text":"Build","completed":true},{"text":"Test","completed":false}]}}"#,
+            r#"{"type":"item.completed","item":{"id":"t1","type":"todo_list","items":[{"text":"Build","completed":true},{"text":"Test","completed":true}]}}"#,
+        ]);
+        assert_eq!(
+            codex,
+            [
+                done("Updated the plan"),
+                AgentEvent::Todos(vec![step("Build", Mark::Todo), step("Test", Mark::Todo)]),
+                AgentEvent::Todos(vec![step("Build", Mark::Done), step("Test", Mark::Todo)]),
+                AgentEvent::Todos(vec![step("Build", Mark::Done), step("Test", Mark::Done)]),
+            ]
+        );
+        let cursor = json_all(&[
+            r#"{"type":"tool_call","subtype":"started","call_id":"z","tool_call":{"updateTodosToolCall":{"args":{"todos":[{"content":"Fix","status":"TODO_STATUS_COMPLETED"},{"content":"Ship","status":"TODO_STATUS_IN_PROGRESS"}]}}}}"#,
+        ]);
+        assert_eq!(
+            cursor,
+            [
+                started("z", "Updated the plan"),
+                AgentEvent::Todos(vec![step("Fix", Mark::Done), step("Ship", Mark::Doing)]),
+            ]
+        );
+        // A list in a shape no CLI uses is only a step.
+        let odd = json_all(&[
+            r#"{"type":"tool_use","tool_name":"write_todos","parameters":{"todos":"- a"}}"#,
+        ]);
+        assert_eq!(odd, [done("Updated the plan")]);
     }
 
     #[test]
@@ -1212,11 +1517,12 @@ mod tests {
         assert_eq!(
             cursor,
             [
-                Update::Conversation("c-1".into()),
-                Update::Step("Read README.md".into()),
-                Update::Step("Ran cargo test".into()),
-                Update::Text("All good.".into()),
-                Update::Summary("4s".into()),
+                AgentEvent::Conversation("c-1".into()),
+                started("x", "Read README.md"),
+                finished("x", true),
+                started("y", "Ran cargo test"),
+                AgentEvent::Text("All good.".into()),
+                AgentEvent::Summary("4s".into()),
             ]
         );
         let droid = json_all(&[
@@ -1229,17 +1535,17 @@ mod tests {
         assert_eq!(
             droid,
             [
-                Update::Conversation("d-1".into()),
-                Update::Step("Ran ls".into()),
-                Update::Text("Two files.".into()),
-                Update::Usage(Usage {
+                AgentEvent::Conversation("d-1".into()),
+                done("Ran ls"),
+                AgentEvent::Text("Two files.".into()),
+                AgentEvent::Usage(Usage {
                     input: 100,
                     cached: 50,
                     output: 20,
                     cost_cents: 0.0,
                     window: 0
                 }),
-                Update::Summary("1m 1s · 2 turns".into()),
+                AgentEvent::Summary("1m 1s · 2 turns".into()),
             ]
         );
     }
@@ -1257,18 +1563,18 @@ mod tests {
         assert_eq!(
             gemini,
             [
-                Update::Conversation("g-1".into()),
-                Update::Step("Read a.rs".into()),
-                Update::Text("Hel".into()),
-                Update::Text("lo".into()),
-                Update::Usage(Usage {
+                AgentEvent::Conversation("g-1".into()),
+                started("r1", "Read a.rs"),
+                AgentEvent::Text("Hel".into()),
+                AgentEvent::Text("lo".into()),
+                AgentEvent::Usage(Usage {
                     input: 60,
                     cached: 40,
                     output: 30,
                     cost_cents: 0.0,
                     window: 0
                 }),
-                Update::Summary("900ms".into()),
+                AgentEvent::Summary("900ms".into()),
             ]
         );
         let opencode = json_all(&[
@@ -1277,10 +1583,10 @@ mod tests {
             r#"{"type":"text","timestamp":3,"sessionID":"ses_1","part":{"type":"text","text":"Yes"}}"#,
             r#"{"type":"step_finish","timestamp":4,"sessionID":"ses_1","part":{"type":"step-finish","tokens":{"input":600,"output":20,"reasoning":0,"cache":{"read":200,"write":0}},"cost":0.003}}"#,
         ]);
-        assert_eq!(opencode[0], Update::Conversation("ses_1".into()));
-        assert_eq!(opencode[1], Update::Step("Ran ls".into()));
-        assert_eq!(opencode[3], Update::Text("Yes".into()));
-        let Update::Usage(last) = opencode[4] else {
+        assert_eq!(opencode[0], AgentEvent::Conversation("ses_1".into()));
+        assert_eq!(opencode[1], done("Ran ls"));
+        assert_eq!(opencode[3], AgentEvent::Text("Yes".into()));
+        let AgentEvent::Usage(last) = opencode[4] else {
             panic!("usage expected")
         };
         assert_eq!((last.input, last.cached, last.output), (600, 200, 35));
@@ -1297,21 +1603,148 @@ mod tests {
         assert_eq!(
             copilot,
             [
-                Update::Conversation("cp-1".into()),
-                Update::Step("Read x.md".into()),
-                Update::Text("Hi ".into()),
-                Update::Text("there".into()),
-                Update::Text("\n\n".into()),
-                Update::Usage(Usage {
+                AgentEvent::Conversation("cp-1".into()),
+                started("1", "Read x.md"),
+                AgentEvent::Text("Hi ".into()),
+                AgentEvent::Text("there".into()),
+                AgentEvent::Text("\n\n".into()),
+                AgentEvent::Usage(Usage {
                     input: 900,
                     cached: 100,
                     output: 40,
                     cost_cents: 0.0,
                     window: 0
                 }),
-                Update::Error("Out of credits".into()),
+                AgentEvent::Error("Out of credits".into()),
             ]
         );
+    }
+
+    /// The finished steps and results a run's lines give, unreduced.
+    fn tools(events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+        events
+            .into_iter()
+            .filter(|e| matches!(e, AgentEvent::Tool(_) | AgentEvent::ToolDone { .. }))
+            .collect()
+    }
+
+    #[test]
+    fn steps_carry_their_kind_tool_outcome_and_output() {
+        let mut claude = ClaudeStream::new("/w");
+        let out: Vec<AgentEvent> = [
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"false"}}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":[{"type":"text","text":"exit 1"}]}]}}"#,
+        ]
+        .iter()
+        .flat_map(|l| claude.feed(l))
+        .collect();
+        assert_eq!(
+            out,
+            [
+                AgentEvent::Tool(ToolStep::running("t1", "Bash", "Ran false")),
+                AgentEvent::ToolDone {
+                    id: "t1".into(),
+                    ok: false,
+                    output: "exit 1".into()
+                },
+            ]
+        );
+        let AgentEvent::Tool(step) = &out[0] else {
+            unreachable!()
+        };
+        assert_eq!(step.kind, ToolKind::Shell);
+
+        let mut json = JsonStream::new("/w");
+        let mut feed = |lines: &[&str]| -> Vec<AgentEvent> {
+            tools(lines.iter().flat_map(|l| json.feed(l)).collect())
+        };
+        // Codex: a command that fails, seen only once it is over, and an MCP call.
+        let codex = feed(&[
+            r#"{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"bash -lc 'cargo build'","aggregated_output":"error[E0425]","exit_code":101,"status":"failed"}}"#,
+            r#"{"type":"item.started","item":{"id":"c2","type":"mcp_tool_call","server":"gh","tool":"get_me","status":"in_progress"}}"#,
+            r#"{"type":"item.completed","item":{"id":"c2","type":"mcp_tool_call","server":"gh","tool":"get_me","status":"completed","result":{"content":[{"type":"text","text":"anish"}]}}}"#,
+            r#"{"type":"item.completed","item":{"id":"c3","type":"file_change","status":"completed","changes":[{"path":"/w/a.rs","kind":"add"}]}}"#,
+        ]);
+        assert_eq!(
+            codex,
+            [
+                AgentEvent::Tool(ToolStep::running("c1", "shell", "Ran cargo build")),
+                AgentEvent::ToolDone {
+                    id: "c1".into(),
+                    ok: false,
+                    output: "error[E0425]".into()
+                },
+                AgentEvent::Tool(
+                    ToolStep::running("c2", "get_me", "Used gh get_me").kind(ToolKind::Mcp)
+                ),
+                AgentEvent::ToolDone {
+                    id: "c2".into(),
+                    ok: true,
+                    output: "anish".into()
+                },
+                AgentEvent::Tool(ToolStep::of("apply_patch", "Wrote a.rs").kind(ToolKind::Write)),
+            ]
+        );
+        // Gemini and Copilot name each result after its call.
+        let gemini = feed(&[
+            r#"{"type":"tool_use","tool_name":"run_shell_command","tool_id":"g1","parameters":{"command":"ls"}}"#,
+            r#"{"type":"tool_result","tool_id":"g1","status":"error","error":{"message":"denied"}}"#,
+        ]);
+        assert_eq!(
+            gemini[1],
+            AgentEvent::ToolDone {
+                id: "g1".into(),
+                ok: false,
+                output: "denied".into()
+            }
+        );
+        let copilot = feed(&[
+            r#"{"type":"tool.execution_start","data":{"toolCallId":"p1","toolName":"bash","arguments":"{\"command\":\"ls\"}"}}"#,
+            r#"{"type":"tool.execution_complete","data":{"toolCallId":"p1","success":true,"result":{"content":"a.rs"}}}"#,
+        ]);
+        assert_eq!(
+            copilot,
+            [
+                AgentEvent::Tool(ToolStep::running("p1", "bash", "Ran ls")),
+                AgentEvent::ToolDone {
+                    id: "p1".into(),
+                    ok: true,
+                    output: "a.rs".into()
+                },
+            ]
+        );
+        // Cursor reports a failed call; OpenCode sends calls once they're over.
+        let cursor = feed(&[
+            r#"{"type":"tool_call","subtype":"completed","call_id":"k1","tool_call":{"shellToolCall":{"args":{"command":"x"},"result":{"failure":{"exitCode":1}}}}}"#,
+        ]);
+        assert_eq!(
+            cursor,
+            [AgentEvent::ToolDone {
+                id: "k1".into(),
+                ok: false,
+                output: String::new()
+            }]
+        );
+        let opencode = feed(&[
+            r#"{"type":"tool_use","part":{"tool":"bash","callID":"o1","state":{"status":"error","input":{"command":"x"}}}}"#,
+        ]);
+        let AgentEvent::Tool(step) = &opencode[0] else {
+            panic!("{opencode:?}")
+        };
+        assert_eq!(step.state, crate::harness::StepState::Failed);
+    }
+
+    #[test]
+    fn codex_commands_lose_their_shell_wrapper() {
+        assert_eq!(shell_body("bash -lc 'cargo test'"), "cargo test");
+        assert_eq!(shell_body("/bin/zsh -lc ls"), "ls");
+        assert_eq!(
+            shell_body("/bin/zsh -lc 'ls /nonexistent'"),
+            "ls /nonexistent"
+        );
+        assert_eq!(shell_body("/bin/sh -c \"make\""), "make");
+        assert_eq!(shell_body("python -c 'x'"), "python -c 'x'");
+        assert_eq!(shell_body("ls"), "ls");
     }
 
     #[test]
@@ -1320,10 +1753,10 @@ mod tests {
             r#"{"type":"system","subtype":"init","session_id":"T-1"}"#,
             r#"{"type":"result","is_error":false,"result":"ok","session_id":"T-1"}"#,
         ]);
-        assert_eq!(out[0], Update::Conversation("T-1".into()));
+        assert_eq!(out[0], AgentEvent::Conversation("T-1".into()));
         assert_eq!(
             out.iter()
-                .filter(|u| matches!(u, Update::Conversation(_)))
+                .filter(|u| matches!(u, AgentEvent::Conversation(_)))
                 .count(),
             1
         );

@@ -551,9 +551,7 @@ impl RunoApp {
             Act::Diff(path) => {
                 self.right_tab = RightTab::Changes;
                 if let Some(dir) = self.current().map(|s| s.dir.clone()) {
-                    if !self.demo {
-                        self.diff = self.load_diff(&dir, &path);
-                    }
+                    self.diff = self.load_diff(&dir, &path);
                 }
                 self.selected_file = Some(path);
             }
@@ -708,7 +706,7 @@ impl RunoApp {
         let mut list = div().v_flex().p_1();
         for (i, entry) in items.into_iter().enumerate() {
             let Some(entry) = entry else {
-                list = list.child(div().my_1().mx_2().h(px(1.)).bg(rgb(c_border())));
+                list = list.child(div().my_1().mx_2().h(px(1.)).bg(divider()));
                 continue;
             };
             let color = if entry.danger { c_red() } else { c_text() };

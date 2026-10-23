@@ -16,7 +16,7 @@ impl RunoApp {
     /// Run the project's checks on the session's last turn. `auto` is set when a turn
     /// just finished, so failures may go back to the agent on their own.
     pub(crate) fn prove_turn(&mut self, id: u64, auto: bool, cx: &mut Context<Self>) {
-        if self.demo || self.proving.contains(&id) {
+        if self.proving.contains(&id) {
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -91,12 +91,6 @@ impl RunoApp {
             .and_then(|s| self.state.projects.iter().find(|p| p.id == s.project_id))
             .map(|p| p.fix_rounds)
             .unwrap_or(0);
-        // A mission's parts always get a couple of rounds: nobody watches them turn by turn.
-        let rounds_allowed = if self.state.session(id).is_some_and(|s| s.mission != 0) {
-            rounds_allowed.max(crate::mission::PART_FIX_ROUNDS)
-        } else {
-            rounds_allowed
-        };
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
@@ -154,7 +148,6 @@ impl RunoApp {
             let opts = cx.global::<AppSettings>().agent(&provider);
             self.start_turn(id, prompt, Vec::new(), &opts);
         }
-        self.mission_check(id, cx);
         cx.notify();
     }
 
@@ -175,7 +168,7 @@ impl RunoApp {
     /// Ask an agent from another vendor to review the last turn's change, read-only.
     /// Its findings land as diff notes, ready for Send notes.
     pub(crate) fn second_opinion(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.reviewing.contains_key(&id) || self.demo_guard(cx) {
+        if self.reviewing.contains_key(&id) {
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -221,11 +214,6 @@ impl RunoApp {
                 };
                 if patch.trim().is_empty() {
                     this.reviewing.remove(&id);
-                    // A mission's part with nothing to review just moves on.
-                    if this.state.session(id).is_some_and(|s| s.mission != 0) {
-                        this.mission_check(id, cx);
-                        return;
-                    }
                     this.fail(
                         "proof",
                         "There are no changes from this turn to review.".into(),
@@ -309,9 +297,6 @@ impl RunoApp {
             ..Default::default()
         });
         p.review = summary;
-        if session.mission != 0 {
-            self.mission_wake.push(id);
-        }
         self.save();
         true
     }

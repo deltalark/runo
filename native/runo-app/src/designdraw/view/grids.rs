@@ -135,7 +135,7 @@ impl DesignCanvas {
     pub(super) fn grid_marks(&self) -> Vec<AnyElement> {
         let z = self.zoom;
         let mut out = vec![];
-        for s in &self.canvas.screens {
+        for s in self.screens_here() {
             let (w, h) = self.board_size(s);
             let (x0, y0) = self.screen_pt((s.x, s.y));
             if let Some(g) = s.grid.as_ref().filter(|_| self.show_grids) {

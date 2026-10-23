@@ -186,11 +186,7 @@ impl RunoApp {
             Path::new(&dir).join(path)
         };
         let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
-        let bytes = if self.demo && !Path::new(path).is_absolute() {
-            b"(demo data)".to_vec()
-        } else {
-            std::fs::read(&abs).unwrap_or_default()
-        };
+        let bytes = std::fs::read(&abs).unwrap_or_default();
         let kind = file_kind(path, &bytes[..bytes.len().min(8000)]);
         let mut not_utf8 = false;
         let text = match kind {
@@ -204,8 +200,7 @@ impl RunoApp {
                 }
             },
         };
-        let read_only =
-            not_utf8 || size > MAX_EDIT_BYTES || (self.demo && !Path::new(path).is_absolute());
+        let read_only = not_utf8 || size > MAX_EDIT_BYTES;
         let language = match kind {
             FileKind::Code => language_for(path),
             FileKind::Markdown => "markdown",
@@ -553,7 +548,7 @@ impl RunoApp {
             .items_center()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(icon(Self::file_icon(kind), 14., c_muted()))
             .child(
                 div()
@@ -741,7 +736,7 @@ impl RunoApp {
                     let mut line = div()
                         .flex()
                         .border_b_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .when(r == 0, |el| {
                             el.bg(tint(c_subtle())).font_weight(FontWeight::MEDIUM)
                         })
@@ -755,7 +750,7 @@ impl RunoApp {
                                 .py(px(4.))
                                 .truncate()
                                 .border_r_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .child(row.get(c).cloned().unwrap_or_default()),
                         );
                     }

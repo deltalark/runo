@@ -31,7 +31,7 @@ impl AgentPick {
     }
 
     /// A model's name as the menu and chip show it.
-    fn model_label(agent: usize, model: &str) -> Option<String> {
+    pub(crate) fn model_label(agent: usize, model: &str) -> Option<String> {
         if model.is_empty() {
             return None;
         }
@@ -46,7 +46,7 @@ impl AgentPick {
     }
 
     /// The model choices an agent offers, its default first.
-    fn models(agent: usize) -> Vec<caps::Choice> {
+    pub(crate) fn models(agent: usize) -> Vec<caps::Choice> {
         let p = &agent::PROVIDERS[agent];
         caps::controls(p.id, &HashMap::new())
             .into_iter()
@@ -115,7 +115,7 @@ impl AgentPick {
     }
 
     /// The menu of agents, with a line on how the ask runs. `how` says what the agent
-    /// changes, such as "the diagram's files in architecture/".
+    /// changes, such as "the diagram's files in architecture/"; empty leaves the line out.
     pub(crate) fn menu<T: 'static>(
         &self,
         key: &'static str,
@@ -226,7 +226,7 @@ impl AgentPick {
         }
         let list = div()
             .v_flex()
-            .child(
+            .when(!how.is_empty(), |el| el.child(
                 div()
                     .px_3()
                     .pt_2()
@@ -238,12 +238,12 @@ impl AgentPick {
                     .child(format!(
                         "The agent runs in your project folder and edits {how} in place. You review its change here before keeping it. Each ask carries on this canvas's chat, so the agent remembers the earlier ones; picking another agent hands it that chat."
                     )),
-            )
+            ))
             .child(
                 div()
                     .flex()
                     .child(agents)
-                    .child(div().w(px(1.)).bg(rgb(c_border())))
+                    .child(div().w(px(1.)).bg(divider()))
                     .child(models),
             );
         Some(

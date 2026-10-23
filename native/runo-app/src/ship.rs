@@ -38,6 +38,8 @@ pub(crate) enum Confirm {
     AutoMergePr(u64),
     /// Post the review the session's agent wrote to its pull request.
     PostReview(u64),
+    /// Push the session's branch although the seatbelt found something in it.
+    PushAnyway(u64),
 }
 
 /// The Create pull request form.
@@ -47,6 +49,9 @@ pub(crate) struct PrForm {
     pub needs_branch: bool,
     pub running: bool,
     pub error: Option<String>,
+    /// The seatbelt has looked at what the pull request would send, or was told to let
+    /// it through.
+    pub belt_ok: bool,
 }
 
 /// A turn asked for while the session's worktree is still being made.
@@ -87,6 +92,9 @@ pub(crate) struct ScanRequest {
     pub whole: bool,
     pub all: bool,
     pub racers: Vec<(u64, String)>,
+    /// For a session sharing its folder, the files its agent changed: the sidebar's
+    /// count is only these. See `Session::touched`.
+    pub touched: Option<HashSet<String>>,
 }
 
 /// Read a session folder's git state. Slow on big repositories, so call it off the UI thread.
@@ -100,7 +108,10 @@ pub(crate) fn scan(req: ScanRequest) -> Scan {
     let uncommitted_changes = git::changes(&req.dir);
     let mut out = Scan {
         is_git: true,
-        uncommitted: git::totals(&uncommitted_changes),
+        uncommitted: git::totals(&crate::store::only_touched(
+            uncommitted_changes.clone(),
+            req.touched.as_ref(),
+        )),
         files: git::tracked_files(&req.dir),
         sync: git::sync_state(&req.dir),
         against: "HEAD".into(),
@@ -223,6 +234,14 @@ pub(crate) fn prepare_worktree(
         Err(error) => log.push(format!("Could not copy .worktreeinclude files: {error}")),
     }
     Ok((dir, branch, log))
+}
+
+/// What the seatbelt would stop in the commits `dir` hasn't sent yet.
+fn belt_stops(dir: &str) -> Vec<(String, usize, seatbelt::Snag)> {
+    seatbelt::scan_patch(&git::outgoing_patch(dir))
+        .into_iter()
+        .filter(|(_, _, s)| s.serious())
+        .collect()
 }
 
 /// Push the branch, then open a pull request or find the one already open. Returns its
@@ -468,10 +487,6 @@ impl RunoApp {
                 if self.selected == Some(id) {
                     self.refresh();
                 }
-                // A mission's own worktree is the branch its parts start from.
-                if self.state.session(id).is_some_and(|s| s.mission != 0) {
-                    self.missions_tick_all(cx);
-                }
             }
             Err(error) => {
                 self.pending_start.remove(&id);
@@ -497,7 +512,7 @@ impl RunoApp {
 
     /// Stage or unstage one changed file.
     pub(crate) fn toggle_stage(&mut self, path: &str, staged: bool) {
-        let Some(dir) = self.current().map(|s| s.dir.clone()).filter(|_| !self.demo) else {
+        let Some(dir) = self.current().map(|s| s.dir.clone()) else {
             return;
         };
         let path = path.to_string();
@@ -521,9 +536,6 @@ impl RunoApp {
     /// Commit the session folder's staged changes, or all of them. An empty message
     /// falls back to the session title.
     pub(crate) fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some((id, dir, title)) = self
             .current()
             .map(|s| (s.id, s.dir.clone(), s.title.clone()))
@@ -537,7 +549,7 @@ impl RunoApp {
         }
         let typed = self.commit_msg.read(cx).value().trim().to_string();
         let mut message = if typed.is_empty() {
-            title
+            title.trim_end_matches('…').to_string()
         } else {
             typed.clone()
         };
@@ -591,9 +603,16 @@ impl RunoApp {
         !base.is_empty() && session.branch == *base && !session.isolated
     }
 
-    /// Push the session branch to its remote.
+    /// Push the open session's branch to its remote.
     pub(crate) fn push(&mut self) {
-        let Some(session) = self.current().filter(|_| !self.demo) else {
+        if let Some(id) = self.current().map(|s| s.id) {
+            self.push_session(id);
+        }
+    }
+
+    /// Push a session's branch, once the seatbelt has looked at the commits it sends.
+    fn push_session(&mut self, id: u64) {
+        let Some(session) = self.state.session(id) else {
             return;
         };
         if self.on_base_branch(session) {
@@ -603,10 +622,27 @@ impl RunoApp {
             ));
             return;
         }
-        let (id, dir) = (session.id, session.dir.clone());
+        let dir = session.dir.clone();
         let remote = self.sync.remote.clone();
         if remote.is_empty() {
             self.fail("git", "This repository has no remote to push to.".into());
+            return;
+        }
+        if self.belt_pass.take() != Some(id) {
+            let scan = dir.clone();
+            self.bg(
+                move || belt_stops(&scan),
+                move |this, serious, cx| {
+                    if serious.is_empty() {
+                        this.belt_pass = Some(id);
+                        this.push_session(id);
+                    } else {
+                        this.belt_found = serious;
+                        this.confirm_git = Some(Confirm::PushAnyway(id));
+                    }
+                    cx.notify();
+                },
+            );
             return;
         }
         if !self.begin(id, "Pushing.") {
@@ -631,9 +667,6 @@ impl RunoApp {
 
     /// Open the Create pull request form, filled from the session and its commits.
     pub(crate) fn open_pr_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.demo_guard(cx) {
-            return;
-        }
         let Some(session) = self.current() else {
             return;
         };
@@ -665,6 +698,12 @@ impl RunoApp {
         } else {
             String::new()
         };
+        // A reviewer's guide written for this branch leads the description.
+        let body = match self.git_guides.get(&session.branch) {
+            Some(Some(guide)) if body.is_empty() => guide.clone(),
+            Some(Some(guide)) => format!("{guide}\n\n## Commits\n{body}"),
+            _ => body,
+        };
         let branch = format!("runo/session-{id}");
         self.pr_title
             .update(cx, |i, cx| i.set_value(title, window, cx));
@@ -679,6 +718,7 @@ impl RunoApp {
             needs_branch,
             running: false,
             error: None,
+            belt_ok: false,
         });
         self.right_tab = RightTab::Changes;
         self.show_panel = true;
@@ -709,6 +749,28 @@ impl RunoApp {
         let Some(dir) = self.state.session(id).map(|s| s.dir.clone()) else {
             return;
         };
+        if !form.belt_ok {
+            self.bg(
+                move || belt_stops(&dir),
+                move |this, serious, cx| {
+                    let Some(form) = this.pr_form.as_mut().filter(|f| f.session == id) else {
+                        return;
+                    };
+                    form.belt_ok = true;
+                    if serious.is_empty() {
+                        this.submit_pr(cx);
+                    } else {
+                        form.running = false;
+                        form.error = Some(format!(
+                            "Wait: {} Once it's on GitHub it stays in the history. Take it out and commit again, or press Create PR again to send it anyway.",
+                            seatbelt::summary(&serious)
+                        ));
+                    }
+                    cx.notify();
+                },
+            );
+            return;
+        }
         self.bg(
             move || {
                 let result = open_pr(&dir, new_branch.as_deref(), &title, &body, &base);
@@ -767,7 +829,7 @@ impl RunoApp {
 
     /// Look up the pull request of a session's branch: state, checks and review.
     pub(crate) fn load_pr_status(&mut self, id: u64) {
-        let Some(session) = self.state.session(id).filter(|_| !self.demo) else {
+        let Some(session) = self.state.session(id) else {
             return;
         };
         if session.branch.is_empty() || session.branch == "local folder" {
@@ -1041,7 +1103,7 @@ impl RunoApp {
     /// Fetch, then rebase (or merge) the session branch onto the latest base branch.
     /// Conflicts leave the worktree mid-rebase, for the agent or the person to resolve.
     pub(crate) fn update_from_base(&mut self, rebase: bool) {
-        let Some(session) = self.current().filter(|_| !self.demo) else {
+        let Some(session) = self.current() else {
             return;
         };
         let (id, dir) = (session.id, session.dir.clone());
@@ -1153,7 +1215,7 @@ impl RunoApp {
     /// Merge the session branch into its base branch (after confirmation), then offer
     /// to clean up.
     pub(crate) fn merge_into_base(&mut self, id: u64) {
-        let Some(session) = self.state.session(id).filter(|_| !self.demo) else {
+        let Some(session) = self.state.session(id) else {
             return;
         };
         let Some(project) = self.project_of(session) else {
@@ -1220,7 +1282,7 @@ impl RunoApp {
     /// `force` deletes the branch even with commits the base lacks (a squash-merged PR,
     /// or a race the person decided against).
     pub(crate) fn remove_session_files(&mut self, session: &Session, force: bool) {
-        let Some(project) = self.project_of(session).filter(|_| !self.demo) else {
+        let Some(project) = self.project_of(session) else {
             return;
         };
         let checkpoints: Vec<String> = session
@@ -1326,13 +1388,13 @@ impl RunoApp {
             .collect();
         for &id in &others {
             if let Some(handle) = self.handles.remove(&Target::Session(id)) {
-                self.stopping.insert(id);
                 handle.kill();
             }
             if let Some(handle) = self.handles.remove(&Target::Terminal(id)) {
                 handle.kill();
             }
-            self.started.remove(&id);
+            // Its turn goes with it; the session is removed below.
+            self.turns.remove(&id);
             self.pending_start.remove(&id);
             if let Some(session) = self.state.session(id).cloned() {
                 self.remove_session_files(&session, true);
@@ -1371,6 +1433,10 @@ impl RunoApp {
             Confirm::MergePr(id) => self.merge_pr(id, false),
             Confirm::AutoMergePr(id) => self.merge_pr(id, true),
             Confirm::PostReview(id) => self.post_review(id),
+            Confirm::PushAnyway(id) => {
+                self.belt_pass = Some(id);
+                self.push_session(id);
+            }
         }
     }
 
@@ -1445,6 +1511,14 @@ impl RunoApp {
                     "Turn on auto-merge",
                 )
             }
+            Confirm::PushAnyway(p) if p == id => (
+                "Push it anyway?".to_string(),
+                format!(
+                    "{} Once it's on the remote it stays in the history, even if you delete it later. Undo the commit and leave it out, or push it anyway.",
+                    seatbelt::summary(&self.belt_found)
+                ),
+                "Push anyway",
+            ),
             Confirm::PostReview(p) if p == id => {
                 let pr = self.pr_status.get(&id)?;
                 let draft = pr.draft_review.as_ref()?;
@@ -1463,7 +1537,7 @@ impl RunoApp {
                 .gap_2()
                 .rounded_xl()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(tint(c_subtle()))
                 .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(title))
                 .child(
@@ -1520,7 +1594,7 @@ impl RunoApp {
                 .gap_2()
                 .rounded_xl()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(tint(c_subtle()))
                 .child(icon(IconName::Trophy, 14., c_blue()))
                 .child(div().flex_1().text_sm().child(format!(
@@ -1590,7 +1664,7 @@ impl RunoApp {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_canvas()))
             .child(
                 div()
@@ -2268,6 +2342,7 @@ mod tests {
             whole: false,
             all: true,
             racers: vec![(5, dir.clone())],
+            touched: None,
         };
         let scan_now = scan(request(false));
         assert!(scan_now.is_git);

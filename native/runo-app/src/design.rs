@@ -248,7 +248,8 @@ impl RunoApp {
         }
     }
 
-    /// The design canvas, edge to edge under a slim header.
+    /// The design canvas, edge to edge: the project is in the top bar and the canvas has
+    /// its own head, so the agents asked from it float over its top right corner.
     fn design_canvas(
         &self,
         pid: u64,
@@ -259,30 +260,37 @@ impl RunoApp {
             .flex_1()
             .min_w_0()
             .h_full()
-            .v_flex()
-            .child(
+            .relative()
+            .child(div().size_full().child(canvas))
+            .children(self.canvas_chats(pid, View::Design, cx).map(|chats| {
                 div()
-                    .flex_none()
-                    .h(px(48.))
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(rgb(c_border()))
-                    .child(icon(Mode::Design.glyph(), 16., c_blue()))
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Design"),
-                    )
-                    .child(self.mode_project_chip(cx))
-                    .child(div().flex_1())
-                    .children(self.canvas_chats(pid, View::Design, cx)),
-            )
-            .child(div().flex_1().min_h_0().child(canvas))
+                    .absolute()
+                    .top(px(8.))
+                    .right(px(crate::designdraw::view::RIGHT_PANEL_W
+                        + crate::shell::GUTTER
+                        + 12.))
+                    .child(chats)
+            }))
+            // A chat opened from the Chats menu floats over the canvas's right, under
+            // the menu's button.
+            .children(self.canvas_chat_panel(
+                pid,
+                View::Design,
+                (46., crate::shell::GUTTER + 8., crate::shell::GUTTER + 8.),
+                cx,
+            ))
             .into_any_element()
+    }
+
+    /// Whether Design shows a project's canvas, which paints its own layers (the layers
+    /// list, the canvas and the inspector) rather than sitting on the page.
+    pub(crate) fn design_canvas_open(&self) -> bool {
+        !self.all_scope()
+            && self
+                .design
+                .project
+                .filter(|pid| self.state.projects.iter().any(|p| p.id == *pid))
+                .is_some_and(|pid| self.design.canvases.contains_key(&pid))
     }
 
     pub(crate) fn design_view(&self, _: &Window, cx: &mut Context<Self>) -> AnyElement {

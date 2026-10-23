@@ -1013,7 +1013,7 @@ fn button_like(id: &'static str, label: &'static str, primary: bool) -> Stateful
         })
         .when(!primary, |el| {
             el.border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .text_color(rgb(c_text()))
                 .hover(|el| el.bg(tint(c_subtle())))
         })

@@ -94,6 +94,9 @@ impl RunoApp {
                         })),
                 );
             }
+            Waiting::Decision(d) => {
+                actions = actions.children(self.decision_chips("inbox-dec", n, id, &d, cx));
+            }
         }
         actions
     }
@@ -159,6 +162,9 @@ impl RunoApp {
                     provider.name
                 ),
             ),
+            Some(Waiting::Decision(d)) => {
+                (IconName::CircleQuestionMark, c_amber(), d.question.clone())
+            }
             None if need == Need::Failed => (
                 IconName::CircleX,
                 c_red(),
@@ -200,22 +206,20 @@ impl RunoApp {
                     cx.notify();
                 })),
             );
-        div()
+        shell::card()
             .id(("inbox-row", id as usize))
             .on_mouse_down(
                 MouseButton::Right,
                 self.on_context(ctxmenu::CtxTarget::Session(id), cx),
             )
+            .relative()
             .p_3()
             .v_flex()
             .gap_2()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(if self.cursor == Some(id) {
-                c_blue()
-            } else {
-                c_border()
-            }))
+            .when(self.cursor == Some(id), |el| {
+                el.bg(tint(c_active()))
+                    .child(shell::accent_bracket(format!("inbox-bracket-{id}"), 12.))
+            })
             .child(
                 div()
                     .flex()
@@ -275,16 +279,23 @@ impl RunoApp {
         url: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
+        shell::card()
             .id(("inbox-gh", n))
             .p_3()
             .flex()
             .items_center()
             .gap_3()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .child(icon(glyph, 16., color))
+            .child(
+                div()
+                    .size(px(26.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .bg(rgb(settings::mix(color, c_canvas(), 0.16)))
+                    .child(icon(glyph, 14., color)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -313,7 +324,17 @@ impl RunoApp {
     pub(crate) fn inbox_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let waiting = self.needs_you();
         let mut rows = div().v_flex().gap_2();
+        let blocked = waiting
+            .iter()
+            .filter(|(_, need)| *need == Need::Blocked)
+            .count();
         for (n, (session, need)) in waiting.iter().enumerate() {
+            if n == 0 && blocked > 0 {
+                rows = rows.child(section("Waiting on you", blocked));
+            }
+            if n == blocked {
+                rows = rows.child(section("Finished unseen", waiting.len() - blocked));
+            }
             rows = rows.child(stagger(
                 self.inbox_row(n, session, *need, cx),
                 SharedString::from(format!("inbox-in-{}", session.id)),
@@ -323,6 +344,9 @@ impl RunoApp {
         let requested = self.gh.requested();
         let failed = github::latest_failures(&self.gh.runs);
         let mut n = 0;
+        if !requested.is_empty() || !failed.is_empty() {
+            rows = rows.child(section("GitHub", requested.len() + failed.len()));
+        }
         for pr in requested {
             rows = rows.child(self.inbox_gh_row(
                 n,
@@ -382,4 +406,163 @@ impl RunoApp {
             });
         self.page("Inbox", div().v_flex().gap_3().child(header).child(rows))
     }
+}
+
+impl RunoApp {
+    /// The sidebar narrowed to Needs you: blocked sessions and Crew threads first, then
+    /// those that finished unseen, then GitHub's asks. A session row opens that session;
+    /// the Inbox below answers them all in one place.
+    pub(crate) fn needs_groups(&self, filter: &str, cx: &mut Context<Self>) -> Div {
+        let no_sessions = self.sidebar_rows(filter, cx).is_empty();
+        let mut col = self.status_groups(filter, cx);
+        let matches = |text: &str| filter.is_empty() || text.to_lowercase().contains(filter);
+        let mut asks: Vec<(IconName, u32, &'static str, String, String)> = Vec::new();
+        for pr in self.gh.requested() {
+            asks.push((
+                IconName::GitPullRequest,
+                c_blue(),
+                "Review requested",
+                format!("#{} {}", pr.number, pr.title),
+                pr.url.clone(),
+            ));
+        }
+        for run in github::latest_failures(&self.gh.runs) {
+            asks.push((
+                IconName::CircleX,
+                c_red(),
+                "Check failed",
+                run.title.clone(),
+                run.url.clone(),
+            ));
+        }
+        asks.retain(|(_, _, _, title, _)| matches(title));
+        let quiet = no_sessions && asks.is_empty();
+        if !asks.is_empty() {
+            col = col.child(group_label("GitHub", asks.len()));
+        }
+        for (n, (mark, color, label, title, url)) in asks.into_iter().enumerate() {
+            col = col.child(
+                div()
+                    .id(("needs-gh", n))
+                    .mx_1()
+                    .px(px(8.))
+                    .py(px(5.))
+                    .flex()
+                    .items_center()
+                    .gap(px(9.))
+                    .rounded(px(11.))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tint(c_subtle())))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        if !url.is_empty() {
+                            cx.open_url(&url);
+                        }
+                    }))
+                    .child(
+                        div()
+                            .size(px(24.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon(mark, 13., color)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .v_flex()
+                            .gap(px(1.))
+                            .child(div().truncate().text_size(px(12.5)).child(title))
+                            .child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(c_muted()))
+                                    .child(label),
+                            ),
+                    ),
+            );
+        }
+        if quiet {
+            return col.child(
+                div()
+                    .mx_1()
+                    .mt_2()
+                    .px_3()
+                    .py_2()
+                    .v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_secondary()))
+                            .child(if filter.is_empty() {
+                                "You're all caught up"
+                            } else {
+                                "Nothing waiting matches"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("Permission prompts, plans, questions and sessions that finish while you're elsewhere show up here."),
+                    ),
+            );
+        }
+        col.child(
+            div()
+                .id("needs-open-inbox")
+                .mx_1()
+                .mt_2()
+                .px(px(8.))
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(11.5))
+                .text_color(rgb(c_muted()))
+                .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_secondary())))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.view = View::Inbox;
+                    cx.notify();
+                }))
+                .child(icon(IconName::Inbox, 12., c_muted()))
+                .child("Answer them all in the Inbox"),
+        )
+    }
+}
+
+/// A group's name over its rows in the sidebar, with its count, as the status groups have.
+fn group_label(name: &'static str, count: usize) -> Div {
+    div()
+        .mt_2()
+        .mx_1()
+        .px_2()
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(c_secondary()))
+        .child(name)
+        .child(shell::count_badge(count, shell::Tone::Quiet))
+}
+
+/// A quiet label over one group of the Inbox, with its count.
+fn section(label: &'static str, count: usize) -> Div {
+    div()
+        .pt_2()
+        .px_1()
+        .flex()
+        .items_center()
+        .justify_between()
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(c_muted()))
+        .child(label.to_uppercase())
+        .child(shell::count_badge(count, shell::Tone::Quiet))
 }

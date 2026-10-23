@@ -37,6 +37,7 @@ gpui-kit = { version = "0.7.1", features = [
     "tree-sitter-markdown",
     "tree-sitter-python",
     "tree-sitter-rust",
+    "tree-sitter-sql",
     "tree-sitter-toml",
     "tree-sitter-tsx",
     "tree-sitter-typescript",
@@ -47,6 +48,8 @@ portable-pty = { path = "../../vendor/portable-pty" }
 vt100 = { path = "../../vendor/vt100" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
+# Checks the signature on agent manifests Runo downloads (see `registry`).
+ring = "0.17"
 i_overlay = "9"
 libc = "0.2"
 serde.workspace = true
@@ -58,6 +61,17 @@ flate2 = "1"
 resvg = "0.45"
 # The pairing code `runo --phone` prints in the terminal.
 qrcode = { version = "0.14", default-features = false }
+# The Data place: read-only sessions on the project's databases.
+postgres = "0.19"
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+rusqlite = { version = "0.32", features = ["bundled", "column_decltype"] }
+url = "2"
+percent-encoding = "2"
+# The SQL editor's completions speak the editor's LSP types.
+lsp-types = { version = "0.97", features = ["proposed"] }
+anyhow = "1"
 
 [build-dependencies]
 embed-resource = "3.0.11"
@@ -69,6 +83,10 @@ objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop", "CFDate"] }
 objc2-foundation = "0.3"
+# Database passwords live in the Keychain.
+security-framework = "3"
+# The menu bar panel finds its own NSWindow to hang it under the glyph.
+raw-window-handle = "0.6"
 # The design canvas draws its screens with WebKit, the engine built into macOS.
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "std",

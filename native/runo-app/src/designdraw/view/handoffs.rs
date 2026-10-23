@@ -215,7 +215,7 @@ impl DesignCanvas {
             .pt_3()
             .pb_3()
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(
                 div()
                     .flex()

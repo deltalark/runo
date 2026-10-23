@@ -176,6 +176,17 @@ impl RunoApp {
     /// on screen; sign-in is checked again when the command exits. Without a session on
     /// this computer, the computer's terminal app opens instead.
     pub(crate) fn sign_in_here(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+        // A session on a Cove server signs in there, for every session on it.
+        if let Some(id) = self.selected.filter(|id| {
+            self.state
+                .session(*id)
+                .and_then(|s| connections::get(s.connection))
+                .is_some_and(|c| c.kind == connections::Kind::Cove)
+                && cove::keeps_login(provider)
+        }) {
+            self.sign_in_on_server(id, provider, cx);
+            return;
+        }
         let local = self.selected.filter(|id| {
             self.state
                 .session(*id)
@@ -244,9 +255,241 @@ impl RunoApp {
         cx.notify();
     }
 
+    /// Sign an agent in on the Cove server session `id` runs on, in a terminal tab of
+    /// that session: the agent's own login runs in a small VM there, and the server then
+    /// keeps the login for every VM on it.
+    pub(crate) fn sign_in_on_server(
+        &mut self,
+        id: u64,
+        provider: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((dir, conn)) = self
+            .state
+            .session(id)
+            .and_then(|s| Some((s.dir.clone(), connections::get(s.connection)?)))
+        else {
+            return;
+        };
+        let p = agent::provider(provider);
+        let command = match cove::sign_in_command(&conn, provider) {
+            Ok(c) => c,
+            Err(e) => {
+                self.fail("fixes", e);
+                cx.notify();
+                return;
+            }
+        };
+        self.next_shell += 1;
+        let shell_id = self.next_shell;
+        let tx = self.tx.clone();
+        let (rows, cols) = self.term_grid();
+        match pty::Shell::spawn_program(
+            shell_id,
+            id,
+            &dir,
+            rows,
+            cols,
+            Some(pty::Program::of(&command)),
+            move |sid| {
+                let _ = tx.send(Event::Pty(sid));
+            },
+        ) {
+            Ok(mut shell) => {
+                shell.title = format!("Sign in to {} on {}", p.name, conn.name);
+                self.shells.push(shell);
+                self.sign_ins.insert(shell_id, provider);
+                self.server_sign_ins.insert(shell_id, id);
+                self.selected = Some(id);
+                self.view = View::Session;
+                self.show_panel = true;
+                self.shell_tab = Some(shell_id);
+                self.focus_shell = 2;
+                self.info = Some((
+                    format!(
+                        "Signing in to {} on {} in the terminal panel. Follow its steps there; Cove keeps the login for every session on {}.",
+                        p.name, conn.name, conn.name
+                    ),
+                    std::time::Instant::now(),
+                ));
+            }
+            Err(e) => self.fail("fixes", format!("Couldn't start Cove's sign-in: {e}")),
+        }
+        cx.notify();
+    }
+
+    /// Sign in on a Cove connection from Settings: in the terminal panel of the session on
+    /// screen when it runs there, otherwise in the computer's terminal app.
+    pub(crate) fn sign_in_on_connection(
+        &mut self,
+        conn: u64,
+        provider: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(id) = self.selected.filter(|id| {
+            self.state
+                .session(*id)
+                .is_some_and(|s| s.connection == conn)
+        }) {
+            self.sign_in_on_server(id, provider, cx);
+            return;
+        }
+        let Some(c) = connections::get(conn) else {
+            return;
+        };
+        let name = agent::provider(provider).name;
+        let line = match cove::sign_in_command(&c, provider) {
+            Ok(command) => {
+                let mut parts: Vec<String> = command
+                    .get_envs()
+                    .filter_map(|(k, v)| {
+                        Some(format!(
+                            "{}={}",
+                            k.to_string_lossy(),
+                            connections::quote(&v?.to_string_lossy())
+                        ))
+                    })
+                    .collect();
+                parts.push(connections::quote(&command.get_program().to_string_lossy()));
+                parts.extend(
+                    command
+                        .get_args()
+                        .map(|a| connections::quote(&a.to_string_lossy())),
+                );
+                parts.join(" ")
+            }
+            Err(e) => {
+                self.fail("fixes", e);
+                cx.notify();
+                return;
+            }
+        };
+        cove::forget_logins();
+        self.info = Some((
+            match install::open_in_terminal(&line) {
+                Ok(()) => format!(
+                    "Sign in to {name} in the terminal window. Cove keeps the login for every session on {}.",
+                    c.name
+                ),
+                Err(e) => format!("Couldn't open a terminal: {e}"),
+            },
+            std::time::Instant::now(),
+        ));
+        cx.notify();
+    }
+
+    /// Copy this Mac's login for an agent to a Cove connection's server, in the background.
+    pub(crate) fn import_login_to(
+        &mut self,
+        conn: u64,
+        provider: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(c) = connections::get(conn) else {
+            return;
+        };
+        let name = agent::provider(provider).name;
+        let place = c.name.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(cove::import_login(&c, provider));
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let answer = match rx.try_recv() {
+                Ok(a) => a,
+                Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                Err(_) => Err("Copying the login stopped.".into()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                match answer {
+                    Ok(()) => {
+                        this.info = Some((
+                            format!("{place} uses this Mac's {name} login now, in every VM."),
+                            std::time::Instant::now(),
+                        ))
+                    }
+                    Err(e) => this.fail("fixes", format!("Couldn't copy the {name} login: {e}")),
+                }
+                cx.notify();
+            });
+            break;
+        })
+        .detach();
+    }
+
+    /// Sign an agent out on a Cove connection's server and its VMs, in the background.
+    pub(crate) fn sign_out_on_connection(
+        &mut self,
+        conn: u64,
+        provider: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(c) = connections::get(conn) else {
+            return;
+        };
+        let name = agent::provider(provider).name;
+        let place = c.name.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(cove::sign_out(&c, provider));
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let answer = match rx.try_recv() {
+                Ok(a) => a,
+                Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                Err(_) => Err("Signing out stopped.".into()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                match answer {
+                    Ok(()) => {
+                        this.info = Some((
+                            format!("Signed out of {name} on {place} and its VMs."),
+                            std::time::Instant::now(),
+                        ))
+                    }
+                    Err(e) => this.fail("fixes", format!("Couldn't sign out of {name}: {e}")),
+                }
+                cx.notify();
+            });
+            break;
+        })
+        .detach();
+    }
+
     /// A shell exited: when it was signing an agent in, check sign-in again.
     pub(crate) fn sign_in_exited(&mut self, shell: u64) {
         if !self.shells.iter().any(|s| s.id == shell && s.exited()) {
+            return;
+        }
+        if let Some(session) = self.server_sign_ins.remove(&shell) {
+            let provider = self.sign_ins.remove(&shell).unwrap_or_default();
+            cove::forget_logins();
+            let ok = self
+                .shells
+                .iter()
+                .find(|s| s.id == shell)
+                .and_then(|s| s.success())
+                .unwrap_or(false);
+            let name = agent::provider(provider).name;
+            let place = self
+                .state
+                .session(session)
+                .map(|s| connections::name(s.connection))
+                .unwrap_or_default();
+            self.info = Some((
+                if ok {
+                    format!("{name} is signed in on {place}. Send your message again.")
+                } else {
+                    format!("{name} didn't sign in on {place}. The terminal tab says why.")
+                },
+                std::time::Instant::now(),
+            ));
             return;
         }
         if let Some(provider) = self.sign_ins.remove(&shell) {
@@ -310,12 +553,71 @@ impl RunoApp {
         cx.notify();
     }
 
+    /// A failed turn on a Cove server whose agent isn't signed in there: sign in there.
+    fn server_sign_in_fix(&self, id: u64, cx: &mut Context<Self>) -> Option<Div> {
+        let session = self.state.session(id)?;
+        let conn = connections::get(session.connection)?;
+        let p = static_provider(&session.provider)?;
+        if conn.kind != connections::Kind::Cove || !cove::keeps_login(p.id) {
+            return None;
+        }
+        let text = session
+            .messages
+            .iter()
+            .rev()
+            .take_while(|m| m.role != Role::User)
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let caps = caps::get(p.id);
+        let problem = modelcheck::classify(p.id, &text, &caps.version, &caps.client_version)?;
+        if !matches!(problem, Problem::SignedOut) {
+            return None;
+        }
+        let provider = p.id;
+        let why = match cove::signed_in_there(&conn, provider) {
+            Some(true) => format!(
+                "{} is signed in on {} now. Send your message again.",
+                p.name, conn.name
+            ),
+            _ => format!(
+                "{} isn't signed in on {}. Sign in once there, and every session on it uses that login.",
+                p.name, conn.name
+            ),
+        };
+        let button = self
+            .button(
+                "fix-sign-in-server",
+                format!("Sign in on {}", conn.name),
+                true,
+            )
+            .h(px(24.))
+            .px_2()
+            .text_size(px(12.))
+            .on_click(cx.listener(move |this, _, _, cx| this.sign_in_on_server(id, provider, cx)));
+        Some(
+            div()
+                .v_flex()
+                .gap_1()
+                .px_2()
+                .pb_2()
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(c_secondary()))
+                        .child(why),
+                )
+                .child(div().flex().flex_wrap().gap_1().child(button)),
+        )
+    }
+
     /// What a failed turn can do about its agent's setup, shown under "The last turn
     /// didn't finish": sign in, another model, another copy of the CLI, or an update.
     pub(crate) fn turn_fixes(&self, id: u64, cx: &mut Context<Self>) -> Option<Div> {
         let session = self.state.session(id)?;
-        if session.sandbox().is_some() {
-            return None;
+        if session.elsewhere() {
+            return self.server_sign_in_fix(id, cx);
         }
         let p = static_provider(&session.provider)?;
         let provider = p.id;
@@ -675,7 +977,7 @@ impl RunoApp {
                 .rounded_lg()
                 .bg(tint(c_subtle()))
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .font_family(self.mono_font.clone())
                 .text_size(px(12.))
                 .child(text)
@@ -687,10 +989,10 @@ impl RunoApp {
             .p_6()
             .v_flex()
             .gap_3()
-            .rounded_2xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(

@@ -4,12 +4,12 @@
 
 <h1>Runo</h1>
 
-<h3>Your whole team of coding agents, in one native app.</h3>
+<h3>Ten agents. One crew. Every turn proven.</h3>
 
 <p>
-Run Claude Code, Codex, Gemini, OpenCode, Cursor and five more side by side, each in its own git worktree.<br />
-Hand one goal to several of them at once, have every turn proven by your own tests,<br />
-and review, design, diagram and ship it all without leaving the window.
+<b>Crew</b> splits your goal into threads, and Claude Code, Codex, Gemini and seven more race it side by side, each in its own git worktree.<br />
+Your own tests prove every turn, and the <b>Git place</b>, <b>Design</b> canvas, <b>Architecture</b> diagrams and <b>Cove VMs</b><br />
+take it all the way to ship, without leaving one native app.
 </p>
 
 <p>
@@ -44,7 +44,7 @@ and review, design, diagram and ship it all without leaving the window.
 
 <br />
 
-<img src="docs/images/main.png" alt="Runo with a Claude Code session open: projects with colored rails in the sidebar, the conversation in the middle, and the changes and a diff on the right" width="920" />
+<img src="docs/images/hero.gif" alt="Runo in motion: Crew on the home screen, a session with its diff ready to ship, the Git place with changes and the history graph, and an Architecture diagram" width="920" />
 
 </div>
 
@@ -76,19 +76,13 @@ Every session can get its own git worktree and branch, so parallel agents never 
 </td>
 </tr>
 <tr>
-<td width="33%" valign="top">
+<td width="50%" valign="top">
 
 ### ✅ Proven, not promised
 Your tests, lint and build run after every turn. Red goes back to the agent, and another vendor's agent can give a second opinion.
 
 </td>
-<td width="33%" valign="top">
-
-### 🚀 One goal, many agents
-A mission splits a goal into parts, runs them at once across vendors, and merges them into one branch you ship.
-
-</td>
-<td width="33%" valign="top">
+<td width="50%" valign="top">
 
 ### 🛰️ Run anywhere
 Start on your laptop, send the session to a VM or a build server to keep going while you sleep, and pull it back.
@@ -120,18 +114,7 @@ Approve permissions, plans and questions from any session or your phone, undo an
 ## What's new
 
 > [!TIP]
-> **🚀 Missions** and **✅ Proof of done** just landed. Give Runo one goal and watch a team of agents plan it, build it in parallel, prove it with your own checks and merge it into a single branch ready to ship. See the [changelog](CHANGELOG.md) for everything else.
-
-### 🚀 Missions
-
-<img src="docs/images/missions.png" alt="The Missions page: a running mission with two waves, the first part merged with its check passed, the second part's agent writing code, and a live activity log on the right" width="920" />
-
-One goal, planned into parts that agents from different vendors work on at the same time. Open **Missions** (<kbd>⌘</kbd> <kbd>9</kbd>), describe the goal, and a planner agent reads the project and splits it into parts, each with its prompt, the parts it waits on, the files it expects to touch and an agent. Switch an agent, drop a part or plan again with feedback, then **Start mission**.
-
-- **A live board in waves.** Every part in a wave runs at once, each as its own session and worktree branched from the mission branch, so later waves build on earlier ones. Cards show each part's agent, its step through Work, Checks, Review and Merge, and what its agent is doing right now, beside an activity log of checks, fixes, reviews, conflicts and merges.
-- **Every part is checked and merged.** A part's checks run when its agent stops and failures go back for at least two rounds. Another vendor's agent can review it, then Runo commits it and merges it into the mission branch one part at a time, sending any conflict back to the part's agent.
-- **Only what's stuck waits.** A part that stays red shows **Needs you** with **Try again** and **Skip**, and only the parts that depend on it are held up.
-- **Ship the whole thing.** When every part is in, the checks run on the mission branch and its own agent fixes whatever broke between the parts. Then **Review and ship** opens the branch in Review for a pull request or a merge.
+> **✅ Proof of done** just landed. Your own checks run after every turn, failures go back to the agent, and another vendor's agent can give a second opinion. See the [changelog](CHANGELOG.md) for everything else.
 
 <table>
 <tr>

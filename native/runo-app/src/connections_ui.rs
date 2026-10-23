@@ -82,6 +82,125 @@ impl RunoApp {
         self.save();
     }
 
+    /// Install Cove on this machine, or start its server, in the background, and
+    /// repaint as it goes.
+    pub(crate) fn set_up_cove(&mut self, start_only: bool, cx: &mut Context<Self>) {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let done = move || {
+            let _ = tx.send(());
+        };
+        if start_only {
+            crate::cove::start(done);
+        } else {
+            crate::cove::install(done);
+        }
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            let finished = !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+            let _ = this.update(cx, |_, cx| cx.notify());
+            if finished {
+                break;
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Add a Cove connection for a server and say what to do next.
+    pub(crate) fn add_cove_server(&mut self, cx: &mut Context<Self>) {
+        let id = self.add_connection(Kind::Cove, cx);
+        connections::set_pair_result(
+            id,
+            (
+                None,
+                "Type the server's SSH login above, such as ubuntu@203.0.113.7, and press Set up."
+                    .into(),
+            ),
+        );
+        cx.notify();
+    }
+
+    /// Set a Cove server up from its SSH login, in the background: install or update Cove
+    /// there, open the tunnel and pair. Settings shows each step.
+    pub(crate) fn set_up_cove_server(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(conn) = connections::get(id) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        crate::coveserver::set_up(conn, move || {
+            let _ = tx.send(());
+        });
+        self.watch_server_setup(id, rx, cx);
+    }
+
+    /// The server's sudo wants a password: do the root steps in a terminal window.
+    pub(crate) fn set_up_cove_in_terminal(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(conn) = connections::get(id) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        match crate::coveserver::set_up_in_terminal(conn, move || {
+            let _ = tx.send(());
+        }) {
+            Ok(()) => self.watch_server_setup(id, rx, cx),
+            Err(e) => {
+                self.fail("connection", format!("Couldn't open a terminal: {e}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Repaint while a server setup runs; once it is paired, keep the URL, tunnel port and
+    /// key on the connection, and check it.
+    fn watch_server_setup(
+        &mut self,
+        id: u64,
+        rx: std::sync::mpsc::Receiver<()>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(400))
+                .await;
+            let finished = !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+            let _ = this.update(cx, |this, cx| {
+                if finished {
+                    if let Some(crate::coveserver::Step::Done { url, key, port }) =
+                        crate::coveserver::step(id)
+                    {
+                        settings::update(cx, move |s| {
+                            if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                                c.url = url;
+                                c.api_key = key;
+                                c.tunnel_port = port;
+                                c.pair_code.clear();
+                            }
+                        });
+                        this.save();
+                        crate::coveserver::clear_step(id);
+                        crate::cove::forget_logins();
+                        this.info = Some((
+                            format!(
+                                "{} is set up and paired. Sign the agents in under it in Settings.",
+                                connections::name(id)
+                            ),
+                            std::time::Instant::now(),
+                        ));
+                        this.test_connection(id, cx);
+                    }
+                }
+                cx.notify();
+            });
+            if finished {
+                break;
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Check a connection in the background and repaint when the answer is in.
     pub(crate) fn test_connection(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(conn) = connections::get(id) else {
@@ -100,6 +219,77 @@ impl RunoApp {
             if done {
                 break;
             }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Trade the pairing code typed for a connection for a key of Runo's own, in the
+    /// background, and keep the key in the connection's settings.
+    pub(crate) fn pair_connection(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(conn) = connections::get(id) else {
+            return;
+        };
+        let code = cx
+            .global::<settings::AppSettings>()
+            .connections
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.pair_code.clone())
+            .unwrap_or_default();
+        if code.trim().is_empty() {
+            connections::set_pair_result(
+                id,
+                (
+                    Some(false),
+                    "Run cove pair on the server and type its code first.".into(),
+                ),
+            );
+            cx.notify();
+            return;
+        }
+        connections::set_pair_result(id, (None, "Pairing…".into()));
+        let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        std::thread::spawn(move || {
+            let _ = tx.send(connections::pair(&conn, &code));
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            let answer = match rx.try_recv() {
+                Ok(a) => Some(a),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(_) => Some(Err("Pairing stopped.".into())),
+            };
+            let Some(answer) = answer else {
+                let _ = this.update(cx, |_, cx| cx.notify());
+                continue;
+            };
+            let _ = this.update(cx, |this, cx| {
+                match answer {
+                    Ok(key) => {
+                        settings::update(cx, move |s| {
+                            if let Some(c) = s.connections.iter_mut().find(|c| c.id == id) {
+                                c.api_key = key;
+                                c.pair_code.clear();
+                            }
+                        });
+                        this.save();
+                        connections::set_pair_result(
+                            id,
+                            (
+                                Some(true),
+                                "Paired: Runo has a key of its own for this server.".into(),
+                            ),
+                        );
+                        this.test_connection(id, cx);
+                    }
+                    Err(e) => connections::set_pair_result(id, (Some(false), e)),
+                }
+                cx.notify();
+            });
+            break;
         })
         .detach();
         cx.notify();
@@ -126,7 +316,7 @@ impl RunoApp {
         }
         let target = connections::get(to);
         // Remote copies are kept in step with git; a plain folder has no way there.
-        if target.as_ref().is_some_and(|c| c.remote()) && !self.demo && !git::is_repo(&s.dir) {
+        if target.as_ref().is_some_and(|c| c.remote()) && !git::is_repo(&s.dir) {
             self.fail("connection", format!(
                 "{} can't run this session: its folder isn't a git repository, and Runo syncs files to {} with git. Run `git init` in the project (or start a session in a repository), then move it.",
                 connections::name(to),
@@ -146,7 +336,7 @@ impl RunoApp {
         let to_name = connections::name(to);
         // The conversation stays behind: the next message gets a brief of it instead.
         let brief = (s.has_conversation() && !carries).then(|| {
-            let (files, commits) = if !self.demo && git::is_repo(&s.dir) {
+            let (files, commits) = if git::is_repo(&s.dir) {
                 (git::changes(&s.dir), git::recent_commits(&s.dir, 5))
             } else {
                 (Vec::new(), String::new())
@@ -379,9 +569,6 @@ impl RunoApp {
     /// them as running again: their output replays from the start and their work comes
     /// back when they end.
     pub(crate) fn resume_remote_turns(&mut self) {
-        if self.demo {
-            return;
-        }
         let ids: Vec<u64> = self
             .state
             .sessions
@@ -416,11 +603,16 @@ impl RunoApp {
                     {
                         *m = Message::now(Role::Agent, "");
                     }
-                    if let Some(parser) = stream::Parser::for_provider(&provider, &dir) {
-                        self.streams.insert(id, parser);
-                    }
+                    let turn = session
+                        .messages
+                        .iter()
+                        .rposition(|m| m.role == Role::User)
+                        .unwrap_or(0);
+                    self.turns.insert(
+                        id,
+                        crate::harness::turn::Turn::resume(id, &provider, &dir, turn),
+                    );
                     self.handles.insert(Target::Session(id), handle);
-                    self.started.insert(id, std::time::Instant::now());
                     picked += 1;
                 }
                 Err(e) => {

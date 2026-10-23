@@ -16,13 +16,10 @@ impl RunoApp {
             .sessions
             .iter()
             .filter(|s| {
-                // A mission's parts ship with the mission, from its own session.
                 !s.archived
                     && s.canvas.is_empty()
                     && !self.is_running(s)
-                    && (s.mission == 0 || self.mission_ready(s.id))
-                    && (self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
-                        || self.mission_ready(s.id))
+                    && self.stats.get(&s.id).is_some_and(|st| st.0 > 0)
             })
             .map(|s| s.id)
             .collect();
@@ -40,32 +37,25 @@ impl RunoApp {
                 self.select(first);
             }
         }
-        // A mission's work is all in commits: show everything since its base.
-        if !self.diff_base && self.selected.is_some_and(|id| self.mission_ready(id)) {
-            self.diff_base = true;
-            self.refresh();
-        }
         self.view = View::Review;
-        self.git_github = false;
+        self.git_tab = View::Review;
+        self.load_repo();
+        self.load_folder();
     }
 
     /// Show one session in Review.
     pub(crate) fn review(&mut self, id: u64) {
-        // A mission's work is all in commits: show everything since its base.
-        if self.mission_ready(id) {
-            self.diff_base = true;
-            self.selected_file = None;
-        }
         self.select(id);
+        self.git_folder_open = false;
         self.view = View::Review;
-        self.git_github = false;
+        self.git_tab = View::Review;
+        self.load_repo();
     }
 
     fn review_row(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
         let id = session.id;
-        let on = self.selected == Some(id);
+        let on = self.selected == Some(id) && !self.git_folder_open;
         let (files, added, removed) = self.stats.get(&id).copied().unwrap_or_default();
-        let mission = self.mission_ready(id);
         let project = self
             .state
             .projects
@@ -75,7 +65,9 @@ impl RunoApp {
             .unwrap_or_default();
         div()
             .id(("review-row", id as usize))
-            .mx_1()
+            .relative()
+            .ml(px(10.))
+            .mr_1()
             .px_2()
             .py(px(7.))
             .flex()
@@ -83,7 +75,9 @@ impl RunoApp {
             .gap_2()
             .rounded_md()
             .cursor_pointer()
-            .when(on, |el| el.bg(tint(c_active())))
+            .when(on, |el| {
+                el.child(shell::row_fuse(format!("review-fuse-{id}"), 4.))
+            })
             .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
             .on_mouse_down(
                 MouseButton::Right,
@@ -93,7 +87,7 @@ impl RunoApp {
                 this.review(id);
                 cx.notify();
             }))
-            .child(self.provider_mark(agent::provider(&session.provider), 14.))
+            .child(self.provider_badge(agent::provider(&session.provider), 28.))
             .child(
                 div()
                     .flex_1()
@@ -112,74 +106,83 @@ impl RunoApp {
                             .text_size(px(11.5))
                             .text_color(rgb(c_muted()))
                             .child(match files {
-                                _ if mission => format!("Mission branch  ·  {project}"),
                                 1 => format!("1 file  ·  {project}"),
                                 n => format!("{n} files  ·  {project}"),
                             }),
                     ),
             )
-            .when(!mission, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .gap_1()
-                        .text_size(px(11.5))
-                        .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
-                        .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
-                )
-            })
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap_1()
+                    .text_size(px(11.5))
+                    .child(div().text_color(rgb(c_add())).child(format!("+{added}")))
+                    .child(div().text_color(rgb(c_del())).child(format!("−{removed}"))),
+            )
             .into_any_element()
     }
 
-    /// Git: what waits to ship and the project's GitHub, as two tabs under one strip.
+    /// Git: what waits to ship, the project folder's branches and its GitHub, as tabs on
+    /// the frame, the open one cut from the page below it, with the folder's branch, Sync
+    /// and Undo at the strip's right end.
     pub(crate) fn git_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let github = self.view == View::GitHub;
+        let branches = self.view == View::Branches;
+        let history = self.view == View::GitHistory;
         let tab = |id: &'static str, label: &'static str, count: usize, alert: bool, on: bool| {
-            crate::github::segment((id, 0), label, on)
-                .gap(px(6.))
+            shell::strip_tab(id, "git", on)
+                .child(label)
                 .when(count > 0, |el| {
-                    el.child(
-                        div()
-                            .px(px(5.))
-                            .rounded_full()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .when(alert, |el| {
-                                el.bg(rgba((c_amber() << 8) | 0x33))
-                                    .text_color(rgb(c_amber()))
-                            })
-                            .when(!alert, |el| {
-                                el.bg(tint(c_subtle())).text_color(rgb(c_secondary()))
-                            })
-                            .child(count.to_string()),
-                    )
+                    el.child(shell::count_badge(
+                        count,
+                        if alert {
+                            shell::Tone::Alert
+                        } else {
+                            shell::Tone::Quiet
+                        },
+                    ))
                 })
         };
-        let tabs = crate::github::segmented()
-            .child(
-                tab(
-                    "git-ship",
-                    "To ship",
-                    self.review_list().len(),
-                    false,
-                    !github,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.open_review();
-                    this.save();
-                    cx.notify();
-                })),
+        // The open tab is the colour of what sits under it: the waiting list for
+        // Changes, the page for GitHub.
+        let under = if github {
+            glass_fill(c_canvas())
+        } else {
+            pane(c_sheet())
+        };
+        let clash = self.git_repo.as_ref().and_then(|r| r.clash.as_ref());
+        let body = if let Some(clash) = clash {
+            shell::island(
+                div().size_full().flex().child(self.clash_view(clash, cx)),
+                rgba(0),
+                [true, true, false, false],
             )
-            .child(
-                tab("git-github", "GitHub", self.gh.needs_you(), true, github).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.load_github();
-                        this.save();
-                        cx.notify();
-                    }),
-                ),
-            );
+        } else if history {
+            shell::island(
+                div().size_full().flex().child(self.git_history_view(cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        } else if branches {
+            shell::island(
+                div().size_full().flex().child(self.branches_view(cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        } else if github {
+            shell::island(
+                div().size_full().flex().child(self.github_view(cx)),
+                glass_fill(c_canvas()),
+                [true, true, false, false],
+            )
+        } else {
+            shell::island(
+                div().size_full().flex().child(self.review_view(cx)),
+                rgba(0),
+                [true, true, false, false],
+            )
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -187,27 +190,89 @@ impl RunoApp {
             .v_flex()
             .child(
                 div()
-                    .h(px(46.))
+                    .h(px(40.))
                     .flex_none()
-                    .px_4()
+                    .relative()
+                    .px(px(10.))
                     .flex()
-                    .items_center()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(divider())
+                    .items_end()
+                    .gap_1()
+                    .child(shell::strip_fill("git", under))
                     .child(
                         div()
+                            .h(px(28.))
+                            .mb(px(3.))
+                            .px_2()
+                            .mr_1()
+                            .flex()
+                            .items_center()
                             .text_size(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Git"),
                     )
-                    .child(tabs),
+                    .child(
+                        tab(
+                            "git-ship",
+                            "Changes",
+                            self.review_list().len(),
+                            false,
+                            !github && !branches && !history,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_review();
+                            this.save();
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        tab("git-history", "History", 0, false, history).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.open_git_history();
+                                this.save();
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        tab(
+                            "git-branches",
+                            "Branches",
+                            self.git_branches
+                                .as_ref()
+                                .map_or(0, |b| b.rows.iter().filter(|r| !r.remote_only).count()),
+                            // Amber when the radar sees clashes coming.
+                            self.git_radar.as_ref().is_some_and(|h| !h.is_empty()),
+                            branches,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_branches();
+                            this.save();
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        tab("git-github", "GitHub", self.gh.needs_you(), true, github).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.load_github();
+                                this.save();
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(div().flex_1())
+                    .child(self.git_controls(cx)),
             )
-            .child(div().flex_1().min_h_0().flex().child(if github {
-                self.github_view(cx)
-            } else {
-                self.review_view(cx)
-            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .flex()
+                    .child(body.size_full())
+                    .children(self.merge_dialog(cx))
+                    .children(self.git_banner_view(cx))
+                    .children(self.git_toast_view(cx)),
+            )
             .into_any_element()
     }
 
@@ -215,19 +280,27 @@ impl RunoApp {
     /// ship controls beside it.
     pub(crate) fn review_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let list = self.review_list();
+        let folder = self
+            .git_folder
+            .as_ref()
+            .is_some_and(|f| !f.files.is_empty());
         let rows: Vec<AnyElement> = list
             .iter()
             .filter_map(|id| self.state.session(*id))
-            .map(|s| self.review_row(s, cx))
+            .enumerate()
+            .map(|(i, s)| shell::cascade(self.review_row(s, cx), format!("review-in-{}", s.id), i))
             .collect();
+        // The list and the page paint the island's corners over their own fills.
         let side = div()
             .w(px(LIST_WIDTH))
             .flex_none()
             .h_full()
+            .relative()
             .v_flex()
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            .bg(pane(c_sheet()))
+            .children(self.folder_row(cx))
+            .child(shell::frame_corner(true, true, pane(c_sheet())))
+            .child(shell::frame_corner(false, true, pane(c_sheet())))
             .child(
                 div()
                     .px_3()
@@ -236,7 +309,7 @@ impl RunoApp {
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(c_muted()))
-                    .child("READY TO REVIEW"),
+                    .child(if folder { "FROM AGENTS  ·  READY TO SHIP" } else { "READY TO REVIEW" }),
             )
             .child(
                 div()
@@ -246,6 +319,9 @@ impl RunoApp {
                     .overflow_y_scroll()
                     .v_flex()
                     .gap(px(2.))
+                    // Room above the first row and below the last for the selected row's
+                    // curves, which the scrolling list would otherwise clip.
+                    .py(px(12.))
                     .children(rows)
                     .when(list.is_empty(), |el| {
                         el.child(
@@ -258,7 +334,11 @@ impl RunoApp {
                         )
                     }),
             );
-        let main = match self.current().filter(|s| list.contains(&s.id)) {
+        let main = match self
+            .current()
+            .filter(|s| list.contains(&s.id) && !self.git_folder_open)
+        {
+            _ if self.git_folder_open && self.git_folder.is_some() => self.folder_page(cx),
             Some(session) => {
                 let id = session.id;
                 let project = self
@@ -374,9 +454,12 @@ impl RunoApp {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .relative()
                     .flex()
                     .bg(glass_fill(c_canvas()))
-                    .child(main),
+                    .child(main)
+                    .child(shell::frame_corner(true, false, glass_fill(c_canvas())))
+                    .child(shell::frame_corner(false, false, glass_fill(c_canvas()))),
             )
             .into_any_element()
     }
@@ -442,7 +525,7 @@ impl RunoApp {
                     })
                     .when(files == 0 || running, |el| {
                         el.border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .text_color(rgb(c_muted()))
                     })
                     .child(icon(

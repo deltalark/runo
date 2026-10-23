@@ -190,7 +190,7 @@ pub(crate) fn brief(input: &BriefInput) -> String {
                     let skip = reply.steps.len().saturating_sub(STEPS_LISTED);
                     let steps: Vec<String> = reply.steps[skip..]
                         .iter()
-                        .map(|s| one_line(s, 80))
+                        .map(|s| one_line(&s.label, 80))
                         .collect();
                     out.push_str(&format!(
                         "{who} did: {}{}\n",
@@ -298,7 +298,10 @@ pub(crate) fn digest(messages: &[Message], current: &str) -> String {
             Some((at, r)) => {
                 let who = author(messages, *at, current);
                 let what = if r.text.trim().is_empty() {
-                    r.steps.last().map(|s| one_line(s, 120)).unwrap_or_default()
+                    r.steps
+                        .last()
+                        .map(|s| one_line(&s.label, 120))
+                        .unwrap_or_default()
                 } else {
                     one_line(&r.text, 160)
                 };
@@ -393,7 +396,7 @@ impl RunoApp {
             return;
         }
         let from = agent::provider(&session.provider).name;
-        let (files, commits) = if !self.demo && git::is_repo(&session.dir) {
+        let (files, commits) = if git::is_repo(&session.dir) {
             (
                 git::changes(&session.dir),
                 git::recent_commits(&session.dir, 5),
@@ -410,7 +413,7 @@ impl RunoApp {
             commits: &commits,
             notes: &read_notes(&session.dir),
         });
-        let recap = if self.demo || !wants_recap(session) {
+        let recap = if !wants_recap(session) {
             None
         } else {
             agent::recap_command(
@@ -507,9 +510,6 @@ impl RunoApp {
     /// Write the session's memory file after a turn, so any agent can catch up from it
     /// instead of replaying the conversation.
     pub(crate) fn write_memory(&self, id: u64) {
-        if self.demo {
-            return;
-        }
         let Some(session) = self.state.session(id) else {
             return;
         };
@@ -558,7 +558,7 @@ impl RunoApp {
             return;
         }
         let from = session.provider.clone();
-        let (files, commits) = if !self.demo && git::is_repo(&session.dir) {
+        let (files, commits) = if git::is_repo(&session.dir) {
             (
                 git::changes(&session.dir),
                 git::recent_commits(&session.dir, 5),
@@ -646,7 +646,7 @@ impl RunoApp {
     pub(crate) fn switch_divider(&self, index: usize, meta: &str) -> Option<AnyElement> {
         let (from, to, carried, cost) = parse_divider(meta)?;
         let (from, to) = (agent::provider(from), agent::provider(to));
-        let line = || div().flex_1().h(px(1.)).bg(rgb(c_border()));
+        let line = || div().flex_1().h(px(1.)).bg(divider());
         let label = if carried {
             format!("context carried over · ~{} tokens", short_count(cost))
         } else {
@@ -670,7 +670,7 @@ impl RunoApp {
                             .py(px(5.))
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .bg(rgb(c_raised()))
                             .text_size(px(12.))
                             .child(self.provider_badge(from, 16.).opacity(0.7))
@@ -760,7 +760,7 @@ impl RunoApp {
                     .w(px(TRACK))
                     .h(px(2.))
                     .rounded_full()
-                    .bg(rgb(c_border())),
+                    .bg(divider()),
             )
             .children((0..3i32).map(|i| {
                 div()
@@ -794,10 +794,10 @@ impl RunoApp {
             .v_flex()
             .gap_4()
             .p_6()
-            .rounded_2xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
@@ -926,8 +926,8 @@ impl RunoApp {
                                 .p_3()
                                 .rounded_lg()
                                 .border_1()
-                                .border_color(rgb(c_border()))
-                                .bg(rgb(c_term_bg()))
+                                .border_color(divider())
+                                .bg(term_fill())
                                 .font_family(self.mono_font.clone())
                                 .text_size(px(11.5))
                                 .text_color(rgb(c_secondary()))
@@ -1119,7 +1119,7 @@ mod tests {
         for i in 0..300 {
             messages.push(Message::new(Role::User, format!("Request {i}: {big}")));
             let mut reply = Message::new(Role::Agent, big.clone());
-            reply.steps = (0..50).map(|n| format!("Step {n} {big}")).collect();
+            reply.steps = (0..50).map(|n| format!("Step {n} {big}").into()).collect();
             messages.push(reply);
         }
         let files: Vec<git::Change> = (0..500)
@@ -1203,7 +1203,6 @@ mod tests {
         let mut session = Session {
             provider: "codex".into(),
             agent_session: "thread-1".into(),
-            model: "gpt-5".into(),
             carried: "older brief".into(),
             messages: vec![
                 Message::new(Role::User, "Go"),
@@ -1212,6 +1211,7 @@ mod tests {
             ..Session::default()
         };
         session.opts.insert("mode".into(), "plan".into());
+        session.opts.insert("model".into(), "gpt-5".into());
         session.switch_provider_keeping("claude");
         session.handoff = "brief".into();
         let mut divider = Message::new(Role::System, "");
@@ -1225,7 +1225,7 @@ mod tests {
         assert!(session.switch_back());
         assert_eq!(session.provider, "codex");
         assert_eq!(session.agent_session, "thread-1");
-        assert_eq!(session.model, "gpt-5");
+        assert_eq!(session.opts.get("model").map(String::as_str), Some("gpt-5"));
         assert_eq!(session.opts.get("mode").map(String::as_str), Some("plan"));
         assert_eq!(session.conversation_start, 0);
         assert_eq!(session.messages.len(), 2, "the divider is dropped");

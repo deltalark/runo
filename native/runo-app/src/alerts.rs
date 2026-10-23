@@ -556,20 +556,13 @@ pub(crate) enum Waiting {
     /// The agent's questions; each is answered in turn and the answers go back together.
     Questions(Vec<store::Question>),
     Plan,
+    /// A Crew thread's decision: one question and the answers it offers.
+    Decision(crate::crew::Decision),
 }
 
 /// The npm package each agent CLI ships as, for looking up its latest release.
 pub(crate) fn npm_package(provider: &str) -> Option<&'static str> {
-    Some(match provider {
-        "claude" => "@anthropic-ai/claude-code",
-        "codex" => "@openai/codex",
-        "opencode" => "opencode-ai",
-        "gemini" => "@google/gemini-cli",
-        "copilot" => "@github/copilot",
-        "amp" => "@sourcegraph/amp",
-        "qwen" => "@qwen-code/qwen-code",
-        _ => return None,
-    })
+    crate::registry::spec(provider)?.package.as_deref()
 }
 
 /// The numeric parts of a version such as "v2.1.296 (Claude Code)" or "codex-cli 0.50.1".
@@ -593,6 +586,11 @@ pub(crate) fn is_newer(latest: &str, current: &str) -> bool {
 /// What the latest reply of a session asks of the person, if anything. Notices after it,
 /// such as the error a run ended with, don't hide the request.
 pub(crate) fn waiting_on(session: &Session) -> Option<(usize, Waiting)> {
+    // A Crew thread's open decision waits until it is answered, whatever came after it.
+    if let Some(d) = session.crew.as_ref().and_then(|i| i.decision.as_ref()) {
+        let index = session.messages.len().saturating_sub(1);
+        return Some((index, Waiting::Decision(d.clone())));
+    }
     let index = session
         .messages
         .iter()
@@ -710,7 +708,7 @@ impl RunoApp {
             return;
         };
         let busy = self
-            .started
+            .turns
             .keys()
             .filter(|id| {
                 self.state
@@ -1007,7 +1005,7 @@ impl RunoApp {
         allow: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        if self.handles.contains_key(&Target::Session(id)) || self.demo_guard(cx) {
+        if self.handles.contains_key(&Target::Session(id)) {
             return;
         }
         let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) else {
@@ -1050,9 +1048,6 @@ impl RunoApp {
     /// Pick up the permission requests agents wait on, answering at once the tools the
     /// person always allowed for that session, and drop ones nobody waits for any more.
     pub(crate) fn poll_approvals(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         let base = approvals::folder();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1245,7 +1240,7 @@ impl RunoApp {
 
     /// The popups in the corner of the window.
     pub(crate) fn alerts_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.demo || self.view == View::Settings || self.tour.is_some() || self.assistant.open {
+        if self.view == View::Settings || self.tour.is_some() || self.assistant.open {
             return None;
         }
         let mut cards: Vec<AnyElement> = Vec::new();
@@ -1318,6 +1313,12 @@ impl RunoApp {
                         "{} proposed a plan and waits for your go-ahead.",
                         provider.name
                     ),
+                ),
+                Waiting::Decision(d) => (
+                    c_blue(),
+                    IconName::CircleQuestionMark,
+                    "Decision needed",
+                    d.question.clone(),
                 ),
             };
             let mut actions = div().flex().flex_wrap().gap_2();
@@ -1397,6 +1398,9 @@ impl RunoApp {
                                 cx.notify();
                             })),
                     );
+                }
+                Waiting::Decision(d) => {
+                    actions = actions.children(self.decision_chips("al-dec", n, id, &d, cx));
                 }
             }
             cards.push(self.alert_card(
@@ -1619,7 +1623,7 @@ impl RunoApp {
                     .py_1()
                     .rounded_full()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(rgb(c_raised()))
                     .shadow_md()
                     .cursor_pointer()
@@ -1873,7 +1877,7 @@ impl RunoApp {
                         .rounded_md()
                         .bg(tint(c_subtle()))
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .font_family(self.mono_font.clone())
                         .text_size(px(11.))
                         .child(command),
@@ -2225,6 +2229,28 @@ mod tests {
         ));
         assert!(matches!(waiting_on(&s), Some((0, Waiting::Denied(_)))));
         s.messages.push(Message::new(Role::User, "ok"));
+        assert!(waiting_on(&s).is_none());
+    }
+
+    #[test]
+    fn a_crew_decision_waits_until_answered() {
+        let mut s = Session {
+            messages: vec![
+                Message::new(Role::Agent, "Which way?"),
+                Message::new(Role::User, "later"),
+            ],
+            ..Session::default()
+        };
+        s.crew = Some(crate::crew::ThreadInfo {
+            decision: Some(crate::crew::Decision {
+                question: "Keep the old API?".into(),
+                options: vec![Default::default(), Default::default()],
+                recommended: 0,
+            }),
+            ..Default::default()
+        });
+        assert!(matches!(waiting_on(&s), Some((1, Waiting::Decision(_)))));
+        s.crew.as_mut().unwrap().decision = None;
         assert!(waiting_on(&s).is_none());
     }
 }

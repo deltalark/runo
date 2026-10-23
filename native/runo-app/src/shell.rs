@@ -5,59 +5,924 @@
 
 use super::*;
 use gpui_kit::component::tooltip::Tooltip;
+use std::cell::Cell;
 
 /// Width of the mode rail.
 pub(crate) const RAIL_WIDTH: f32 = 52.;
 
-/// The rail's mark on the open place: a glowing accent line on the window's edge, and a
-/// soft beam of the same light falling from it across the page. Children of a 34px rail
-/// item, which sits 9px in from the edge.
-fn light_beam() -> [AnyElement; 2] {
-    let edge = div()
-        .absolute()
-        .left(px(-9.))
-        .top(px(4.))
-        .w(px(3.))
-        .h(px(26.))
-        .rounded_full()
-        .bg(rgb(c_blue()))
-        .shadow(vec![BoxShadow {
-            color: hsla_of(c_blue(), 0.75),
-            offset: point(px(0.), px(0.)),
-            blur_radius: px(10.),
-            spread_radius: px(1.),
-            inset: false,
-        }]);
-    // Stacked bands, the tallest outermost, add up to a beam that is brightest in its
-    // middle and fades out up and down; each fades out to the right on its own.
-    let mut beam = div().absolute().left(px(-9.)).top_0().size_full();
-    for height in [96., 78., 62., 48., 34., 22.] {
-        beam = beam.child(
-            div()
-                .absolute()
-                .left_0()
-                .top(px((34. - height) / 2.))
-                .w(px(340.))
-                .h(px(height))
-                .rounded_full()
-                .bg(linear_gradient(
-                    90.,
-                    linear_color_stop(hsla_of(c_blue(), 0.03), 0.),
-                    linear_color_stop(hsla_of(c_blue(), 0.), 1.),
-                )),
-        );
-    }
-    [
-        deferred(beam).with_priority(0).into_any_element(),
-        edge.into_any_element(),
-    ]
+/// Where the open place's tab sits on its 34px rail item: starting just outside the
+/// item on the left, 8px in from the rail's edge, reaching 9px past it to the rail's
+/// other edge on the right, and a little past it at the top and bottom.
+const TAB_INSET: f32 = -1.;
+const TAB_PAD: f32 = 4.;
+/// Radius of the curves where a tab or a selected row flows into the sheet beside it.
+const FUSE_R: f32 = 12.;
+/// Radius of a sheet's top corner where it meets the rail under the top bar.
+const SHEET_R: f32 = 14.;
+/// Radius of the rail's own corners where it turns in above and below the open tab.
+const RAIL_R: f32 = 14.;
+
+/// How long the shell's small transitions take: quick enough to feel immediate, long
+/// enough that a change reads as a change rather than a jump.
+const QUICK: u64 = 160;
+
+/// Hold still for the first `lead` of an animation, then ease out over the rest: lets a
+/// detail land after the motion it belongs to.
+fn after(lead: f32) -> impl Fn(f32) -> f32 {
+    move |t| ease_out_quint()(((t - lead) / (1. - lead)).clamp(0., 1.))
 }
 
-/// A colour with its own alpha, for glows and gradients.
-fn hsla_of(color: u32, alpha: f32) -> Hsla {
-    let mut c: Hsla = rgb(color).into();
-    c.a = alpha;
-    c
+/// The curve where an edge turns into the sheet beside it: the corner of an `r`
+/// square outside a quarter circle, filled with `fill`, so whatever is behind shows in
+/// the rest. Drawn as a path, not as a square painted over in a guessed colour, so no
+/// corner shows darker than what is around it. It sits beside its shape, never over it,
+/// so it matches in glass mode too.
+fn inner_curve(fill: Rgba, top: bool, r: f32) -> Div {
+    let fill = Hsla::from(fill);
+    div().absolute().right_0().size(px(r)).child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let k = 0.5523;
+                let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                // The top curve turns round the square's top-left corner, the bottom
+                // one round its bottom-left.
+                let mut f = PathBuilder::fill();
+                if top {
+                    f.move_to(p(r, 0.));
+                    f.line_to(p(r, r));
+                    f.line_to(p(0., r));
+                    f.cubic_bezier_to(p(r, 0.), p(k * r, r), p(r, k * r));
+                } else {
+                    f.move_to(p(0., 0.));
+                    f.line_to(p(r, 0.));
+                    f.line_to(p(r, r));
+                    f.cubic_bezier_to(p(0., 0.), p(r, r - k * r), p(k * r, 0.));
+                }
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, fill);
+                }
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// The one touch of accent on a selected row: its own outline lit in the accent at the
+/// top-left and bottom-right corners, fading out along the edges between them, the way
+/// the app icon's rim is lit (see `accent::Rim`). `radius` is the row's own corner radius,
+/// so the rim sits on the row's outline. It draws in once the row has landed, and while
+/// the row is hovered the light reaches further and brightens. A child of the row, which
+/// must be `relative`.
+pub(crate) fn accent_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
+    bracket(key.into(), radius, true)
+}
+
+/// The rim for a row fused to the page beside it (see `row_fuse`). Its right side runs
+/// on into the page, so it owns only its left corners, and the rim is lit at those: the
+/// top-left and the bottom-left. The light fades out long before the page.
+fn fused_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
+    bracket(key.into(), radius, false)
+}
+
+fn bracket(key: SharedString, radius: f32, own_corners: bool) -> AnyElement {
+    let hover_key = key.clone();
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |b, _, window, _| {
+                    let hover = accent::hover(&hover_key, b, window);
+                    let (x0, x1, y0, y1) = (b.origin.x, b.right(), b.origin.y, b.bottom());
+                    let r = px(radius).min((y1 - y0) / 2.);
+                    let rim = if own_corners {
+                        // Along the middle of a 2px edge inside the outline.
+                        let i = px(1.);
+                        let (x0, x1, y0, y1, r) = (x0 + i, x1 - i, y0 + i, y1 - i, r - i);
+                        let at = |x: Pixels, y: Pixels| point(x, y);
+                        let mut rim = accent::Rim::new(at(x0 + r, y0));
+                        rim.line(at(x1 - r, y0));
+                        rim.corner(at(x1, y0), at(x1, y0 + r), false);
+                        rim.line(at(x1, y1 - r));
+                        rim.corner(at(x1, y1), at(x1 - r, y1), true);
+                        rim.line(at(x0 + r, y1));
+                        rim.corner(at(x0, y1), at(x0, y1 - r), false);
+                        rim.line(at(x0, y0 + r));
+                        rim.corner(at(x0, y0), at(x0 + r, y0), true);
+                        rim.close()
+                    } else {
+                        fused_rim(x0, x1, y0, y1, r, px(FUSE_R), true)
+                    };
+                    rim.paint(hover, window);
+                },
+            )
+            .size_full(),
+        )
+        .animated(
+            ElementId::Name(key),
+            Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+            |el, d| el.opacity(d),
+        )
+        .into_any_element()
+}
+
+/// The rim of something whose right side runs on into what sits beside it, such as a
+/// fused row or the rail's open tab, along the middle of a 2px edge inside its outline:
+/// down the edge of what it sits on, round the curve (radius `o`) into its top, round its
+/// top-left and bottom-left corners (radius `r`), both lit, and along its bottom back
+/// round the curve out of it and on down the edge. Without a curve below (`curve_below`
+/// false, as for a tab at the rail's foot) the bottom runs straight on instead. The light
+/// follows the outline through the curves and fades out before it ends. `right` is the
+/// edge it runs on into.
+fn fused_rim(
+    x0: Pixels,
+    right: Pixels,
+    y0: Pixels,
+    y1: Pixels,
+    r: Pixels,
+    o: Pixels,
+    curve_below: bool,
+) -> accent::Rim {
+    let at = |x: Pixels, y: Pixels| point(x, y);
+    let i = px(1.);
+    // The curves turn the other way, so inside them is the outside of their arc, and the
+    // rim there turns a step wider.
+    let (x0, y0, y1, r, edge) = (x0 + i, y0 + i, y1 - i, r - i, right + i);
+    let mut rim = accent::Rim::new(at(edge, y0 - i - 2. * o));
+    rim.line(at(edge, y0 - i - o));
+    rim.corner(at(edge, y0), at(right - o, y0), false);
+    rim.line(at(x0 + r, y0));
+    rim.corner(at(x0, y0), at(x0, y0 + r), true);
+    rim.line(at(x0, y1 - r));
+    rim.corner(at(x0, y1), at(x0 + r, y1), true);
+    if curve_below {
+        rim.line(at(right - o, y1));
+        rim.corner(at(edge, y1), at(edge, y1 + i + o), false);
+        rim.line(at(edge, y1 + i + 2. * o));
+    } else {
+        rim.line(at(right + 2. * o, y1));
+    }
+    rim
+}
+
+/// The track behind a row of connected choices, such as the sidebar's filter or a
+/// setting's options: a shallow well a step darker than what it sits on. Every
+/// segmented control uses it, so they all read the same.
+pub(crate) fn seg_track() -> Div {
+    div()
+        .flex()
+        .items_center()
+        .p(px(3.))
+        .gap(px(2.))
+        .rounded(px(9.))
+        .bg(rgba(if is_dark() { 0x00000047 } else { 0x0000000d }))
+}
+
+/// The raised pill under the chosen choice in a `seg_track`, which fades in when it is
+/// chosen. A child of the choice, which must be `relative` and add it first.
+pub(crate) fn seg_pill(key: impl Into<SharedString>) -> AnyElement {
+    chosen_fill_of(
+        key,
+        7.,
+        div()
+            // A touch more lift through glass, where the desktop behind thins it.
+            .bg(rgba(match (is_dark(), glass_on()) {
+                (true, false) => 0xffffff17,
+                (true, true) => 0xffffff21,
+                (false, false) => 0xffffffff,
+                (false, true) => 0xffffffd9,
+            }))
+            .shadow_sm(),
+    )
+}
+
+/// One choice in a `seg_track`: the chosen one on its pill in full text colour, the
+/// rest quieter until hovered.
+pub(crate) fn seg_choice(
+    id: impl Into<ElementId>,
+    key: impl Into<SharedString>,
+    on: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .h(px(26.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(5.))
+        .rounded(px(7.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .when(on, |el| el.child(seg_pill(key)).text_color(rgb(c_text())))
+        .when(!on, |el| {
+            el.text_color(rgb(c_secondary()))
+                .hover(|el| el.text_color(rgb(c_text())))
+                .active(|el| el.opacity(0.7))
+        })
+}
+
+thread_local! {
+    /// Where the open tab sits this frame, so the rail can leave a hole for it.
+    static TAB_CUT: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
+    /// The layer the open tab is cut from, set while the rail is built.
+    static TAB_SHEET: Cell<Option<Rgba>> = const { Cell::new(None) };
+    /// Where the rail's islands end, above the gutter, as the rail last painted it.
+    static RAIL_FLOOR: Cell<Option<Pixels>> = const { Cell::new(None) };
+}
+
+/// The open place's tab on the rail: a piece of what sits beside the rail, the same
+/// colour, that reaches out around the icon, with the rail's edge curving into it above
+/// and below, so the place and its list (or page) read as one sheet. It slides out of
+/// the sheet when the place opens. `sheet` is the fill of what it is cut from.
+///
+/// The tab paints nothing itself. The rail lays the sheet under its whole column and
+/// its own shade over that, cut round the tab (see `rail_fill`), so the tab is the very
+/// layer it joins and no two see-through edges ever meet in glass mode.
+fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
+    TAB_SHEET.set(Some(sheet));
+    let reach = (RAIL_WIDTH - 34.) / 2.;
+    let height = 34. + 2. * TAB_PAD;
+    div()
+        .absolute()
+        .top(px(-TAB_PAD))
+        .left(px(TAB_INSET))
+        .right(px(-reach))
+        .h(px(height))
+        .child(canvas(|b, _, _| TAB_CUT.set(Some(b)), |_, _, _, _| {}).size_full())
+        // The accent's rim, lit at the tab's own two corners, top-left and bottom-left (its
+        // right side runs on into the sheet), along the middle of a 2px edge inside the
+        // tab's outline.
+        .child({
+            let hover_key = SharedString::from(format!("rail-hover-{key}"));
+            div()
+                .absolute()
+                .inset_0()
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |b, _, window, _| {
+                            let hover = accent::hover(&hover_key, b, window);
+                            // At the rail's foot the tab runs level with the island's
+                            // square bottom edge, with no curve out below.
+                            let floor = RAIL_FLOOR.get().unwrap_or(b.bottom() + px(RAIL_R));
+                            let foot = b.bottom() + px(RAIL_R) > floor;
+                            fused_rim(
+                                b.origin.x,
+                                b.right(),
+                                b.origin.y,
+                                if foot {
+                                    b.bottom().min(floor)
+                                } else {
+                                    b.bottom()
+                                },
+                                px(FUSE_R),
+                                px(RAIL_R),
+                                !foot,
+                            )
+                            .paint(hover, window);
+                        },
+                    )
+                    .size_full(),
+                )
+                .animated(
+                    SharedString::from(format!("rail-bracket-{key}")),
+                    Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
+                    |el, d| el.opacity(d),
+                )
+        })
+        .animated(
+            SharedString::from(format!("rail-tab-{key}")),
+            Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+            move |el, d| el.left(px(TAB_INSET + 6. * (1. - d))),
+        )
+}
+
+/// The pattern on the rail's shade, clear of the open tab, which is cut from the sheet.
+fn rail_pattern() -> AnyElement {
+    canvas(
+        |_, _, _| (),
+        |b, _, window, _| {
+            // The tab with the curves into it above and below.
+            let skip = TAB_CUT.get().map(|t| {
+                Bounds::from_corners(
+                    point(t.left(), t.top() - px(RAIL_R)),
+                    point(b.right(), t.bottom() + px(RAIL_R)),
+                )
+            });
+            crate::pattern::paint(b, skip, crate::pattern::FRAME, window);
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+    .into_any_element()
+}
+
+/// The rail's own fill: the sheet under the whole column, then the rail's shade over it
+/// as one path, its whole column less the tab and the curves into it. Where the shade's
+/// edge is antialiased it blends into the sheet beneath, never into the desktop, so the
+/// outline stays one smooth curve in every glass style. The rest of the frame is this
+/// same pair flattened (see `settings::frame`), so the rail and the bars match.
+///
+/// A tab cut from the page rather than a list (`tab`) has the difference between the
+/// page and the sheet laid in the hole too, so it is the very shade of the page.
+fn rail_fill(tab: Rgba) -> AnyElement {
+    let base = pane(c_sheet());
+    let fill = Hsla::from(settings::over(settings::frame(), base));
+    let lift = (tab != base).then(|| Hsla::from(settings::over(tab, base)));
+    let shade = canvas(
+        |_, _, _| TAB_CUT.set(None),
+        move |b, _, window, _| {
+            let (r, k) = (FUSE_R, 0.5523);
+            let at = |x: Pixels, y: Pixels| point(x, y);
+            // A quarter turn from `from` to `to` round the square corner `c`.
+            let turn =
+                |f: &mut PathBuilder, from: Point<Pixels>, c: Point<Pixels>, to: Point<Pixels>| {
+                    f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
+                };
+            let (left, top, right, bottom) = (b.origin.x, b.origin.y, b.right(), b.bottom());
+            // Where the islands end, above the gutter along the bottom.
+            let floor = bottom - px(GUTTER);
+            RAIL_FLOOR.set(Some(floor));
+            // The tab's outline, from the rail's edge above it round to the edge below.
+            let outline = |f: &mut PathBuilder, t: Bounds<Pixels>| {
+                let (tx, ty, tb, r, o) = (t.origin.x, t.origin.y, t.bottom(), px(r), px(RAIL_R));
+                f.line_to(at(right, ty - o));
+                turn(f, at(right, ty - o), at(right, ty), at(right - o, ty));
+                f.line_to(at(tx + r, ty));
+                turn(f, at(tx + r, ty), at(tx, ty), at(tx, ty + r));
+                if tb + o > floor {
+                    // A tab at the foot, such as Settings, has no room to curve out below:
+                    // it runs level with the island's square bottom edge instead.
+                    let tb = tb.min(floor);
+                    f.line_to(at(tx, tb - r));
+                    turn(f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
+                    f.line_to(at(right, tb));
+                } else {
+                    f.line_to(at(tx, tb - r));
+                    turn(f, at(tx, tb - r), at(tx, tb), at(tx + r, tb));
+                    f.line_to(at(right - o, tb));
+                    turn(f, at(right - o, tb), at(right, tb), at(right, tb + o));
+                }
+            };
+            let cut = TAB_CUT.get();
+            let mut f = PathBuilder::fill();
+            f.move_to(at(left, top));
+            f.line_to(at(right, top));
+            if let Some(t) = cut {
+                outline(&mut f, t);
+            }
+            f.line_to(at(right, bottom));
+            f.line_to(at(left, bottom));
+            f.close();
+            if let Ok(path) = f.build() {
+                window.paint_path(path, fill);
+            }
+            if let (Some(t), Some(lift)) = (cut, lift) {
+                let mut f = PathBuilder::fill();
+                f.move_to(at(right, t.origin.y - px(RAIL_R)));
+                outline(&mut f, t);
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, lift);
+                }
+            }
+        },
+    )
+    .size_full();
+    div()
+        .absolute()
+        .inset_0()
+        .bg(base)
+        .child(shade)
+        .into_any_element()
+}
+
+/// The open place on a page with no list beside the rail, such as the More menu: a quiet
+/// tile under the icon, which fades up when the place opens.
+fn rail_tile(key: &'static str) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(8.))
+        .bg(tint(c_active()))
+        .animated(
+            SharedString::from(format!("rail-tile-{key}")),
+            Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+            |el, d| el.opacity(d),
+        )
+}
+
+/// A rail icon: the open place's at full strength, the rest muted.
+fn rail_icon(glyph: IconName, on: bool) -> AnyElement {
+    div()
+        .relative()
+        .child(icon(glyph, 18., if on { c_text() } else { c_muted() }))
+        .into_any_element()
+}
+
+/// A list's selected row joined to the page beside the list: a fill in the page's colour
+/// from the row out to the list's edge, with the list curving into it above and below,
+/// the same way the rail's tab joins the list, and the accent's hooks at its corners.
+/// `reach` is how far the list's edge is past the row's right side. It slides in from the
+/// page when the row is picked. A child of the row, which must be `relative` and draw it
+/// first, under its content.
+pub(crate) fn row_fuse(key: impl Into<SharedString>, reach: f32) -> AnyElement {
+    let key = key.into();
+    // The row sits on the list's sheet: in glass mode only the difference is painted, so
+    // the row and its curves are the very shade of the page they join.
+    let page = settings::over(glass_fill(c_canvas()), pane(c_sheet()));
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right(px(-reach))
+        .child(div().absolute().inset_0().rounded_l(px(FUSE_R)).bg(page))
+        .child(inner_curve(page, true, FUSE_R).top(px(-FUSE_R)))
+        .child(inner_curve(page, false, FUSE_R).bottom(px(-FUSE_R)))
+        .child(fused_bracket(format!("{key}-rule"), FUSE_R))
+        .animated(
+            ElementId::Name(key),
+            Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+            |el, d| el.left(px(6. * (1. - d))).opacity(d),
+        )
+}
+
+/// Let a small detail, such as a count or a badge, settle in with a quick fade when it
+/// appears or its value changes. Key it by its value.
+pub(crate) fn pop(el: impl IntoElement + 'static, key: impl Into<SharedString>) -> AnyElement {
+    div().relative().child(el).animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+        |el, d| el.opacity(0.3 + 0.7 * d),
+    )
+}
+
+/// A live status dot: the one thing in the shell that moves on its own, a slow, soft pulse
+/// while an agent is working.
+pub(crate) fn live_dot(color: u32, size: f32, key: impl Into<SharedString>) -> AnyElement {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded_full()
+        .bg(rgb(color))
+        .animated(
+            ElementId::Name(key.into()),
+            Animation::new(Duration::from_millis(1800))
+                .repeat()
+                .with_easing(pulsating_between(0.4, 1.)),
+            |el, d| el.opacity(d),
+        )
+}
+
+/// The fill under a chosen item, such as a segment, that fades in when the item is
+/// chosen, with its own look. A child of the item, which must be `relative` and add it
+/// first, under its content.
+pub(crate) fn chosen_fill_of(key: impl Into<SharedString>, radius: f32, look: Div) -> AnyElement {
+    look.absolute()
+        .top_0()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .rounded(px(radius))
+        .animated(
+            ElementId::Name(key.into()),
+            Animation::new(Duration::from_millis(QUICK)).with_easing(ease_out_quint()),
+            |el, d| el.opacity(d),
+        )
+}
+
+/// The rounded top corner of a sheet beside the rail, where it meets the rail under the
+/// top bar: the corner of a square outside a quarter circle, in the rail's colour, laid
+/// over the sheet's top-left. Empty in glass mode.
+pub(crate) fn sheet_corner() -> Div {
+    let fill = Hsla::from(settings::over(settings::frame(), pane(c_sheet())));
+    div().absolute().top_0().left_0().size(px(SHEET_R)).child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let (r, k) = (SHEET_R, 0.5523);
+                let p = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+                let mut f = PathBuilder::fill();
+                f.move_to(p(0., 0.));
+                f.line_to(p(r, 0.));
+                f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
+                f.close();
+                if let Ok(path) = f.build() {
+                    window.paint_path(path, fill);
+                }
+            },
+        )
+        .size_full(),
+    )
+}
+
+/// The gap between the window's islands, in the frame's grey.
+pub(crate) const GUTTER: f32 = 8.;
+/// Radius of an island's rounded corners.
+pub(crate) const ISLAND_R: f32 = 14.;
+/// Radius of an open tab's top corners, and of the curves where it flows into its island.
+const STRIP_TAB_R: f32 = 9.;
+const STRIP_FLARE_R: f32 = 8.;
+
+thread_local! {
+    /// Where each fused strip's open tab sits this frame, keyed by strip.
+    static STRIP_CUTS: std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// A quarter turn from `from` to `to` round the square corner `c`.
+fn turn(f: &mut PathBuilder, from: Point<Pixels>, c: Point<Pixels>, to: Point<Pixels>) {
+    let k = 0.5523;
+    f.cubic_bezier_to(to, from + (c - from) * k, to + (c - to) * k);
+}
+
+/// Marks the open tab of a fused strip, so the strip leaves it out of the frame's grey.
+/// A child of the open tab, which must be `relative`.
+pub(crate) fn strip_cut(strip: &'static str) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                move |b, _, _| STRIP_CUTS.with_borrow_mut(|c| c.insert(strip, b)),
+                |_, _, _, _| {},
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// The fill of a strip of tabs over an island: the frame's grey across the strip, less
+/// the open tab, which is the island's own colour and flows into it with curves on both
+/// sides, and the accent's hooks round its two top corners. The grey and the tab are two
+/// paths that never overlap, so the join looks the same in every glass style. A child
+/// of the strip, which must be `relative`, added first so it sits under the tabs.
+pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
+    // The island's fill under the whole strip, and the frame as the difference over it
+    // (see `settings::frame`): along the tab's curves the two blend into each other
+    // instead of overlapping, which darkens, or leaving a gap, which lets the desktop
+    // through.
+    let frame = Hsla::from(settings::over(settings::frame(), island));
+    let island = Hsla::from(island);
+    div()
+        .absolute()
+        .inset_0()
+        .bg(island)
+        .child(
+            canvas(
+                move |_, _, _| STRIP_CUTS.with_borrow_mut(|c| c.remove(strip)),
+                move |b, _, window, _| {
+                    let at = |x: Pixels, y: Pixels| point(x, y);
+                    let (left, top, right, bottom) =
+                        (b.origin.x, b.origin.y, b.right(), b.bottom());
+                    let (fr, tr) = (px(STRIP_FLARE_R), px(STRIP_TAB_R));
+                    // A tab scrolled partly out of the strip is not cut.
+                    let cut = STRIP_CUTS
+                        .with_borrow(|c| c.get(strip).copied())
+                        .filter(|t| t.origin.x - fr >= left && t.right() + fr <= right);
+                    let mut f = PathBuilder::fill();
+                    f.move_to(at(left, top));
+                    f.line_to(at(right, top));
+                    f.line_to(at(right, bottom));
+                    if let Some(t) = cut {
+                        let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
+                        f.line_to(at(x1 + fr, bottom));
+                        turn(
+                            &mut f,
+                            at(x1 + fr, bottom),
+                            at(x1, bottom),
+                            at(x1, bottom - fr),
+                        );
+                        f.line_to(at(x1, y0 + tr));
+                        turn(&mut f, at(x1, y0 + tr), at(x1, y0), at(x1 - tr, y0));
+                        f.line_to(at(x0 + tr, y0));
+                        turn(&mut f, at(x0 + tr, y0), at(x0, y0), at(x0, y0 + tr));
+                        f.line_to(at(x0, bottom - fr));
+                        turn(
+                            &mut f,
+                            at(x0, bottom - fr),
+                            at(x0, bottom),
+                            at(x0 - fr, bottom),
+                        );
+                    }
+                    f.line_to(at(left, bottom));
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, frame);
+                    }
+                    let Some(t) = cut else { return };
+                    let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
+                    // The accent's rim, lit at the tab's own two corners, top-left and
+                    // top-right, along the middle of a 2px edge inside its outline: in
+                    // along the island's top, round the flare up the tab's side, over its
+                    // top and down round the other flare and out again, so the light
+                    // follows the curves. Inside a flare is the outside of its arc, so the
+                    // rim there turns a step wider.
+                    let hover = accent::hover(&SharedString::from(strip), t, window);
+                    let i = px(1.);
+                    let (x0, x1, y0, r, foot) = (x0 + i, x1 - i, y0 + i, tr - i, bottom + i);
+                    let mut rim = accent::Rim::new(at(x0 - i - 2. * fr, foot));
+                    rim.line(at(x0 - i - fr, foot));
+                    rim.corner(at(x0, foot), at(x0, bottom - fr), false);
+                    rim.line(at(x0, y0 + r));
+                    rim.corner(at(x0, y0), at(x0 + r, y0), true);
+                    rim.line(at(x1 - r, y0));
+                    rim.corner(at(x1, y0), at(x1, y0 + r), true);
+                    rim.line(at(x1, bottom - fr));
+                    rim.corner(at(x1, foot), at(x1 + i + fr, foot), false);
+                    rim.line(at(x1 + i + 2. * fr, foot));
+                    rim.paint(hover, window);
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// One rounded corner of an island: the corner of a square outside a quarter circle, in
+/// the frame's grey, so the island reads as rounded over whatever it holds. The island's
+/// own fill is rounded too, so the two never overlap in glass mode.
+pub(crate) fn frame_corner(top: bool, left: bool, under: Rgba) -> AnyElement {
+    // The frame as the difference over the island's own square fill (see
+    // `settings::frame`), so along the curve the two blend instead of overlapping or
+    // leaving a gap. The island must not round this corner itself.
+    let fill = Hsla::from(settings::over(settings::frame(), under));
+    let r = ISLAND_R;
+    div()
+        .absolute()
+        .size(px(r))
+        .map(|el| if top { el.top_0() } else { el.bottom_0() })
+        .map(|el| if left { el.left_0() } else { el.right_0() })
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |b, _, window, _| {
+                    let k = 0.5523;
+                    // Drawn as the top-left corner, then mirrored into place.
+                    let p = |x: f32, y: f32| {
+                        let x = if left { x } else { r - x };
+                        let y = if top { y } else { r - y };
+                        point(b.origin.x + px(x), b.origin.y + px(y))
+                    };
+                    let mut f = PathBuilder::fill();
+                    f.move_to(p(0., 0.));
+                    f.line_to(p(r, 0.));
+                    f.cubic_bezier_to(p(0., r), p(r - k * r, 0.), p(0., r - k * r));
+                    f.close();
+                    if let Ok(path) = f.build() {
+                        window.paint_path(path, fill);
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// An island on the frame: `content` on a fill with the given corners rounded, as
+/// top-left, top-right, bottom-right and bottom-left. The fill is square; each rounded
+/// corner is the frame painted over it (see `frame_corner`). A transparent fill leaves
+/// the layers and their corners to the content, as on pages that paint their own list
+/// beside the page.
+pub(crate) fn island(content: impl IntoElement, fill: Rgba, round: [bool; 4]) -> Div {
+    let [tl, tr, br, bl] = round;
+    // A transparent fill leaves the corners to the content too, which knows what lies
+    // under each; see `frame_corner`.
+    let own = fill.a > 0.0;
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .bg(fill)
+        .child(content)
+        .when(own && tl, |el| el.child(frame_corner(true, true, fill)))
+        .when(own && tr, |el| el.child(frame_corner(true, false, fill)))
+        .when(own && br, |el| el.child(frame_corner(false, false, fill)))
+        .when(own && bl, |el| el.child(frame_corner(false, true, fill)))
+}
+
+/// One tab in a strip over an island. The open one is cut from the island below
+/// (see `strip_fill`); the rest sit quietly on the frame until hovered.
+pub(crate) fn strip_tab(
+    id: impl Into<ElementId>,
+    strip: &'static str,
+    selected: bool,
+) -> Stateful<Div> {
+    let id = id.into();
+    let tab = div()
+        .id(id.clone())
+        .relative()
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM);
+    if selected {
+        tab.h(px(32.))
+            .child(strip_cut(strip))
+            .text_color(rgb(c_text()))
+    } else {
+        let (rest, hover) = tab_chip();
+        hover_wash(tab, id, hover, 8.)
+            .h(px(28.))
+            .mb(px(3.))
+            .rounded(px(8.))
+            .bg(rest)
+            .text_color(rgb(c_secondary()))
+            .hover(|el| el.text_color(rgb(c_text())))
+            .active(|el| el.opacity(0.75))
+    }
+}
+
+/// The header of a list beside the rail: a large title over a quiet summary line,
+/// with room on the right for the list's add button.
+pub(crate) fn list_header(title: &'static str, summary: impl IntoElement) -> Div {
+    div()
+        .pt(px(16.))
+        .px(px(16.))
+        .flex()
+        .items_start()
+        .justify_between()
+        .child(
+            div()
+                .v_flex()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(19.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(summary),
+                ),
+        )
+}
+
+/// The round, filled add button in a `list_header`.
+pub(crate) fn add_button(id: impl Into<ElementId>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .size(px(30.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(c_text()))
+        .cursor_pointer()
+        .hover(|el| el.opacity(0.85))
+        .active(|el| el.opacity(0.7))
+        .child(icon(IconName::Plus, 16., c_canvas()))
+}
+
+/// A strip of the frame's grey, such as the gutter between two islands.
+pub(crate) fn gutter() -> Div {
+    div()
+        .flex_none()
+        .bg(settings::frame())
+        .relative()
+        .child(crate::pattern::chrome())
+}
+
+/// A card on an island: a borderless step lighter than the page, so groups read by
+/// tone rather than by lines.
+pub(crate) fn card() -> Div {
+    div().rounded(px(12.)).bg(tint(c_subtle()))
+}
+
+/// A hairline between rows inside a `card`, inset from its edges.
+pub(crate) fn card_rule() -> Div {
+    div().mx_4().h(px(1.)).flex_none().bg(divider())
+}
+
+/// Let a list's rows fade in one after another when the list opens, each a beat after
+/// the one above it.
+pub(crate) fn cascade(
+    el: impl IntoElement + 'static,
+    key: impl Into<SharedString>,
+    i: usize,
+) -> AnyElement {
+    let lead = i.min(8) as f32 * 0.04;
+    div().relative().child(el).animated(
+        ElementId::Name(key.into()),
+        Animation::new(Duration::from_millis(QUICK + 20 * i.min(8) as u64))
+            .with_easing(after(lead)),
+        |el, d| el.opacity(d),
+    )
+}
+
+thread_local! {
+    /// Whether the pointer was over each hover-washed element when it last painted, and
+    /// since when, keyed by id.
+    static HOVERS: std::cell::RefCell<HashMap<ElementId, (bool, std::time::Instant)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// How long a hover wash takes to ease in or out.
+const HOVER_MS: f32 = 120.;
+
+/// Give an element a hover fill that eases in and out instead of snapping: `color`
+/// washes up under its content while the pointer is over it. Call it before adding the
+/// element's content, so the wash sits beneath it, and keep `on_hover` free for it. The
+/// element must be `relative`.
+///
+/// Whether the pointer is over it is read from the pointer itself as the wash paints,
+/// so an element that went away while hovered never comes back lit.
+pub(crate) fn hover_wash(
+    el: Stateful<Div>,
+    id: impl Into<ElementId>,
+    color: Rgba,
+    radius: f32,
+) -> Stateful<Div> {
+    let id: ElementId = id.into();
+    let color = Hsla::from(color);
+    el.on_hover(|_, window, _| window.refresh()).child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, window, _| {
+                let over = b.contains(&window.mouse_position());
+                let now = std::time::Instant::now();
+                let since = HOVERS.with_borrow_mut(|h| {
+                    // First seen: already settled, so nothing fades on arrival.
+                    let seen = h
+                        .entry(id.clone())
+                        .or_insert((over, now - Duration::from_secs(1)));
+                    if seen.0 != over {
+                        *seen = (over, now);
+                    }
+                    seen.1.elapsed().as_secs_f32() * 1000.
+                });
+                let t = if anim_on() {
+                    (since / HOVER_MS).min(1.)
+                } else {
+                    1.
+                };
+                if t < 1. {
+                    window.request_animation_frame();
+                }
+                let t = 1. - (1. - t).powi(3);
+                let strength = if over { t } else { 1. - t };
+                if strength > 0. && color.a > 0. {
+                    window.paint_quad(fill(b, color.opacity(strength)).corner_radii(px(radius)));
+                }
+            },
+        )
+        .absolute()
+        .inset_0(),
+    )
+}
+
+thread_local! {
+    /// Whether the pointer is over each hover group that reveals actions, and since when.
+    static GROUPS: std::cell::RefCell<HashMap<ElementId, (bool, std::time::Instant)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// How long actions take to fade in when their row is hovered.
+const REVEAL_MS: u64 = 140;
+
+/// Mark a row whose actions show on hover, so `reveal` can fade them in rather than
+/// have them pop. Keep `on_hover` free on the row for it.
+pub(crate) fn reveal_group(el: Stateful<Div>, id: impl Into<ElementId>) -> Stateful<Div> {
+    let id = id.into();
+    el.on_hover(move |hovered, window, _| {
+        GROUPS.with_borrow_mut(|g| {
+            g.insert(id.clone(), (*hovered, std::time::Instant::now()));
+        });
+        window.refresh();
+    })
+}
+
+/// An action that shows while its row is hovered (with `group_hover`, which still decides
+/// whether it shows at all), faded in over a moment each time the pointer arrives.
+/// `group` is the id the row was given in `reveal_group`.
+pub(crate) fn reveal(el: impl IntoElement + 'static, group: impl Into<ElementId>) -> AnyElement {
+    let group = group.into();
+    let since = GROUPS.with_borrow(|g| g.get(&group).filter(|(on, _)| *on).map(|(_, at)| *at));
+    div().flex().child(el).animated(
+        ElementId::Name(SharedString::from(format!("reveal-{group}-{since:?}"))),
+        Animation::new(Duration::from_millis(REVEAL_MS)).with_easing(ease_out_quint()),
+        move |el, d| if since.is_some() { el.opacity(d) } else { el },
+    )
 }
 
 /// The places on the mode rail.
@@ -67,7 +932,8 @@ pub(crate) enum Mode {
     Sessions,
     Design,
     Architecture,
-    Missions,
+    /// The project's databases.
+    Data,
     /// What waits to ship and the project's GitHub, as two tabs of one place.
     Git,
     Playbooks,
@@ -80,24 +946,27 @@ pub(crate) enum Mode {
 impl Mode {
     /// The modes at the top of the rail, in order. The first `WORK` are the day's work;
     /// the rest, what's been kept, sit apart.
-    pub(crate) const MAIN: [Mode; 6] = [
+    pub(crate) const MAIN: [Mode; 5] = [
         Mode::Home,
         Mode::Sessions,
-        Mode::Missions,
         Mode::Git,
         Mode::Playbooks,
         Mode::History,
     ];
 
     /// How many of `MAIN` stay out on the rail; the rest wait in its More menu.
-    const WORK: usize = 4;
+    const WORK: usize = 3;
 
     /// The places in the rail's More menu, used less than the ones out on the rail.
     pub(crate) const MORE: [Mode; 3] = [Mode::Playbooks, Mode::History, Mode::Notes];
 
+    /// The places Settings > General > Rail can pin out on the rail, in rail order.
+    pub(crate) const PINNABLE: [Mode; 4] =
+        [Mode::Playbooks, Mode::History, Mode::Notes, Mode::Inbox];
+
     /// The current project's own modes, grouped under its badge below the main ones; ⌘7
     /// and ⌘8.
-    pub(crate) const PLAN: [Mode; 2] = [Mode::Design, Mode::Architecture];
+    pub(crate) const PLAN: [Mode; 3] = [Mode::Design, Mode::Architecture, Mode::Data];
 
     /// Whether the mode shows one project at a time, or a chooser under All projects.
     pub(crate) fn per_project(self) -> bool {
@@ -110,7 +979,7 @@ impl Mode {
             Mode::Sessions => "Sessions",
             Mode::Design => "Design",
             Mode::Architecture => "Architecture",
-            Mode::Missions => "Missions",
+            Mode::Data => "Data",
             Mode::Git => "Git",
             Mode::Playbooks => "Playbooks",
             Mode::History => "History",
@@ -127,8 +996,8 @@ impl Mode {
             Mode::Sessions => "go-sessions",
             Mode::Design => "go-design",
             Mode::Architecture => "go-architecture",
-            Mode::Missions => "go-missions",
-            // Git's To ship tab; `go-reviews` opens its GitHub tab.
+            Mode::Data => "go-data",
+            // Git's Changes tab; `go-reviews` opens its GitHub tab.
             Mode::Git => "go-review",
             Mode::Playbooks => "go-playbooks",
             Mode::History => "go-history",
@@ -144,7 +1013,7 @@ impl Mode {
             Mode::Sessions => IconName::CodeXml,
             Mode::Design => IconName::PanelsTopLeft,
             Mode::Architecture => IconName::Network,
-            Mode::Missions => IconName::Rocket,
+            Mode::Data => IconName::Database,
             Mode::Git => IconName::GitPullRequest,
             Mode::Playbooks => IconName::BookOpen,
             Mode::History => IconName::RotateCcwClock,
@@ -160,9 +1029,9 @@ impl Mode {
             View::Home => Mode::Home,
             View::Design => Mode::Design,
             View::Architecture => Mode::Architecture,
+            View::Data => Mode::Data,
             View::Automations => Mode::Playbooks,
-            View::Missions => Mode::Missions,
-            View::Review | View::GitHub => Mode::Git,
+            View::Review | View::GitHistory | View::Branches | View::GitHub => Mode::Git,
             View::History => Mode::History,
             View::Inbox => Mode::Inbox,
             View::Notes => Mode::Notes,
@@ -237,6 +1106,10 @@ pub(crate) fn need_of(
     if s.archived || running {
         return None;
     }
+    // A Crew thread asking the person to decide something waits on them.
+    if s.crew.as_ref().is_some_and(|i| i.decision.is_some()) {
+        return Some(Need::Blocked);
+    }
     if let Some((index, _)) = alerts::waiting_on(s) {
         if !hidden.contains(&format!("s:{}:{index}", s.id)) {
             return Some(Need::Blocked);
@@ -277,6 +1150,23 @@ pub(crate) fn move_tab(tabs: &mut Vec<u64>, id: u64, target: u64) {
     tabs.insert(to, tab);
 }
 
+/// The usage the latest turn reported: the last reply after the latest prompt that
+/// carries any. A turn that ended before its agent replied, such as one stopped or failed
+/// at start, reported nothing, rather than the turn before it again.
+pub(crate) fn turn_usage(messages: &[store::Message]) -> store::Usage {
+    let start = messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or(0);
+    messages[start..]
+        .iter()
+        .rev()
+        .filter(|m| m.role == Role::Agent)
+        .find(|m| !m.usage.is_empty() || m.usage.cost_cents > 0.0)
+        .map(|m| m.usage)
+        .unwrap_or_default()
+}
+
 /// Totals shown in the top bar and on Home.
 #[derive(Default)]
 pub(crate) struct Counts {
@@ -285,10 +1175,6 @@ pub(crate) struct Counts {
     pub needs_you: usize,
     /// Idle sessions with uncommitted changes.
     pub review: usize,
-    /// Spend reported by the agents today.
-    pub spend_today: f64,
-    /// Spend over every session ever, for the tooltip.
-    pub spend_cents: f64,
 }
 
 /// A tab being dragged to a new place in the strip.
@@ -307,7 +1193,7 @@ impl Render for DraggedTab {
             .items_center()
             .rounded_md()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()))
             .shadow_md()
             .text_size(px(12.5))
@@ -339,9 +1225,13 @@ impl RunoApp {
             }
             Mode::Design => self.view = View::Design,
             Mode::Architecture => self.view = View::Architecture,
-            Mode::Missions => self.open_missions(cx),
-            Mode::Git if self.git_github => self.load_github(),
-            Mode::Git => self.open_review(),
+            Mode::Data => self.view = View::Data,
+            Mode::Git => match self.git_tab {
+                View::GitHub => self.load_github(),
+                View::Branches => self.open_branches(),
+                View::GitHistory => self.open_git_history(),
+                _ => self.open_review(),
+            },
             Mode::Playbooks => self.view = View::Automations,
             Mode::History => self.open_history(cx),
             Mode::Inbox => self.view = View::Inbox,
@@ -354,7 +1244,7 @@ impl RunoApp {
 
     /// Whether the session's agent is running now.
     pub(crate) fn is_running(&self, s: &Session) -> bool {
-        self.started.contains_key(&s.id)
+        self.turns.contains_key(&s.id)
             || s.status == Status::Working
             || self.handles.contains_key(&Target::Session(s.id))
     }
@@ -415,33 +1305,19 @@ impl RunoApp {
                 _ => {}
             }
         }
-        counts.spend_cents = self
-            .state
-            .sessions
-            .iter()
-            .flat_map(|s| s.messages.iter())
-            .map(|m| m.usage.cost_cents)
-            .sum();
-        counts.spend_today = self
-            .state
-            .spend
-            .get(&store::today())
-            .copied()
-            .unwrap_or_default();
         counts
     }
 
-    /// Note a finished turn's cost and tokens under today, for the top bar's spend and
-    /// the daily limits.
+    /// Note a finished turn's cost and tokens under today, for the daily limits and the
+    /// Usage popover.
     pub(crate) fn record_spend(&mut self, id: u64) {
-        let usage = self
-            .state
-            .session(id)
-            .and_then(|s| s.messages.iter().rev().find(|m| m.role == Role::Agent))
-            .map(|m| m.usage)
-            .unwrap_or_default();
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        let provider = session.provider.clone();
+        let usage = turn_usage(&session.messages);
         let today = store::today();
-        self.state.add_spend(&today, usage.cost_cents);
+        self.state.add_spend(&today, &provider, usage.cost_cents);
         self.state
             .add_tokens(&today, crate::health::turn_tokens(&usage));
     }
@@ -526,7 +1402,8 @@ impl RunoApp {
     /// Show the Files tab and put the cursor in its search box.
     pub(crate) fn focus_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_right_tab(RightTab::Files);
-        self.file_query.update(cx, |input, cx| input.focus(window, cx));
+        self.file_query
+            .update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// Open the Browser tab when the built-in browser is turned on.
@@ -598,19 +1475,7 @@ impl RunoApp {
     pub(crate) fn nav_list(&self, cx: &App) -> Vec<u64> {
         match self.view {
             View::Inbox => self.needs_you().into_iter().map(|(s, _)| s.id).collect(),
-            View::Home => {
-                let mut out = Vec::new();
-                for bucket in [Bucket::NeedsYou, Bucket::Running, Bucket::Review] {
-                    out.extend(
-                        self.state
-                            .sessions
-                            .iter()
-                            .filter(|s| self.on_home(s) && self.bucket(s) == Some(bucket))
-                            .map(|s| s.id),
-                    );
-                }
-                out
-            }
+            View::Home => self.home_recent().into_iter().map(|s| s.id).collect(),
             _ if self.mode() == Mode::Sessions && self.show_sidebar => {
                 let filter = self.search.read(cx).value().to_lowercase();
                 self.sidebar_rows(&filter, cx)
@@ -675,8 +1540,9 @@ impl RunoApp {
             keys if keys.is_empty() => name,
             keys => format!("{name}  {keys}"),
         };
-        div()
-            .id(SharedString::from(format!("rail-{}", mode.label())))
+        let id = SharedString::from(format!("rail-{}", mode.label()));
+        let item = div()
+            .id(id.clone())
             .relative()
             .size(px(34.))
             .flex()
@@ -684,18 +1550,25 @@ impl RunoApp {
             .justify_center()
             .rounded(px(8.))
             .cursor_pointer()
-            .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
+            .active(|el| el.opacity(0.7));
+        // The open place shows its tab instead, so its wash stays clear.
+        let wash = if on { rgba(0) } else { tint(c_subtle()) };
+        hover_wash(item, id, wash, 8.)
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.go(mode, window, cx);
                 cx.notify();
             }))
-            .when(on, |el| el.children(light_beam()))
-            .child(icon(
-                mode.glyph(),
-                17.,
-                if on { c_blue() } else { c_muted() },
-            ))
+            .when(on, |el| {
+                // The tab is cut from the list beside the rail, or from the page itself
+                // where nothing sits between them.
+                el.child(if self.has_panel(cx) {
+                    rail_tab(mode.label(), pane(c_sheet()))
+                } else {
+                    rail_tab(mode.label(), glass_fill(c_canvas()))
+                })
+            })
+            .child(rail_icon(mode.glyph(), on))
             // A small dot cut into the icon's corner, ringed in the rail's own colour.
             .when_some(badge.filter(|_| !on), |el, color| {
                 el.child(
@@ -706,17 +1579,44 @@ impl RunoApp {
                         .size(px(8.))
                         .rounded_full()
                         .border_2()
-                        .border_color(rgb(c_sidebar()))
+                        .border_color(rgb(c_rail()))
                         .bg(rgb(color)),
                 )
             })
             .into_any_element()
     }
 
+    /// Whether the open place has a list beside the rail for its tab to join: the
+    /// sessions sidebar, the review list, Settings' pages, or Design's layers.
+    pub(crate) fn has_panel(&self, cx: &App) -> bool {
+        match self.mode() {
+            Mode::Sessions => self.show_sidebar,
+            Mode::Git => matches!(self.view, View::Review | View::GitHistory | View::Branches),
+            Mode::Design => self
+                .design
+                .project
+                .and_then(|p| self.design.canvases.get(&p))
+                .is_some_and(|canvas| canvas.read(cx).layers_shown()),
+            // The diagram editor's shape palette sits against the rail; the code map and
+            // the project chooser have nothing there.
+            Mode::Architecture => {
+                !self.all_scope()
+                    && !self.arch.code_map
+                    && self
+                        .arch
+                        .project
+                        .is_some_and(|p| self.arch.editors.contains_key(&p))
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn mode_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        TAB_SHEET.set(None);
         let counts = self.counts();
         // The groups part by space alone, so the rail reads as a few calm clusters.
-        let group = || div().v_flex().items_center().gap(px(4.));
+        // Room between the items for the open tab's curves, so they never crowd a neighbour.
+        let group = || div().v_flex().items_center().gap(px(8.));
         let mut work = group().relative().child(tour::anchor(&self.anchors, "nav"));
         for mode in &Mode::MAIN[..Mode::WORK] {
             // Amber: something there needs you. Blue: agents are working, or work waits
@@ -724,12 +1624,17 @@ impl RunoApp {
             let badge = match mode {
                 Mode::Sessions if counts.needs_you > 0 => Some(c_amber()),
                 Mode::Sessions if counts.running > 0 => Some(c_blue()),
-                Mode::Missions => self.missions_badge(),
                 Mode::Git if self.gh.needs_you() > 0 => Some(c_amber()),
                 Mode::Git if counts.review > 0 => Some(c_blue()),
                 _ => None,
             };
             work = work.child(self.rail_item(*mode, badge, cx));
+        }
+        // Places pinned from Settings follow the main ones, in a fixed order.
+        for mode in Mode::PINNABLE {
+            if cx.global::<AppSettings>().pinned(mode.label()) {
+                work = work.child(self.rail_item(mode, None, cx));
+            }
         }
         let foot = group().child(self.rail_more(cx)).child(
             div()
@@ -745,11 +1650,16 @@ impl RunoApp {
             .v_flex()
             .items_center()
             .pt(px(10.))
-            .pb_2()
+            // The foot's open tab ends level with the islands' bottom edge.
+            .pb(px(GUTTER + TAB_PAD))
             .gap(px(18.))
-            .border_r_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            .relative()
+            // Keeps the open tab inside the rail, under the top bar.
+            .overflow_hidden()
+            .child(rail_fill(
+                TAB_SHEET.get().unwrap_or_else(|| pane(c_sheet())),
+            ))
+            .child(rail_pattern())
             .child(work)
             .child(self.project_group(cx))
             .child(div().flex_1())
@@ -761,9 +1671,24 @@ impl RunoApp {
     /// It lights up while one of them is open.
     fn rail_more(&self, cx: &mut Context<Self>) -> AnyElement {
         let open = self.menu.as_deref() == Some("rail-more");
-        let on = Mode::MORE.contains(&self.mode());
+        let st = cx.global::<AppSettings>();
+        let unpinned: Vec<Mode> = Mode::MORE
+            .into_iter()
+            .filter(|m| !st.pinned(m.label()))
+            .collect();
+        // Everything it held is pinned out on the rail.
+        if unpinned.is_empty() {
+            return div().into_any_element();
+        }
+        let on = unpinned.contains(&self.mode());
+        let tip: SharedString = unpinned
+            .iter()
+            .map(|m| m.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+            .into();
         let mut list = div().v_flex().p_1();
-        for mode in Mode::MORE {
+        for mode in unpinned {
             let here = self.mode() == mode;
             list = list.child(
                 div()
@@ -805,11 +1730,9 @@ impl RunoApp {
                     .cursor_pointer()
                     .when(open, |el| el.bg(tint(c_active())))
                     .when(!(on || open), |el| el.hover(|el| el.bg(tint(c_subtle()))))
-                    .when(on, |el| el.children(light_beam()))
+                    .when(on, |el| el.child(rail_tile("more")))
                     .when(!open, |el| {
-                        el.tooltip(|window, cx| {
-                            Tooltip::new("Playbooks, History and Notes").build(window, cx)
-                        })
+                        el.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.menu = match this.menu.as_deref() {
@@ -818,11 +1741,7 @@ impl RunoApp {
                         };
                         cx.notify();
                     }))
-                    .child(icon(
-                        IconName::Ellipsis,
-                        17.,
-                        if on { c_blue() } else { c_muted() },
-                    )),
+                    .child(rail_icon(IconName::Ellipsis, on)),
             )
             .when(open, |el| {
                 el.child(
@@ -881,13 +1800,9 @@ impl RunoApp {
                 Some(p) => project_mark(p, 18.).into_any_element(),
                 None => icon(IconName::LayoutGrid, 15., c_muted()).into_any_element(),
             });
-        // A short rule above the badge marks where the project's own pages begin.
-        let mut group = div()
-            .v_flex()
-            .items_center()
-            .gap(px(4.))
-            .child(div().mb(px(12.)).w(px(18.)).h(px(1.)).bg(divider()))
-            .child(badge);
+        // The rail's gap between groups marks where the project's own pages begin; no
+        // rule, since the window is borderless.
+        let mut group = div().v_flex().items_center().gap(px(4.)).child(badge);
         for mode in Mode::PLAN {
             group = group.child(self.rail_item(mode, None, cx));
         }
@@ -922,7 +1837,7 @@ impl RunoApp {
             .gap(px(6.))
             .rounded_full()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .text_size(px(12.))
             .text_color(rgb(c_secondary()))
             .cursor_pointer()
@@ -963,7 +1878,7 @@ impl RunoApp {
         );
         for project in &self.state.projects {
             let pid = project.id;
-            let missing = !self.demo && !std::path::Path::new(&project.path).is_dir();
+            let missing = !std::path::Path::new(&project.path).is_dir();
             let sessions = self
                 .state
                 .sessions
@@ -1005,28 +1920,43 @@ impl RunoApp {
                     }),
             );
         }
-        list = list
-            .child(div().h(px(1.)).my_1().bg(rgb(c_border())))
-            .child(
+        // How the person works in the project the top bar shows: through Crew, or directly.
+        if let Some(pid) = current.filter(|_| !self.all_scope()) {
+            list = list.child(div().h(px(1.)).my_1().bg(divider())).child(
                 div()
-                    .id("project-add")
-                    .h(px(30.))
                     .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu = None;
-                        this.pick_project(cx);
-                    }))
-                    .child(icon(IconName::FolderPlus, 14., c_muted()))
-                    .child("New project…"),
+                    .py_1()
+                    .v_flex()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("How you work in this project"),
+                    )
+                    .child(self.crew_mode_switch(pid, cx)),
             );
+        }
+        list = list.child(div().h(px(1.)).my_1().bg(divider())).child(
+            div()
+                .id("project-add")
+                .h(px(30.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(13.))
+                .text_color(rgb(c_secondary()))
+                .hover(|el| el.bg(tint(c_active())).text_color(rgb(c_text())))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.menu = None;
+                    this.pick_project(cx);
+                }))
+                .child(icon(IconName::FolderPlus, 14., c_muted()))
+                .child("New project…"),
+        );
         div()
             .absolute()
             .top(px(34.))
@@ -1077,6 +2007,16 @@ impl RunoApp {
             .max();
         match (self.mode(), latest) {
             (Mode::Git, _) if self.view == View::GitHub => self.load_github(),
+            (Mode::Git, _) if self.view == View::GitHistory => {
+                self.git_commit_sel = None;
+                self.git_log_filter.path.clear();
+                self.open_git_history();
+            }
+            (Mode::Git, _) if self.view == View::Branches => {
+                self.git_branch_sel = None;
+                self.open_branches();
+            }
+            (Mode::Git, _) => self.load_repo(),
             (Mode::Sessions, Some(id)) => self.select(id),
             (Mode::Sessions, None) => {
                 self.view = View::Home;
@@ -1145,8 +2085,9 @@ impl RunoApp {
             let id = s.id;
             let provider = agent::provider(&s.provider);
             let when = self
-                .started
+                .turns
                 .get(&id)
+                .map(|t| &t.started)
                 .map_or("Working".to_string(), |t| elapsed(t.elapsed()));
             list = list.child(
                 div()
@@ -1261,9 +2202,10 @@ impl RunoApp {
             .gap_2()
             .pl(px(lead))
             .pr_2()
-            .border_b_1()
-            .border_color(divider())
-            .bg(pane(c_sidebar()))
+            // The frame's grey, the same as the rail and the gutters between islands.
+            .bg(settings::frame())
+            .relative()
+            .child(crate::pattern::chrome())
             .window_control_area(WindowControlArea::Drag)
             // Three zones: the two sides share what the search box leaves, so the box
             // sits in the middle of the window on every page instead of moving with the
@@ -1279,12 +2221,16 @@ impl RunoApp {
                     .overflow_hidden()
                     .when(mode == Mode::Sessions, |el| {
                         el.child(
-                            self.ghost_button("toggle-sidebar", IconName::PanelLeft, "Toggle sidebar")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_sidebar = !this.show_sidebar;
-                                    this.save();
-                                    cx.notify();
-                                })),
+                            self.ghost_button(
+                                "toggle-sidebar",
+                                IconName::PanelLeft,
+                                "Toggle sidebar",
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_sidebar = !this.show_sidebar;
+                                this.save();
+                                cx.notify();
+                            })),
                         )
                     })
                     .child(
@@ -1306,11 +2252,12 @@ impl RunoApp {
                                     .when(menu_open, |el| el.bg(tint(c_active())))
                                     .hover(|el| el.bg(tint(c_subtle())))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.menu = if this.menu.as_deref() == Some("project-switch") {
-                                            None
-                                        } else {
-                                            Some("project-switch".into())
-                                        };
+                                        this.menu =
+                                            if this.menu.as_deref() == Some("project-switch") {
+                                                None
+                                            } else {
+                                                Some("project-switch".into())
+                                            };
                                         cx.notify();
                                     }))
                                     .when_some(project, |el, p| el.child(project_mark(p, 20.)))
@@ -1338,13 +2285,14 @@ impl RunoApp {
                                 .gap(px(5.))
                                 .rounded_md()
                                 .border_1()
-                                .border_color(rgb(c_border()))
+                                .border_color(divider())
                                 .text_size(px(12.))
                                 .text_color(rgb(c_secondary()))
                                 .cursor_pointer()
                                 .hover(|el| el.bg(tint(c_subtle())).text_color(rgb(c_text())))
                                 .tooltip(|window, cx| {
-                                    Tooltip::new("Branch: changes, terminal, worktrees").build(window, cx)
+                                    Tooltip::new("Branch: changes, terminal, worktrees")
+                                        .build(window, cx)
                                 })
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -1385,74 +2333,81 @@ impl RunoApp {
                                     .child(mode.label()),
                             )
                             .when_some(crumb, |el, title| {
-                                el.child(icon(IconName::ChevronRight, 12., c_muted())).child(
-                                    div()
-                                        .id("crumb-session")
-                                        .min_w_0()
-                                        .max_w(px(220.))
-                                        .truncate()
-                                        .px_1()
-                                        .rounded_sm()
-                                        .cursor_pointer()
-                                        .text_color(rgb(c_text()))
-                                        .hover(|el| el.bg(tint(c_subtle())))
-                                        .tooltip(|window, cx| {
-                                            Tooltip::new("Rename this session").build(window, cx)
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.start_rename(window, cx);
-                                            cx.notify();
-                                        }))
-                                        .child(title),
-                                )
+                                el.child(icon(IconName::ChevronRight, 12., c_muted()))
+                                    .child(
+                                        div()
+                                            .id("crumb-session")
+                                            .min_w_0()
+                                            .max_w(px(220.))
+                                            .truncate()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .cursor_pointer()
+                                            .text_color(rgb(c_text()))
+                                            .hover(|el| el.bg(tint(c_subtle())))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("Rename this session")
+                                                    .build(window, cx)
+                                            })
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.start_rename(window, cx);
+                                                cx.notify();
+                                            }))
+                                            .child(title),
+                                    )
                             }),
-                    )
+                    ),
             )
             .child(
-                div().flex_shrink(1.).min_w(px(160.)).flex().justify_center().child(
-                    div()
-                        .id("top-search")
-                        .relative()
-                        .child(tour::anchor(&self.anchors, "palette"))
-                        .w(px(420.))
-                        .min_w(px(160.))
-                        .flex_shrink(1.)
-                        .h(px(28.))
-                        .px(px(10.))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(c_border()))
-                        .bg(tint(c_subtle()))
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_muted()))
-                        .hover(|el| el.border_color(rgb(c_secondary())))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_palette(window, cx);
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::Search, 13., c_muted()))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child("Search sessions, projects, files, commands"),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .px(px(5.))
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(c_border()))
-                                .text_size(px(11.))
-                                .child(keymap::label(cx, "quick-open")),
-                        ),
-                ),
+                div()
+                    .flex_shrink(1.)
+                    .min_w(px(160.))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .id("top-search")
+                            .relative()
+                            .child(tour::anchor(&self.anchors, "palette"))
+                            .w(px(420.))
+                            .min_w(px(160.))
+                            .flex_shrink(1.)
+                            .h(px(28.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(divider())
+                            .bg(tint(c_subtle()))
+                            .cursor_pointer()
+                            .text_size(px(12.5))
+                            .text_color(rgb(c_muted()))
+                            .hover(|el| el.border_color(rgb(c_secondary())))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_palette(window, cx);
+                                cx.notify();
+                            }))
+                            .child(icon(IconName::Search, 13., c_muted()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child("Search sessions, projects, files, commands"),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .px(px(5.))
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(divider())
+                                    .text_size(px(11.))
+                                    .child(keymap::label(cx, "quick-open")),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -1496,22 +2451,6 @@ impl RunoApp {
                             )
                             .when(agents_open, |el| el.child(self.agents_menu(cx))),
                     )
-                    .when(counts.spend_cents > 0.0, |el| {
-                        let total = counts.spend_cents;
-                        el.child(
-                            self.bar_pill("top-spend")
-                                .cursor_default()
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(format!(
-                                        "Spend reported by the agents today. ${:.2} across every session. {}",
-                                        total / 100.0,
-                                        agent::cost_note()
-                                    ))
-                                    .build(window, cx)
-                                })
-                                .child(format!("${:.2} today", counts.spend_today / 100.0)),
-                        )
-                    })
                     .child(
                         div()
                             .relative()
@@ -1539,7 +2478,10 @@ impl RunoApp {
                                         .text_size(px(9.5))
                                         .font_weight(FontWeight::BOLD)
                                         .text_color(rgb(0xffffff))
-                                        .child(inbox.to_string()),
+                                        .child(pop(
+                                            inbox.to_string(),
+                                            format!("top-inbox-{inbox}"),
+                                        )),
                                 )
                             }),
                     )
@@ -1744,7 +2686,7 @@ impl RunoApp {
                             .items_center()
                             .justify_center()
                             .rounded_sm()
-                            .hover(|el| el.bg(rgb(c_border())))
+                            .hover(|el| el.bg(divider()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.close_tab(id);
@@ -1793,7 +2735,7 @@ impl RunoApp {
                             .items_center()
                             .justify_center()
                             .rounded_sm()
-                            .hover(|el| el.bg(rgb(c_border())))
+                            .hover(|el| el.bg(divider()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.browser_open = false;
@@ -1804,21 +2746,27 @@ impl RunoApp {
                     ),
             ));
         }
-        let (added, removed) = self
+        // A session sharing its folder counts only the files its agent changed.
+        let touched = self.current().and_then(|s| s.touched());
+        let mine: Vec<_> = self
             .changes
             .iter()
+            .filter(|c| touched.as_ref().is_none_or(|t| t.contains(&c.path)))
+            .collect();
+        let (added, removed) = mine
+            .iter()
             .fold((0, 0), |a, c| (a.0 + c.added, a.1 + c.removed));
-        let show_stats = self.view == View::Session && !self.changes.is_empty();
+        let show_stats = self.view == View::Session && !mine.is_empty();
         let menu_open = self.menu.as_deref() == Some("tabs");
         div()
             .h(px(36.))
             .flex_none()
             .flex()
             .items_end()
-            .bg(pane(c_sidebar()))
-            // Every part of the strip draws its own bottom edge except the open tab, which
-            // runs straight into the page below.
-            .child(strip_edge(div().w(px(8.))))
+            .relative()
+            // The frame's grey, with the open tab cut out of it and joined to the page.
+            .child(strip_fill("tabs", glass_fill(c_canvas())))
+            .child(strip_edge(div().w(px(10.))))
             .child(
                 div()
                     .flex_1()
@@ -1873,158 +2821,6 @@ impl RunoApp {
 
     // ---------- Home ----------
 
-    fn stat_card(&self, label: &'static str, value: String, hint: String, color: u32) -> Div {
-        div()
-            .flex_1()
-            .min_w_0()
-            .p_4()
-            .v_flex()
-            .gap_1()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_subtle()))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .child(div().size(px(7.)).rounded_full().bg(rgb(color)))
-                    .child(label),
-            )
-            .child(
-                div()
-                    .text_size(px(24.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(value),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_muted()))
-                    .truncate()
-                    .child(hint),
-            )
-    }
-
-    fn home_row(&self, session: &Session, note: String, cx: &mut Context<Self>) -> AnyElement {
-        let id = session.id;
-        let provider = agent::provider(&session.provider);
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
-        div()
-            .id(("home-row", id as usize))
-            .px_3()
-            .py(px(9.))
-            .flex()
-            .items_center()
-            .gap_3()
-            .border_t_1()
-            .border_color(rgb(c_border()))
-            .cursor_pointer()
-            .hover(|el| el.bg(tint(c_subtle())))
-            .when(self.cursor == Some(id), |el| el.bg(tint(c_selected())))
-            .on_mouse_down(
-                MouseButton::Right,
-                self.on_context(ctxmenu::CtxTarget::Session(id), cx),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                // Work waiting for review opens on Review, where it can be shipped.
-                let waiting = this
-                    .state
-                    .session(id)
-                    .is_some_and(|s| this.bucket(s) == Some(Bucket::Review));
-                if waiting {
-                    this.review(id);
-                } else {
-                    this.select(id);
-                }
-                cx.notify();
-            }))
-            .child(self.provider_mark(provider, 14.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .v_flex()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(session.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_muted()))
-                            .child(format!("{project}  ·  {}", session.branch)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .child(note),
-            )
-            .into_any_element()
-    }
-
-    fn home_panel(
-        &self,
-        title: &'static str,
-        count: usize,
-        rows: Vec<AnyElement>,
-        empty: &'static str,
-    ) -> Div {
-        div()
-            .flex_1()
-            .min_w_0()
-            .v_flex()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .overflow_hidden()
-            .child(
-                div()
-                    .px_3()
-                    .h(px(40.))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(title)
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_muted()))
-                            .child(count.to_string()),
-                    ),
-            )
-            .children(rows)
-            .when(count == 0, |el| {
-                el.child(
-                    div()
-                        .px_3()
-                        .py_4()
-                        .border_t_1()
-                        .border_color(rgb(c_border()))
-                        .text_size(px(12.5))
-                        .text_color(rgb(c_muted()))
-                        .child(empty),
-                )
-            })
-    }
-
     /// A small bordered button with an icon, for Home's actions.
     pub(crate) fn home_button(
         &self,
@@ -2043,7 +2839,7 @@ impl RunoApp {
             .gap_2()
             .rounded_md()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_raised()))
             .cursor_pointer()
             .text_size(px(13.))
@@ -2059,312 +2855,6 @@ impl RunoApp {
                         .child(hint),
                 )
             })
-    }
-
-    /// Home: what needs you, what runs and what waits for review, in the top bar's project
-    /// or, with "All projects", everywhere.
-    pub(crate) fn home_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut needs: Vec<AnyElement> = Vec::new();
-        let mut running: Vec<AnyElement> = Vec::new();
-        let mut review: Vec<AnyElement> = Vec::new();
-        for s in self.state.sessions.iter().filter(|s| self.on_home(s)) {
-            match self.bucket(s) {
-                Some(Bucket::NeedsYou) => {
-                    let note = self.need(s).map_or("", Need::label);
-                    needs.push(self.home_row(s, note.into(), cx));
-                }
-                Some(Bucket::Running) => {
-                    let note = self
-                        .started
-                        .get(&s.id)
-                        .map_or("Working".to_string(), |t| elapsed(t.elapsed()));
-                    running.push(self.home_row(s, note, cx));
-                }
-                Some(Bucket::Review) => {
-                    let (_, a, r) = self.stats.get(&s.id).copied().unwrap_or_default();
-                    review.push(self.home_row(s, format!("+{a} −{r}"), cx));
-                }
-                _ => {}
-            }
-        }
-        let (n_needs, n_running, n_review) = (needs.len(), running.len(), review.len());
-        let spend_today = self.counts().spend_today;
-        let project = self
-            .current_project()
-            .and_then(|id| self.state.projects.iter().find(|p| p.id == id))
-            .filter(|_| !self.home_all)
-            .cloned();
-        let missing = project
-            .as_ref()
-            .filter(|p| !self.demo && !std::path::Path::new(&p.path).is_dir())
-            .map(|p| (p.id, p.path.clone()));
-        let no_projects = self.state.projects.is_empty();
-        let scope = |label: &'static str, all: bool| {
-            let on = self.home_all == all;
-            div()
-                .id(if all { "home-all" } else { "home-one" })
-                .h(px(26.))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded_md()
-                .cursor_pointer()
-                .text_size(px(12.5))
-                .when(on, |el| el.bg(tint(c_active())).text_color(rgb(c_text())))
-                .when(!on, |el| {
-                    el.text_color(rgb(c_secondary()))
-                        .hover(|el| el.bg(tint(c_subtle())))
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.home_all = all;
-                    this.cursor = None;
-                    this.save();
-                    cx.notify();
-                }))
-                .child(label)
-        };
-        let links: [(&'static str, IconName, &'static str, View); 4] = [
-            (
-                "home-history",
-                IconName::RotateCcwClock,
-                "Agent history",
-                View::History,
-            ),
-            (
-                "home-activity",
-                IconName::Activity,
-                "Timeline",
-                View::Activity,
-            ),
-            (
-                "home-notes",
-                IconName::NotebookPen,
-                "Project notes",
-                View::Notes,
-            ),
-            (
-                "home-isolated",
-                IconName::GitBranch,
-                "Isolated sessions",
-                View::Worktrees,
-            ),
-        ];
-        let mut link_row = div().flex().flex_wrap().gap_2();
-        for (id, glyph, label, view) in links {
-            link_row = link_row.child(
-                self.home_button(id, glyph, label, String::new())
-                    .font_weight(FontWeight::NORMAL)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        match view {
-                            View::History => this.open_history(cx),
-                            View::Notes => {
-                                this.notes_project = this.current_project();
-                                this.open_notes(window, cx);
-                            }
-                            _ => this.view = view,
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        let body = div()
-            .v_flex()
-            .gap_4()
-            .when_some(missing, |el, (pid, path)| {
-                el.child(
-                    div()
-                        .p_4()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(rgb(c_amber()))
-                        .bg(rgb(settings::mix(c_amber(), c_canvas(), 0.1)))
-                        .child(icon(IconName::TriangleAlert, 18., c_amber()))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .v_flex()
-                                .child(
-                                    div()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("This project's folder is missing"),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(c_secondary()))
-                                        .child(format!(
-                                            "{path} was moved or deleted. Point the project at its new place, or remove it from Runo."
-                                        )),
-                                ),
-                        )
-                        .child(
-                            self.button("home-relink", "Relink…", true)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.relink_project(pid, cx);
-                                })),
-                        )
-                        .child(
-                            self.button("home-remove", "Remove…", false)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.ask_remove_project(pid, window, cx);
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .child(self.stat_card(
-                        "Needs you",
-                        n_needs.to_string(),
-                        "blocked, or finished unseen".into(),
-                        c_amber(),
-                    ))
-                    .child(self.stat_card(
-                        "Running",
-                        n_running.to_string(),
-                        "agents working now".into(),
-                        c_blue(),
-                    ))
-                    .child(self.stat_card(
-                        "Ready to review",
-                        n_review.to_string(),
-                        "idle with changes".into(),
-                        c_green(),
-                    ))
-                    .child(self.stat_card(
-                        "Spend today",
-                        format!("${:.2}", spend_today / 100.0),
-                        "reported by Claude Code and OpenCode, all projects".into(),
-                        c_muted(),
-                    )),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_3()
-                    .items_start()
-                    .child(self.home_panel(
-                        "Needs you",
-                        n_needs,
-                        needs,
-                        "Nothing is waiting on you.",
-                    ))
-                    .child(self.home_panel(
-                        "Running",
-                        n_running,
-                        running,
-                        "No agents are working right now.",
-                    )),
-            )
-            .child(self.home_panel(
-                "Ready to review",
-                n_review,
-                review,
-                "Sessions with changes to commit show up here.",
-            ))
-            .child(link_row);
-        let title = match &project {
-            Some(p) => p.name.clone(),
-            None if no_projects => "Welcome to Runo".into(),
-            None => "All projects".into(),
-        };
-        let subtitle = match &project {
-            _ if no_projects => "Add a project folder to get started.".to_string(),
-            Some(p) => p.path.clone(),
-            None => match self.state.projects.len() {
-                1 => "1 project".to_string(),
-                n => format!("{n} projects"),
-            },
-        };
-        div()
-            .flex_1()
-            .min_w_0()
-            .overflow_y_scrollbar()
-            .child(
-                div()
-                    .max_w(px(1080.))
-                    .mx_auto()
-                    .p_8()
-                    .v_flex()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .v_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_size(px(20.))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(title),
-                                    )
-                                    .child(
-                                        div()
-                                            .truncate()
-                                            .text_size(px(12.5))
-                                            .text_color(rgb(c_muted()))
-                                            .child(subtitle),
-                                    ),
-                            )
-                            .when(self.state.projects.len() > 1, |el| {
-                                el.child(
-                                    div()
-                                        .flex()
-                                        .p(px(2.))
-                                        .gap(px(2.))
-                                        .rounded_lg()
-                                        .border_1()
-                                        .border_color(rgb(c_border()))
-                                        .child(scope("This project", false))
-                                        .child(scope("All projects", true)),
-                                )
-                            })
-                            .child(
-                                self.home_button(
-                                    "home-add",
-                                    IconName::FolderPlus,
-                                    "Add project",
-                                    String::new(),
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.pick_project(cx))),
-                            )
-                            .when(!no_projects, |el| {
-                                el.child(
-                                    self.home_button(
-                                        "home-new",
-                                        IconName::SquarePen,
-                                        "New session",
-                                        keymap::label(cx, "new-session"),
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            if let Some(pid) = this.current_project() {
-                                                this.new_project = Some(pid);
-                                            }
-                                            this.open_new_session();
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            }),
-                    )
-                    .child(body),
-            )
-            .into_any_element()
     }
 
     // ---------- Design and Architecture ----------
@@ -2423,7 +2913,7 @@ impl RunoApp {
                 .gap_2()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .bg(tint(c_subtle()))
                 .text_size(px(12.5))
                 .child(icon(IconName::Paperclip, 13., c_secondary()))
@@ -2476,7 +2966,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .cursor_pointer()
                     .text_size(px(14.))
                     .font_weight(FontWeight::MEDIUM)
@@ -2513,11 +3003,11 @@ impl RunoApp {
         for project in &self.state.projects {
             let pid = project.id;
             let root = std::path::Path::new(&project.path);
-            let missing = !self.demo && !root.is_dir();
+            let missing = !root.is_dir();
             let summary = if missing {
                 "Folder missing".to_string()
             } else {
-                chooser_summary(mode, root, self.arch.maps.get(&pid), self.demo)
+                chooser_summary(mode, root, self.arch.maps.get(&pid))
             };
             let sessions = self
                 .state
@@ -2534,7 +3024,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(pane(c_canvas()))
                     .cursor_pointer()
                     .hover(|el| el.border_color(rgb(c_muted())).bg(tint(c_subtle())))
@@ -2598,7 +3088,7 @@ impl RunoApp {
                 .rounded_xl()
                 .border_1()
                 .border_dashed()
-                .border_color(rgb(c_border()))
+                .border_color(divider())
                 .cursor_pointer()
                 .text_color(rgb(c_secondary()))
                 .hover(|el| el.border_color(rgb(c_muted())).text_color(rgb(c_text())))
@@ -2629,11 +3119,7 @@ fn chooser_summary(
     mode: Mode,
     root: &std::path::Path,
     map: Option<&architecture::ProjectMap>,
-    demo: bool,
 ) -> String {
-    if demo {
-        return "Sample project".into();
-    }
     if mode == Mode::Design {
         let refs = std::fs::read_dir(root.join(design::FOLDER))
             .into_iter()
@@ -2760,40 +3246,94 @@ pub(crate) fn mode_frame(
 /// A project's square badge: its icon on its colour, or its initial.
 /// A piece of the tab strip that carries the strip's bottom edge.
 fn strip_edge(el: Div) -> Div {
-    el.h_full().border_b_1().border_color(divider())
+    el.h_full()
 }
 
-/// Where a tab sits in the strip, with the gap after it. Only the open tab's slot has no
-/// bottom edge.
-fn tab_slot(active: bool, tab: Stateful<Div>) -> Div {
-    let slot = div().h_full().flex_none().flex().items_end().child(tab);
+/// Where a tab sits in the strip, with the gap after it.
+fn tab_slot(_active: bool, tab: Stateful<Div>) -> Div {
+    div()
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_end()
+        .pr(px(4.))
+        .child(tab)
+}
+
+/// A tab's look: the open tab is cut from the page below the strip, which the strip's
+/// fill paints (see `strip_fill`); the others sit on the frame as soft raised chips, so
+/// they read as tabs, and lift a step more under the pointer.
+fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
     if active {
-        slot.child(strip_edge(div().w(px(4.))))
+        el.relative()
+            .h(px(31.))
+            .child(strip_cut("tabs"))
+            .text_color(rgb(c_text()))
     } else {
-        strip_edge(slot.pr_1())
+        let (rest, hover) = tab_chip();
+        el.h(px(28.))
+            .mb(px(3.))
+            .rounded(px(8.))
+            .bg(rest)
+            .text_color(rgb(c_secondary()))
+            .hover(move |el| el.bg(hover).text_color(rgb(c_text())))
     }
 }
 
-/// A tab's outline: the open tab is the page's own colour with no bottom edge, so it
-/// joins the page under the strip; the others float above the strip's edge.
-fn tab_shape(el: Stateful<Div>, active: bool) -> Stateful<Div> {
-    if active {
-        el.h(px(32.))
-            .rounded_t_md()
-            .border_t_1()
-            .border_l_1()
-            .border_r_1()
-            .border_color(divider())
-            .bg(glass_fill(c_canvas()))
-            .text_color(rgb(c_text()))
+/// How a count badge is tinted: the accent for counts that call for a look, amber for
+/// ones that need you, and quiet for plain tallies.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Tone {
+    Accent,
+    Alert,
+    Quiet,
+}
+
+/// A count as a small pill: room for one to three characters at a fixed height and a
+/// minimum width, so a 1 is a round dot and 128 widens it evenly instead of crowding the
+/// label beside it. Past 999 it reads "999+".
+pub(crate) fn count_badge(n: usize, tone: Tone) -> Div {
+    let text = if n > 999 {
+        "999+".to_string()
     } else {
-        el.h(px(28.))
-            .mb(px(3.))
-            .rounded_md()
-            .border_1()
-            .border_color(transparent_black())
-            .text_color(rgb(c_secondary()))
-            .hover(|el| el.bg(tint(c_subtle())))
+        n.to_string()
+    };
+    let (fill, ink) = match tone {
+        Tone::Accent => (rgba((c_blue() << 8) | 0x2e), rgb(c_blue())),
+        Tone::Alert => (rgba((c_amber() << 8) | 0x33), rgb(c_amber())),
+        Tone::Quiet => (tint(c_active()), rgb(c_secondary())),
+    };
+    div()
+        .flex_none()
+        .h(px(16.))
+        .min_w(px(16.))
+        .px(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(fill)
+        .text_size(px(10.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(ink)
+        .child(text)
+}
+
+/// Fill of a tab that is not open, at rest and under the pointer: a wash of white over
+/// the frame, stronger on the light theme's grey frame than on the dark one. In glass
+/// mode the open tab is as see-through as its island, so the rest get only a faint wash,
+/// enough to read as tabs but well short of the open one, and the pointer lifts them.
+pub(crate) fn tab_chip() -> (Rgba, Rgba) {
+    if settings::glass_on() {
+        if is_dark() {
+            (rgba(0xffffff0d), rgba(0xffffff1f))
+        } else {
+            (rgba(0xffffff38), rgba(0xffffff66))
+        }
+    } else if is_dark() {
+        (rgba(0xffffff14), rgba(0xffffff26))
+    } else {
+        (rgba(0xffffff80), rgba(0xffffffd0))
     }
 }
 
@@ -2868,6 +3408,9 @@ pub(crate) fn canvas_of(s: &Session) -> Option<View> {
     }
 }
 
+/// Width of the chat floating over a canvas.
+const CANVAS_CHAT_W: f32 = 440.;
+
 pub(crate) fn canvas_title(view: View) -> &'static str {
     match view {
         View::Design => "Design",
@@ -2932,6 +3475,7 @@ impl RunoApp {
             let provider = agent::PROVIDERS[agent].id;
             let opts = cx.global::<AppSettings>().agent(provider);
             self.start_agent(id, task.to_string(), &opts);
+            self.follow_in_canvas_chat(id, view);
             self.save();
             return;
         }
@@ -2960,6 +3504,26 @@ impl RunoApp {
         if matches!(self.view, View::NewSession) {
             self.view = view;
         }
+        let started = self
+            .state
+            .sessions
+            .iter()
+            .rev()
+            .find(|s| s.id > before && s.project_id == pid && s.canvas == name);
+        if let Some(id) = started.map(|s| s.id) {
+            self.follow_in_canvas_chat(id, view);
+        }
+    }
+
+    /// With a chat open over the canvas, an ask from the canvas shows in it: the panel
+    /// turns to the chat the ask went to.
+    fn follow_in_canvas_chat(&mut self, id: u64, view: View) {
+        if self.canvas_chat.is_none() || self.view != view {
+            return;
+        }
+        self.select(id);
+        self.view = view;
+        self.canvas_chat = Some(id);
     }
 
     /// The agent and model a canvas's last chat used, for its AI bar to start on.
@@ -2992,6 +3556,145 @@ impl RunoApp {
         self.view = view;
         self.save();
         window.focus(&self.focus, cx);
+    }
+
+    /// What a canvas chat is up to, in a few words: working, waiting on the person, or
+    /// how many asks it has had.
+    fn canvas_chat_state(&self, s: &Session) -> String {
+        if self.is_running(s) {
+            "Working".to_string()
+        } else if self.need(s).is_some() {
+            "Needs you".to_string()
+        } else {
+            let turns = s.messages.iter().filter(|m| m.role == Role::User).count();
+            match turns {
+                1 => "1 ask".to_string(),
+                n => format!("{n} asks"),
+            }
+        }
+    }
+
+    /// Open a chat asked from a canvas in the panel floating over that canvas, so the
+    /// canvas stays in view while the chat is read or asked more.
+    pub(crate) fn open_canvas_chat(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self.view;
+        self.select(id);
+        // `select` turns to the session's page; the canvas stays and the chat floats over it.
+        self.view = view;
+        self.canvas_chat = Some(id);
+        self.chat_scroll.scroll_to_bottom();
+        self.prompt.update(cx, |p, cx| p.focus(window, cx));
+    }
+
+    /// The chat open over a canvas: it slides in from the right over the canvas's edge,
+    /// with the conversation and the composer to ask more, and closes back to the canvas.
+    /// `inset` is its distance from the top, right and bottom of the canvas area.
+    pub(crate) fn canvas_chat_panel(
+        &self,
+        pid: u64,
+        view: View,
+        inset: (f32, f32, f32),
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // The composer always talks to the selected session, so the panel shows only while
+        // the chat in it is the one selected.
+        let id = self.canvas_chat.filter(|id| self.selected == Some(*id))?;
+        let session = self
+            .state
+            .session(id)
+            .filter(|s| s.project_id == pid && !s.archived && canvas_of(s) == Some(view))?;
+        let provider = agent::provider(&session.provider);
+        let working = self.handles.contains_key(&Target::Session(id));
+        let header =
+            div()
+                .flex_none()
+                .h(px(48.))
+                .pl_4()
+                .pr_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_b_1()
+                .border_color(divider())
+                .child(self.provider_mark(provider, 14.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .v_flex()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(session.title.clone()),
+                        )
+                        .child(div().text_size(px(11.5)).text_color(rgb(c_muted())).child(
+                            format!("{} · {}", provider.name, self.canvas_chat_state(session)),
+                        )),
+                )
+                .child(
+                    self.ghost_button(
+                        "canvas-chat-full",
+                        IconName::Maximize2,
+                        "Open as a full chat",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.canvas_chat = None;
+                        this.select(id);
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.ghost_button("canvas-chat-close", IconName::X, "Close")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.canvas_chat = None;
+                            cx.notify();
+                        })),
+                );
+        let body = div()
+            .id("canvas-chat-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.chat_scroll)
+            .child(self.chat_list(session, working, true, cx));
+        let (top, right, bottom) = inset;
+        Some(
+            div()
+                .id("canvas-chat-panel")
+                .absolute()
+                .top(px(top))
+                .right(px(right))
+                .bottom(px(bottom))
+                .w(px(CANVAS_CHAT_W))
+                .max_w(relative(0.9))
+                .v_flex()
+                .rounded_xl()
+                .border_1()
+                .border_color(float_edge())
+                .bg(float(c_canvas()))
+                .shadow_2xl()
+                .occlude()
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(header)
+                .child(body)
+                .child(self.composer(provider, working, cx))
+                // It slides in from the right edge, settling as it fades in.
+                .animated(
+                    "canvas-chat-in",
+                    Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()),
+                    move |el, d| {
+                        el.opacity(d)
+                            .right(px(right - (CANVAS_CHAT_W + right) * (1. - d)))
+                    },
+                ),
+        )
     }
 
     /// The agent chats asked from a canvas of project `pid`, newest first.
@@ -3030,24 +3733,15 @@ impl RunoApp {
                 .text_color(rgb(c_muted()))
                 .whitespace_normal()
                 .child(format!(
-                    "Agents asked from the {} canvas. Open one to read its chat or ask it more.",
+                    "Agents asked from the {} canvas. Open one to read its chat or ask it more over the canvas.",
                     canvas_title(view)
                 )),
         );
         for s in &sessions {
             let id = s.id;
             let p = agent::provider(&s.provider);
-            let state = if self.is_running(s) {
-                "Working".to_string()
-            } else if self.need(s).is_some() {
-                "Needs you".to_string()
-            } else {
-                let turns = s.messages.iter().filter(|m| m.role == Role::User).count();
-                match turns {
-                    1 => "1 ask".to_string(),
-                    n => format!("{n} asks"),
-                }
-            };
+            let state = self.canvas_chat_state(s);
+            let shown = self.canvas_chat == Some(id);
             list = list.child(
                 div()
                     .id(("canvas-chat", id as usize))
@@ -3058,10 +3752,10 @@ impl RunoApp {
                     .gap_2()
                     .rounded_md()
                     .cursor_pointer()
+                    .when(shown, |el| el.bg(tint(c_subtle())))
                     .hover(|el| el.bg(tint(c_active())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.menu = None;
-                        this.select(id);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_canvas_chat(id, window, cx);
                         cx.notify();
                     }))
                     .child(
@@ -3103,7 +3797,7 @@ impl RunoApp {
                         .gap_1()
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .cursor_pointer()
                         .text_size(px(12.5))
                         .when(open, |el| el.bg(tint(c_active())))
@@ -3121,15 +3815,10 @@ impl RunoApp {
                         }))
                         .child(icon(IconName::MessagesSquare, 14., c_secondary()))
                         .child("Chats")
-                        .child(
-                            div()
-                                .px(px(5.))
-                                .rounded_full()
-                                .bg(tint(c_active()))
-                                .text_size(px(11.))
-                                .text_color(rgb(if busy { c_blue() } else { c_muted() }))
-                                .child(sessions.len().to_string()),
-                        ),
+                        .child(count_badge(
+                            sessions.len(),
+                            if busy { Tone::Accent } else { Tone::Quiet },
+                        )),
                 )
                 .when(open, |el| {
                     el.child(
@@ -3185,7 +3874,11 @@ mod tests {
 
     #[test]
     fn only_design_and_architecture_show_one_project() {
-        assert!(Mode::Design.per_project() && Mode::Architecture.per_project());
+        assert!(
+            Mode::Design.per_project()
+                && Mode::Architecture.per_project()
+                && Mode::Data.per_project()
+        );
         assert!(Mode::MAIN.iter().all(|m| !m.per_project()));
     }
 
@@ -3194,8 +3887,9 @@ mod tests {
         // Each place on the rail opens a view that lights that same place up again.
         for (view, mode) in [
             (View::Review, Mode::Git),
-            (View::Missions, Mode::Missions),
             (View::GitHub, Mode::Git),
+            (View::Branches, Mode::Git),
+            (View::GitHistory, Mode::Git),
             (View::History, Mode::History),
             (View::Notes, Mode::Notes),
             (View::Automations, Mode::Playbooks),
@@ -3216,6 +3910,27 @@ mod tests {
                 mode.label()
             );
         }
+    }
+
+    #[test]
+    fn a_turn_without_a_reply_reports_no_usage() {
+        let reply = |cents: f64| {
+            let mut m = Message::new(Role::Agent, "done");
+            m.usage.output = 10;
+            m.usage.cost_cents = cents;
+            m
+        };
+        let mut messages = vec![Message::new(Role::User, "one"), reply(40.0)];
+        assert_eq!(turn_usage(&messages).cost_cents, 40.0);
+        // Stopped or failed before replying: the earlier reply isn't counted again.
+        messages.push(Message::new(Role::User, "two"));
+        messages.push(Message::new(Role::System, "The agent stopped."));
+        assert_eq!(turn_usage(&messages).cost_cents, 0.0);
+        // An error between two replies of one turn: the later one carries the usage.
+        messages.push(reply(15.0));
+        messages.push(Message::new(Role::System, "warning"));
+        messages.push(Message::new(Role::Agent, "more"));
+        assert_eq!(turn_usage(&messages).cost_cents, 15.0);
     }
 
     #[test]
@@ -3240,6 +3955,25 @@ mod tests {
         assert_eq!(need_of(&s, true, &hidden), None);
         let dismissed: std::collections::HashSet<String> = ["s:7:0".to_string()].into();
         assert_eq!(need_of(&s, false, &dismissed), None);
+        s.archived = true;
+        assert_eq!(need_of(&s, false, &hidden), None);
+    }
+
+    #[test]
+    fn a_crew_decision_needs_you_until_answered() {
+        let hidden = std::collections::HashSet::new();
+        let mut s = Session {
+            id: 8,
+            crew: Some(crate::crew::ThreadInfo::default()),
+            ..Session::default()
+        };
+        assert_eq!(need_of(&s, false, &hidden), None);
+        if let Some(info) = s.crew.as_mut() {
+            info.decision = Some(crate::crew::Decision::default());
+        }
+        assert_eq!(need_of(&s, false, &hidden), Some(Need::Blocked));
+        // Not while its agent is still working, and not once archived.
+        assert_eq!(need_of(&s, true, &hidden), None);
         s.archived = true;
         assert_eq!(need_of(&s, false, &hidden), None);
     }

@@ -25,11 +25,6 @@ fn session_file(root: &Path, id: u64) -> PathBuf {
     session_dir(root, id).join("session.json")
 }
 
-/// Where the single-file state from before is kept after it was split up.
-pub fn backup_path(index: &Path) -> PathBuf {
-    index.with_extension("json.v1-backup")
-}
-
 /// JSON as Runo writes it, with object keys sorted so unchanged data gives the same bytes.
 fn render<T: Serialize>(value: &T) -> Option<String> {
     serde_json::to_value(value)
@@ -120,10 +115,10 @@ fn remove_session(root: &Path, id: u64) {
 }
 
 /// Read the state at `index` (and the session files next to it) without changing
-/// anything on disk. Says whether it was the single-file format from before.
-pub fn read(index: &Path) -> Result<(State, Written, bool), String> {
+/// anything on disk.
+pub fn read(index: &Path) -> Result<(State, Written), String> {
     let Ok(text) = std::fs::read_to_string(index) else {
-        return Ok((State::default(), Written::default(), false));
+        return Ok((State::default(), Written::default()));
     };
     let mut value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let listed: Vec<u64> = value
@@ -132,11 +127,10 @@ pub fn read(index: &Path) -> Result<(State, Written, bool), String> {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     let mut state: State = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    let mut written = Written::default();
-    if !state.sessions.is_empty() {
-        return Ok((state, written, true));
-    }
-    written.index = digest(&text);
+    let mut written = Written {
+        index: digest(&text),
+        ..Default::default()
+    };
     let root = index.parent().unwrap_or(Path::new("."));
     // A session written just before Runo stopped may be missing from the index. Ids up to
     // `next_id` that aren't listed were deleted.
@@ -165,25 +159,7 @@ pub fn read(index: &Path) -> Result<(State, Written, bool), String> {
             Err(error) => crate::store::move_aside(&path, &error.to_string()),
         }
     }
-    Ok((state, written, false))
-}
-
-/// Split a single-file state into the index and session files, keeping the old file as
-/// a backup next to it.
-pub fn migrate(index: &Path, state: &mut State, written: &mut Written) {
-    let backup = backup_path(index);
-    if !backup.exists() && std::fs::copy(index, &backup).is_err() {
-        crate::applog::warn(
-            "save",
-            format!(
-                "could not back up {} before splitting it; keeping the single file",
-                index.display()
-            ),
-        );
-        return;
-    }
-    let root = index.parent().unwrap_or(Path::new("."));
-    write_all(root, state, written);
+    Ok((state, written))
 }
 
 enum Job {
@@ -291,7 +267,7 @@ mod tests {
     #[test]
     fn sessions_get_their_own_files_and_only_changes_are_written() {
         let root = temp("split");
-        let mut state = State::demo();
+        let mut state = State::sample();
         state.sessions[0].opts.insert("b".into(), "2".into());
         state.sessions[0].opts.insert("a".into(), "1".into());
         let mut written = Written::default();
@@ -310,8 +286,7 @@ mod tests {
         assert_eq!(modified(&first), before.0);
         assert!(modified(&second) > before.1);
         // Reading it back gives the same sessions in the same order, and knows the files.
-        let (loaded, seen, old) = read(&root.join("state.json")).unwrap();
-        assert!(!old);
+        let (loaded, seen) = read(&root.join("state.json")).unwrap();
         let ids: Vec<u64> = loaded.sessions.iter().map(|s| s.id).collect();
         assert_eq!(ids, state.sessions.iter().map(|s| s.id).collect::<Vec<_>>());
         assert_eq!(loaded.sessions[1].messages.last().unwrap().text, "more");
@@ -323,7 +298,7 @@ mod tests {
     #[test]
     fn deleted_sessions_lose_their_files() {
         let root = temp("delete");
-        let mut state = State::demo();
+        let mut state = State::sample();
         let mut written = Written::default();
         write_all(&root, &mut state, &mut written);
         let gone = state.sessions.remove(0).id;
@@ -337,7 +312,7 @@ mod tests {
     #[test]
     fn a_session_missing_from_the_index_is_still_found() {
         let root = temp("orphan");
-        let mut state = State::demo();
+        let mut state = State::sample();
         let mut written = Written::default();
         write_all(&root, &mut state, &mut written);
         // A new session's file was written, but Runo stopped before the index was.
@@ -358,8 +333,8 @@ mod tests {
     #[test]
     fn the_writer_waits_for_quiet_then_writes() {
         let root = temp("writer");
-        let mut state = State::demo();
-        queue(&root, State::demo());
+        let mut state = State::sample();
+        queue(&root, State::sample());
         state.sessions[0].title = "Latest".into();
         queue(&root, state);
         flush(Duration::from_secs(5));

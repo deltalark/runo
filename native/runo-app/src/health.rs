@@ -174,10 +174,8 @@ impl RunoApp {
     /// Save now rather than on the next tick: the window is closing or Runo quitting.
     pub(crate) fn save_now(&mut self) {
         self.health.save_due = false;
-        if !self.demo {
-            self.store_layout();
-            self.state.save();
-        }
+        self.store_layout();
+        self.state.save();
     }
 
     /// Agents running on this machine or elsewhere, for the cap.
@@ -204,9 +202,6 @@ impl RunoApp {
     /// Why a new turn of `id` has to wait (a spending, turn or token limit, or no free
     /// slot), noting it so the turn starts once it can. None lets it start.
     pub(crate) fn hold_turn(&mut self, id: u64) -> Option<String> {
-        if self.demo {
-            return None;
-        }
         let session = self.state.session(id)?;
         if !self.health.allow_once.contains(&id) {
             if let Some(hold) = over_limit(&self.used(session), &settings::limits()) {
@@ -257,9 +252,6 @@ impl RunoApp {
     /// their output replays from the start and they end as usual.
     pub(crate) fn resume_local_turns(&mut self) {
         // The sample workspace's running session is a picture; there is nothing to follow.
-        if self.demo {
-            return;
-        }
         let Some(root) = crate::detach::root() else {
             return;
         };
@@ -278,21 +270,30 @@ impl RunoApp {
             };
             match crate::detach::attach(root, id, self.tx.clone()) {
                 Ok(handle) => {
-                    // The replay rebuilds everything after the prompt.
+                    // The replay rebuilds everything after the prompt. Messages sent to the
+                    // agent while it worked stay, just after it.
                     let start = session
                         .messages
                         .iter()
-                        .rposition(|m| m.role == Role::User)
+                        .rposition(|m| m.role == Role::User && m.meta != crate::turns::STEER)
                         .map_or(session.messages.len(), |i| i + 1);
-                    session.messages.truncate(start);
+                    let sent: Vec<Message> = session
+                        .messages
+                        .split_off(start.min(session.messages.len()))
+                        .into_iter()
+                        .filter(|m| m.role == Role::User && m.meta == crate::turns::STEER)
+                        .collect();
+                    session.messages.extend(sent);
                     session.messages.push(Message::now(Role::Agent, ""));
-                    if let Some(parser) =
-                        stream::Parser::for_provider(&session.provider, &session.dir)
-                    {
-                        self.streams.insert(id, parser);
-                    }
+                    let mut running = crate::harness::turn::Turn::resume(
+                        id,
+                        &session.provider,
+                        &session.dir,
+                        start.saturating_sub(1),
+                    );
+                    running.follow(&crate::detach::turn_dir(root, id));
+                    self.turns.insert(id, running);
                     self.handles.insert(Target::Session(id), handle);
-                    self.started.insert(id, Instant::now());
                     picked += 1;
                 }
                 Err(e) => {
@@ -330,9 +331,7 @@ impl RunoApp {
         if self.health.save_due {
             self.save_now();
         }
-        if !self.demo {
-            self.start_waiting(cx);
-        }
+        self.start_waiting(cx);
         if !self.health.crash_looked {
             self.health.crash_looked = true;
             self.health.crash = crate::applog::unseen_crash(&crate::applog::logs_dir());
@@ -346,6 +345,8 @@ impl RunoApp {
             self.health.release_checked = Some(Instant::now());
             let slot = self.health.release.clone();
             std::thread::spawn(move || {
+                // Newer agent manifests come with the same check, used from the next start.
+                crate::registry::fetch();
                 if let Some(release) = crate::applog::check_release() {
                     if let Ok(mut slot) = slot.lock() {
                         *slot = Some(release);
@@ -405,7 +406,7 @@ impl RunoApp {
                     .health
                     .last_output
                     .get(&id)
-                    .or_else(|| self.started.get(&id))?;
+                    .or_else(|| self.turns.get(&id).map(|t| &t.started))?;
                 let secs = since.elapsed().as_secs();
                 (secs >= u64::from(mins) * 60).then_some((id, secs / 60))
             })
@@ -488,7 +489,7 @@ impl RunoApp {
                         .h(px(26.))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.open_settings();
-                            this.settings_page = SettingsPage::General;
+                            this.settings_page = SettingsPage::Safety;
                             cx.notify();
                         })),
                 );
@@ -859,7 +860,7 @@ mod tests {
 
     #[test]
     fn a_session_counts_its_turns_and_a_turn_its_tokens() {
-        let mut session = State::demo().sessions[0].clone();
+        let mut session = State::sample().sessions[0].clone();
         session.messages.clear();
         assert_eq!(session_turns(&session), 0);
         session.messages.push(Message::new(Role::User, "one"));
@@ -882,7 +883,7 @@ mod tests {
 
     #[test]
     fn a_session_costs_what_its_turns_reported() {
-        let mut session = State::demo().sessions[0].clone();
+        let mut session = State::sample().sessions[0].clone();
         session.messages.clear();
         let mut m = Message::new(Role::Agent, "a");
         m.usage.cost_cents = 12.5;

@@ -46,7 +46,7 @@ const STEPS: &[Step] = &[
         side: Side::Right,
         glyph: IconName::Layers,
         title: "Everything in one place",
-        body: "The rail on the left switches between Home, Sessions, Missions and Git, then the project's Design and Architecture. Playbooks, History and Notes wait in its ⋯ menu, above Settings. Press {go-home} to {go-history} to jump between them. The bell in the top bar opens the Inbox ({go-inbox}).",
+        body: "The rail on the left switches between Home, Sessions and Git, then the project's Design and Architecture. Playbooks, History and Notes wait in its ⋯ menu, above Settings. Press {go-home} to {go-history} to jump between them. The bell in the top bar opens the Inbox ({go-inbox}).",
     },
     Step {
         anchor: Some("projects"),
@@ -258,10 +258,10 @@ impl RunoApp {
             .p_5()
             .v_flex()
             .gap_3()
-            .rounded_xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
@@ -428,7 +428,6 @@ impl RunoApp {
             || !st.browser_asked
             || self.tour.is_some()
             || self.view == View::Settings
-            || self.demo
         {
             return None;
         }
@@ -436,7 +435,7 @@ impl RunoApp {
             (
                 IconName::Layers,
                 format!(
-                    "A rail on the left for Home, Sessions, Missions and Git, with Playbooks, History and Notes under ⋯ ({} to {}).",
+                    "A rail on the left for Home, Sessions and Git, with Playbooks, History and Notes under ⋯ ({} to {}).",
                     keymap::label(cx, "go-home"),
                     keymap::label(cx, "go-history")
                 ),
@@ -498,10 +497,10 @@ impl RunoApp {
             .p_5()
             .v_flex()
             .gap_3()
-            .rounded_xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
@@ -582,10 +581,10 @@ impl RunoApp {
             .p_5()
             .v_flex()
             .gap_3()
-            .rounded_xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(

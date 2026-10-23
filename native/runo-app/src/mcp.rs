@@ -47,6 +47,30 @@ impl McpSpec {
         }
     }
 
+    /// The server as an ACP agent takes it in `session/new`.
+    pub fn acp_json(&self, name: &str) -> Value {
+        let pairs = |list: &[(String, String)]| -> Value {
+            list.iter()
+                .map(|(k, v)| serde_json::json!({ "name": k, "value": v }))
+                .collect()
+        };
+        if !self.command.is_empty() {
+            serde_json::json!({
+                "name": name,
+                "command": self.command,
+                "args": self.args,
+                "env": pairs(&self.env),
+            })
+        } else {
+            serde_json::json!({
+                "type": if self.sse { "sse" } else { "http" },
+                "name": name,
+                "url": self.url,
+                "headers": pairs(&self.headers),
+            })
+        }
+    }
+
     /// Claude Code's `mcpServers` entry, which Qwen Code reads too.
     pub fn claude_json(&self) -> Value {
         let mut obj = Map::new();

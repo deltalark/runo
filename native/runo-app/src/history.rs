@@ -2,6 +2,7 @@
 //! Claude Code keeps `~/.claude/projects/<folder>/<session-id>.jsonl` and Codex keeps
 //! `~/.codex/sessions/YYYY/MM/DD/rollout-…-<session-id>.jsonl`.
 
+use crate::harness::ToolStep;
 use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -119,9 +120,27 @@ fn typed_text(content: &Value) -> Option<String> {
     if text.is_empty() || text.starts_with('<') {
         return None;
     }
-    let first = text.lines().next().unwrap_or(text);
-    Some(first.chars().take(90).collect())
+    // Runo puts its own context first (a Crew brief, a canvas, a handoff) and the ask under
+    // one of these headings; the ask is what names the conversation.
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .rposition(|l| TASK_HEADINGS.contains(&l.trim()))
+        .map_or(0, |at| at + 1);
+    let first = lines[start..]
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(&lines[0]);
+    Some(first.trim().chars().take(90).collect())
 }
+
+/// Headings Runo writes right before the person's own words in a prompt.
+const TASK_HEADINGS: [&str; 4] = [
+    "## Your next instruction",
+    "## Your task",
+    "## The task",
+    "## Task",
+];
 
 pub fn parse_claude(text: &str) -> Option<Past> {
     let (mut id, mut cwd, mut title) = (String::new(), String::new(), String::new());
@@ -343,11 +362,9 @@ pub fn turns(provider: &str, text: &str) -> Vec<crate::store::Message> {
                         match block["type"].as_str().unwrap_or("") {
                             "text" => add_text(&mut out[i], block["text"].as_str().unwrap_or("")),
                             "tool_use" => {
-                                let label = step_label(
-                                    block["name"].as_str().unwrap_or("a tool"),
-                                    &block["input"],
-                                );
-                                out[i].steps.push(label);
+                                let name = block["name"].as_str().unwrap_or("a tool");
+                                let label = step_label(name, &block["input"]);
+                                out[i].steps.push(ToolStep::of(name, label));
                             }
                             _ => {}
                         }
@@ -391,7 +408,9 @@ pub fn turns(provider: &str, text: &str) -> Vec<crate::store::Message> {
                         .as_str()
                         .and_then(|a| serde_json::from_str::<Value>(a).ok())
                         .unwrap_or_else(|| payload["action"].clone());
-                    out[i].steps.push(step_label(name, &input));
+                    out[i]
+                        .steps
+                        .push(ToolStep::of(name, step_label(name, &input)));
                 }
                 _ => {}
             }
@@ -445,7 +464,10 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!((m[0].role, m[0].text.as_str()), (Role::User, "Add a test"));
         assert_eq!(m[1].text, "Adding it.\n\nDone.");
-        assert_eq!(m[1].steps, vec!["Edited src/lib.rs", "Ran cargo test"]);
+        assert_eq!(
+            m[1].step_labels().collect::<Vec<_>>(),
+            ["Edited src/lib.rs", "Ran cargo test"]
+        );
         assert_eq!((m[1].usage.input, m[1].usage.output), (3, 7));
         let codex = r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context></environment_context>"}]}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"List files"}]}}
@@ -455,7 +477,7 @@ mod tests {
         let m = turns("codex", codex);
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].text, "List files");
-        assert_eq!(m[1].steps, vec!["Ran ls -a"]);
+        assert_eq!(m[1].step_labels().collect::<Vec<_>>(), ["Ran ls -a"]);
         assert_eq!(m[1].text, "Two files.");
     }
 
@@ -500,6 +522,8 @@ mod tests {
             ),
             ("codex", "0199-uuid", "/work/api", "Add rate limiting")
         );
+        let wrapped = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"cwd\":\"/a\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"## You are a Crew thread\\nCrew started you.\\n\\n## Your task\\nFix the footer\\nmore\"}}";
+        assert_eq!(parse_codex(wrapped).unwrap().title, "Fix the footer");
         let from_event = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\",\"cwd\":\"/a\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Ship it\"}}";
         assert_eq!(parse_codex(from_event).unwrap().title, "Ship it");
     }

@@ -284,7 +284,7 @@ impl RunoApp {
         let Some(cp) = session.messages.get(index).map(|m| m.checkpoint.clone()) else {
             return;
         };
-        if cp.is_empty() || self.demo {
+        if cp.is_empty() {
             self.rewound(id, index, None, text, images, cx);
             return;
         }
@@ -380,9 +380,6 @@ impl RunoApp {
         first: Option<(String, Vec<String>)>,
         cx: &mut Context<Self>,
     ) {
-        if self.demo {
-            return;
-        }
         let Some(src) = self.state.session(id).cloned() else {
             return;
         };
@@ -435,8 +432,6 @@ impl RunoApp {
             branch: branch.clone(),
             dir,
             isolated: in_git,
-            mode: src.mode.clone(),
-            model: src.model.clone(),
             opts: src.opts.clone(),
             status: Status::Idle,
             conversation_start: messages.len(),
@@ -542,7 +537,7 @@ impl RunoApp {
                 handoff::short_count(tokens)
             )
         };
-        let line = || div().flex_1().h(px(1.)).bg(rgb(c_border()));
+        let line = || div().flex_1().h(px(1.)).bg(divider());
         Some(
             div()
                 .id(("context-div", index))
@@ -560,7 +555,7 @@ impl RunoApp {
                         .py(px(5.))
                         .rounded_full()
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .text_size(px(11.5))
                         .text_color(rgb(c_muted()))
                         .child(icon(

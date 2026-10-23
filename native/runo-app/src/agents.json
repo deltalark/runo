@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "claude",
+      "name": "Claude Code",
+      "bin": "claude",
+      "mark": "✳",
+      "color": "#d9633f",
+      "package": "@anthropic-ai/claude-code",
+      "install": {
+        "unix": "curl -fsSL https://claude.ai/install.sh | bash",
+        "windows": "irm https://claude.ai/install.ps1 | iex"
+      },
+      "resumes": true,
+      "names_conversation": true,
+      "images": true,
+      "output": [{ "format": "claude" }],
+      "live": [{ "flag": "--", "args": ["--input-format", "stream-json"] }]
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "bin": "codex",
+      "mark": "◆",
+      "color": "#1767e8",
+      "package": "@openai/codex",
+      "install": { "npm": "@openai/codex" },
+      "login": ["login"],
+      "resumes": true,
+      "images": true,
+      "output": [{ "format": "json" }],
+      "rpc": [{ "when": "app-server", "args": ["app-server"] }]
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "bin": "opencode",
+      "mark": ">_",
+      "color": "#258a5b",
+      "package": "opencode-ai",
+      "install": {
+        "npm": "opencode-ai",
+        "prefer_npm": true,
+        "unix": "curl -fsSL https://opencode.ai/install | bash"
+      },
+      "login": ["auth", "login"],
+      "resumes": true,
+      "images": true,
+      "output": [{ "format": "json" }],
+      "acp": [{ "when": " acp", "args": ["acp"] }]
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "bin": "cursor-agent",
+      "alt_bins": ["agent"],
+      "mark": "▲",
+      "color": "#7c7c86",
+      "install": {
+        "unix": "curl https://cursor.com/install -fsS | bash",
+        "windows": "irm 'https://cursor.com/install?win32=true' | iex"
+      },
+      "login": ["login"],
+      "resumes": true,
+      "modes": ["plan", "full"],
+      "output": [{ "format": "json" }],
+      "acp": [{ "when": " acp", "args": ["acp"] }],
+      "models": { "args": ["models"] }
+    },
+    {
+      "id": "gemini",
+      "name": "Gemini",
+      "bin": "gemini",
+      "mark": "✦",
+      "color": "#4f7cf7",
+      "package": "@google/gemini-cli",
+      "install": { "npm": "@google/gemini-cli" },
+      "resumes": true,
+      "names_conversation": "--session-id",
+      "images": true,
+      "output": [{ "when": "stream-json", "format": "json" }],
+      "acp": [
+        { "when": "--acp", "args": ["--acp"] },
+        { "when": "--experimental-acp", "args": ["--experimental-acp"] }
+      ]
+    },
+    {
+      "id": "copilot",
+      "name": "Copilot",
+      "bin": "copilot",
+      "mark": "◎",
+      "color": "#8957e5",
+      "package": "@github/copilot",
+      "install": { "npm": "@github/copilot" },
+      "resumes": true,
+      "names_conversation": "--session-id",
+      "images": "--attachment",
+      "output": [{ "when": "--output-format", "format": "json" }],
+      "acp": [{ "when": "--acp", "args": ["--acp", "--stdio"] }]
+    },
+    {
+      "id": "amp",
+      "name": "Amp",
+      "bin": "amp",
+      "mark": "∿",
+      "color": "#e5484d",
+      "package": "@sourcegraph/amp",
+      "install": { "npm": "@sourcegraph/amp" },
+      "login": ["login"],
+      "resumes": true,
+      "images": true,
+      "modes": ["edit", "full"],
+      "output": [{ "format": "claude" }],
+      "live": [
+        { "flag": "-x", "args": ["-x", "--stream-json-input"], "when": "--stream-json-input" }
+      ]
+    },
+    {
+      "id": "droid",
+      "name": "Droid",
+      "bin": "droid",
+      "mark": "◈",
+      "color": "#f27b2a",
+      "install": {
+        "npm": "droid",
+        "prefer_npm": true,
+        "unix": "curl -fsSL https://app.factory.ai/cli | sh",
+        "windows": "irm https://app.factory.ai/cli/windows | iex"
+      },
+      "resumes": true,
+      "output": [{ "format": "json" }]
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen Code",
+      "bin": "qwen",
+      "mark": "◇",
+      "color": "#615ced",
+      "package": "@qwen-code/qwen-code",
+      "install": { "npm": "@qwen-code/qwen-code" },
+      "resumes": true,
+      "names_conversation": true,
+      "output": [{ "when": "stream-json", "format": "claude" }],
+      "acp": [
+        { "when": "--acp", "args": ["--acp"] },
+        { "when": "--experimental-acp", "args": ["--experimental-acp"] }
+      ]
+    },
+    {
+      "id": "grok",
+      "name": "Grok",
+      "bin": "grok",
+      "mark": "𝕏",
+      "color": "#9a9aa3",
+      "install": {
+        "unix": "curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash"
+      },
+      "resumes": "--session <",
+      "modes": ["full"]
+    },
+    {
+      "id": "pi",
+      "name": "Pi",
+      "bin": "pi",
+      "mark": "π",
+      "color": "#c9a227",
+      "driver": "pi",
+      "package": "@earendil-works/pi-coding-agent",
+      "install": { "npm": "@earendil-works/pi-coding-agent" },
+      "resumes": true,
+      "names_conversation": true,
+      "output": [{ "format": "pi" }],
+      "rpc": [{ "when": "--mode", "args": ["--mode", "rpc"] }],
+      "models": { "args": ["--list-models"], "table": true },
+      "efforts": ["off", "minimal", "low", "medium", "high", "xhigh"]
+    }
+  ]
+}

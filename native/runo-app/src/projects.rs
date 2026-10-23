@@ -98,6 +98,8 @@ pub(crate) struct ProjectForm {
     pub cloning: Option<String>,
     /// Start with no code, for Design or Architecture: a new folder under `~/Runo/`.
     pub blank: Option<Mode>,
+    /// Work through Crew rather than directly in sessions (Labs).
+    pub crew: bool,
 }
 
 /// Where projects started without code get their folder: `~/Runo/`.
@@ -192,9 +194,6 @@ impl RunoApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.demo_guard(cx) {
-            return;
-        }
         self.remove_project = Some(RemoveProject {
             id: pid,
             worktrees: false,
@@ -431,10 +430,10 @@ impl RunoApp {
             .p_6()
             .v_flex()
             .gap_4()
-            .rounded_2xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
@@ -485,7 +484,7 @@ impl RunoApp {
                     .p_3()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .when(isolated > 0, |el| {
                         el.child(check(
                             "remove-worktrees",
@@ -599,6 +598,7 @@ impl RunoApp {
             parent: clone_parent(&self.state.projects),
             cloning: None,
             blank: None,
+            crew: false,
         });
         cx.notify();
     }
@@ -644,6 +644,7 @@ impl RunoApp {
             parent: None,
             cloning: None,
             blank: None,
+            crew: crate::crew::is_crew(p),
         });
     }
 
@@ -948,6 +949,7 @@ impl RunoApp {
         let setup = self.project_setup.read(cx).value().trim().to_string();
         let checks = self.project_checks.read(cx).value().trim().to_string();
         let fix_rounds = form.fix_rounds;
+        let crew = form.crew;
         let color = COLORS[form.color].0.to_string();
         let glyph = ICONS[form.icon].0.to_string();
         if let Some(pid) = form.editing {
@@ -961,6 +963,7 @@ impl RunoApp {
                 p.checks = checks;
                 p.fix_rounds = fix_rounds;
             }
+            self.set_project_mode(pid, crew);
             self.project_form = None;
             self.save();
             cx.notify();
@@ -1016,15 +1019,24 @@ impl RunoApp {
             // and the first sessions run in the folder until something is committed.
             let _ = git::initial_commit(&path_str);
         }
-        match self.add_project(&path, name, color, glyph, start) {
+        // A Crew project starts in Crew's chat rather than the New session dialog.
+        match self.add_project(&path, name, color, glyph, start && !crew) {
             Ok(()) => {
                 self.project_form = None;
+                let mut pid = None;
                 if let Some(p) = self.state.projects.last_mut() {
                     p.setup = setup;
                     p.checks = checks;
                     p.fix_rounds = fix_rounds;
+                    if crew {
+                        p.mode = crate::crew::MODE_CREW.into();
+                    }
+                    pid = Some(p.id);
                 }
                 self.save();
+                if let Some(pid) = pid.filter(|_| crew && start) {
+                    self.open_crew(pid, cx);
+                }
             }
             Err(why) => {
                 crate::applog::warn("project", format!("could not add the project: {why}"));
@@ -1114,6 +1126,45 @@ impl RunoApp {
             hex => hex,
         };
         let checks = form.blank.is_none().then(|| self.checks_field(cx));
+        let mode_choice = form.blank.is_none().then(|| {
+            let on = form.crew;
+            let choice = |id: &'static str, title: &'static str, crew: bool| {
+                shell::seg_choice(id, format!("project-mode-{}", crew == on), crew == on)
+                    .flex_1()
+                    .child(title)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.project_form.as_mut() {
+                            f.crew = crew;
+                        }
+                        cx.notify();
+                    }))
+            };
+            div()
+                .v_flex()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c_secondary()))
+                        .child("How you work here"),
+                )
+                .child(
+                    shell::seg_track()
+                        .child(choice("project-mode-crew", "Crew", true))
+                        .child(choice("project-mode-direct", "Direct", false)),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(rgb(c_muted()))
+                        .child(if on {
+                            "You talk to Crew. It answers, and starts threads for the work, each an ordinary session. Switch any time from the project menu."
+                        } else {
+                            "You start and run sessions yourself, as Runo always has. Switch to Crew any time from the project menu."
+                        }),
+                )
+        });
         let label = |text: &'static str| {
             div()
                 .text_size(px(11.5))
@@ -1133,7 +1184,7 @@ impl RunoApp {
             .gap_2()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(tint(c_subtle()))
             .when(!editing, |el| {
                 el.cursor_pointer()
@@ -1205,7 +1256,7 @@ impl RunoApp {
             .gap(px(2.))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_canvas()));
         for (j, (value, start, glyph, text)) in [
             (false, None, IconName::FolderOpen, "Folder"),
@@ -1285,7 +1336,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(tint(c_subtle()))
                     .cursor_pointer()
                     .hover(|el| el.border_color(rgb(c_muted())))
@@ -1367,7 +1418,7 @@ impl RunoApp {
                     .gap_2()
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(tint(c_subtle()))
                     .child(icon(IconName::FolderPlus, 15., c_muted()))
                     .child(
@@ -1531,7 +1582,7 @@ impl RunoApp {
                         .rounded_lg()
                         .bg(tint(c_subtle()))
                         .border_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .child(icon(ICONS[form.icon].1, 18., accent)),
                 )
                 .child(
@@ -1570,10 +1621,10 @@ impl RunoApp {
             .p_6()
             .v_flex()
             .gap_4()
-            .rounded_2xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(preview)
@@ -1623,6 +1674,7 @@ impl RunoApp {
                     ),
             ))
             .children(checks)
+            .children(mode_choice)
             .child(div().v_flex().gap_1p5().child(label("Color")).child(swatches))
             .child(div().v_flex().gap_1p5().child(label("Icon")).child(glyphs))
             .when(!editing && blank.is_none(), |el| {
@@ -1643,8 +1695,13 @@ impl RunoApp {
                         .child(check(
                             "project-start",
                             form.start_session,
-                            "Start a session",
-                            "Open a new session in this project right away.".into(),
+                            if form.crew { "Open Crew" } else { "Start a session" },
+                            if form.crew {
+                                "Open this project's Crew chat right away."
+                            } else {
+                                "Open a new session in this project right away."
+                            }
+                            .into(),
                             |f, v| f.start_session = v,
                         )),
                 )

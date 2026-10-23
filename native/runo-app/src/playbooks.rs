@@ -265,7 +265,7 @@ impl RunoApp {
                         .px(px(14.))
                         .py(px(10.))
                         .border_t_1()
-                        .border_color(rgb(c_border()))
+                        .border_color(divider())
                         .text_size(px(13.5))
                         .child(message.note.clone()),
                 )
@@ -782,14 +782,9 @@ impl RunoApp {
             .p_4()
             .v_flex()
             .gap_3()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(c_border()))
-            .bg(tint(c_raised()))
-            .hover(|el| {
-                el.border_color(rgb(settings::mix(color, c_border(), 0.45)))
-                    .shadow_md()
-            })
+            .rounded(px(12.))
+            .bg(tint(c_subtle()))
+            .hover(|el| el.bg(tint(c_active())))
             .when(auto.scheduled() && !auto.enabled, |el| el.opacity(0.75))
             .child(
                 div()
@@ -929,7 +924,7 @@ impl RunoApp {
                             .gap(px(5.))
                             .rounded_full()
                             .border_1()
-                            .border_color(rgb(c_border()))
+                            .border_color(divider())
                             .text_size(px(11.5))
                             .text_color(rgb(c_secondary()))
                             .child(self.provider_badge(provider, 16.))
@@ -952,7 +947,7 @@ impl RunoApp {
                 )
             })
             .when(!auto.runs.is_empty(), |el| el.child(history))
-            .child(div().h(px(1.)).bg(rgb(c_border())))
+            .child(div().h(px(1.)).bg(divider()))
             .child(if confirming {
                 div()
                     .flex()
@@ -1076,10 +1071,8 @@ impl RunoApp {
                 .flex()
                 .items_center()
                 .gap_3()
-                .rounded_xl()
-                .border_1()
-                .border_color(rgb(c_border()))
-                .bg(tint(c_raised()))
+                .rounded(px(12.))
+                .bg(tint(c_subtle()))
                 .child(Self::playbook_tile(glyph, color, 34.))
                 .child(
                     div()
@@ -1155,10 +1148,8 @@ impl RunoApp {
         let list = if all.is_empty() {
             div()
                 .p_6()
-                .rounded_xl()
-                .border_1()
-                .border_color(rgb(c_border()))
-                .bg(tint(c_raised()))
+                .rounded(px(12.))
+                .bg(tint(c_subtle()))
                 .child(empty_hint(
                     "auto-empty",
                     IconName::BookOpen,
@@ -1202,18 +1193,11 @@ impl RunoApp {
                     .p_3()
                     .v_flex()
                     .gap_2()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(rgb(c_border()))
+                    .rounded(px(12.))
+                    .bg(tint(c_subtle()))
                     .when(!added, |el| {
                         el.cursor_pointer()
-                            .hover(|el| {
-                                el.bg(tint(c_subtle())).border_color(rgb(settings::mix(
-                                    color,
-                                    c_border(),
-                                    0.45,
-                                )))
-                            })
+                            .hover(|el| el.bg(tint(c_active())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.push_playbook(
                                     name.to_string(),
@@ -1419,7 +1403,7 @@ impl RunoApp {
                         .text_color(rgb(c_text()))
                 })
                 .when(!on, |el| {
-                    el.border_color(rgb(c_border()))
+                    el.border_color(divider())
                         .text_color(rgb(c_secondary()))
                         .hover(|el| el.bg(tint(c_subtle())))
                 })
@@ -1476,7 +1460,7 @@ impl RunoApp {
             .gap(px(2.))
             .rounded_lg()
             .border_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .bg(rgb(c_canvas()));
         // Presets carry their minutes; the others pick a kind of schedule.
         let options = SCHEDULES
@@ -1675,10 +1659,10 @@ impl RunoApp {
             .max_w(relative(0.94))
             .max_h(relative(0.92))
             .v_flex()
-            .rounded_2xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .overflow_hidden()
             .on_click(|_, _, cx| cx.stop_propagation())
@@ -1690,7 +1674,7 @@ impl RunoApp {
                     .items_center()
                     .gap_3()
                     .border_b_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .bg(linear_gradient(
                         180.,
                         linear_color_stop(
@@ -1862,7 +1846,7 @@ impl RunoApp {
                     .items_center()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .child(
                         div()
                             .flex_1()

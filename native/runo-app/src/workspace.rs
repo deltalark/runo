@@ -25,6 +25,7 @@ impl RunoApp {
             right_tab: match self.right_tab {
                 RightTab::Changes => "changes",
                 RightTab::Files => "files",
+                RightTab::Threads => "threads",
             }
             .to_string(),
             expanded: Some(self.expanded.clone()),
@@ -88,6 +89,7 @@ impl RunoApp {
             "Home" => View::Home,
             "Design" => View::Design,
             "Architecture" => View::Architecture,
+            "Data" => View::Data,
             "Playbooks" => View::Automations,
             "Inbox" => View::Inbox,
             // "Reviews" is what GitHub was called before Review got its own page.
@@ -123,6 +125,22 @@ impl RunoApp {
     /// The sessions the sidebar shows, in order, under their group: by status when the
     /// sidebar is grouped that way, else under each open project.
     pub(crate) fn sidebar_rows(&self, filter: &str, cx: &App) -> Vec<(String, Vec<&Session>)> {
+        if self.needs_filter {
+            let (blocked, unseen): (Vec<_>, Vec<_>) = self
+                .needs_you()
+                .into_iter()
+                .filter(|(s, _)| {
+                    filter.is_empty()
+                        || s.title.to_lowercase().contains(filter)
+                        || s.branch.to_lowercase().contains(filter)
+                })
+                .partition(|(_, need)| *need == shell::Need::Blocked);
+            return [("Waiting on you", blocked), ("Finished unseen", unseen)]
+                .into_iter()
+                .filter(|(_, m)| !m.is_empty())
+                .map(|(name, m)| (name.to_string(), m.into_iter().map(|(s, _)| s).collect()))
+                .collect();
+        }
         if cx.global::<AppSettings>().group_by_status {
             let visible: Vec<&Session> = self
                 .state
@@ -174,12 +192,7 @@ impl RunoApp {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(c_secondary()))
                     .child(name)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(c_muted()))
-                            .child(members.len().to_string()),
-                    ),
+                    .child(shell::count_badge(members.len(), shell::Tone::Quiet)),
             );
             for s in members {
                 col = col.child(self.session_row(s, cx));
@@ -329,9 +342,6 @@ impl RunoApp {
     /// while Runo was closed (or asleep) runs once on launch and says what it covers,
     /// unless Settings turns catching up off.
     pub(crate) fn run_due_automations(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         self.import_headless_runs();
         let now = unix_now();
         let due: Vec<(u64, u64, u64)> = self
@@ -457,9 +467,6 @@ impl RunoApp {
 
     /// Start the playbooks agents asked for through Runo's MCP server.
     pub(crate) fn take_playbook_requests(&mut self, cx: &mut Context<Self>) {
-        if self.demo {
-            return;
-        }
         let ask = cx.global::<AppSettings>().confirm_agent_playbooks;
         for request in store::take_requests(&store::inbox_dir()) {
             let Some(auto) = self
@@ -557,10 +564,10 @@ impl RunoApp {
             .p_5()
             .v_flex()
             .gap_3()
-            .rounded_2xl()
+            .rounded(px(crate::shell::ISLAND_R))
             .border_1()
             .border_color(float_edge())
-            .bg(float(c_canvas()))
+            .bg(float(c_sheet()))
             .shadow_2xl()
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
@@ -623,9 +630,6 @@ impl RunoApp {
         in_project: Option<u64>,
         cx: &mut Context<Self>,
     ) {
-        if self.demo_guard(cx) {
-            return;
-        }
         // Inputs to fill in, or limits the agent can't be held to, are shown first.
         let asks = self
             .state

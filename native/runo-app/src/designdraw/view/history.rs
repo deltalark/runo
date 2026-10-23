@@ -49,6 +49,12 @@ impl DesignCanvas {
             return;
         }
         self.version_due = Some(Instant::now());
+        // A design as the last commit has it can be had back from git; a version of it
+        // would only show up as a change.
+        let dir = self.root.to_string_lossy();
+        if crate::git::is_repo(&dir) && crate::git::changed_under(&dir, FOLDER).is_empty() {
+            return;
+        }
         let who = self.who();
         if let Ok(Some(_)) = versions::save(&self.root, "", &who) {
             self.versions = versions::list(&self.root);
@@ -182,7 +188,7 @@ impl DesignCanvas {
             .v_flex()
             .gap(px(6.))
             .border_b_1()
-            .border_color(rgb(c_border()))
+            .border_color(divider())
             .child(
                 div()
                     .flex()
@@ -388,7 +394,7 @@ impl DesignCanvas {
                     .h(px(h * scale))
                     .rounded(px(10.))
                     .border_1()
-                    .border_color(rgb(c_border()))
+                    .border_color(divider())
                     .flex()
                     .items_center()
                     .justify_center()
