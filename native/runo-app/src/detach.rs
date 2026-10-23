@@ -168,26 +168,27 @@ pub fn spawn_live(
     start(id, turn, host, &command, dir, tx)
 }
 
-/// Start an ACP agent's turn under Runo's agent host, with `config` in the turn folder
-/// and `prompt` as its first message (see `harness::acp`). `command`, the print-mode
-/// command, lends the turn its environment.
-pub fn spawn_acp(
+/// Start a turn that one of the agent host's protocol drivers runs (`--acp` or
+/// `--codex`), with its settings written into the turn folder by `setup` and `prompt` as
+/// its first message. `command`, the print-mode command, lends the turn its environment.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_driver(
     root: &Path,
     id: u64,
-    config: &crate::harness::acp::Config,
+    driver: &str,
+    setup: impl FnOnce(&Path) -> std::io::Result<()>,
     command: Command,
     prompt: &str,
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
     let turn = fresh_turn(root, id)?;
-    config
-        .write(&turn)
+    setup(&turn)
         .and_then(|_| crate::harness::host::send(&turn, prompt))
         .map_err(|e| format!("could not set up the turn: {e}"))?;
     let exe = std::env::current_exe().map_err(|e| format!("could not find Runo: {e}"))?;
     let mut host = Command::new(exe);
-    host.arg("--agent-host").arg(MARK).arg(&turn).arg("--acp");
+    host.arg("--agent-host").arg(MARK).arg(&turn).arg(driver);
     start(id, turn, host, &command, dir, tx)
 }
 

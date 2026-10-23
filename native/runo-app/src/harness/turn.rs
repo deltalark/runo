@@ -13,6 +13,8 @@ use crate::stream::Parser;
 pub struct Turn {
     session: u64,
     provider: String,
+    /// The session's folder, which tool labels are shown relative to.
+    cwd: String,
     /// `None` for agents whose output is plain text.
     parser: Option<Parser>,
     log: TurnLog,
@@ -64,6 +66,7 @@ impl Turn {
         Turn {
             session,
             provider: provider.to_string(),
+            cwd: dir.to_string(),
             parser: Parser::for_provider(provider, dir),
             log,
             started: Instant::now(),
@@ -75,12 +78,20 @@ impl Turn {
     }
 
     /// Read the turn the way its folder says it runs: under the agent host, taking
-    /// messages as it works, and over ACP.
+    /// messages as it works, over ACP or Codex's app server.
     pub fn follow(&mut self, folder: &Path) {
         self.live = super::host::is_live(folder);
-        if super::acp::is_acp(folder) && !matches!(self.parser, Some(Parser::Acp(_))) {
+        if matches!(self.parser, Some(Parser::Acp(_) | Parser::Codex(_))) {
+            return;
+        }
+        if super::acp::is_acp(folder) {
             let fallback = self.parser.take();
             self.parser = Some(Parser::Acp(Box::new(super::acp::AcpStream::new(fallback))));
+        } else if super::codex::is_codex(folder) {
+            let fallback = self.parser.take();
+            self.parser = Some(Parser::Codex(Box::new(super::codex::CodexAppStream::new(
+                &self.cwd, fallback,
+            ))));
         }
     }
 

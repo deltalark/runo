@@ -1725,6 +1725,51 @@ pub fn acp_config(
     Some((config, with_images(spec)))
 }
 
+/// A Codex turn's settings for its app server, once the installed Codex has one, with
+/// `fallback` (the `exec` command) to run if it can't start. The `-c` settings of the
+/// `exec` command (MCP servers, effort, service tier) go along.
+pub fn codex_app_config(
+    spec: &RunSpec,
+    dir: &str,
+    fallback: &Command,
+) -> Option<crate::harness::codex::Config> {
+    if spec.provider != "codex"
+        || std::env::var_os("RUNO_NO_APP_SERVER").is_some()
+        || !crate::caps::mentions("codex", "app-server")
+    {
+        return None;
+    }
+    let args: Vec<String> = fallback
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let mut command = vec![program(spec).to_string(), "app-server".to_string()];
+    for pair in args.windows(2) {
+        match pair[0].as_str() {
+            "-c" => command.extend(["-c".to_string(), pair[1].clone()]),
+            "-p" => command.extend(["-c".to_string(), format!("profile={:?}", pair[1])]),
+            _ => {}
+        }
+    }
+    let get = |id: &str| spec.sel.get(id).cloned().unwrap_or_default();
+    let or = |a: String, b: &str| if a.is_empty() { b.to_string() } else { a };
+    Some(crate::harness::codex::Config {
+        command,
+        fallback: std::iter::once(fallback.get_program().to_string_lossy().into_owned())
+            .chain(args)
+            .collect(),
+        cwd: dir.to_string(),
+        session: if spec.resume {
+            spec.session_id.to_string()
+        } else {
+            String::new()
+        },
+        model: or(get("model"), &spec.opts.model_override),
+        effort: or(get("effort"), &spec.opts.effort),
+        mode: get("mode"),
+    })
+}
+
 /// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
 pub fn run_agent(
     target: Target,
@@ -1754,7 +1799,23 @@ pub fn run_agent(
         // Local turns outlive Runo, so closing or a crash doesn't stop them.
         if crate::updater::resolve(bin).is_some() {
             if let Some((config, prompt)) = acp {
-                return crate::detach::spawn_acp(root, id, &config, command, &prompt, dir, tx);
+                let setup = |turn: &std::path::Path| config.write(turn);
+                return crate::detach::spawn_driver(
+                    root, id, "--acp", setup, command, &prompt, dir, tx,
+                );
+            }
+            if let Some(config) = codex_app_config(spec, dir, &command) {
+                let setup = |turn: &std::path::Path| config.write(turn);
+                return crate::detach::spawn_driver(
+                    root,
+                    id,
+                    "--codex",
+                    setup,
+                    command,
+                    &with_images(spec),
+                    dir,
+                    tx,
+                );
             }
             if takes_live_input(spec.provider) {
                 if let Some((live, prompt)) = live_command(&command) {
@@ -2053,6 +2114,59 @@ mod arg_tests {
         assert!(!next.contains(&"--continue".to_string()));
         // The prompt always comes last, after `--`.
         assert_eq!(&next[next.len() - 2..], ["--", "hi"]);
+    }
+
+    #[test]
+    fn codex_runs_its_app_server_with_the_exec_settings() {
+        let sel: std::collections::HashMap<String, String> = [
+            ("mode".to_string(), "plan".to_string()),
+            ("effort".to_string(), "high".to_string()),
+        ]
+        .into();
+        let o = AgentOptions {
+            profile: "work".into(),
+            ..AgentOptions::default()
+        };
+        let spec = RunSpec {
+            provider: "codex",
+            prompt: "Fix it",
+            resume: true,
+            sel: &sel,
+            opts: &o,
+            in_git: true,
+            session_id: "01a1",
+            images: &[],
+            memory: None,
+            local: true,
+            thread: 0,
+        };
+        let exec = turn_command(&spec);
+        // Without an app server in the installed Codex's help, `exec` runs as before.
+        assert!(codex_app_config(&spec, "/w", &exec).is_none());
+        crate::caps::set(
+            "codex",
+            crate::caps::Caps {
+                help: "Commands:\n  exec  Run non-interactively\n  app-server  Run the app server"
+                    .into(),
+                ..Default::default()
+            },
+        );
+        let config = codex_app_config(&spec, "/w", &exec).unwrap();
+        assert_eq!(config.command[1], "app-server");
+        assert!(config
+            .command
+            .windows(2)
+            .any(|w| w == ["-c", "model_reasoning_effort=\"high\""]));
+        assert!(config
+            .command
+            .windows(2)
+            .any(|w| w == ["-c", "profile=\"work\""]));
+        assert_eq!(config.fallback.last().map(String::as_str), Some("Fix it"));
+        assert_eq!(
+            (config.session.as_str(), config.mode.as_str()),
+            ("01a1", "plan")
+        );
+        assert_eq!(config.effort, "high");
     }
 
     #[test]

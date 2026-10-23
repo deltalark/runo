@@ -553,6 +553,8 @@ fn parse_codex(
         modes,
         approvals,
         detected: true,
+        // Both, for flags and commands only some releases have (`app-server`).
+        help: format!("{top_help}\n{exec_help}"),
         ..Default::default()
     }
 }
@@ -922,6 +924,8 @@ mod fixture_tests {
         .unwrap();
         let caps = parse_codex("codex-cli 0.50.1\n", exec_help, top_help, Some(&cache));
         assert_eq!(caps.version, "0.50.1");
+        // The help is kept, so gates such as the app server's can see it.
+        assert!(caps.help.contains("--sandbox") && caps.help.contains("--ask-for-approval"));
         assert_eq!(
             values(&caps.modes),
             ["read-only", "workspace-write", "danger-full-access"]
