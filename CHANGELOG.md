@@ -4,6 +4,15 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Five more background patterns beside Dot matrix: Grid, Blueprint (a faint grid with every fourth line stronger), Crosses, Rings and Stitches. Pick one in Settings > Appearance > Background.
+- Choose where the background pattern lies: on the content (the page and the terminal), on the side panels (the sidebar, Changes and Files), and on the frame (the top bar, the rail and the status bar). Each is a switch under Settings > Appearance > Background.
+
+### Changed
+
+- The background pattern lies on the content only by default, leaving the top bar, the rail and the status bar plain. Turn on "On the frame" for the earlier look.
+
 ## [0.5.0] - 2026-10-23
 
 ### Fixed
