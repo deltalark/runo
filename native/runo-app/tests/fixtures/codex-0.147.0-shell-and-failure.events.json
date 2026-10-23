@@ -1,0 +1,60 @@
+[
+  {
+    "type": "conversation",
+    "data": "01a1654b-5ec0-7683-a3b4-4ae1dbc130ad"
+  },
+  {
+    "type": "text",
+    "data": "I’ll run those two commands now."
+  },
+  {
+    "type": "tool",
+    "data": {
+      "id": "item_1",
+      "kind": "shell",
+      "tool": "shell",
+      "label": "Ran ls",
+      "state": "running"
+    }
+  },
+  {
+    "type": "tool_done",
+    "data": {
+      "id": "item_1",
+      "ok": true,
+      "output": "a.txt\nb.md"
+    }
+  },
+  {
+    "type": "tool",
+    "data": {
+      "id": "item_2",
+      "kind": "shell",
+      "tool": "shell",
+      "label": "Ran ls /nonexistent",
+      "state": "running"
+    }
+  },
+  {
+    "type": "tool_done",
+    "data": {
+      "id": "item_2",
+      "ok": false,
+      "output": "ls: /nonexistent: No such file or directory"
+    }
+  },
+  {
+    "type": "text",
+    "data": "\n\nOK"
+  },
+  {
+    "type": "usage",
+    "data": {
+      "input": 16179,
+      "output": 192,
+      "cached": 15104,
+      "cost_cents": 0.0,
+      "window": 0
+    }
+  }
+]

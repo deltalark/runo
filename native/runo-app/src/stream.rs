@@ -19,7 +19,12 @@ pub enum Parser {
 impl Parser {
     /// The parser for a run of `provider` in `cwd`, or `None` for plain text output.
     pub fn for_provider(provider: &str, cwd: &str) -> Option<Parser> {
-        match crate::agent::output(provider) {
+        Parser::for_format(crate::agent::output(provider), cwd)
+    }
+
+    /// The parser for output in `format`, or `None` for plain text.
+    pub fn for_format(format: crate::agent::Output, cwd: &str) -> Option<Parser> {
+        match format {
             crate::agent::Output::Claude => Some(Parser::Claude(ClaudeStream::new(cwd))),
             crate::agent::Output::Json => Some(Parser::Json(Box::new(JsonStream::new(cwd)))),
             crate::agent::Output::Text => None,
