@@ -1481,6 +1481,17 @@ impl DesignCanvas {
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.focus_ask(window, cx))),
             )
+            .when(self.also.is_empty(), |d| {
+                d.child(
+                    mini(
+                        "design-sel-options",
+                        IconName::Shuffle,
+                        "Try options: three takes on it, toward what's typed in the ask bar",
+                        self.options.is_some(),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.try_options(window, cx))),
+                )
+            })
             .child(
                 div()
                     .relative()

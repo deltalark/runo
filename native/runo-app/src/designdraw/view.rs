@@ -43,6 +43,7 @@ mod layers;
 mod libraries;
 mod looks;
 mod motion;
+mod options;
 mod pictures;
 mod quick;
 mod shapes;
@@ -298,6 +299,8 @@ pub(crate) struct DesignCanvas {
     scoping: bool,
     /// A quick edit of the selected layer on its way.
     quick: Option<quick::Quick>,
+    /// Takes on the selected layer, to pick one of.
+    options: Option<options::Options>,
     /// An ask a quick edit handed on, to start as a session.
     pending_session: Option<String>,
     /// Each screen's HTML before a change, for undo and redo.
@@ -649,6 +652,7 @@ impl DesignCanvas {
             layers_hidden: false,
             scoping: false,
             quick: None,
+            options: None,
             pending_session: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -4060,7 +4064,9 @@ impl DesignCanvas {
 
     /// Escape: leave play, then the text being edited, then step out to the parent.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.comparing.is_some() {
+        if self.options.is_some() {
+            self.close_options(cx);
+        } else if self.comparing.is_some() {
             self.drop_compare(cx);
         } else if self.points.is_some() {
             self.points = None;
@@ -4729,6 +4735,7 @@ impl DesignCanvas {
         }
         out.extend(self.editing_marks(cx));
         out.extend(self.quick_mark());
+        out.extend(self.options_strip(cx));
         out
     }
 
