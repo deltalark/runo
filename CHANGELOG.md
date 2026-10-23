@@ -6,6 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
+- Quick AI edits in Design. Ask about one selected layer ("make it a dark pill", "tighten the spacing") and the agent answers with just that layer's new markup in one fast call, instead of starting a session. The change lands on the canvas as one edit you undo with one Ctrl+Z, while a pill over the layer shows it's working. Asks that need more than the layer go on to a session as before.
 - Design's number fields can be dragged like Figma's: drag a field's label or icon (W, H, radius, opacity, gap, padding, font size, X, Y, rotation and the rest) left or right to change it a step a pixel, or ten with Shift. The screen follows as you drag, and the whole drag undoes in one step.
 - Five more background patterns beside Dot matrix: Grid, Blueprint (a faint grid with every fourth line stronger), Crosses, Rings and Stitches. Pick one in Settings > Appearance > Background.
 - Choose where the background pattern lies: on the content (the page and the terminal), on the side panels (the sidebar, Changes and Files), and on the frame (the top bar, the rail and the status bar). Each is a switch under Settings > Appearance > Background.

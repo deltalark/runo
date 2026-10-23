@@ -45,6 +45,7 @@ mod libraries;
 mod looks;
 mod motion;
 mod pictures;
+mod quick;
 mod scrub;
 mod shapes;
 mod vars;
@@ -311,6 +312,10 @@ pub(crate) struct DesignCanvas {
     layers_hidden: bool,
     /// The next ask is about the selected layers.
     scoping: bool,
+    /// A quick edit of the selected layer on its way.
+    quick: Option<quick::Quick>,
+    /// An ask a quick edit handed on, to start as a session.
+    pending_session: Option<String>,
     /// Each screen's HTML before a change, for undo and redo.
     undo: Vec<Step>,
     redo: Vec<Step>,
@@ -663,6 +668,8 @@ impl DesignCanvas {
             layers_loading: false,
             layers_hidden: false,
             scoping: false,
+            quick: None,
+            pending_session: None,
             undo: Vec::new(),
             redo: Vec::new(),
             panel: Panel::Design,
@@ -1251,6 +1258,11 @@ impl DesignCanvas {
             Some(device) => brief::describe_task(&typed, device),
             None => typed,
         };
+        // An ask about one layer comes back as one quick edit when it can.
+        if self.ask_new.is_none() && self.quick_edit(&task, cx) {
+            self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
+            return;
+        }
         // Asked with layers selected, the ask is about them, and AI changes only them.
         self.scoping = self.ask_new.is_none() && self.element.is_some();
         if self.ask(task, window, cx) {
@@ -4798,6 +4810,7 @@ impl DesignCanvas {
             }
         }
         out.extend(self.editing_marks(cx));
+        out.extend(self.quick_mark());
         out
     }
 
@@ -5907,6 +5920,10 @@ impl DesignCanvas {
                 self.fit();
             }
             self.fitted = true;
+        }
+        if let Some(task) = self.pending_session.take() {
+            self.scoping = self.element.is_some();
+            self.ask(task, window, cx);
         }
         if self.inline_open {
             let input = self.f_inline.clone();
