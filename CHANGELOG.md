@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Queue asks while AI works in Design. The bar keeps a line to type in while the agent is busy; Enter puts the ask in line with what was selected when you typed it, and the queue shows under the working row with a way to take each one out. When a change ends, it's kept (it stays in History) and the next ask starts on its own.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
