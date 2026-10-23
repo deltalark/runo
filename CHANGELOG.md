@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Import from Figma in Design. Paste a link to a frame or a page under Add a screen (or pick Import from Figma in the frame tool's menu), and its frames come in as screens. Auto layout becomes flex with its gap, padding and alignment, so it stays editable; everything else sits where it was in the frame. Fills, gradients, strokes, corners, shadows, blur, opacity and text styles come along, pictures are saved in the design's assets, and icons and other drawings come in as SVG. It reads Figma's REST API with a personal access token, set once in Settings > General > Design and kept on this computer.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
