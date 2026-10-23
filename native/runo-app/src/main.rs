@@ -391,6 +391,8 @@ struct RunoApp {
     applied_dark: Option<(bool, &'static str)>,
     applied_font: Option<&'static str>,
     applied_glass: Option<bool>,
+    /// The code editors' surface last given to the theme, to set it again on a change.
+    applied_editor: Option<(u32, u32, u32)>,
     applied_enter: Option<bool>,
     changes: Vec<git::Change>,
     dir_is_git: bool,
@@ -1649,6 +1651,7 @@ impl RunoApp {
             applied_dark: None,
             applied_font: None,
             applied_glass: None,
+            applied_editor: None,
             applied_enter: None,
             changes: Vec::new(),
             dir_is_git: true,
@@ -9219,8 +9222,37 @@ impl Render for RunoApp {
                     }
                 });
             }
-            // A theme switch reloads the theme file's fonts; set the UI font again.
+            // A theme switch reloads the theme file's fonts and editor colours; set them
+            // again.
             self.applied_font = None;
+            self.applied_editor = None;
+        }
+        // Code editors (the Query tab, the file viewer) sit on the page's own surface:
+        // the theme's editor colours are opaque black or white, which turn the gutter
+        // and the current line into slabs on glass and clash with the page in solid.
+        // In glass the page is already a translucent layer: another one on top would show
+        // as a pale or dark column, so the gutter is left clear. Solid, it's the page's
+        // own colour, which also covers text scrolled sideways under the line numbers.
+        let surface = if glass_on() { rgba(0) } else { rgb(c_canvas()) };
+        let rgba_u32 = |c: Rgba| {
+            ((c.r * 255.) as u32) << 24
+                | ((c.g * 255.) as u32) << 16
+                | ((c.b * 255.) as u32) << 8
+                | (c.a * 255.) as u32
+        };
+        let line = rgba((c_text() << 8) | if dark { 0x0d } else { 0x0b });
+        let key = (rgba_u32(surface), rgba_u32(line), c_muted());
+        if self.applied_editor != Some(key) {
+            self.applied_editor = Some(key);
+            gpui_kit::component::Theme::update(cx, |theme| {
+                let mut hl = (*theme.highlight_theme).clone();
+                hl.style.editor_background = Some(surface.into());
+                hl.style.editor_gutter_background = Some(surface.into());
+                hl.style.editor_active_line = Some(line.into());
+                hl.style.editor_line_number = Some(rgba((c_muted() << 8) | 0xa0).into());
+                hl.style.editor_active_line_number = Some(rgb(c_secondary()).into());
+                theme.highlight_theme = std::sync::Arc::new(hl);
+            });
         }
         let font = ui_font(&st.font);
         if self.applied_font != Some(font) {

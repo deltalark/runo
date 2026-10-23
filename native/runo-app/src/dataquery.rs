@@ -927,6 +927,7 @@ impl RunoApp {
                         div()
                             .h(px(180.))
                             .flex_none()
+                            .pt(px(6.))
                             .font_family(self.mono_font.clone())
                             .text_size(px(12.5))
                             // Cmd/Ctrl-Enter runs; caught before the editor turns it
