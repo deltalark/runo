@@ -88,45 +88,30 @@ fn fused_bracket(key: impl Into<SharedString>, radius: f32) -> AnyElement {
 
 fn bracket(key: SharedString, radius: f32, own_corners: bool) -> AnyElement {
     let hover_key = key.clone();
-    div()
-        .absolute()
-        .inset_0()
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |b, _, window, _| {
-                    let hover = accent::hover(&hover_key, b, window);
-                    let (x0, x1, y0, y1) = (b.origin.x, b.right(), b.origin.y, b.bottom());
-                    let r = px(radius).min((y1 - y0) / 2.);
-                    let rim = if own_corners {
-                        // Along the middle of a 2px edge inside the outline.
-                        let i = px(1.);
-                        let (x0, x1, y0, y1, r) = (x0 + i, x1 - i, y0 + i, y1 - i, r - i);
-                        let at = |x: Pixels, y: Pixels| point(x, y);
-                        let mut rim = accent::Rim::new(at(x0 + r, y0));
-                        rim.line(at(x1 - r, y0));
-                        rim.corner(at(x1, y0), at(x1, y0 + r), false);
-                        rim.line(at(x1, y1 - r));
-                        rim.corner(at(x1, y1), at(x1 - r, y1), true);
-                        rim.line(at(x0 + r, y1));
-                        rim.corner(at(x0, y1), at(x0, y1 - r), false);
-                        rim.line(at(x0, y0 + r));
-                        rim.corner(at(x0, y0), at(x0 + r, y0), true);
-                        rim.close()
-                    } else {
-                        fused_rim(x0, x1, y0, y1, r, px(FUSE_R), true)
-                    };
-                    rim.paint(hover, window);
-                },
-            )
-            .size_full(),
-        )
-        .animated(
-            ElementId::Name(key),
-            Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
-            |el, d| el.opacity(d),
-        )
-        .into_any_element()
+    accent::drawn_in(ElementId::Name(key), move |b, open, window| {
+        let hover = accent::hover(&hover_key, b, window);
+        let (x0, x1, y0, y1) = (b.origin.x, b.right(), b.origin.y, b.bottom());
+        let r = px(radius).min((y1 - y0) / 2.);
+        let rim = if own_corners {
+            // Along the middle of a 2px edge inside the outline.
+            let i = px(1.);
+            let (x0, x1, y0, y1, r) = (x0 + i, x1 - i, y0 + i, y1 - i, r - i);
+            let at = |x: Pixels, y: Pixels| point(x, y);
+            let mut rim = accent::Rim::new(at(x0 + r, y0));
+            rim.line(at(x1 - r, y0));
+            rim.corner(at(x1, y0), at(x1, y0 + r), false);
+            rim.line(at(x1, y1 - r));
+            rim.corner(at(x1, y1), at(x1 - r, y1), true);
+            rim.line(at(x0 + r, y1));
+            rim.corner(at(x0, y1), at(x0, y1 - r), false);
+            rim.line(at(x0, y0 + r));
+            rim.corner(at(x0, y0), at(x0 + r, y0), true);
+            rim.close()
+        } else {
+            fused_rim(x0, x1, y0, y1, r, px(FUSE_R), true)
+        };
+        rim.paint(hover, open, window);
+    })
 }
 
 /// The rim of something whose right side runs on into what sits beside it, such as a
@@ -260,41 +245,30 @@ fn rail_tab(key: &'static str, sheet: Rgba) -> AnyElement {
         // tab's outline.
         .child({
             let hover_key = SharedString::from(format!("rail-hover-{key}"));
-            div()
-                .absolute()
-                .inset_0()
-                .child(
-                    canvas(
-                        |_, _, _| (),
-                        move |b, _, window, _| {
-                            let hover = accent::hover(&hover_key, b, window);
-                            // At the rail's foot the tab runs level with the island's
-                            // square bottom edge, with no curve out below.
-                            let floor = RAIL_FLOOR.get().unwrap_or(b.bottom() + px(RAIL_R));
-                            let foot = b.bottom() + px(RAIL_R) > floor;
-                            fused_rim(
-                                b.origin.x,
-                                b.right(),
-                                b.origin.y,
-                                if foot {
-                                    b.bottom().min(floor)
-                                } else {
-                                    b.bottom()
-                                },
-                                px(FUSE_R),
-                                px(RAIL_R),
-                                !foot,
-                            )
-                            .paint(hover, window);
+            accent::drawn_in(
+                SharedString::from(format!("rail-bracket-{key}")),
+                move |b, open, window| {
+                    let hover = accent::hover(&hover_key, b, window);
+                    // At the rail's foot the tab runs level with the island's square
+                    // bottom edge, with no curve out below.
+                    let floor = RAIL_FLOOR.get().unwrap_or(b.bottom() + px(RAIL_R));
+                    let foot = b.bottom() + px(RAIL_R) > floor;
+                    fused_rim(
+                        b.origin.x,
+                        b.right(),
+                        b.origin.y,
+                        if foot {
+                            b.bottom().min(floor)
+                        } else {
+                            b.bottom()
                         },
+                        px(FUSE_R),
+                        px(RAIL_R),
+                        !foot,
                     )
-                    .size_full(),
-                )
-                .animated(
-                    SharedString::from(format!("rail-bracket-{key}")),
-                    Animation::new(Duration::from_millis(QUICK + 120)).with_easing(after(0.4)),
-                    |el, d| el.opacity(d),
-                )
+                    .paint(hover, open, window);
+                },
+            )
         })
         .animated(
             SharedString::from(format!("rail-tab-{key}")),
@@ -534,8 +508,9 @@ const STRIP_TAB_R: f32 = 9.;
 const STRIP_FLARE_R: f32 = 8.;
 
 thread_local! {
-    /// Where each fused strip's open tab sits this frame, keyed by strip.
-    static STRIP_CUTS: std::cell::RefCell<HashMap<&'static str, Bounds<Pixels>>> =
+    /// Where each fused strip's open tab sits this frame, and how far its light has grown
+    /// out since it opened (see `accent::opening`), keyed by strip.
+    static STRIP_CUTS: std::cell::RefCell<HashMap<&'static str, (Bounds<Pixels>, f32)>> =
         std::cell::RefCell::new(HashMap::new());
 }
 
@@ -546,19 +521,27 @@ fn turn(f: &mut PathBuilder, from: Point<Pixels>, c: Point<Pixels>, to: Point<Pi
 }
 
 /// Marks the open tab of a fused strip, so the strip leaves it out of the frame's grey.
-/// A child of the open tab, which must be `relative`.
+/// Its light grows out each time a tab opens, the way every lit rim opens. A child of the
+/// open tab, which must be `relative`.
 pub(crate) fn strip_cut(strip: &'static str) -> AnyElement {
-    div()
-        .absolute()
-        .inset_0()
-        .child(
-            canvas(
-                move |b, _, _| STRIP_CUTS.with_borrow_mut(|c| c.insert(strip, b)),
-                |_, _, _, _| {},
-            )
-            .size_full(),
+    let mark = move |open: f32| {
+        canvas(
+            move |b, _, _| STRIP_CUTS.with_borrow_mut(|c| c.insert(strip, (b, open))),
+            |_, _, _, _| {},
+        )
+        .size_full()
+    };
+    let el = div().absolute().inset_0();
+    if anim_on() {
+        el.with_animation(
+            SharedString::from(format!("strip-open-{strip}")),
+            accent::opening(),
+            move |el, open| el.child(mark(open)),
         )
         .into_any_element()
+    } else {
+        el.child(mark(1.)).into_any_element()
+    }
 }
 
 /// The fill of a strip of tabs over an island: the frame's grey across the strip, less
@@ -588,12 +571,12 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     // A tab scrolled partly out of the strip is not cut.
                     let cut = STRIP_CUTS
                         .with_borrow(|c| c.get(strip).copied())
-                        .filter(|t| t.origin.x - fr >= left && t.right() + fr <= right);
+                        .filter(|(t, _)| t.origin.x - fr >= left && t.right() + fr <= right);
                     let mut f = PathBuilder::fill();
                     f.move_to(at(left, top));
                     f.line_to(at(right, top));
                     f.line_to(at(right, bottom));
-                    if let Some(t) = cut {
+                    if let Some((t, _)) = cut {
                         let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
                         f.line_to(at(x1 + fr, bottom));
                         turn(
@@ -619,18 +602,19 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     if let Ok(path) = f.build() {
                         window.paint_path(path, frame);
                     }
-                    let Some(t) = cut else { return };
+                    let Some((t, open)) = cut else { return };
                     let (x0, x1, y0) = (t.origin.x, t.right(), t.origin.y.max(top));
                     // The accent's rim, lit at the tab's own two corners, top-left and
                     // top-right, along the middle of a 2px edge inside its outline: in
                     // along the island's top, round the flare up the tab's side, over its
                     // top and down round the other flare and out again, so the light
                     // follows the curves. Inside a flare is the outside of its arc, so the
-                    // rim there turns a step wider.
+                    // rim there turns a step wider. Its ends stay over the strip, never out
+                    // past the island's side.
                     let hover = accent::hover(&SharedString::from(strip), t, window);
                     let i = px(1.);
                     let (x0, x1, y0, r, foot) = (x0 + i, x1 - i, y0 + i, tr - i, bottom + i);
-                    let mut rim = accent::Rim::new(at(x0 - i - 2. * fr, foot));
+                    let mut rim = accent::Rim::new(at((x0 - i - 2. * fr).max(left), foot));
                     rim.line(at(x0 - i - fr, foot));
                     rim.corner(at(x0, foot), at(x0, bottom - fr), false);
                     rim.line(at(x0, y0 + r));
@@ -639,8 +623,8 @@ pub(crate) fn strip_fill(strip: &'static str, island: Rgba) -> AnyElement {
                     rim.corner(at(x1, y0), at(x1, y0 + r), true);
                     rim.line(at(x1, bottom - fr));
                     rim.corner(at(x1, foot), at(x1 + i + fr, foot), false);
-                    rim.line(at(x1 + i + 2. * fr, foot));
-                    rim.paint(hover, window);
+                    rim.line(at((x1 + i + 2. * fr).min(right), foot));
+                    rim.paint(hover, open, window);
                 },
             )
             .size_full(),

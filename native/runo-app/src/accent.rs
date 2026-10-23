@@ -1,7 +1,8 @@
 //! The accent's lit rim: a selected row or an open tab has its own outline lit in the
 //! accent at two of its corners, fading out along the edges between them, like light
-//! catching the edge. While the pointer is over it the light reaches further and
-//! brightens, easing in and out. With Animations off it snaps.
+//! catching the edge. When it opens the light grows out from its corners, and while the
+//! pointer is over it the light reaches further and brightens, easing in and out. With
+//! Animations off it snaps.
 
 use super::*;
 use std::cell::RefCell;
@@ -68,6 +69,43 @@ pub fn color(hover: f32) -> Hsla {
     .into()
 }
 
+/// How long the light takes to grow out from its corners when something opens, after
+/// a short hold that lets the motion it belongs to (a tab sliding out, a row landing)
+/// come first.
+const OPEN_MS: u64 = 520;
+const OPEN_LEAD: f32 = 0.25;
+
+/// The animation of the light growing out when something opens, from 0 to 1, easing
+/// out. Every lit rim opens with it, so they all move alike.
+pub fn opening() -> Animation {
+    Animation::new(Duration::from_millis(OPEN_MS)).with_easing(|t: f32| {
+        let t = ((t - OPEN_LEAD) / (1. - OPEN_LEAD)).clamp(0., 1.);
+        1. - (1. - t).powi(4)
+    })
+}
+
+/// A layer over its parent that paints a lit rim with `paint`, given its bounds and how
+/// far the light has grown out (see `opening`). It grows out each time the layer is
+/// mounted, such as when a row is picked, even during a page switch, so opening a place
+/// or a tab always shows the same motion. With Animations off it is there at once.
+pub fn drawn_in(
+    id: impl Into<ElementId>,
+    paint: impl Fn(Bounds<Pixels>, f32, &mut Window) + 'static,
+) -> AnyElement {
+    let paint = std::rc::Rc::new(paint);
+    let layer = move |open: f32| {
+        let paint = paint.clone();
+        canvas(|_, _, _| (), move |b, _, window, _| paint(b, open, window)).size_full()
+    };
+    let el = div().absolute().inset_0();
+    if anim_on() {
+        el.with_animation(id, opening(), move |el, open| el.child(layer(open)))
+            .into_any_element()
+    } else {
+        el.child(layer(1.)).into_any_element()
+    }
+}
+
 /// An outline traced with straight edges and quarter turns, and the corners its rim is
 /// lit at. Start it with `new`, trace it with `line` and `corner`, and paint it with
 /// `paint`.
@@ -115,8 +153,9 @@ impl Rim {
     /// unbroken stroke round the corner and on along the outline either side, through
     /// any curves it meets, in the accent at the corner and fading to nothing `fade`
     /// along (or under a third of the way to the next lit corner, so a gap stays dark between them, or at the outline's end), over a faint
-    /// wider glow.
-    pub fn paint(self, hover: f32, window: &mut Window) {
+    /// wider glow. `open` is how far the light has grown out from the middle of each
+    /// corner, from 0 to 1 (see `opening`).
+    pub fn paint(self, hover: f32, open: f32, window: &mut Window) {
         // The outline as a dense polyline, each turn cut fine enough to read as a curve,
         // with how far along it each point is, and where each lit corner runs.
         const CUTS: usize = 16;
@@ -229,7 +268,12 @@ impl Rim {
                         1. - (1. - want(j)) / (1. - want(j + 1))
                     };
                     let t = j as f32 / LAYERS as f32;
-                    let line = stretch(sa - back * t, sb + on * t);
+                    // The light grows out from the corner's middle as it opens.
+                    let mid = (sa + sb) / 2.;
+                    let line = stretch(
+                        mid - (mid - sa + back * t) * open,
+                        mid + (sb - mid + on * t) * open,
+                    );
                     let mut f = PathBuilder::stroke(px(width));
                     f.move_to(line[0]);
                     for p in &line[1..] {
@@ -237,7 +281,7 @@ impl Rim {
                     }
                     if let Ok(path) = f.build() {
                         let mut lit = color;
-                        lit.a *= alpha * strength;
+                        lit.a *= alpha * strength * (open * 3.).min(1.);
                         window.paint_path(path, lit);
                     }
                 }
