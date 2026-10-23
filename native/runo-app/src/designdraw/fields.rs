@@ -164,15 +164,23 @@ pub(crate) fn hex(css: &str) -> Option<String> {
     if let Some(h) = s.strip_prefix('#') {
         return Some(format!("#{}", h.to_uppercase()));
     }
-    let inner = s
-        .strip_prefix("rgba(")
-        .or_else(|| s.strip_prefix("rgb("))?
-        .trim_end_matches(')');
-    let parts: Vec<f32> = inner
+    // A colour mixed with color-mix() is worked out as `color(srgb r g b)`, from 0 to 1.
+    let (inner, scale) = match s.strip_prefix("color(srgb ") {
+        Some(rest) => (rest, 255.),
+        None => (
+            s.strip_prefix("rgba(").or_else(|| s.strip_prefix("rgb("))?,
+            1.,
+        ),
+    };
+    let mut parts: Vec<f32> = inner
+        .trim_end_matches(')')
         .split([',', ' ', '/'])
         .filter(|p| !p.is_empty())
         .filter_map(|p| p.trim().parse().ok())
         .collect();
+    for c in parts.iter_mut().take(3) {
+        *c = (*c * scale).round();
+    }
     if parts.len() < 3 || parts.get(3).is_some_and(|a| *a == 0.) {
         return None;
     }
@@ -301,6 +309,21 @@ pub(crate) const SHADOWS: [(&str, &str); 4] = [
     ("Large", "0 12px 32px rgba(0, 0, 0, 0.18)"),
 ];
 
+/// What a field shows for several layers at once: their value when they share it, else
+/// "Mixed", as Figma shows it.
+pub(crate) fn shown(f: &Field, els: &[&Element]) -> String {
+    let mut all = els.iter().map(|e| display(f, e));
+    let first = all.next().unwrap_or_default();
+    if all.any(|v| v != first) {
+        MIXED.into()
+    } else {
+        first
+    }
+}
+
+/// What a field shows when the selected layers differ.
+pub(crate) const MIXED: &str = "Mixed";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +364,13 @@ mod tests {
         assert_eq!(show("line-height"), "Auto");
         let hug = el(&[("width", "fit-content")], &[("width", "120px")]);
         assert_eq!(display(field("w").unwrap(), &hug), "Hug");
+    }
+
+    #[test]
+    fn mixed_colours_read_as_hex() {
+        assert_eq!(hex("color(srgb 0.5 1 0)"), Some("#80FF00".into()));
+        assert_eq!(hex("color(srgb 0.5 1 0 / 0)"), None);
+        assert_eq!(hex("rgb(217, 56, 26)"), Some("#D9381A".into()));
     }
 
     #[test]
@@ -408,5 +438,16 @@ mod tests {
         assert_eq!(hex("rgb(37, 99, 235)"), Some("#2563EB".into()));
         assert_eq!(hex("rgba(0, 0, 0, 0)"), None);
         assert_eq!(hex("#abc"), Some("#ABC".into()));
+    }
+
+    #[test]
+    fn several_layers_show_their_shared_value_or_mixed() {
+        let f = field("gap").unwrap();
+        let a = el(&[], &[("gap", "8px")]);
+        let b = el(&[], &[("gap", "8px")]);
+        let c = el(&[], &[("gap", "12px")]);
+        assert_eq!(shown(f, &[&a, &b]), display(f, &a));
+        assert_eq!(shown(f, &[&a, &b, &c]), MIXED);
+        assert_eq!(shown(f, &[&c]), display(f, &c));
     }
 }

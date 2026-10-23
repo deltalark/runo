@@ -167,7 +167,8 @@ impl DesignCanvas {
             let Some(f) = fields::field(id) else {
                 continue;
             };
-            let v = fields::display(f, &el);
+            let others: Vec<&Element> = std::iter::once(&el).chain(&self.also).collect();
+            let v = fields::shown(f, &others);
             if self.field_vals.get(id) != Some(&v) {
                 state.update(cx, |s, cx| s.set_value(v.clone(), window, cx));
                 self.field_vals.insert(id, v);
@@ -234,23 +235,44 @@ impl DesignCanvas {
 
     /// A colour field: a swatch of the colour, then its hex or token name.
     fn color_fld(&self, id: &'static str, el: &Element) -> Div {
+        let all: Vec<&Element> = std::iter::once(el).chain(&self.also).collect();
         let shown = fields::field(id)
-            .map(|f| fields::display(f, el))
+            .map(|f| fields::shown(f, &all))
             .unwrap_or_default();
+        // The colour a layer really shows, so a token mixed from others still has one.
+        let painted = |e: &Element| {
+            let f = fields::field(id)?;
+            let v = fields::display(f, e);
+            color_of(&v)
+                .or_else(|| self.token_color(&format!("--{v}")))
+                .or_else(|| color_of(&fields::hex(e.computed.get(f.reads)?)?))
+        };
         let c = color_of(&shown)
             .or_else(|| self.token_color(&format!("--{shown}")))
-            .unwrap_or(0xffffff);
-        self.fld(
-            id,
-            div()
-                .size(px(14.))
-                .flex_none()
-                .rounded(px(3.))
-                .border_1()
-                .border_color(divider())
-                .bg(rgb(c))
-                .into_any_element(),
-        )
+            .or_else(|| painted(el));
+        // Layers with different colours show a swatch split between the first two.
+        let split = (shown == fields::MIXED)
+            .then(|| {
+                let mut cs = all.iter().filter_map(|e| painted(e));
+                let a = cs.next()?;
+                Some((a, cs.find(|b| *b != a)?))
+            })
+            .flatten();
+        let swatch = div()
+            .size(px(14.))
+            .flex_none()
+            .rounded(px(3.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(divider());
+        let swatch = match split {
+            Some((a, b)) => swatch
+                .flex()
+                .child(div().flex_1().h_full().bg(rgb(a)))
+                .child(div().flex_1().h_full().bg(rgb(b))),
+            None => swatch.bg(rgb(c.unwrap_or(0xffffff))),
+        };
+        self.fld(id, swatch.into_any_element())
     }
 
     // ---- The layers panel on the left
@@ -886,8 +908,10 @@ impl DesignCanvas {
             out = out.child(self.vector_section(el, cx));
         } else {
             // Fill: a colour, a gradient or a picture.
+            // Open when any selected layer has a fill, so Mixed shows.
+            let all: Vec<&Element> = std::iter::once(el).chain(&self.also).collect();
             let fill = fields::field("fill")
-                .map(|f| fields::display(f, el))
+                .map(|f| fields::shown(f, &all))
                 .unwrap_or_default();
             let kind = Self::fill_kind(el);
             out = out.child(if fill.is_empty() && kind == "solid" {

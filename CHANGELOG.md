@@ -4,8 +4,13 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Mixed values in Design. With several layers selected, each field shows the value they share, or Mixed where they differ, instead of only the first layer's. Fill opens when any of them has one, and its swatch is split between the colours in play. Typing a value still sets it on all of them.
+
 ### Fixed
 
+- A fill made from a mixed token, such as `color-mix()`, shows its colour in the inspector instead of looking empty.
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
 
 ## [0.5.0] - 2026-10-23
