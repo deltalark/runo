@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- A colour picker in Design. Click the swatch of a fill, text or stroke colour for a square of shades, a hue strip and an opacity strip, the colour's hex and RGB, the theme's colours, and the colours you used last. The eyedropper (the pipette in the picker, or I with a layer picked) takes a colour from anywhere on the screens, with a loupe showing the colour and its hex under the pointer.
+
 ## [0.5.0] - 2026-10-23
 
 ### Fixed

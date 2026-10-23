@@ -30,6 +30,7 @@ const ASK_EASE_MS: u64 = 200;
 mod agents;
 mod chrome;
 mod codelinks;
+mod colours;
 mod comments;
 mod components;
 mod discard;
@@ -353,6 +354,14 @@ pub(crate) struct DesignCanvas {
     field_vals: HashMap<&'static str, String>,
     /// The hand tool: dragging anywhere pans.
     hand: bool,
+    /// The colour picker, when open on a colour field.
+    picker: Option<colours::Picker>,
+    /// Colours set from the picker, newest first.
+    recent_colours: Vec<String>,
+    /// The eyedropper is out: the next click on the canvas takes the colour there.
+    eyedropper: bool,
+    /// Where the pointer is with the eyedropper, on screen, and the colour under it.
+    eye_at: Option<(Pt, u32)>,
     /// Whether layout grids are drawn and snapped to.
     show_grids: bool,
     /// The vector path whose points are being edited.
@@ -678,6 +687,10 @@ impl DesignCanvas {
             fields,
             field_vals: HashMap::new(),
             hand: false,
+            picker: None,
+            recent_colours: Vec::new(),
+            eyedropper: false,
+            eye_at: None,
             show_grids: true,
             points: None,
             shape: None,
@@ -3397,6 +3410,10 @@ impl DesignCanvas {
         self.new_open = false;
         let local = self.local(e.position);
         let w = self.world(local);
+        if self.eyedropper && e.button == MouseButton::Left {
+            self.eyedrop(w, cx);
+            return;
+        }
         if self.commenting && e.button == MouseButton::Left {
             self.comment_down(w, cx);
             return;
@@ -3521,8 +3538,16 @@ impl DesignCanvas {
     }
 
     fn on_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.picker_drag(e.position, cx) {
+            return;
+        }
         let local = self.local(e.position);
         let w = self.world(local);
+        if self.eyedropper {
+            self.eye_at = self.colour_at(w).map(|c| (local, c));
+            cx.notify();
+            return;
+        }
         if matches!(self.drag, Drag::None) && self.pen.is_some() {
             self.pen_at = Some(w);
             cx.notify();
@@ -3641,6 +3666,9 @@ impl DesignCanvas {
     }
 
     fn on_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.picker_drop(cx) {
+            return;
+        }
         let drop = self.drop.take();
         self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
@@ -4034,6 +4062,10 @@ impl DesignCanvas {
                 self.new_open = !self.new_open;
                 true
             }
+            (false, false, false, "i") if self.element.is_some() => {
+                self.toggle_eyedropper(cx);
+                true
+            }
             (false, false, false, "t") if self.screen.is_some() => {
                 self.insert("<p>Text</p>", cx);
                 true
@@ -4048,7 +4080,12 @@ impl DesignCanvas {
 
     /// Escape: leave play, then the text being edited, then step out to the parent.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.comparing.is_some() {
+        if self.eyedropper {
+            self.eyedropper = false;
+            self.eye_at = None;
+        } else if self.picker.is_some() {
+            self.picker = None;
+        } else if self.comparing.is_some() {
             self.drop_compare(cx);
         } else if self.points.is_some() {
             self.points = None;
@@ -5434,6 +5471,9 @@ impl DesignCanvas {
                 .size_full(),
             )
             .children(self.point_handles())
+            .children(self.eyedropper_loupe())
+            .children(self.colour_picker(cx))
+            .when(self.eyedropper, |a| a.cursor_crosshair())
             .children(self.empty_state(cx))
             .children(self.thinking())
             .when(self.playing.is_none(), |a| {
