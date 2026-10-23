@@ -16,6 +16,7 @@ pub(crate) mod notes;
 pub(crate) mod parts;
 pub(crate) mod render;
 pub(crate) mod shared;
+pub(crate) mod snap;
 pub(crate) mod spec;
 pub(crate) mod styles;
 pub(crate) mod tokens;

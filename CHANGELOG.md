@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Design snaps raw values to the theme. Snap to tokens, in Checks, writes every colour, text size, corner and spacing that is all but a token as that token, on every screen, one undo step per screen, so it follows the theme and dark mode. After an AI change, what AI wrote that way is snapped on its own. Values close to no token stay as they are, for the checks to point out.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
