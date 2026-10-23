@@ -2,7 +2,7 @@
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -71,7 +71,10 @@ pub struct Shell {
     /// that stops reading never blocks the window.
     input: Sender<Vec<u8>>,
     master: Box<dyn MasterPty + Send>,
-    child: Mutex<Box<dyn Child + Send + Sync>>,
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    /// 0 until the process is reaped, then 1 if it succeeded and 2 if it failed.
+    /// Set before `exited`, so a caller that sees `exited` can read the status.
+    outcome: Arc<AtomicU8>,
     exited: Arc<AtomicBool>,
     /// Set by the reader when output arrives, cleared when the UI repaints.
     dirty: Arc<AtomicBool>,
@@ -112,6 +115,55 @@ impl Program {
                 })
                 .collect(),
             unset: Vec::new(),
+        }
+    }
+}
+
+/// Interactive shell for a new Windows terminal tab. Prefer PowerShell over cmd.exe,
+/// and skip the profile so a slow or blocking profile cannot leave a blank ConPTY.
+fn windows_shell() -> Option<Program> {
+    if !cfg!(windows) {
+        return None;
+    }
+    Some(Program {
+        bin: "powershell.exe".into(),
+        args: vec!["-NoLogo".into(), "-NoProfile".into()],
+        env: Vec::new(),
+        unset: Vec::new(),
+    })
+}
+
+/// Reap `child` and store 1 or 2 in `outcome`. The lock is not held while waiting,
+/// so the shell can still be killed. Returns without a status if waiting fails.
+/// Safe to call from more than one thread; the first status wins.
+fn record_exit(child: &Mutex<Box<dyn Child + Send + Sync>>, outcome: &AtomicU8) {
+    loop {
+        if outcome.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let polled = {
+            let Ok(mut child) = child.lock() else {
+                return;
+            };
+            child.try_wait()
+        };
+        match polled {
+            Ok(Some(status)) => {
+                let value = if status.success() { 1 } else { 2 };
+                let _ = outcome.compare_exchange(0, value, Ordering::Release, Ordering::Relaxed);
+                return;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(_) => return,
+        }
+    }
+}
+
+/// Say the program has ended, once. `outcome` must already be stored.
+fn note_exit(exited: &AtomicBool, wake: &Mutex<Box<dyn Fn(u64) + Send>>, id: u64) {
+    if !exited.swap(true, Ordering::AcqRel) {
+        if let Ok(wake) = wake.lock() {
+            wake(id);
         }
     }
 }
@@ -157,7 +209,9 @@ impl Shell {
                 pixel_height: 0,
             })
             .map_err(|e| e.to_string())?;
-        let custom = program.is_some();
+        // On Windows, prefer PowerShell over cmd.exe: ConPTY often leaves cmd with a
+        // blank screen and no prompt until something else wakes it.
+        let program = program.or_else(windows_shell);
         let mut cmd = match &program {
             Some(p) => {
                 let mut c = CommandBuilder::new(&p.bin);
@@ -175,8 +229,11 @@ impl Shell {
         if !dir.is_empty() {
             cmd.cwd(dir);
         }
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+        // xterm TERM confuses some Windows hosts in ConPTY; keep it for Unix only.
+        if !cfg!(windows) {
+            cmd.env("TERM", "xterm-256color");
+            cmd.env("COLORTERM", "truecolor");
+        }
         // Light text on a dark background, or the reverse, for programs that read it
         // rather than ask the terminal.
         cmd.env(
@@ -187,7 +244,9 @@ impl Shell {
                 "0;15"
             },
         );
-        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+        let child = Arc::new(Mutex::new(
+            pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?,
+        ));
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
         let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -210,15 +269,53 @@ impl Shell {
             }
         });
         let exited = Arc::new(AtomicBool::new(false));
+        let outcome = Arc::new(AtomicU8::new(0));
         let dirty = Arc::new(AtomicBool::new(false));
         let last_output = Arc::new(AtomicU64::new(now_ms()));
+        let wake = Arc::new(Mutex::new(Box::new(wake) as Box<dyn Fn(u64) + Send>));
         {
-            let (parser, exited, dirty, last, answers) = (
+            // The process can end before the PTY read does (Windows often never
+            // signals EOF), or the read can end first (Unix). Either way the status
+            // is stored before `exited` flips.
+            let (outcome, child, exited, last, wake) = (
+                outcome.clone(),
+                Arc::clone(&child),
+                exited.clone(),
+                last_output.clone(),
+                Arc::clone(&wake),
+            );
+            std::thread::spawn(move || {
+                record_exit(&child, &outcome);
+                let started = std::time::Instant::now();
+                let mut quiet = 0u8;
+                while started.elapsed() < std::time::Duration::from_millis(500) {
+                    if exited.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let mark = last.load(Ordering::Acquire);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    if last.load(Ordering::Acquire) == mark {
+                        quiet += 1;
+                        if quiet >= 2 {
+                            break;
+                        }
+                    } else {
+                        quiet = 0;
+                    }
+                }
+                note_exit(&exited, &wake, id);
+            });
+        }
+        {
+            let (parser, exited, outcome, child, dirty, last, answers, wake) = (
                 parser.clone(),
                 exited.clone(),
+                outcome.clone(),
+                Arc::clone(&child),
                 dirty.clone(),
                 last_output.clone(),
                 input.clone(),
+                Arc::clone(&wake),
             );
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
@@ -246,37 +343,60 @@ impl Shell {
                                 let _ = answers.send(reply);
                             }
                             if !dirty.swap(true, Ordering::AcqRel) {
-                                wake(id);
+                                if let Ok(wake) = wake.lock() {
+                                    wake(id);
+                                }
                             }
                         }
                     }
                 }
-                exited.store(true, Ordering::Release);
-                wake(id);
+                // The PTY can close before the process is reaped. Record the status
+                // first, then say it has exited, so success() is never a guess.
+                record_exit(&child, &outcome);
+                note_exit(&exited, &wake, id);
             });
         }
         let name = program
-            .filter(|_| custom)
-            .map(|p| p.bin)
-            .or_else(|| std::env::var("SHELL").ok())
-            .and_then(|s| s.rsplit(['/', '\\']).next().map(str::to_string))
+            .as_ref()
+            .map(|p| p.bin.as_str())
+            .map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s).to_string())
+            .or_else(|| {
+                std::env::var("SHELL")
+                    .ok()
+                    .and_then(|s| s.rsplit(['/', '\\']).next().map(str::to_string))
+            })
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| if cfg!(windows) { "pwsh" } else { "shell" }.into());
-        Ok(Self {
+            .unwrap_or_else(|| {
+                if cfg!(windows) {
+                    "powershell".into()
+                } else {
+                    "shell".into()
+                }
+            });
+        let shell = Self {
             id,
             session,
             title: name,
             parser,
             input,
             master: pair.master,
-            child: Mutex::new(child),
+            child,
+            outcome,
             exited,
             dirty,
             size: Mutex::new((rows, cols)),
             last_output,
             last_input: AtomicU64::new(0),
             view: Arc::new(Mutex::new(ViewState::default())),
-        })
+        };
+        // ConPTY sometimes holds the first paint until the size changes: nudge it.
+        let _ = shell.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        Ok(shell)
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -471,17 +591,14 @@ impl Shell {
         }
     }
 
-    /// Whether the program exited successfully, once it has exited. A program that
-    /// closed its terminal but hasn't quit yet is given half a second.
+    /// Whether the program exited successfully. Recorded when the reader reaps it,
+    /// before `exited` becomes true, and read here without waiting.
     pub fn success(&self) -> Option<bool> {
-        let mut c = self.child.lock().ok()?;
-        for _ in 0..50 {
-            if let Ok(Some(status)) = c.try_wait() {
-                return Some(status.success());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        match self.outcome.load(Ordering::Acquire) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
         }
-        None
     }
 
     /// Ask the program to finish up: Runo's connection runner ends the program on the
@@ -502,6 +619,12 @@ impl Shell {
 impl Drop for Shell {
     fn drop(&mut self) {
         self.kill();
+        // Closing the input channel ends the writer thread before ConPTY tears down.
+        // Field drop would close `master` first; take the sender here instead.
+        drop(std::mem::replace(
+            &mut self.input,
+            std::sync::mpsc::channel().0,
+        ));
     }
 }
 
@@ -689,9 +812,20 @@ pub fn key_bytes(
             }
         }
         _ => {
+            // GPUI on Windows sometimes omits key_char; fall back to the key name
+            // when it is a single printable character.
             let text = key_char
                 .map(str::to_string)
-                .or_else(|| (key == "space").then(|| " ".to_string()))?;
+                .or_else(|| (key == "space").then(|| " ".to_string()))
+                .or_else(|| {
+                    let mut chars = key.chars();
+                    let c = chars.next()?;
+                    if chars.next().is_none() && !c.is_control() {
+                        Some(c.to_string())
+                    } else {
+                        None
+                    }
+                })?;
             let mut v = if alt { vec![0x1b] } else { vec![] };
             v.extend(text.into_bytes());
             v
@@ -909,6 +1043,7 @@ mod tests {
         let k = |key, ch: Option<&str>, ctrl, alt| key_bytes(key, ch, ctrl, alt, false, false);
         assert_eq!(k("c", Some("c"), true, false), Some(vec![3]));
         assert_eq!(k("a", Some("a"), false, false), Some(b"a".to_vec()));
+        assert_eq!(k("a", None, false, false), Some(b"a".to_vec()));
         assert_eq!(k("b", Some("b"), false, true), Some(b"\x1bb".to_vec()));
         assert_eq!(k("enter", None, false, false), Some(b"\r".to_vec()));
         assert_eq!(k("up", None, false, false), Some(b"\x1b[A".to_vec()));
@@ -1029,6 +1164,42 @@ mod tests {
         }
         assert!(shell.text().contains("hi runo"), "{}", shell.text());
         assert_eq!(shell.success(), Some(false));
+    }
+
+    /// The exit status is known as soon as the shell says the program has ended.
+    #[test]
+    fn exit_status_is_known_when_the_program_ends() {
+        let dir = std::env::temp_dir();
+        let run = |code: u32| {
+            let line = format!("exit {code}");
+            let command = if cfg!(windows) {
+                let mut command = std::process::Command::new("cmd");
+                command.args(["/C", &line]);
+                command
+            } else {
+                let mut command = std::process::Command::new("sh");
+                command.args(["-c", &line]);
+                command
+            };
+            let shell = Shell::spawn_program(
+                1,
+                1,
+                dir.to_str().unwrap(),
+                10,
+                40,
+                Some(Program::of(&command)),
+                |_| {},
+            )
+            .unwrap();
+            let start = Instant::now();
+            while !shell.exited() && start.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(shell.exited(), "{}", shell.text());
+            shell.success()
+        };
+        assert_eq!(run(4), Some(false));
+        assert_eq!(run(0), Some(true));
     }
 
     #[cfg(unix)]

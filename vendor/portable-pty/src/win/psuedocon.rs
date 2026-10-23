@@ -79,14 +79,14 @@ impl Drop for PsuedoCon {
 impl PsuedoCon {
     pub fn new(size: COORD, input: FileDescriptor, output: FileDescriptor) -> Result<Self, Error> {
         let mut con: HPCON = INVALID_HANDLE_VALUE;
+        // Only RESIZE_QUIRK: WIN32_INPUT_MODE needs win32-input sequences (Runo sends
+        // UTF-8/VT), and INHERIT_CURSOR has left blank/unresponsive shells on Windows.
         let result = unsafe {
             (CONPTY.CreatePseudoConsole)(
                 size,
                 input.as_raw_handle() as _,
                 output.as_raw_handle() as _,
-                PSUEDOCONSOLE_INHERIT_CURSOR
-                    | PSEUDOCONSOLE_RESIZE_QUIRK
-                    | PSEUDOCONSOLE_WIN32_INPUT_MODE,
+                PSEUDOCONSOLE_RESIZE_QUIRK,
                 &mut con,
             )
         };

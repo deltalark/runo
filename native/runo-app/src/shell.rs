@@ -1338,6 +1338,89 @@ impl RunoApp {
         self.save();
     }
 
+    /// Show the terminal and focus it, or hide the right panel when it already has focus.
+    pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current().is_none() {
+            return;
+        }
+        if self.view != View::Session {
+            self.view = View::Session;
+        }
+
+        let focused = self.term_focus.is_focused(window);
+        if self.show_panel && focused {
+            self.show_panel = false;
+            self.panel_auto_hidden = false;
+            self.save();
+            return;
+        }
+
+        self.show_panel = true;
+        self.panel_auto_hidden = false;
+        let session = self.selected.expect("current() was Some");
+        if self.session_shells(session).next().is_none() {
+            self.new_shell(cx);
+        } else {
+            if self.active_shell().is_none() {
+                if let Some(id) = self.session_shells(session).last().map(|s| s.id) {
+                    self.shell_tab = Some(id);
+                }
+            }
+            self.focus_shell = 2;
+        }
+        self.save();
+    }
+
+    /// Open a new shell tab in the terminal panel.
+    pub(crate) fn open_new_terminal(&mut self, cx: &mut Context<Self>) {
+        if self.current().is_none() {
+            return;
+        }
+        if self.view != View::Session {
+            self.view = View::Session;
+        }
+        self.show_panel = true;
+        self.panel_auto_hidden = false;
+        self.new_shell(cx);
+        self.save();
+    }
+
+    /// Show the Changes or Files tab in the right panel.
+    pub(crate) fn focus_right_tab(&mut self, tab: RightTab) {
+        if self.current().is_none() {
+            return;
+        }
+        if self.view != View::Session {
+            self.view = View::Session;
+        }
+        self.show_panel = true;
+        self.panel_auto_hidden = false;
+        self.right_tab = tab;
+        self.save();
+    }
+
+    /// Show the Files tab and put the cursor in its search box.
+    pub(crate) fn focus_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_right_tab(RightTab::Files);
+        self.file_query
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// Open the Browser tab when the built-in browser is turned on.
+    pub(crate) fn open_browser_tab(&mut self, cx: &mut Context<Self>) {
+        if self.current().is_none() {
+            return;
+        }
+        if !cx.global::<AppSettings>().browser_enabled {
+            self.info = Some((
+                "Turn on the built-in browser in Settings → General.".into(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        self.show_browser();
+    }
+
     /// Put the cursor in the open session's message box, opening Sessions if needed.
     pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.current().is_none() {
