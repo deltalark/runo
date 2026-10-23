@@ -701,6 +701,35 @@ if (!window.__runo) window.__runo = (() => {
     },
     // The same change to several elements, last on the page first, so changing one
     // doesn't move the ones still to come.
+    // Line floating layers up evenly in a row or a column, whichever way they spread more:
+    // their order kept, the space between each the average space between them now, and
+    // lined up with the first across. Null when fewer than two of them float.
+    tidy: (ps) => {
+      const els = ps.map(at).filter((el) => el && getComputedStyle(el).position === 'absolute');
+      if (els.length < 2) return null;
+      const rs = els.map((el) => [el, el.getBoundingClientRect()]);
+      const xs = rs.map(([, r]) => r.left + r.width / 2), ys = rs.map(([, r]) => r.top + r.height / 2);
+      const row = Math.max(...xs) - Math.min(...xs) >= Math.max(...ys) - Math.min(...ys);
+      const [a, z, size] = row ? ['left', 'right', 'width'] : ['top', 'bottom', 'height'];
+      const cross = row ? 'top' : 'left';
+      rs.sort((p, q) => p[1][a] - q[1][a]);
+      const total = rs.reduce((n, [, r]) => n + r[size], 0);
+      const span = rs[rs.length - 1][1][z] - rs[0][1][a];
+      const gap = Math.max(0, Math.round((span - total) / (rs.length - 1)));
+      let at0 = rs[0][1][a];
+      const line = rs[0][1][cross];
+      for (const [el, r] of rs) {
+        const move = (k, by) => {
+          const now = parseFloat(getComputedStyle(el)[k]) || 0;
+          el.style.setProperty(k, Math.round(now + by) + 'px');
+          el.style.removeProperty({ left: 'right', top: 'bottom' }[k]);
+        };
+        move(a, at0 - r[a]);
+        move(cross, line - r[cross]);
+        at0 += r[size] + gap;
+      }
+      return true;
+    },
     opAll: (ps, name, ...args) => {
       for (const el of inOrder(ps).reverse()) ops[name](el, ...args);
       return true;

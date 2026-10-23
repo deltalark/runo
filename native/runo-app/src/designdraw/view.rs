@@ -45,6 +45,7 @@ mod looks;
 mod motion;
 mod pictures;
 mod shapes;
+mod spacing;
 mod vars;
 mod vectors;
 
@@ -175,6 +176,13 @@ enum Drag {
         index: usize,
         vertical: bool,
         at: f32,
+    },
+    /// Dragging a spacing handle of the selected auto layout: its gap or a padding.
+    Spacing {
+        space: spacing::Space,
+        from: Pt,
+        start: f32,
+        now: f32,
     },
     /// Dragging out a shape on a screen with a shape tool.
     Draw {
@@ -3462,6 +3470,9 @@ impl DesignCanvas {
             };
             return;
         }
+        if e.button == MouseButton::Left && !self.hand && self.spacing_down(w, cx) {
+            return;
+        }
         if e.click_count == 1 && !e.modifiers.shift && self.also.is_empty() {
             if let Some((id, r)) = self.picked_rect() {
                 if w.0 >= r.x && w.1 >= r.y && w.0 <= r.x + r.w && w.1 <= r.y + r.h {
@@ -3595,6 +3606,20 @@ impl DesignCanvas {
                 }
             }
             Drag::Resize { at, .. } => *at = snapped,
+            Drag::Spacing {
+                space,
+                from,
+                start,
+                now,
+            } => {
+                let by = if space.vertical {
+                    w.1 - from.1
+                } else {
+                    w.0 - from.0
+                };
+                let step = e.modifiers.shift.then_some(8.);
+                *now = spacing::dragged(*space, *start, by, step);
+            }
             Drag::Marquee {
                 from, at, moved, ..
             } => {
@@ -3645,6 +3670,9 @@ impl DesignCanvas {
         self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Move { moved: true, .. } => self.save_canvas(),
+            Drag::Spacing {
+                space, start, now, ..
+            } => self.spacing_up(space, start, now, cx),
             Drag::Draw {
                 id,
                 from,
@@ -3860,6 +3888,10 @@ impl DesignCanvas {
         let m = &k.modifiers;
         let sec = m.secondary();
         let handled = match (sec, m.shift, m.alt, k.key.as_str()) {
+            (true, false, true, "t") if !self.also.is_empty() => {
+                self.tidy_up(cx);
+                true
+            }
             (true, false, false, "c") => {
                 self.copy(false, cx);
                 true
@@ -4715,6 +4747,7 @@ impl DesignCanvas {
                 );
             }
         }
+        out.extend(self.spacing_marks(cx));
         out.extend(self.editing_marks(cx));
         out
     }

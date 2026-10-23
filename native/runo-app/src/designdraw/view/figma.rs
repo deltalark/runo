@@ -1654,6 +1654,7 @@ impl DesignCanvas {
             }
             aligns = aligns.child(seg);
         }
+
         let place = match el.style("position").as_str() {
             "absolute" => "absolute",
             "sticky" => "sticky",
@@ -1687,6 +1688,14 @@ impl DesignCanvas {
         let mut out = sec("Position", None);
         if !multi {
             out = out.child(aligns);
+        } else {
+            out = out.child(
+                div().flex().child(
+                    text_btn("design-tidy", "Tidy up", Some(IconName::LayoutGrid), false)
+                        .tooltip(tip("Line floating layers up evenly (⌥⌘T)"))
+                        .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
+                ),
+            );
         }
         if place.is_empty() {
             // In the flow, where it is shows but is set by its layout.

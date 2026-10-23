@@ -4,6 +4,11 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Spacing handles in Design, as in Figma. A selected auto layout shows its gaps and padding as pink bands on the canvas; drag one to set that space, with Shift for steps of 8. Each drag is one undo step.
+- Tidy up in Design. With several floating layers picked, Tidy up (⌥⌘T) lines them up evenly in a row or a column, whichever way they spread more.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
