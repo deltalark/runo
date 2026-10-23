@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Draw to ask in Design. Pick the marker (M) and circle, underline or dot what you mean on any screen, then ask: "make this bigger", "a button here". The ask carries a picture of each marked screen with the marks on it and names the layers under each mark, so there's nothing to select first. Marks clear once asked; Clear and Done sit in the hint over the canvas.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.

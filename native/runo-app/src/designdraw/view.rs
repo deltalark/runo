@@ -42,6 +42,7 @@ mod insert;
 mod layers;
 mod libraries;
 mod looks;
+mod marks;
 mod motion;
 mod pictures;
 mod shapes;
@@ -175,6 +176,11 @@ enum Drag {
         index: usize,
         vertical: bool,
         at: f32,
+    },
+    /// Drawing a mark on screen `id` with the marker, in canvas units.
+    Mark {
+        id: String,
+        pts: Vec<Pt>,
     },
     /// Dragging out a shape on a screen with a shape tool.
     Draw {
@@ -362,6 +368,10 @@ pub(crate) struct DesignCanvas {
     shape: Option<shapes::Shape>,
     pen: Option<(String, Vec<Pt>)>,
     pen_at: Option<Pt>,
+    /// The marker is on: a drag on a screen draws a mark for the next ask.
+    marking: bool,
+    /// Marks drawn for the next ask.
+    marks: Vec<marks::Mark>,
     /// How the Export section exports: pixels per CSS pixel, and the format.
     export_scale: u32,
     export_format: super::export::Format,
@@ -683,6 +693,8 @@ impl DesignCanvas {
             shape: None,
             pen: None,
             pen_at: None,
+            marking: false,
+            marks: Vec::new(),
             export_scale: 2,
             export_format: Default::default(),
             library,
@@ -1263,8 +1275,16 @@ impl DesignCanvas {
         if let Ok(Some(_)) = super::versions::save(&self.root, "", &who) {
             self.versions = super::versions::list(&self.root);
         }
-        let picture = self.screen.clone().and_then(|id| self.save_picture(&id));
+        let (marked, marked_text) = self.take_marks();
+        let picture =
+            self.screen
+                .clone()
+                .and_then(|id| match marked.iter().find(|(m, _)| *m == id) {
+                    Some((_, p)) => Some(p.clone()),
+                    None => self.save_picture(&id),
+                });
         let mut context = self.ask_context(picture.as_deref());
+        context.push_str(&marked_text);
         let scope = std::mem::take(&mut self.scoping)
             .then(|| Some((self.screen.clone()?, self.selected_paths())))
             .flatten()
@@ -1293,7 +1313,14 @@ impl DesignCanvas {
             }
         }
         let images: Vec<String> = picture
-            .into_iter()
+            .iter()
+            .cloned()
+            .chain(
+                marked
+                    .into_iter()
+                    .map(|(_, p)| p)
+                    .filter(|p| Some(p) != picture.as_ref()),
+            )
             .chain(picked.into_iter().map(|(p, _)| p))
             .collect();
         self.refs_picked.clear();
@@ -1722,6 +1749,12 @@ impl DesignCanvas {
 
     /// Save how a screen looks now as a picture for an agent, and say where.
     fn save_picture(&self, id: &str) -> Option<String> {
+        let picture = self.picture_of(id)?;
+        self.write_picture(id, id, picture)
+    }
+
+    /// How a screen looks now, as a picture for an agent.
+    fn picture_of(&self, id: &str) -> Option<image::RgbaImage> {
         let shot = self.shots.get(id)?;
         let size = shot.image.size(0);
         let (w, h) = (size.width.0 as u32, size.height.0 as u32);
@@ -1735,9 +1768,18 @@ impl DesignCanvas {
             let h = (h as f32 * PICTURE_WIDTH as f32 / w as f32).round() as u32;
             picture = image::imageops::thumbnail(&picture, PICTURE_WIDTH, h.max(1));
         }
+        Some(picture)
+    }
+
+    /// Save a picture of screen `id` for an agent as `name`.png, and say where.
+    fn write_picture(&self, id: &str, name: &str, picture: image::RgbaImage) -> Option<String> {
         let dir = crate::design::folder(&self.root).join("shots");
         std::fs::create_dir_all(&dir).ok()?;
-        let file = dir.join(format!("{id}.png"));
+        let file = if name == id {
+            dir.join(format!("{id}.png"))
+        } else {
+            dir.join(format!("{id}-{name}.png"))
+        };
         picture
             .save_with_format(&file, image::ImageFormat::Png)
             .ok()?;
@@ -3401,6 +3443,9 @@ impl DesignCanvas {
             self.comment_down(w, cx);
             return;
         }
+        if e.button == MouseButton::Left && self.mark_down(w, cx) {
+            return;
+        }
         if e.button == MouseButton::Left && self.points_down(w, e.modifiers.alt, cx) {
             return;
         }
@@ -3577,6 +3622,12 @@ impl DesignCanvas {
         };
         match &mut self.drag {
             Drag::None => return,
+            Drag::Mark { pts, .. } => {
+                let last = pts[pts.len() - 1];
+                if (w.0 - last.0).abs().max((w.1 - last.1).abs()) * self.zoom >= 2. {
+                    pts.push(w);
+                }
+            }
             Drag::Point { at, .. } => *at = w,
             Drag::Guide { vertical, at, .. } => {
                 if let Some((sx, sy)) = guide_off {
@@ -3645,6 +3696,7 @@ impl DesignCanvas {
         self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
             Drag::Move { moved: true, .. } => self.save_canvas(),
+            Drag::Mark { id, pts } => self.mark_up(id, pts, cx),
             Drag::Draw {
                 id,
                 from,
@@ -4034,6 +4086,10 @@ impl DesignCanvas {
                 self.new_open = !self.new_open;
                 true
             }
+            (false, false, false, "m") => {
+                self.toggle_marking(cx);
+                true
+            }
             (false, false, false, "t") if self.screen.is_some() => {
                 self.insert("<p>Text</p>", cx);
                 true
@@ -4058,6 +4114,8 @@ impl DesignCanvas {
             self.finish_pen(false, cx);
         } else if self.shape.is_some() {
             self.shape = None;
+        } else if self.marking {
+            self.marking = false;
         } else if self.inline_open {
             self.inline_open = false;
         } else if self.comment_open.is_some() {
@@ -5347,6 +5405,7 @@ impl DesignCanvas {
         let bounds = self.bounds.clone();
         let (links, dragging) = self.paint_links();
         let sketch = self.sketch();
+        let mark_strokes = self.mark_strokes();
         let point_lines = self.point_lines();
         let notice = self
             .notice
@@ -5402,7 +5461,9 @@ impl DesignCanvas {
             .children(self.artboards(cx))
             .children(self.grid_marks())
             .children(self.shape_marks())
-            .when(self.shape.is_some(), |a| a.cursor_crosshair())
+            .when(self.shape.is_some() || self.marking, |a| {
+                a.cursor_crosshair()
+            })
             .child(
                 canvas(
                     |_, _, _| {},
@@ -5419,6 +5480,7 @@ impl DesignCanvas {
                         if let Some((pts, arrow)) = &sketch {
                             shapes::paint_sketch(pts, *arrow, &tf, window);
                         }
+                        marks::paint_marks(&mark_strokes, &tf, window);
                         for (pts, closed) in &point_lines {
                             let mut pts = pts.clone();
                             if *closed && !pts.is_empty() {
@@ -5434,6 +5496,7 @@ impl DesignCanvas {
                 .size_full(),
             )
             .children(self.point_handles())
+            .children(self.mark_hint(cx))
             .children(self.empty_state(cx))
             .children(self.thinking())
             .when(self.playing.is_none(), |a| {
