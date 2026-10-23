@@ -250,7 +250,8 @@ impl DesignCanvas {
             .child(div().flex_1().min_w_0().children(input))
     }
 
-    /// A colour field: a swatch of the colour, then its hex or token name.
+    /// A colour field: a swatch of the colour, which opens the colour picker, then its
+    /// hex or token name.
     fn color_fld(&self, id: &'static str, el: &Element, cx: &mut Context<Self>) -> Div {
         let all: Vec<&Element> = std::iter::once(el).chain(&self.also).collect();
         let shown = fields::field(id)
@@ -264,7 +265,9 @@ impl DesignCanvas {
                 .or_else(|| self.token_color(&format!("--{v}")))
                 .or_else(|| color_of(&fields::hex(e.computed.get(f.reads)?)?))
         };
-        let c = color_of(&shown)
+        let c = self
+            .picking(id)
+            .or_else(|| color_of(&shown))
             .or_else(|| self.token_color(&format!("--{shown}")))
             .or_else(|| painted(el));
         // Layers with different colours show a swatch split between the first two.
@@ -275,13 +278,19 @@ impl DesignCanvas {
                 Some((a, cs.find(|b| *b != a)?))
             })
             .flatten();
+        let open = self.picking(id).is_some();
         let swatch = div()
-            .size(px(14.))
+            .id(SharedString::from(format!("design-swatch-{id}")))
+            .size(px(16.))
             .flex_none()
             .rounded(px(3.))
             .overflow_hidden()
             .border_1()
-            .border_color(divider());
+            .border_color(if open { rgb(c_blue()) } else { divider() })
+            .cursor_pointer()
+            .tooltip(tip("Pick a colour"))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| this.open_picker(id, cx)));
         let swatch = match split {
             Some((a, b)) => swatch
                 .flex()

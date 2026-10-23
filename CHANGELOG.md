@@ -6,6 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
+- A colour picker in Design. Click the swatch of a fill, text or stroke colour for a square of shades, a hue strip and an opacity strip, the colour's hex and RGB, the theme's colours, and the colours you used last. The eyedropper (the pipette in the picker, or I with a layer picked) takes a colour from anywhere on the screens, with a loupe showing the colour and its hex under the pointer.
 - Mixed values in Design. With several layers selected, each field shows the value they share, or Mixed where they differ, instead of only the first layer's. Fill opens when any of them has one, and its swatch is split between the colours in play. Typing a value still sets it on all of them.
 - Review an AI change screen by screen in Design. Each screen under "Changed" opens before and after over the canvas, as a slider that follows the pointer or side by side, with Put this screen back to drop that screen's part of the change and keep the rest. Comparing a screen with a version in History uses the slider too.
 - Queue asks while AI works in Design. The bar keeps a line to type in while the agent is busy; Enter puts the ask in line with what was selected when you typed it, and the queue shows under the working row with a way to take each one out. When a change ends, it's kept (it stays in History) and the next ask starts on its own.
