@@ -13,7 +13,7 @@ use std::time::Duration;
 
 /// Marks Runo's wrapper in the process list, so an unrelated process that reused a pid is
 /// never mistaken for a turn.
-const MARK: &str = "runo-turn";
+pub(crate) const MARK: &str = "runo-turn";
 /// Runs the agent with its output in files, then records how it ended.
 const SCRIPT: &str = r#"d="$1"; shift; "$@" >"$d/out" 2>"$d/err" </dev/null; echo $? >"$d/exit.tmp"; mv "$d/exit.tmp" "$d/exit""#;
 
@@ -44,7 +44,7 @@ pub fn root() -> Option<&'static Path> {
     ROOT.get().map(PathBuf::as_path)
 }
 
-fn turn_dir(root: &Path, id: u64) -> PathBuf {
+pub(crate) fn turn_dir(root: &Path, id: u64) -> PathBuf {
     crate::persist::session_dir(root, id).join("turn")
 }
 
@@ -133,9 +133,7 @@ pub fn spawn(
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
-    let turn = turn_dir(root, id);
-    let _ = std::fs::remove_dir_all(&turn);
-    std::fs::create_dir_all(&turn).map_err(|e| format!("could not set up the turn: {e}"))?;
+    let turn = fresh_turn(root, id)?;
     let mut sh = Command::new("/bin/sh");
     sh.arg("-c")
         .arg(SCRIPT)
@@ -143,10 +141,54 @@ pub fn spawn(
         .arg(&turn)
         .arg(command.get_program())
         .args(command.get_args());
+    start(id, turn, sh, &command, dir, tx)
+}
+
+/// Start `command` as a detached turn that takes its messages on stdin: Runo's agent
+/// host runs it, sends it `prompt` first, and forwards each message added while it works
+/// (see `harness::host`).
+pub fn spawn_live(
+    root: &Path,
+    id: u64,
+    command: Command,
+    prompt: &str,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
+    let turn = fresh_turn(root, id)?;
+    crate::harness::host::send(&turn, prompt)
+        .map_err(|e| format!("could not set up the turn: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("could not find Runo: {e}"))?;
+    let mut host = Command::new(exe);
+    host.arg("--agent-host")
+        .arg(MARK)
+        .arg(&turn)
+        .arg(command.get_program())
+        .args(command.get_args());
+    start(id, turn, host, &command, dir, tx)
+}
+
+/// An empty folder for session `id`'s next turn.
+fn fresh_turn(root: &Path, id: u64) -> Result<PathBuf, String> {
+    let turn = turn_dir(root, id);
+    let _ = std::fs::remove_dir_all(&turn);
+    std::fs::create_dir_all(&turn).map_err(|e| format!("could not set up the turn: {e}"))?;
+    Ok(turn)
+}
+
+/// Start `wrapper`, which runs `command` in `turn`, in a process session of its own.
+fn start(
+    id: u64,
+    turn: PathBuf,
+    mut wrapper: Command,
+    command: &Command,
+    dir: &str,
+    tx: Sender<Event>,
+) -> Result<Handle, String> {
     for (key, value) in command.get_envs() {
         match value {
-            Some(value) => sh.env(key, value),
-            None => sh.env_remove(key),
+            Some(value) => wrapper.env(key, value),
+            None => wrapper.env_remove(key),
         };
     }
     #[cfg(unix)]
@@ -155,13 +197,13 @@ pub fn spawn(
         // SAFETY: setsid is async-signal-safe; it gives the turn its own session and
         // process group, so it survives Runo and can be stopped as a whole.
         unsafe {
-            sh.pre_exec(|| {
+            wrapper.pre_exec(|| {
                 libc::setsid();
                 Ok(())
             });
         }
     }
-    let child = sh
+    let child = wrapper
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

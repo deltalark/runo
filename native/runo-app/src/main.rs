@@ -2410,6 +2410,9 @@ impl RunoApp {
                 // Taken here so a stopped run that still exits cleanly doesn't leave the
                 // flag behind for the next real failure.
                 let turn = self.turns.remove(&id);
+                if turn.as_ref().is_some_and(|t| t.live) {
+                    self.requeue_unsent(id);
+                }
                 let stopped = turn.as_ref().is_some_and(|t| t.stopping);
                 let took = turn.as_ref().map(|t| t.started.elapsed());
                 self.handles.remove(&Target::Session(id));
@@ -9956,6 +9959,11 @@ fn main() {
             .flatten();
         memory_mcp::serve(args.get(2).map(String::as_str).unwrap_or("."), thread);
         return;
+    }
+    // `runo --agent-host runo-turn <turn folder> <agent> <args…>`: a live turn's agent,
+    // detached from the window (see harness::host).
+    if args.get(1).map(String::as_str) == Some("--agent-host") {
+        std::process::exit(harness::host::main(&args[2..]));
     }
     // `runo --events <session>`: print a session's event log, one JSON line per event.
     if args.get(1).map(String::as_str) == Some("--events") {

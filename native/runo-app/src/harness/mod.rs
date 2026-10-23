@@ -7,6 +7,7 @@ pub mod apply;
 pub mod event;
 #[cfg(test)]
 mod fixtures;
+pub mod host;
 pub mod log;
 pub mod record;
 pub mod turn;

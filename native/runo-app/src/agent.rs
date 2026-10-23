@@ -1636,6 +1636,37 @@ pub fn prepare_folder(spec: &RunSpec, dir: &str, sandboxed: bool) {
     }
 }
 
+/// Whether Runo talks to the agent while it works: Claude Code takes its prompt, and
+/// any message sent while it runs, on stdin (`--input-format stream-json`).
+pub fn takes_live_input(provider: &str) -> bool {
+    provider == "claude"
+}
+
+/// A Claude turn's command made live: the prompt at the end of its arguments goes
+/// instead as the first message on stdin. Returns the command and that prompt, or
+/// `None` when the arguments don't end in `-- <prompt>`.
+pub fn live_command(command: &Command) -> Option<(Command, String)> {
+    let args: Vec<String> = command
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let [rest @ .., dashes, prompt] = args.as_slice() else {
+        return None;
+    };
+    if dashes != "--" {
+        return None;
+    }
+    let mut live = Command::new(command.get_program());
+    live.args(rest).args(["--input-format", "stream-json"]);
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => live.env(key, value),
+            None => live.env_remove(key),
+        };
+    }
+    Some((live, prompt.clone()))
+}
+
 /// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
 pub fn run_agent(
     target: Target,
@@ -1652,6 +1683,11 @@ pub fn run_agent(
     } else if let (Target::Session(id), Some(root)) = (target, crate::detach::root()) {
         // Local turns outlive Runo, so closing or a crash doesn't stop them.
         if crate::updater::resolve(bin).is_some() {
+            if takes_live_input(spec.provider) {
+                if let Some((live, prompt)) = live_command(&command) {
+                    return crate::detach::spawn_live(root, id, live, &prompt, dir, tx);
+                }
+            }
             return crate::detach::spawn(root, id, command, dir, tx);
         }
     }
@@ -1944,6 +1980,36 @@ mod arg_tests {
         assert!(!next.contains(&"--continue".to_string()));
         // The prompt always comes last, after `--`.
         assert_eq!(&next[next.len() - 2..], ["--", "hi"]);
+    }
+
+    #[test]
+    fn a_live_claude_turn_sends_its_prompt_on_stdin() {
+        let mut command = Command::new("claude");
+        command
+            .args(["-p", "--output-format", "stream-json", "--", "Fix it"])
+            .env("RUNO_X", "1");
+        let (live, prompt) = live_command(&command).unwrap();
+        assert_eq!(prompt, "Fix it");
+        let args: Vec<_> = live
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json"
+            ]
+        );
+        assert!(live.get_envs().any(|(k, v)| k == "RUNO_X" && v.is_some()));
+        // Without a trailing prompt there's nothing to move.
+        let mut bare = Command::new("claude");
+        bare.args(["-p", "hi"]);
+        assert!(live_command(&bare).is_none());
+        assert!(takes_live_input("claude") && !takes_live_input("codex"));
     }
 
     #[test]
