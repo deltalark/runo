@@ -8,6 +8,12 @@
 //! A fact that depends on the installed release is a `Gate`: true, false, or text the
 //! CLI's `--help` must mention, checked against what `caps` found when Runo started.
 //! Nothing here starts a model or costs tokens.
+//!
+//! Newer manifests come over the air: alongside the check for a new Runo, `fetch`
+//! downloads the manifest published with the `agent-registry` release, and keeps it when
+//! its Ed25519 signature checks out against the key built into Runo (`agents.pub`), its
+//! version is newer than any Runo has, and this Runo is new enough for it. It is used
+//! from the next start, so the list of agents never changes under a running window.
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -15,6 +21,14 @@ use std::sync::OnceLock;
 
 /// The manifest built into Runo.
 const BUILT_IN: &str = include_str!("agents.json");
+
+/// The public half of the key published manifests are signed with: 32 bytes of Ed25519,
+/// in base64. Empty, Runo downloads nothing and keeps the manifest it was built with.
+const PUBLIC_KEY: &str = include_str!("agents.pub");
+
+/// Where published manifests are, with their signature at `<url>.sig`.
+const REMOTE: &str =
+    "https://github.com/deltalark/runo/releases/download/agent-registry/agents.json";
 
 /// A fact that holds always, never, or once the CLI's help mentions some text.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -195,8 +209,120 @@ impl AgentSpec {
 
 #[derive(Deserialize)]
 struct Manifest {
+    /// Raised with every change, so an older manifest never replaces a newer one.
+    #[serde(default)]
+    version: u64,
+    /// The oldest Runo that understands this manifest.
+    #[serde(default)]
+    min_runo: String,
     #[serde(default)]
     agents: Vec<Value>,
+}
+
+/// Whether `signature` (base64) is `key`'s Ed25519 signature of `text`.
+pub fn verify(text: &[u8], signature: &str, key: &str) -> bool {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (Ok(signature), Ok(key)) = (b64.decode(signature.trim()), b64.decode(key.trim())) else {
+        return false;
+    };
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(text, &signature)
+        .is_ok()
+}
+
+/// The version of manifest `text`, when this Runo can use it: well formed, and not
+/// written for a newer Runo.
+fn usable(text: &str) -> Option<u64> {
+    let manifest: Manifest = serde_json::from_str(text).ok()?;
+    let runo = env!("CARGO_PKG_VERSION");
+    if !manifest.min_runo.is_empty() && crate::alerts::is_newer(&manifest.min_runo, runo) {
+        return None;
+    }
+    merge(text, None).ok()?;
+    Some(manifest.version)
+}
+
+fn version_of(text: &str) -> u64 {
+    serde_json::from_str::<Manifest>(text).map_or(0, |m| m.version)
+}
+
+/// The downloaded manifest kept in `dir`, when its signature checks out against `key`,
+/// it is newer than the built-in one, and this Runo can use it.
+fn kept(dir: &std::path::Path, key: &str, built_in: &str) -> Option<String> {
+    if key.trim().is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join("agents.json")).ok()?;
+    let signature = std::fs::read_to_string(dir.join("agents.json.sig")).ok()?;
+    if !verify(text.as_bytes(), &signature, key) {
+        return None;
+    }
+    (usable(&text)? > version_of(built_in)).then_some(text)
+}
+
+/// Keep a downloaded manifest and its signature in `dir` when they are better than what
+/// Runo has: signed with `key`, usable, and newer than the built-in and kept ones.
+/// Returns its version when it was kept.
+fn keep(
+    dir: &std::path::Path,
+    key: &str,
+    built_in: &str,
+    text: &str,
+    signature: &str,
+) -> Option<u64> {
+    if key.trim().is_empty() || !verify(text.as_bytes(), signature, key) {
+        return None;
+    }
+    let version = usable(text)?;
+    let have = kept(dir, key, built_in).map_or_else(|| version_of(built_in), |t| version_of(&t));
+    if version <= have {
+        return None;
+    }
+    std::fs::create_dir_all(dir).ok()?;
+    // The signature goes first, so a manifest is never kept without the one it needs.
+    for (name, data) in [("agents.json.sig", signature), ("agents.json", text)] {
+        let tmp = dir.join(format!("{name}.tmp"));
+        std::fs::write(&tmp, data).ok()?;
+        std::fs::rename(&tmp, dir.join(name)).ok()?;
+    }
+    Some(version)
+}
+
+fn cache() -> std::path::PathBuf {
+    crate::store::data_dir().join("registry")
+}
+
+/// Download the published manifest and keep it for the next start when it is signed,
+/// usable and newer. Runs on a background thread; a failure leaves everything as it was.
+pub fn fetch() {
+    if PUBLIC_KEY.trim().is_empty() || std::env::var_os("RUNO_NO_REGISTRY").is_some() {
+        return;
+    }
+    let get = |url: &str| -> Option<String> {
+        let out = std::process::Command::new("curl")
+            .args(["-fsSL", "-m", "10", "-H", "User-Agent: Runo", url])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let (Some(text), Some(signature)) = (get(REMOTE), get(&format!("{REMOTE}.sig"))) else {
+        return;
+    };
+    match keep(&cache(), PUBLIC_KEY, BUILT_IN, &text, &signature) {
+        Some(version) => crate::applog::info(
+            "registry",
+            format!("kept agent manifest {version}; it is used from the next start"),
+        ),
+        None if !verify(text.as_bytes(), &signature, PUBLIC_KEY) => crate::applog::warn(
+            "registry",
+            "the published agent manifest's signature didn't check out, so it was left out",
+        ),
+        None => {}
+    }
 }
 
 /// The manifest `text` with `over` on top: an agent `over` names by an id `text` has
@@ -261,12 +387,18 @@ fn own() -> Option<String> {
 fn registry() -> &'static Registry {
     REGISTRY.get_or_init(|| {
         let own = own();
-        let specs = match merge(BUILT_IN, own.as_deref()) {
+        let downloaded = if cfg!(test) {
+            None
+        } else {
+            kept(&cache(), PUBLIC_KEY, BUILT_IN)
+        };
+        let base = downloaded.as_deref().unwrap_or(BUILT_IN);
+        let specs = match merge(base, own.as_deref()) {
             Ok(specs) => specs,
             Err(why) => {
                 // A broken file of the person's leaves the built-in agents as they are.
                 eprintln!("Runo couldn't read your agents.json, so it was left out: {why}");
-                merge(BUILT_IN, None).expect("the built-in manifest reads")
+                merge(base, None).expect("a kept manifest reads")
             }
         };
         let specs: &'static [AgentSpec] = Box::leak(specs.into_boxed_slice());
@@ -345,6 +477,97 @@ mod tests {
         assert_eq!(kimi.acp[0].args, ["--acp"]);
         assert_eq!(kimi.modes, ["edit", "plan", "full"]);
         assert!(merge(BUILT_IN, Some("{not json")).is_err());
+    }
+
+    /// A key pair for tests: the signing key and the public half in base64.
+    fn key() -> (ring::signature::Ed25519KeyPair, String) {
+        use base64::Engine;
+        use ring::signature::KeyPair;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let public = base64::engine::general_purpose::STANDARD.encode(pair.public_key().as_ref());
+        (pair, public)
+    }
+
+    fn sign(pair: &ring::signature::Ed25519KeyPair, text: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(pair.sign(text.as_bytes()).as_ref())
+    }
+
+    fn manifest(version: u64, min_runo: &str) -> String {
+        format!(
+            r#"{{"version":{version},"min_runo":"{min_runo}","agents":[{{"id":"claude","name":"Claude Code","bin":"claude"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn only_signed_newer_manifests_are_kept() {
+        let dir = std::env::temp_dir().join(format!("runo-registry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (pair, public) = key();
+        let (other, _) = key();
+        let built_in = manifest(1, "");
+        let v2 = manifest(2, "");
+        // No key built in: nothing is downloaded or kept.
+        assert_eq!(keep(&dir, "", &built_in, &v2, &sign(&pair, &v2)), None);
+        // Signed by another key, or changed after signing.
+        assert_eq!(
+            keep(&dir, &public, &built_in, &v2, &sign(&other, &v2)),
+            None
+        );
+        let tampered = v2.replace("claude\"", "evil\"");
+        assert_eq!(
+            keep(&dir, &public, &built_in, &tampered, &sign(&pair, &v2)),
+            None
+        );
+        // Not newer than the built-in one.
+        let v1 = manifest(1, "");
+        assert_eq!(keep(&dir, &public, &built_in, &v1, &sign(&pair, &v1)), None);
+        // For a newer Runo than this one.
+        let future = manifest(5, "999.0.0");
+        assert_eq!(
+            keep(&dir, &public, &built_in, &future, &sign(&pair, &future)),
+            None
+        );
+        assert!(kept(&dir, &public, &built_in).is_none());
+        // Signed and newer: kept, and used from then on.
+        assert_eq!(
+            keep(&dir, &public, &built_in, &v2, &sign(&pair, &v2)),
+            Some(2)
+        );
+        assert_eq!(kept(&dir, &public, &built_in).as_deref(), Some(v2.as_str()));
+        // An older one never replaces it.
+        let v3 = manifest(3, "");
+        assert_eq!(keep(&dir, &public, &built_in, &v1, &sign(&pair, &v1)), None);
+        assert_eq!(
+            keep(&dir, &public, &built_in, &v3, &sign(&pair, &v3)),
+            Some(3)
+        );
+        // A kept file edited on disk is left out.
+        std::fs::write(dir.join("agents.json"), &tampered).unwrap();
+        assert!(kept(&dir, &public, &built_in).is_none());
+        // A Runo built with a newer manifest ignores an older kept one.
+        std::fs::write(dir.join("agents.json"), &v3).unwrap();
+        assert!(kept(&dir, &public, &manifest(4, "")).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn signatures_made_by_openssl_check_out() {
+        // `openssl pkeyutl -sign -rawin` with a throwaway key, as the publishing workflow
+        // signs, and the key's public half as `agents.pub` holds it.
+        let public = "loK6moR+lVv/gchdpEtWUC3ykzTj6m9/qKsr8E7dnzc=";
+        let signature = "/hlNev7mhRsBBKLyk96Syfl4k1Egz/BV9dRj0K4LX0Chx9E5N7yLFraHKSA58A+tc5pvODX6i63h+kXP8Y3VCA==";
+        assert!(verify(b"{\"version\":2}\n", signature, public));
+        assert!(!verify(b"{\"version\":3}\n", signature, public));
+        assert!(!verify(b"x", "not base64!", public));
+    }
+
+    #[test]
+    fn the_built_in_manifest_has_a_version() {
+        assert!(version_of(BUILT_IN) >= 1);
+        assert!(usable(BUILT_IN).is_some());
     }
 
     #[test]

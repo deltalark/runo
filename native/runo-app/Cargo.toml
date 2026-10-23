@@ -48,6 +48,8 @@ portable-pty = { path = "../../vendor/portable-pty" }
 vt100 = { path = "../../vendor/vt100" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 base64 = "0.22"
+# Checks the signature on agent manifests Runo downloads (see `registry`).
+ring = "0.17"
 i_overlay = "9"
 libc = "0.2"
 serde.workspace = true
