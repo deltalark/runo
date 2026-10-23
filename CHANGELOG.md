@@ -6,6 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
+- Check now under Settings > General > Updates looks for a newer Runo right away, even with automatic checks off, and says what it found.
 - Spacing handles in Design, as in Figma. A selected auto layout shows its gaps and padding as pink bands on the canvas; drag one to set that space, with Shift for steps of 8. Each drag is one undo step.
 - Tidy up in Design. With several floating layers picked, Tidy up (⌥⌘T) lines them up evenly in a row or a column, whichever way they spread more.
 - A colour picker in Design. Click the swatch of a fill, text or stroke colour for a square of shades, a hue strip and an opacity strip, the colour's hex and RGB, the theme's colours, and the colours you used last. The eyedropper (the pipette in the picker, or I with a layer picked) takes a colour from anywhere on the screens, with a loupe showing the colour and its hex under the pointer.

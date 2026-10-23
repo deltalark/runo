@@ -38,6 +38,8 @@ pub(crate) struct Health {
     crash_looked: bool,
     release: Arc<Mutex<Option<Release>>>,
     release_checked: Option<Instant>,
+    /// A check asked for from Settings is running.
+    release_asked: bool,
     download: Arc<Mutex<Option<Download>>>,
 }
 
@@ -342,18 +344,43 @@ impl RunoApp {
                 .release_checked
                 .is_none_or(|at| at.elapsed() > RELEASE_EVERY)
         {
-            self.health.release_checked = Some(Instant::now());
-            let slot = self.health.release.clone();
-            std::thread::spawn(move || {
-                // Newer agent manifests come with the same check, used from the next start.
-                crate::registry::fetch();
-                if let Some(release) = crate::applog::check_release() {
-                    if let Ok(mut slot) = slot.lock() {
-                        *slot = Some(release);
-                    }
-                }
-            });
+            self.check_runo();
         }
+        // A check asked for from Settings has finished: show what it found.
+        if self.health.release_asked && !crate::applog::last_check().1 {
+            self.health.release_asked = false;
+            if let Some(release) = self.health.release.lock().ok().and_then(|r| r.clone()) {
+                self.alerts_hidden
+                    .remove(&format!("runo:{}", release.version));
+            }
+            cx.notify();
+        }
+    }
+
+    /// Look for a newer Runo on GitHub now, in the background.
+    fn check_runo(&mut self) {
+        self.health.release_checked = Some(Instant::now());
+        crate::applog::check_started();
+        let slot = self.health.release.clone();
+        std::thread::spawn(move || {
+            // Newer agent manifests come with the same check, used from the next start.
+            crate::registry::fetch();
+            if let Some(release) = crate::applog::check_release() {
+                if let Ok(mut slot) = slot.lock() {
+                    *slot = Some(release);
+                }
+            }
+        });
+    }
+
+    /// Check for a Runo update now, from Settings, whether or not automatic checks are on.
+    pub(crate) fn check_runo_now(&mut self, cx: &mut Context<Self>) {
+        if crate::applog::last_check().1 {
+            return;
+        }
+        self.health.release_asked = true;
+        self.check_runo();
+        cx.notify();
     }
 
     /// Start turns that waited for a free slot, in order, and those held by a limit that
