@@ -48,6 +48,7 @@ mod marks;
 mod motion;
 mod options;
 mod pictures;
+mod queue;
 mod quick;
 mod scrub;
 mod shapes;
@@ -322,6 +323,8 @@ pub(crate) struct DesignCanvas {
     layers_hidden: bool,
     /// The next ask is about the selected layers.
     scoping: bool,
+    /// Asks typed while AI works, to start one after another.
+    queued: Vec<queue::Queued>,
     /// A quick edit of the selected layer on its way.
     quick: Option<quick::Quick>,
     /// Takes on the selected layer, to pick one of.
@@ -697,6 +700,7 @@ impl DesignCanvas {
             layers_loading: false,
             layers_hidden: false,
             scoping: false,
+            queued: Vec::new(),
             quick: None,
             options: None,
             pending_session: None,
@@ -1301,6 +1305,12 @@ impl DesignCanvas {
         }
         // Asked with layers selected, the ask is about them, and AI changes only them.
         self.scoping = self.ask_new.is_none() && self.element.is_some();
+        // While AI is working, the ask waits in line.
+        if self.ai.as_ref().is_some_and(|ai| ai.busy()) {
+            self.queue_ask(task, cx);
+            self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
+            return;
+        }
         if self.ask(task, window, cx) {
             self.ask_new = None;
             self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
@@ -1911,6 +1921,8 @@ impl DesignCanvas {
                             .on_click(cx.listener(|this, _, _, cx| this.stop_ai(cx))),
                     ),
                 )
+                .children(self.queued_rows(cx))
+                .child(self.queue_input())
                 .into_any_element(),
             None => {
                 let empty = self.f_ask.read(cx).value().trim().is_empty();
@@ -6046,6 +6058,7 @@ impl DesignCanvas {
             self.scoping = self.element.is_some();
             self.ask(task, window, cx);
         }
+        self.run_queued(window, cx);
         if self.inline_open {
             let input = self.f_inline.clone();
             if !input.read(cx).focus_handle(cx).is_focused(window) {
