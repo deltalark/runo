@@ -6,18 +6,42 @@ use super::*;
 use crate::applog::{Crash, Release};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Instant;
 
 /// How often Runo looks for a newer release of itself.
 const RELEASE_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// A Runo download: running, saved to a file, or failed.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum Download {
     Running,
     Saved(PathBuf),
     Failed(String),
+}
+
+/// A check for updates the person asked for: Settings and the Runo menu show its result.
+#[derive(Clone, PartialEq)]
+pub(crate) enum UpdateCheck {
+    Checking,
+    Latest,
+    Found(String),
+    Failed(String),
+}
+
+/// The newer Runo release, once a check found one.
+static RELEASE: Mutex<Option<Release>> = Mutex::new(None);
+/// Its download, once started.
+static DOWNLOAD: Mutex<Option<Download>> = Mutex::new(None);
+/// The last check the person asked for.
+static CHECK: Mutex<Option<UpdateCheck>> = Mutex::new(None);
+
+/// The newer Runo release found so far, its download, and the last check asked for.
+pub(crate) fn runo_update() -> (Option<Release>, Option<Download>, Option<UpdateCheck>) {
+    fn get<T: Clone>(m: &Mutex<Option<T>>) -> Option<T> {
+        m.lock().ok().and_then(|v| v.clone())
+    }
+    (get(&RELEASE), get(&DOWNLOAD), get(&CHECK))
 }
 
 #[derive(Default)]
@@ -36,9 +60,9 @@ pub(crate) struct Health {
     waiting_slot: Vec<u64>,
     crash: Option<Crash>,
     crash_looked: bool,
-    release: Arc<Mutex<Option<Release>>>,
     release_checked: Option<Instant>,
-    download: Arc<Mutex<Option<Download>>>,
+    /// The update state the window last drew, to redraw when a check or download moves on.
+    update_seen: (Option<Download>, Option<UpdateCheck>),
 }
 
 impl Health {
@@ -343,17 +367,79 @@ impl RunoApp {
                 .is_none_or(|at| at.elapsed() > RELEASE_EVERY)
         {
             self.health.release_checked = Some(Instant::now());
-            let slot = self.health.release.clone();
             std::thread::spawn(move || {
                 // Newer agent manifests come with the same check, used from the next start.
                 crate::registry::fetch();
                 if let Some(release) = crate::applog::check_release() {
-                    if let Ok(mut slot) = slot.lock() {
+                    if let Ok(mut slot) = RELEASE.lock() {
                         *slot = Some(release);
                     }
                 }
             });
         }
+        let (_, download, check) = runo_update();
+        if (download.clone(), check.clone()) != self.health.update_seen {
+            // A check the person asked for brings back the card they may have hidden.
+            if let Some(UpdateCheck::Found(version)) = &check {
+                self.alerts_hidden.remove(&format!("runo:{version}"));
+            }
+            self.health.update_seen = (download, check);
+            cx.notify();
+        }
+    }
+
+    /// Check GitHub for a newer Runo now, whatever the automatic check is set to.
+    pub(crate) fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        let Ok(mut check) = CHECK.lock() else {
+            return;
+        };
+        if *check == Some(UpdateCheck::Checking) {
+            return;
+        }
+        *check = Some(UpdateCheck::Checking);
+        drop(check);
+        self.health.release_checked = Some(Instant::now());
+        std::thread::spawn(|| {
+            let done = match crate::applog::fetch_release() {
+                Ok(Some(release)) => {
+                    let version = release.version.clone();
+                    if let Ok(mut slot) = RELEASE.lock() {
+                        *slot = Some(release);
+                    }
+                    UpdateCheck::Found(version)
+                }
+                Ok(None) => UpdateCheck::Latest,
+                Err(why) => UpdateCheck::Failed(why),
+            };
+            if let Ok(mut check) = CHECK.lock() {
+                *check = Some(done);
+            }
+        });
+        cx.notify();
+    }
+
+    /// Download the newer release for this computer into Downloads; the update card
+    /// follows it and offers to open it when it's saved.
+    pub(crate) fn download_runo(&mut self, cx: &mut Context<Self>) {
+        let Some((name, url)) = runo_update().0.and_then(|r| r.asset) else {
+            return;
+        };
+        if let Ok(mut s) = DOWNLOAD.lock() {
+            if *s == Some(Download::Running) {
+                return;
+            }
+            *s = Some(Download::Running);
+        }
+        std::thread::spawn(move || {
+            let done = crate::applog::download(&name, &url, &crate::applog::downloads_dir());
+            if let Ok(mut s) = DOWNLOAD.lock() {
+                *s = Some(match done {
+                    Ok(path) => Download::Saved(path),
+                    Err(why) => Download::Failed(why),
+                });
+            }
+        });
+        cx.notify();
     }
 
     /// Start turns that waited for a free slot, in order, and those held by a limit that
@@ -574,9 +660,9 @@ impl RunoApp {
     }
 
     fn release_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let release = self.health.release.lock().ok()?.clone()?;
+        let (release, download, _) = runo_update();
+        let release = release?;
         let key = format!("runo:{}", release.version);
-        let download = self.health.download.lock().ok()?.clone();
         if self.alerts_hidden.contains(&key) && !matches!(download, Some(Download::Running)) {
             return None;
         }
@@ -625,8 +711,7 @@ impl RunoApp {
                     _ => None,
                 };
                 let mut actions = div().flex().gap_2();
-                if let Some((name, url)) = release.asset.clone() {
-                    let slot = self.health.download.clone();
+                if release.asset.is_some() {
                     actions = actions.child(
                         self.button(
                             "runo-download",
@@ -639,26 +724,7 @@ impl RunoApp {
                         )
                         .h(px(26.))
                         .child(icon(IconName::Download, 12., c_canvas()))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            if let Ok(mut s) = slot.lock() {
-                                *s = Some(Download::Running);
-                            }
-                            let (slot, name, url) = (slot.clone(), name.clone(), url.clone());
-                            std::thread::spawn(move || {
-                                let done = crate::applog::download(
-                                    &name,
-                                    &url,
-                                    &crate::applog::downloads_dir(),
-                                );
-                                if let Ok(mut s) = slot.lock() {
-                                    *s = Some(match done {
-                                        Ok(path) => Download::Saved(path),
-                                        Err(why) => Download::Failed(why),
-                                    });
-                                }
-                            });
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(|this, _, _, cx| this.download_runo(cx))),
                     );
                 }
                 actions = actions.child(notes);

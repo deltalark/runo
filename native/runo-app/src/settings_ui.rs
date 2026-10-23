@@ -767,6 +767,100 @@ fn launch_section(pid: &'static str, st: &AppSettings, model_hint: &str) -> Sect
     )
 }
 
+/// Check for updates now, with what the last check found and the download it offers.
+fn update_row() -> Row {
+    use crate::health::{Download, UpdateCheck};
+    let current = env!("CARGO_PKG_VERSION");
+    let (release, download, check) = crate::health::runo_update();
+    let check_now = |label: &str| {
+        Ctl::Button(
+            label.into(),
+            Rc::new(|this: &mut RunoApp, cx: &mut Context<RunoApp>| this.check_for_updates(cx)),
+        )
+    };
+    if check == Some(UpdateCheck::Checking) {
+        return row(
+            "Check for updates",
+            &format!("You have Runo {current}. Looking on GitHub…"),
+            Ctl::Chip("Checking…".into(), 2),
+        );
+    }
+    if let Some(release) = release {
+        let page = release.page.clone();
+        let notes: Action = Rc::new(move |_, cx| cx.open_url(&page));
+        return match download {
+            Some(Download::Running) => row(
+                "Check for updates",
+                &format!(
+                    "Downloading Runo {} to your Downloads folder.",
+                    release.version
+                ),
+                Ctl::Chip("Downloading…".into(), 2),
+            ),
+            Some(Download::Saved(path)) => {
+                let (open, folder) = (path.clone(), path.clone());
+                row(
+                    "Check for updates",
+                    &format!(
+                        "Runo {} is saved to {}. Open it and replace Runo to finish; your sessions stay.",
+                        release.version,
+                        tilde(&path)
+                    ),
+                    Ctl::Buttons(vec![
+                        (
+                            "Show in folder".into(),
+                            Rc::new(move |_: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                                cx.reveal_path(&folder)
+                            }) as Action,
+                        ),
+                        (
+                            "Open".into(),
+                            Rc::new(move |_: &mut RunoApp, cx: &mut Context<RunoApp>| {
+                                cx.open_with_system(&open)
+                            }) as Action,
+                        ),
+                    ]),
+                )
+            }
+            other => {
+                let desc = match other {
+                    Some(Download::Failed(why)) => why,
+                    _ => format!("Runo {} is out. You have {current}.", release.version),
+                };
+                let get: Action = if release.asset.is_some() {
+                    Rc::new(|this, cx| this.download_runo(cx))
+                } else {
+                    // No file for this computer in the release: its page has the others.
+                    let page = release.page.clone();
+                    Rc::new(move |_, cx| cx.open_url(&page))
+                };
+                row(
+                    "Check for updates",
+                    &desc,
+                    Ctl::Buttons(vec![("What's new".into(), notes), ("Download".into(), get)]),
+                )
+            }
+        };
+    }
+    match check {
+        Some(UpdateCheck::Latest) => row(
+            "Check for updates",
+            &format!("Runo {current} is the latest version."),
+            check_now("Check again"),
+        ),
+        Some(UpdateCheck::Failed(why)) => row(
+            "Check for updates",
+            &format!("The check didn't finish. {why}"),
+            check_now("Try again"),
+        ),
+        _ => row(
+            "Check for updates",
+            &format!("You have Runo {current}. Looks on GitHub for a newer release now."),
+            check_now("Check now"),
+        ),
+    }
+}
+
 fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec<Section> {
     match page {
         SettingsPage::General => vec![
@@ -813,6 +907,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Inbox", "What needs you, also under the bell in the top bar.", st.pinned("Inbox"), |s, v| s.pin("Inbox", v)),
             ]),
             section("Updates", "Runo looks for a newer release on GitHub and offers to download it. Nothing installs without you.", vec![
+                update_row(),
                 switch_row("Check for Runo updates", "Checks at start and every few hours.", st.check_runo_updates, |s, v| s.check_runo_updates = v),
                 row("Logs and crash reports", &format!("Each launch writes a log, and crashes leave a report, in {}.", tilde(&crate::applog::logs_dir())), Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
             ]),
