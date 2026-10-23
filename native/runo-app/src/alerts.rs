@@ -717,7 +717,7 @@ impl RunoApp {
             return;
         };
         let busy = self
-            .started
+            .turns
             .keys()
             .filter(|id| {
                 self.state

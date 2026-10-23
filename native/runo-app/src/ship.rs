@@ -1388,13 +1388,13 @@ impl RunoApp {
             .collect();
         for &id in &others {
             if let Some(handle) = self.handles.remove(&Target::Session(id)) {
-                self.stopping.insert(id);
                 handle.kill();
             }
             if let Some(handle) = self.handles.remove(&Target::Terminal(id)) {
                 handle.kill();
             }
-            self.started.remove(&id);
+            // Its turn goes with it; the session is removed below.
+            self.turns.remove(&id);
             self.pending_start.remove(&id);
             if let Some(session) = self.state.session(id).cloned() {
                 self.remove_session_files(&session, true);

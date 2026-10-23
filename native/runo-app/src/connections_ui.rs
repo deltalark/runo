@@ -608,15 +608,11 @@ impl RunoApp {
                         .iter()
                         .rposition(|m| m.role == Role::User)
                         .unwrap_or(0);
-                    self.logs.insert(
+                    self.turns.insert(
                         id,
-                        crate::harness::log::TurnLog::resume(crate::harness::log::root(), id, turn),
+                        crate::harness::turn::Turn::resume(id, &provider, &dir, turn),
                     );
-                    if let Some(parser) = stream::Parser::for_provider(&provider, &dir) {
-                        self.streams.insert(id, parser);
-                    }
                     self.handles.insert(Target::Session(id), handle);
-                    self.started.insert(id, std::time::Instant::now());
                     picked += 1;
                 }
                 Err(e) => {

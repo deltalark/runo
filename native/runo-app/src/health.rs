@@ -278,21 +278,16 @@ impl RunoApp {
                         .map_or(session.messages.len(), |i| i + 1);
                     session.messages.truncate(start);
                     session.messages.push(Message::now(Role::Agent, ""));
-                    self.logs.insert(
+                    self.turns.insert(
                         id,
-                        crate::harness::log::TurnLog::resume(
-                            crate::harness::log::root(),
+                        crate::harness::turn::Turn::resume(
                             id,
+                            &session.provider,
+                            &session.dir,
                             start.saturating_sub(1),
                         ),
                     );
-                    if let Some(parser) =
-                        stream::Parser::for_provider(&session.provider, &session.dir)
-                    {
-                        self.streams.insert(id, parser);
-                    }
                     self.handles.insert(Target::Session(id), handle);
-                    self.started.insert(id, Instant::now());
                     picked += 1;
                 }
                 Err(e) => {
@@ -403,7 +398,7 @@ impl RunoApp {
                     .health
                     .last_output
                     .get(&id)
-                    .or_else(|| self.started.get(&id))?;
+                    .or_else(|| self.turns.get(&id).map(|t| &t.started))?;
                 let secs = since.elapsed().as_secs();
                 (secs >= u64::from(mins) * 60).then_some((id, secs / 60))
             })

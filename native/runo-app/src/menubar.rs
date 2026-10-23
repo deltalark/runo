@@ -143,8 +143,9 @@ impl RunoApp {
             .filter(|s| self.bucket(s) == Some(shell::Bucket::Running))
             .map(|s| {
                 let secs = self
-                    .started
+                    .turns
                     .get(&s.id)
+                    .map(|t| &t.started)
                     .map(|at| at.elapsed().as_secs())
                     .unwrap_or_default();
                 (s, secs)
