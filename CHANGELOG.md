@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Text in Design is edited where it is. Double-click a text layer (or press Enter) and the editor sits on the layer in its own size, weight and colours, over its own background, instead of a plain box. The screen takes the text as you type, a small layer's editor grows to fit, and the whole edit undoes with one Ctrl+Z. Escape keeps what you typed, like Enter.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
