@@ -2,17 +2,16 @@
 <defs>
 <linearGradient id="t" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#232327"/><stop offset="1" stop-color="#0E0E10"/></linearGradient>
 <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.04"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.08"/></linearGradient>
-<linearGradient id="rb" gradientUnits="userSpaceOnUse" x1="164" y1="860" x2="860" y2="164"><stop offset="0" stop-color="#34D399"/><stop offset="0.25" stop-color="#22D3EE"/><stop offset="0.5" stop-color="#6366F1"/><stop offset="0.75" stop-color="#A855F7"/><stop offset="1" stop-color="#F472B6"/></linearGradient>
-<radialGradient id="tl" gradientUnits="userSpaceOnUse" cx="190" cy="190" r="440"><stop offset="0" stop-color="#FFFFFF"/><stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.55"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
-<radialGradient id="br" gradientUnits="userSpaceOnUse" cx="834" cy="834" r="440"><stop offset="0" stop-color="#FFFFFF"/><stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.55"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
-<mask id="lit" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="url(#tl)"/><rect width="1024" height="1024" fill="url(#br)"/></mask>
+<linearGradient id="rb" gradientUnits="userSpaceOnUse" x1="0" y1="232" x2="0" y2="792"><stop offset="0" stop-color="#F472B6"/><stop offset="0.3" stop-color="#A855F7"/><stop offset="0.6" stop-color="#6366F1"/><stop offset="1" stop-color="#22D3EE"/></linearGradient>
+<linearGradient id="fadev" gradientUnits="userSpaceOnUse" x1="0" y1="232" x2="0" y2="792"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0"/><stop offset="0.3" stop-color="#FFFFFF"/><stop offset="0.7" stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient>
+<mask id="lit" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="url(#fadev)"/></mask>
 <filter id="glow" filterUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><feGaussianBlur stdDeviation="18"/></filter>
 </defs>
 <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#t)"/>
 <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="url(#rim)" stroke-width="3"/>
 <g mask="url(#lit)">
-<rect x="164" y="164" width="696" height="696" rx="124" fill="none" stroke="url(#rb)" stroke-width="44" filter="url(#glow)" opacity="0.55"/>
-<rect x="164" y="164" width="696" height="696" rx="124" fill="none" stroke="url(#rb)" stroke-width="26"/>
+<line x1="196" y1="232" x2="196" y2="792" stroke="url(#rb)" stroke-width="72" stroke-linecap="round" filter="url(#glow)" opacity="0.7"/>
+<line x1="196" y1="232" x2="196" y2="792" stroke="url(#rb)" stroke-width="34" stroke-linecap="round"/>
 </g>
 <g stroke-linecap="round" stroke-width="72">
 <line x1="336" y1="392" x2="600" y2="392" stroke="#FAFAFA" stroke-opacity="0.35"/>
