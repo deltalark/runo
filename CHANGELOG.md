@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
+
 ## [0.5.0] - 2026-10-23
 
 ### Fixed

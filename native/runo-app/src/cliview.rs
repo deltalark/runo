@@ -502,8 +502,14 @@ impl RunoApp {
         }
     }
 
-    /// The segmented Chat / CLI switch in the session header.
-    pub(crate) fn view_toggle(&self, session: &Session, cx: &mut Context<Self>) -> AnyElement {
+    /// The segmented Chat / CLI switch in the session header; `compact` shows only the
+    /// icons, for a narrow header.
+    pub(crate) fn view_toggle(
+        &self,
+        session: &Session,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = session.id;
         let blocker = cli_blocker(session);
         let supported = blocker.is_none();
@@ -535,7 +541,7 @@ impl RunoApp {
                 } else {
                     icon(glyph, 12., c_muted()).into_any_element()
                 })
-                .child(label)
+                .when(!compact, |el| el.child(label))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_cli_view(id, on, cx)))
         };
         crate::shell::seg_track()
@@ -545,6 +551,10 @@ impl RunoApp {
             .when(!supported, |el| el.opacity(0.5))
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(match &blocker {
+                    None if compact => format!(
+                        "Chat or CLI: same conversation, two views. Switching is free: nothing is sent to {name}. {}",
+                        keymap::label(cx, "toggle-view")
+                    ),
                     None => format!(
                         "Same conversation, two views. Switching is free: nothing is sent to {name}. {}",
                         keymap::label(cx, "toggle-view")

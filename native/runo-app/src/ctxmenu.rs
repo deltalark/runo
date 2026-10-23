@@ -19,6 +19,8 @@ pub(crate) enum CtxTarget {
     Playbooks(u64),
     /// The Runs on button in a session's header.
     RunsOn(u64),
+    /// The More button of a session's header too narrow for its actions.
+    Header(u64),
     /// The branch chip in the top bar, for a session.
     Branch(u64),
     /// The terminal panel's Run menu of quick commands.
@@ -46,6 +48,9 @@ enum Act {
     /// Move a session (id) to a connection (id).
     MoveTo(u64, u64),
     ManageConnections,
+    /// Go back to the canvas a session was asked from.
+    OpenCanvas(u64),
+    ShowBrowser,
     Toggle(u64),
     Diff(String),
     Preview(String),
@@ -328,6 +333,53 @@ impl RunoApp {
                     ])
                     .collect()
             }
+            CtxTarget::Header(sid) => {
+                let Some(s) = self.state.session(*sid) else {
+                    return Vec::new();
+                };
+                let mut v = Vec::new();
+                if let Some(view) = crate::shell::canvas_of(s) {
+                    v.push(item(
+                        format!("Open {}", crate::shell::canvas_title(view)),
+                        if view == View::Design {
+                            Mode::Design.glyph()
+                        } else {
+                            Mode::Architecture.glyph()
+                        },
+                        Act::OpenCanvas(*sid),
+                    ));
+                }
+                if cx.global::<AppSettings>().browser_enabled && self.app_serving(s) {
+                    v.push(item("Open in Browser", IconName::Globe, Act::ShowBrowser));
+                }
+                if !s.branch.is_empty() {
+                    v.push(item(
+                        "Copy branch name",
+                        IconName::GitBranch,
+                        Act::Copy(s.branch.clone(), "branch name"),
+                    ));
+                }
+                v.push(None);
+                v.extend(self.ctx_items(&CtxTarget::Playbooks(s.project_id), cx));
+                if self.runs_on_label(s).is_some() {
+                    v.push(None);
+                    v.extend(self.ctx_items(&CtxTarget::RunsOn(*sid), cx));
+                }
+                v.push(None);
+                v.push(danger(
+                    "Delete session…",
+                    IconName::Trash,
+                    Act::Delete(*sid),
+                ));
+                // No separator first or twice in a row, where a group came out empty.
+                let mut prev_sep = true;
+                v.retain(|e| {
+                    let keep = !(e.is_none() && prev_sep);
+                    prev_sep = e.is_none();
+                    keep
+                });
+                v
+            }
             CtxTarget::Branch(sid) => {
                 let Some(s) = self.state.session(*sid) else {
                     return Vec::new();
@@ -537,6 +589,8 @@ impl RunoApp {
                 self.settings_page = SettingsPage::Connections;
             }
             Act::ManagePlaybooks => self.view = View::Automations,
+            Act::OpenCanvas(sid) => self.open_session(sid, window, cx),
+            Act::ShowBrowser => self.show_browser(),
             Act::NewIn(pid) => {
                 self.new_project = Some(pid);
                 self.open_new_session();
