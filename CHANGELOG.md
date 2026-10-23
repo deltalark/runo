@@ -8,6 +8,10 @@ All notable changes to Runo are documented here.
 
 - Design's canvas handles like a design tool. Every side and corner of the picked layer resizes it: Shift keeps its shape and Alt resizes it about its middle. Moving or resizing snaps to the sides and middles of the layers beside it, its container and the screen, with red lines for what it lines up with and, while moving, the gaps to its neighbours. Arrow keys move a floating layer 1px (10 with Shift), reorder one in a layout, or move a picked screen. Alt-drag leaves a copy, holding Space pans, Enter steps into a layer's children, Shift+Enter steps out, and Tab and Shift+Tab go to the next and previous layer.
 
+### Fixed
+
+- The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
+
 ## [0.5.0] - 2026-10-23
 
 ### Fixed
