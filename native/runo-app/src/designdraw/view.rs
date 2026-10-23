@@ -44,6 +44,7 @@ mod libraries;
 mod looks;
 mod motion;
 mod pictures;
+mod scrub;
 mod shapes;
 mod vars;
 mod vectors;
@@ -433,6 +434,8 @@ pub(crate) struct DesignCanvas {
     people: Vec<String>,
     f_inline: Entity<InputState>,
     inline_open: bool,
+    /// A field's mark being dragged to change its number.
+    scrub: Option<scrub::Scrub>,
     /// What the text fields were filled for.
     loaded: Option<(String, dom::Path)>,
     loaded_screen: Option<String>,
@@ -731,6 +734,7 @@ impl DesignCanvas {
             people: Vec::new(),
             f_inline,
             inline_open: false,
+            scrub: None,
             loaded: None,
             loaded_screen: None,
             seen: HashMap::new(),
@@ -2439,9 +2443,15 @@ impl DesignCanvas {
             cx,
             move |r| r.edit(&id, device, &js),
             move |this, out, cx| match out {
-                Ok(Some((before, shot))) => this.landed(id2, before, shot, after, cx),
-                Ok(None) => {}
-                Err(e) => this.say(e),
+                Ok(Some((before, shot))) => {
+                    this.landed(id2, before, shot, after, cx);
+                    this.scrub_landed(cx);
+                }
+                Ok(None) => this.scrub_landed(cx),
+                Err(e) => {
+                    this.say(e);
+                    this.scrub_landed(cx);
+                }
             },
         );
     }
@@ -2456,12 +2466,15 @@ impl DesignCanvas {
         after: After,
         cx: &mut Context<Self>,
     ) {
-        self.undo.push(Step {
-            id: id.clone(),
-            html: before,
-            by_ai: None,
-            lesson: None,
-        });
+        // A dragged field keeps the step its first edit made, so the drag undoes at once.
+        if !self.scrub_merges() {
+            self.undo.push(Step {
+                id: id.clone(),
+                html: before,
+                by_ai: None,
+                lesson: None,
+            });
+        }
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
         }
@@ -3520,7 +3533,10 @@ impl DesignCanvas {
         cx.notify();
     }
 
-    fn on_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_move(&mut self, e: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scrub_move(e, window, cx) {
+            return;
+        }
         let local = self.local(e.position);
         let w = self.world(local);
         if matches!(self.drag, Drag::None) && self.pen.is_some() {
@@ -3641,6 +3657,10 @@ impl DesignCanvas {
     }
 
     fn on_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.end_scrub() {
+            cx.notify();
+            return;
+        }
         let drop = self.drop.take();
         self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
@@ -5890,6 +5910,7 @@ impl DesignCanvas {
             .on_mouse_move(cx.listener(Self::on_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_up))
+            .when(self.scrubbing(), |el| el.cursor_ew_resize())
             .v_flex()
             .child(
                 div()

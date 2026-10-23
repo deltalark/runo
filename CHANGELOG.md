@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Design's number fields can be dragged like Figma's: drag a field's label or icon (W, H, radius, opacity, gap, padding, font size, X, Y, rotation and the rest) left or right to change it a step a pixel, or ten with Shift. The screen follows as you drag, and the whole drag undoes in one step.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
