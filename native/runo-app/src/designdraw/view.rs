@@ -34,6 +34,7 @@ mod comments;
 mod components;
 mod discard;
 mod figma;
+mod fromfigma;
 mod grids;
 mod handles;
 mod handoff;
@@ -433,6 +434,10 @@ pub(crate) struct DesignCanvas {
     code_map: super::codemap::CodeMap,
     f_link_name: Entity<InputState>,
     f_link_import: Entity<InputState>,
+    /// Import from Figma: the link, and a token when Settings has none.
+    f_figma: Entity<InputState>,
+    f_figma_token: Entity<InputState>,
+    figma_busy: bool,
     code_link_for: String,
     f_variant: Entity<InputState>,
     comp_vals: (String, String),
@@ -639,6 +644,7 @@ impl DesignCanvas {
         let f_lib = Self::make_library_field(&root, window, cx);
         let f_version = Self::make_version_field(window, cx, &mut subs);
         let (f_link_name, f_link_import) = Self::make_code_link_fields(window, cx, &mut subs);
+        let (f_figma, f_figma_token) = Self::make_figma_fields(window, cx, &mut subs);
         let code_map = super::codemap::CodeMap::load(&root);
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
@@ -750,6 +756,9 @@ impl DesignCanvas {
             code_map,
             f_link_name,
             f_link_import,
+            f_figma,
+            f_figma_token,
+            figma_busy: false,
             code_link_for: String::new(),
             f_variant,
             comp_vals: Default::default(),
@@ -4461,6 +4470,7 @@ impl DesignCanvas {
                     ),
             )
             .on_click(cx.listener(|this, _, window, cx| this.start_describe(window, cx)));
+        let figma = self.figma_menu_item(cx);
         // It opens from the frame tool, above the toolbar.
         div()
             .absolute()
@@ -4486,6 +4496,7 @@ impl DesignCanvas {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(devices)
                     .child(describe)
+                    .child(figma)
                     .child(list),
             )
             .into_any_element()
@@ -5777,6 +5788,8 @@ impl DesignCanvas {
                     .child(section("Add a screen"))
                     .child(div().pt_2().child(devices)),
             )
+            .child(section("Import from Figma"))
+            .child(self.figma_import_form(cx))
             .child(grid)
             .child(section("How it works"))
             .child(how)

@@ -134,6 +134,8 @@ pub struct AppSettings {
     pub browser: String,
     /// The built-in browser card was answered.
     pub browser_asked: bool,
+    /// A Figma personal access token, for importing frames into Design.
+    pub figma_token: String,
     /// Shortcuts changed in Settings > Keybindings: shortcut id → keys ("cmd-shift-k").
     pub keybindings: HashMap<String, String>,
     /// Places sessions can run besides this machine (Cove servers, SSH servers).
@@ -256,6 +258,7 @@ impl Default for AppSettings {
             browser_enabled: false,
             browser: "auto".into(),
             browser_asked: false,
+            figma_token: String::new(),
             keybindings: HashMap::new(),
             connections: Vec::new(),
             sync_backup: false,
