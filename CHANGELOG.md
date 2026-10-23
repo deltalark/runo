@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Review an AI change screen by screen in Design. Each screen under "Changed" opens before and after over the canvas, as a slider that follows the pointer or side by side, with Put this screen back to drop that screen's part of the change and keep the rest. Comparing a screen with a version in History uses the slider too.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
