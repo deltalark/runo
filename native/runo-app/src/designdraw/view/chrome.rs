@@ -377,7 +377,11 @@ impl DesignCanvas {
 
     pub(super) fn bottom_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let sep = || div().w(px(1.)).h(px(22.)).mx(px(4.)).bg(divider());
-        let moving = !self.hand && !self.commenting && self.shape.is_none() && self.pen.is_none();
+        let moving = !self.hand
+            && !self.commenting
+            && !self.marking
+            && self.shape.is_none()
+            && self.pen.is_none();
         let shape_on = self.shape.is_some_and(|s| {
             matches!(s, Shape::Rect | Shape::Ellipse | Shape::Line | Shape::Arrow)
         });
@@ -472,6 +476,18 @@ impl DesignCanvas {
                     self.commenting,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.pick_tool("comment", cx))),
+            )
+            .child(
+                self.tool(
+                    "design-tool-mark",
+                    IconName::Highlighter,
+                    "Mark for AI: draw what you mean (M)",
+                    self.marking,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.flyout = None;
+                    this.toggle_marking(cx)
+                })),
             )
             .child(
                 self.tool(

@@ -36,6 +36,8 @@ impl DesignCanvas {
                 .filter(|g| g.vertical == vertical)
                 .map(|g| g.at),
         );
+        // The sides and middles of the layers beside the picked one.
+        out.extend(self.smart_lines(id, vertical).into_iter().map(|l| l.at));
         if let Some(grid) = s.grid.as_ref().filter(|_| self.show_grids) {
             match (grid.kind.as_str(), vertical) {
                 ("columns", true) | ("rows", false) => {
@@ -94,29 +96,50 @@ impl DesignCanvas {
 
     /// Move the floating picked element by (dx, dy), keeping the sides it's anchored to.
     pub(super) fn move_floating(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
-        let Some(el) = &self.element else {
+        let Some(map) = self.floating_moved(dx, dy) else {
             return;
         };
-        let px_of = |k: &str| {
-            el.inline
-                .get(k)
-                .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+        self.op("styles", &[serde_json::Value::Object(map)], After::Same, cx);
+    }
+
+    /// Leave the floating picked element where it is and put a copy of it (dx, dy) away,
+    /// picking the copy.
+    pub(super) fn copy_floating(&mut self, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        let (Some(map), Some(mut path)) = (
+            self.floating_moved(dx, dy),
+            self.element.as_ref().map(|e| e.path.clone()),
+        ) else {
+            return;
         };
-        let mut map = serde_json::Map::new();
-        let mut put = |k: &str, v: f32| {
-            map.insert(k.into(), json!(format!("{}px", v.round())));
+        if let Some(last) = path.last_mut() {
+            *last += 1;
+        }
+        self.op(
+            "copyStyled",
+            &[serde_json::Value::Object(map)],
+            After::Path(path),
+            cx,
+        );
+    }
+
+    /// The styles that move the floating picked element by (dx, dy); nothing when that's
+    /// no move at all.
+    fn floating_moved(
+        &self,
+        dx: f32,
+        dy: f32,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        let el = self.element.as_ref()?;
+        if dx.abs() + dy.abs() <= 0.5 {
+            return None;
+        }
+        let r = &el.rect;
+        let to = dom::Box {
+            x: r.x + dx,
+            y: r.y + dy,
+            ..r.clone()
         };
-        match (px_of("left"), px_of("right")) {
-            (None, Some(r)) => put("right", r - dx),
-            (l, _) => put("left", l.unwrap_or(0.) + dx),
-        }
-        match (px_of("top"), px_of("bottom")) {
-            (None, Some(b)) => put("bottom", b - dy),
-            (t, _) => put("top", t.unwrap_or(0.) + dy),
-        }
-        if dx.abs() + dy.abs() > 0.5 {
-            self.op("styles", &[serde_json::Value::Object(map)], After::Same, cx);
-        }
+        Some(handles::placed(&el.inline, r, &to, true))
     }
 
     /// Change the picked screen's grid and guides, and keep it.
