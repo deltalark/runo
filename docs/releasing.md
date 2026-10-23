@@ -23,10 +23,14 @@ Without these repository secrets, the build is signed ad hoc and macOS asks befo
 
 Add them in the repository's Settings → Secrets and variables → Actions.
 
+## Version numbers
+
+Releases bump only the last number: 0.5.0, then 0.5.1, 0.5.2 and so on. Raise the middle number (0.6.0) only for a major release, decided ahead of time.
+
 ## Cutting a release
 
-1. Set `version` in the root `Cargo.toml` (for example `0.2.0`).
-2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [0.2.0] - YYYY-MM-DD` and start a new empty `## [Unreleased]` above it.
-3. Merge that to `main`, then tag it: `git tag v0.2.0 && git push origin v0.2.0`.
+1. Set `version` in the root `Cargo.toml` to the next patch version (for example `0.5.1` after `0.5.0`).
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [0.5.1] - YYYY-MM-DD` and start a new empty `## [Unreleased]` above it.
+3. Merge that to `main`, then tag it: `git tag v0.5.1 && git push origin v0.5.1`.
 
-The workflow stops if the tag doesn't match the version in `Cargo.toml`. A running Runo on an older version shows the update card on its next start, or within six hours while it runs (Settings can turn the check off).
+The workflow stops if the tag doesn't match the version in `Cargo.toml`. A running Runo on an older version shows the update card on its next start, or within six hours while it runs (Settings can turn the check off). Settings > General > Updates also has Check now, which checks right away.

@@ -814,6 +814,17 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             ]),
             section("Updates", "Runo looks for a newer release on GitHub and offers to download it. Nothing installs without you.", vec![
                 switch_row("Check for Runo updates", "Checks at start and every few hours.", st.check_runo_updates, |s, v| s.check_runo_updates = v),
+                {
+                    let (found, running) = crate::applog::last_check();
+                    let desc = if running {
+                        "Checking GitHub…".to_string()
+                    } else if found.is_empty() {
+                        format!("You have Runo {}.", env!("CARGO_PKG_VERSION"))
+                    } else {
+                        found
+                    };
+                    row("Check for updates", &desc, Ctl::Button("Check now".into(), Rc::new(|this, cx| this.check_runo_now(cx))))
+                },
                 row("Logs and crash reports", &format!("Each launch writes a log, and crashes leave a report, in {}.", tilde(&crate::applog::logs_dir())), Ctl::Button("Show".into(), Rc::new(|_, cx| cx.reveal_path(&crate::applog::logs_dir())))),
             ]),
             section("Git", "How Runo commits for you.", vec![

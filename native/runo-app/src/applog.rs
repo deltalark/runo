@@ -525,8 +525,52 @@ pub fn pick_asset(assets: &[(String, String)], os: &str, arch: &str) -> Option<(
     best.map(|(_, a)| a.clone())
 }
 
+/// What the last update check found, in a line for Settings, and whether a check is
+/// running now.
+static CHECKED: std::sync::Mutex<(String, bool)> = std::sync::Mutex::new((String::new(), false));
+
+/// What the last update check found, and whether one is running now.
+pub fn last_check() -> (String, bool) {
+    CHECKED.lock().map(|c| c.clone()).unwrap_or_default()
+}
+
+/// Note that a check started, so Settings shows it until it's done.
+pub fn check_started() {
+    if let Ok(mut c) = CHECKED.lock() {
+        c.1 = true;
+    }
+}
+
+fn checked(line: String) {
+    if let Ok(mut c) = CHECKED.lock() {
+        *c = (line, false);
+    }
+}
+
 /// Ask GitHub for the latest release; None when it isn't newer or can't be reached.
 pub fn check_release() -> Option<Release> {
+    let found = fetch_release();
+    let current = env!("CARGO_PKG_VERSION");
+    let line = match &found {
+        Some(release) => format!(
+            "Runo {} is out. Leave Settings to download it from the update card.",
+            release.version
+        ),
+        None if !LAST_FAILED.load(std::sync::atomic::Ordering::Relaxed) => {
+            format!("Runo {current} is the latest version.")
+        }
+        None => "Couldn't reach GitHub to check. Try again later.".to_string(),
+    };
+    checked(line);
+    found
+}
+
+/// Whether the last check couldn't get an answer from GitHub.
+static LAST_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn fetch_release() -> Option<Release> {
+    let failed = |f: bool| LAST_FAILED.store(f, std::sync::atomic::Ordering::Relaxed);
+    failed(true);
     let out = std::process::Command::new("curl")
         .args([
             "-sL",
@@ -573,12 +617,14 @@ pub fn check_release() -> Option<Release> {
         None if serde_json::from_str::<serde_json::Value>(&body)
             .is_ok_and(|v| v["tag_name"].is_string()) =>
         {
+            failed(false);
             info("app-update", format!("checked: {current} is the latest"))
         }
         // GitHub answers 404 until the first release is published.
         None if serde_json::from_str::<serde_json::Value>(&body)
             .is_ok_and(|v| v["message"] == "Not Found") =>
         {
+            failed(false);
             info("app-update", "checked: no release published yet")
         }
         None => warn(
