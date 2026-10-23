@@ -4,6 +4,8 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-23
+
 ### Added
 
 - Check now under Settings > General > Updates looks for a newer Runo right away, even with automatic checks off, and says what it found.
