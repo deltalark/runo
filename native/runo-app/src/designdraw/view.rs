@@ -52,6 +52,7 @@ mod quick;
 mod scrub;
 mod shapes;
 mod tokensnap;
+mod typing;
 mod vars;
 mod vectors;
 
@@ -475,6 +476,8 @@ pub(crate) struct DesignCanvas {
     people: Vec<String>,
     f_inline: Entity<InputState>,
     inline_open: bool,
+    /// Text being typed into a layer on the canvas.
+    typing: Option<typing::Typing>,
     /// A field's mark being dragged to change its number.
     scrub: Option<scrub::Scrub>,
     /// What the text fields were filled for.
@@ -592,13 +595,19 @@ impl DesignCanvas {
         let f_inline = cx.new(|cx| InputState::new(window, cx));
         subs.push(
             cx.subscribe_in(&f_inline, window, |this, state, ev, window, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur)
-                    && this.inline_open
-                {
-                    this.inline_open = false;
-                    let v = state.read(cx).value().to_string();
-                    this.set_text(v, cx);
-                    window.focus(&this.focus, cx);
+                if !this.inline_open {
+                    return;
+                }
+                let v = state.read(cx).value().to_string();
+                match ev {
+                    // The screen takes the text as it's typed.
+                    InputEvent::Change => this.typed(v, cx),
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        this.inline_open = false;
+                        this.end_typing(v, cx);
+                        window.focus(&this.focus, cx);
+                    }
+                    _ => {}
                 }
             }),
         );
@@ -785,6 +794,7 @@ impl DesignCanvas {
             people: Vec::new(),
             f_inline,
             inline_open: false,
+            typing: None,
             scrub: None,
             loaded: None,
             loaded_screen: None,
@@ -2543,11 +2553,16 @@ impl DesignCanvas {
             move |this, out, cx| match out {
                 Ok(Some((before, shot))) => {
                     this.landed(id2, before, shot, after, cx);
+                    this.typing_landed(cx);
                     this.scrub_landed(cx);
                 }
-                Ok(None) => this.scrub_landed(cx),
+                Ok(None) => {
+                    this.typing_landed(cx);
+                    this.scrub_landed(cx);
+                }
                 Err(e) => {
                     this.say(e);
+                    this.typing_landed(cx);
                     this.scrub_landed(cx);
                 }
             },
@@ -2564,8 +2579,9 @@ impl DesignCanvas {
         after: After,
         cx: &mut Context<Self>,
     ) {
-        // A dragged field keeps the step its first edit made, so the drag undoes at once.
-        if !self.scrub_merges() {
+        // Typing into a layer or dragging a field keeps the step its first edit made,
+        // so it undoes at once.
+        if !(self.typing_merges() | self.scrub_merges()) {
             self.undo.push(Step {
                 id: id.clone(),
                 html: before,
@@ -4255,6 +4271,8 @@ impl DesignCanvas {
             self.marking = false;
         } else if self.inline_open {
             self.inline_open = false;
+            let v = self.f_inline.read(cx).value().to_string();
+            self.end_typing(v, cx);
         } else if self.comment_open.is_some() {
             self.comment_open = None;
         } else if self.commenting {
@@ -4882,19 +4900,7 @@ impl DesignCanvas {
                 );
             }
             if self.inline_open {
-                out.push(
-                    div()
-                        .absolute()
-                        .left(px(x))
-                        .top(px(y))
-                        .w(px(w.max(160.)))
-                        .bg(float(c_canvas()))
-                        .rounded_md()
-                        .shadow_md()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(Input::new(&self.f_inline).h(px(h.clamp(28., 60.))))
-                        .into_any_element(),
-                );
+                out.push(self.text_editor(el, (x, y), (w, h)));
             }
         }
         out.extend(self.editing_marks(cx));
