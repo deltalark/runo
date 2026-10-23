@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Check for Updates… in the Runo menu and Check for updates in the palette. Both check GitHub right away and open Settings on the Updates row, where the result shows.
+
 ## [0.5.1] - 2026-10-23
 
 ### Added
