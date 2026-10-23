@@ -92,8 +92,13 @@ pub struct AppSettings {
     pub glass: String,
     /// Cards, menus and dialogs are translucent too.
     pub glass_cards: bool,
-    /// Background pattern, by id from `pattern::Pattern`: "off", "dots", "blueprint"…
+    /// Background pattern, by id from `pattern::Pattern`: "off", "dots", "grid"…
     pub pattern: String,
+    /// Where the pattern lies: on the page and the terminal, on the side panels, and on
+    /// the frame round them (the top bar, the rail, the gutters and the status bar).
+    pub pattern_content: bool,
+    pub pattern_panels: bool,
+    pub pattern_frame: bool,
     /// Interface font: "bundled" (Runo's own, tuned for sharp small text) or "system".
     pub font: String,
     /// The status bar's Usage popover shows every limit window, not just the closest one.
@@ -215,6 +220,9 @@ impl Default for AppSettings {
             color_theme: "runo".into(),
             accent: "indigo".into(),
             pattern: "off".into(),
+            pattern_content: true,
+            pattern_panels: false,
+            pattern_frame: false,
             diff_colors: "default".into(),
             animations: true,
             notifications: true,
@@ -350,7 +358,12 @@ impl AppSettings {
         ANIMATIONS.store(self.animations, Ordering::Relaxed);
         GLASS.store(glass_alpha(&self.glass), Ordering::Relaxed);
         GLASS_CARDS.store(self.glass_cards, Ordering::Relaxed);
-        crate::pattern::set(&self.pattern);
+        crate::pattern::set(
+            &self.pattern,
+            self.pattern_content,
+            self.pattern_panels,
+            self.pattern_frame,
+        );
         MEMORY_SERVER.store(self.memory_server, Ordering::Relaxed);
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
