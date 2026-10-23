@@ -78,6 +78,7 @@ mod proof;
 mod proof_ui;
 mod pty;
 mod radar;
+mod registry;
 mod review;
 mod reviewable;
 mod schedule;

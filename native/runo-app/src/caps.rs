@@ -190,12 +190,19 @@ fn generic(provider: &str, bin: &str) -> Caps {
         String::new()
     };
     // Models: the CLI's own list when it has one, else the choices its help names.
-    let models = if !installed {
-        Vec::new()
-    } else if provider == "cursor" {
-        crate::models::parse_model_list(&run_quiet(bin, &["models"], Duration::from_secs(20)))
-    } else {
-        crate::models::help_model_choices(&help)
+    let list = crate::registry::spec(provider).and_then(|s| s.models.as_ref());
+    let models = match list {
+        _ if !installed => Vec::new(),
+        Some(list) => {
+            let args: Vec<&str> = list.args.iter().map(String::as_str).collect();
+            let text = run_quiet(bin, &args, Duration::from_secs(20));
+            if list.table {
+                crate::models::parse_model_table(&text)
+            } else {
+                crate::models::parse_model_list(&text)
+            }
+        }
+        None => crate::models::help_model_choices(&help),
     };
     // Only the levels the CLI can really hold to: one without a read-only mode doesn't
     // offer Plan only, and one that always runs every tool offers only Full access.
@@ -207,11 +214,15 @@ fn generic(provider: &str, bin: &str) -> Caps {
             _ => level("full", "Full access", "Run anything without asking"),
         })
         .collect();
+    let efforts = crate::registry::spec(provider)
+        .map(|s| s.efforts.iter().map(|e| choice(e)).collect())
+        .unwrap_or_default();
     Caps {
         installed,
         version,
         models,
         modes,
+        efforts,
         detected: true,
         help,
         ..Caps::default()

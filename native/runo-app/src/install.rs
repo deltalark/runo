@@ -44,9 +44,6 @@ fn npm(package: &str) -> Install {
     }
 }
 
-pub(crate) const GROK: &str =
-    "curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash";
-
 /// How to install an agent here, from its vendor's documentation, or why it can't be.
 pub(crate) fn install_plan(
     provider: &str,
@@ -61,43 +58,19 @@ pub(crate) fn install_plan(
             "{name} has no Windows installer yet. Install it under WSL."
         ))
     };
-    match provider {
-        "claude" => Ok(script(
-            if windows {
-                "irm https://claude.ai/install.ps1 | iex"
-            } else {
-                "curl -fsSL https://claude.ai/install.sh | bash"
-            },
-            windows,
-        )),
-        "cursor" => Ok(script(
-            if windows {
-                "irm 'https://cursor.com/install?win32=true' | iex"
-            } else {
-                "curl https://cursor.com/install -fsS | bash"
-            },
-            windows,
-        )),
-        "droid" => Ok(if has_npm {
-            npm("droid")
-        } else if windows {
-            script("irm https://app.factory.ai/cli/windows | iex", windows)
-        } else {
-            script("curl -fsSL https://app.factory.ai/cli | sh", windows)
-        }),
-        "opencode" if has_npm => Ok(npm("opencode-ai")),
-        "opencode" if windows => need_node(),
-        "opencode" => Ok(script(
-            "curl -fsSL https://opencode.ai/install | bash",
-            windows,
-        )),
-        "grok" if windows => unix_only("Grok CLI"),
-        "grok" => Ok(script(GROK, windows)),
-        other => match alerts::npm_package(other) {
-            Some(package) if has_npm => Ok(npm(package)),
-            Some(_) => need_node(),
-            None => Err("Runo doesn't know how to install this agent.".into()),
-        },
+    let Some(spec) = crate::registry::spec(provider) else {
+        return Err("Runo doesn't know how to install this agent.".into());
+    };
+    let how = &spec.install;
+    let own_script = if windows { &how.windows } else { &how.unix };
+    match (&how.npm, own_script) {
+        (Some(package), _) if has_npm && (how.prefer_npm || own_script.is_none()) => {
+            Ok(npm(package))
+        }
+        (_, Some(command)) => Ok(script(command, windows)),
+        (Some(_), None) => need_node(),
+        (None, None) if how.unix.is_some() => unix_only(&spec.name),
+        (None, None) => Err("Runo doesn't know how to install this agent.".into()),
     }
 }
 
@@ -177,7 +150,12 @@ pub(crate) fn agent_path(provider: &'static agent::Provider) -> Option<PathBuf> 
     if as_path.is_absolute() {
         return as_path.is_file().then_some(as_path);
     }
-    locate(&bin).or_else(|| (provider.id == "cursor").then(|| locate("agent")).flatten())
+    locate(&bin).or_else(|| {
+        crate::registry::spec(provider.id)?
+            .alt_bins
+            .iter()
+            .find_map(|b| locate(b))
+    })
 }
 
 /// The command that signs an agent in, as typed in a terminal: its login command where
@@ -193,9 +171,8 @@ pub(crate) fn sign_in_command(provider: &str, bin: &str) -> String {
     } else {
         format!("'{}'", bin.replace('\'', "'\\''"))
     };
-    match provider {
-        "codex" | "cursor" | "amp" => format!("{bin} login"),
-        "opencode" => format!("{bin} auth login"),
+    match crate::registry::spec(provider) {
+        Some(spec) if !spec.login.is_empty() => format!("{bin} {}", spec.login.join(" ")),
         _ => bin,
     }
 }

@@ -1,4 +1,4 @@
-//! The JSON-RPC plumbing the agent host's protocol drivers share (`acp`, `codex`): an
+//! The plumbing the agent host's protocol drivers share (`acp`, `codex`, `pi`): an
 //! agent process with its stdout read on a thread, numbered requests, answers to the
 //! agent's own requests, and the host's lines in the turn's `out`.
 
@@ -110,12 +110,27 @@ impl Agent {
         send(&self.input, &message);
     }
 
+    /// Send one JSON record as it is, for agents whose protocol isn't JSON-RPC (Pi's).
+    pub fn send(&self, record: &Value) {
+        send(&self.input, record);
+    }
+
+    /// The next line the agent prints, as it is: `Ok(None)` when nothing came within
+    /// `wait`, `Err` once its output ended.
+    pub fn line(&mut self, wait: Duration) -> Result<Option<String>, ()> {
+        match self.lines.recv_timeout(wait) {
+            Ok(line) => Ok(Some(line)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(()),
+        }
+    }
+
     /// The next thing the agent sends, waiting at most `wait`.
     pub fn next(&mut self, wait: Duration) -> Message {
-        let line = match self.lines.recv_timeout(wait) {
-            Ok(line) => line,
-            Err(RecvTimeoutError::Timeout) => return Message::Quiet,
-            Err(RecvTimeoutError::Disconnected) => return Message::Gone,
+        let line = match self.line(wait) {
+            Ok(Some(line)) => line,
+            Ok(None) => return Message::Quiet,
+            Err(()) => return Message::Gone,
         };
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             return Message::Quiet;
@@ -241,6 +256,23 @@ pub fn write_line(out: &Mutex<std::fs::File>, line: &str) {
 /// One line for `out` from the host itself: `{"runo": …}`.
 pub fn note(out: &Mutex<std::fs::File>, line: Value) {
     write_line(out, &json!({ "runo": line }).to_string());
+}
+
+/// Note in `turn/drift`, once each, a message type the driver doesn't know, so a
+/// protocol change in a new release of the agent shows up early.
+pub fn drift(turn: &Path, kind: &str) {
+    let path = turn.join("drift");
+    let seen = std::fs::read_to_string(&path).unwrap_or_default();
+    if seen.lines().any(|l| l == kind) {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{kind}");
+    }
 }
 
 /// The prompt in a line of `turn/in`.

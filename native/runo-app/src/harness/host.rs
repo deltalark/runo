@@ -36,6 +36,10 @@ pub fn main(args: &[String]) -> i32 {
     if program == "--codex" {
         return super::codex::main(Path::new(turn));
     }
+    // Pi's RPC mode.
+    if program == "--pi" {
+        return super::pi::main(Path::new(turn));
+    }
     run(Path::new(turn), program, &args[3..], IDLE)
 }
 

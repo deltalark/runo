@@ -562,16 +562,7 @@ pub(crate) enum Waiting {
 
 /// The npm package each agent CLI ships as, for looking up its latest release.
 pub(crate) fn npm_package(provider: &str) -> Option<&'static str> {
-    Some(match provider {
-        "claude" => "@anthropic-ai/claude-code",
-        "codex" => "@openai/codex",
-        "opencode" => "opencode-ai",
-        "gemini" => "@google/gemini-cli",
-        "copilot" => "@github/copilot",
-        "amp" => "@sourcegraph/amp",
-        "qwen" => "@qwen-code/qwen-code",
-        _ => return None,
-    })
+    crate::registry::spec(provider)?.package.as_deref()
 }
 
 /// The numeric parts of a version such as "v2.1.296 (Claude Code)" or "codex-cli 0.50.1".
