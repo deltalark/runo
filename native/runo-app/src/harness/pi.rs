@@ -191,7 +191,7 @@ impl Pi<'_> {
 }
 
 /// Events Runo reads or knowingly passes over. Others are noted in `turn/drift`.
-const KNOWN: &[&str] = &[
+pub(crate) const KNOWN: &[&str] = &[
     "agent_start",
     "agent_end",
     "agent_settled",

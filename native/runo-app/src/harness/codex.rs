@@ -465,7 +465,7 @@ fn turns(turn: &Path, agent: &mut Agent, h: &Handler, thread: &str) -> Result<bo
 
 /// Notifications Runo reads or knowingly passes over. Others are noted in `turn/drift`,
 /// so a protocol change in a new Codex release shows up early.
-const KNOWN: &[&str] = &[
+pub(crate) const KNOWN: &[&str] = &[
     "error",
     "warning",
     "configWarning",

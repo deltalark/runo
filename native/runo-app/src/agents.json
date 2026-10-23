@@ -29,7 +29,8 @@
       "login": ["login"],
       "resumes": true,
       "images": true,
-      "output": [{ "format": "json" }]
+      "output": [{ "format": "json" }],
+      "rpc": [{ "when": "app-server", "args": ["app-server"] }]
     },
     {
       "id": "opencode",

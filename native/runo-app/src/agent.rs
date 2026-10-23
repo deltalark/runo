@@ -1732,17 +1732,17 @@ pub fn codex_app_config(
     dir: &str,
     fallback: &Command,
 ) -> Option<crate::harness::codex::Config> {
-    if spec.provider != "codex"
-        || std::env::var_os("RUNO_NO_APP_SERVER").is_some()
-        || !crate::caps::mentions("codex", "app-server")
-    {
+    if spec.provider != "codex" || std::env::var_os("RUNO_NO_APP_SERVER").is_some() {
         return None;
     }
+    let agent = crate::registry::spec("codex")?;
+    let server = agent.pick(&agent.rpc)?;
     let args: Vec<String> = fallback
         .get_args()
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let mut command = vec![program(spec).to_string(), "app-server".to_string()];
+    let mut command = vec![program(spec).to_string()];
+    command.extend(server.iter().cloned());
     for pair in args.windows(2) {
         match pair[0].as_str() {
             "-c" => command.extend(["-c".to_string(), pair[1].clone()]),
