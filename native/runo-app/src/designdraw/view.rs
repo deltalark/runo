@@ -49,6 +49,7 @@ mod pictures;
 mod quick;
 mod scrub;
 mod shapes;
+mod tokensnap;
 mod vars;
 mod vectors;
 
@@ -1645,6 +1646,7 @@ impl DesignCanvas {
         let before = ai.before.clone();
         let kept = super::guard::keep(&self.root, &before, &self.code_map);
         let outside = self.keep_scope(&before);
+        let snapped = self.snap_ai_change(&before);
         // Read what it wrote now rather than at the next look, and draw it.
         self.check_files(cx);
         self.sync_changed_components(&before, cx);
@@ -1658,6 +1660,17 @@ impl DesignCanvas {
             self.say(format!(
                 "AI was asked about the selection, so Design put back {} it changed besides.",
                 outside.join(", ")
+            ));
+        }
+        if snapped > 0 && self.ai.is_some() {
+            self.say(format!(
+                "Wrote {snapped} {} AI used as the theme's tokens, so {} with the theme.",
+                if snapped == 1 { "value" } else { "values" },
+                if snapped == 1 {
+                    "it changes"
+                } else {
+                    "they change"
+                }
             ));
         }
         // The chat that just ended takes the next ask a moment later.
@@ -5741,6 +5754,25 @@ impl DesignCanvas {
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.fix_checks(None, window, cx))),
                 ),
+            );
+        }
+        if !self.canvas.screens.is_empty() {
+            out = out.child(
+                div()
+                    .pt_1()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        text_btn("design-snap-tokens", "Snap to tokens", Some(IconName::Palette), false)
+                            .on_click(cx.listener(|this, _, _, cx| this.snap_to_tokens(cx))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("Colours, text sizes, corners and spacing that are all but a token use the token, so they follow the theme."),
+                    ),
             );
         }
         let mut n: usize = 0;
