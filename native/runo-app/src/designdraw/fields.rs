@@ -250,6 +250,36 @@ pub(crate) fn parse(f: &Field, typed: &str) -> Option<String> {
     }
 }
 
+/// The number a field's value moves from when its mark is dragged, or `None` when it holds
+/// none to move: a colour, or a size worked out from something else.
+pub(crate) fn scrub_from(f: &Field, el: &Element) -> Option<f32> {
+    if f.unit == Unit::Color {
+        return None;
+    }
+    let shown = display(f, el);
+    if let Ok(n) = shown.trim_end_matches(['%', '°']).trim().parse::<f32>() {
+        return Some(n);
+    }
+    match (f.id, shown.as_str()) {
+        ("w", _) => Some(el.rect.w),
+        ("h", _) => Some(el.rect.h),
+        ("line-height", _) => None,
+        (_, "Auto") => Some(0.),
+        _ => None,
+    }
+}
+
+/// What a dragged field types: `from` moved by `by`, to a whole number, kept to what the
+/// field takes.
+pub(crate) fn scrubbed(f: &Field, from: f32, by: f32) -> String {
+    let n = (from + by).round();
+    match f.unit {
+        Unit::Percent => format!("{}%", number(n.clamp(0., 100.))),
+        Unit::Px if !matches!(f.id, "letter" | "x" | "y" | "r" | "b") => number(n.max(0.)),
+        _ => number(n),
+    }
+}
+
 /// The styles to set for what's typed in a field, as name and value.
 pub(crate) fn styles(f: &Field, value: &str, el: &Element) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> =
@@ -449,5 +479,27 @@ mod tests {
         assert_eq!(shown(f, &[&a, &b]), display(f, &a));
         assert_eq!(shown(f, &[&a, &b, &c]), MIXED);
         assert_eq!(shown(f, &[&c]), display(f, &c));
+    }
+
+    #[test]
+    fn dragged_fields_move_by_whole_numbers_within_range() {
+        let e = el(
+            &[],
+            &[("width", "342.5px"), ("opacity", "0.5"), ("gap", "normal")],
+        );
+        let f = |id| field(id).unwrap();
+        assert_eq!(scrub_from(f("w"), &e), Some(342.5));
+        assert_eq!(scrub_from(f("opacity"), &e), Some(50.));
+        assert_eq!(scrub_from(f("gap"), &e), Some(0.));
+        assert_eq!(scrub_from(f("fill"), &e), None);
+        assert_eq!(scrubbed(f("w"), 342.5, 10.), "353");
+        assert_eq!(scrubbed(f("w"), 4., -20.), "0");
+        assert_eq!(scrubbed(f("letter"), 0., -2.), "-2");
+        assert_eq!(scrubbed(f("opacity"), 90., 30.), "100%");
+        assert_eq!(scrubbed(f("rotate"), 350., 20.), "370");
+        assert_eq!(
+            parse(f("rotate"), &scrubbed(f("rotate"), 350., 20.)).as_deref(),
+            Some("10deg")
+        );
     }
 }

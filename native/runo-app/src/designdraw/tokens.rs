@@ -196,7 +196,7 @@ fn themes(css: &str) -> (Props, Props) {
 }
 
 /// `s` split at `sep`, but not inside brackets or quotes.
-fn split_top(s: &str, sep: char) -> Vec<String> {
+pub(crate) fn split_top(s: &str, sep: char) -> Vec<String> {
     let (mut out, mut cur) = (Vec::new(), String::new());
     let (mut depth, mut quote) = (0i32, None);
     for c in s.chars() {
@@ -291,7 +291,7 @@ fn channel(s: &str, pct_of: f32) -> Option<f32> {
     }
 }
 
-fn color(v: &str) -> Option<[u8; 4]> {
+pub(crate) fn color(v: &str) -> Option<[u8; 4]> {
     let v = v.trim();
     match v.to_ascii_lowercase().as_str() {
         "transparent" => return Some([0, 0, 0, 0]),
@@ -381,7 +381,7 @@ fn color_mix(inner: &str) -> Option<[u8; 4]> {
 }
 
 /// A length or number, with `calc()` worked out: px, rem (16px) and plain numbers.
-fn length(v: &str) -> Option<(f32, bool)> {
+pub(crate) fn length(v: &str) -> Option<(f32, bool)> {
     let v = v.trim();
     if let Some(inner) = v.strip_prefix("calc(").and_then(|r| r.strip_suffix(')')) {
         let mut p = Calc {

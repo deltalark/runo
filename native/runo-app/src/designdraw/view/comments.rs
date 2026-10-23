@@ -115,6 +115,7 @@ impl DesignCanvas {
         self.hand = false;
         self.comment_open = None;
         if self.commenting {
+            self.marking = false;
             self.comments = notes::load(&self.root);
             self.people = notes::people(&self.root, &self.comments);
             if self.author.is_empty() {

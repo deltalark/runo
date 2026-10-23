@@ -326,14 +326,25 @@ impl DesignCanvas {
                 .screen(&id)
                 .map_or_else(|| id.clone(), |s| s.name.clone());
             let label = if new { format!("{name} (new)") } else { name };
+            // A screen that was there before opens before and after, to keep or put back;
+            // a new one has no before, so it's taken away.
+            let compare = !new && self.ai.as_ref().is_some_and(|ai| ai.version.is_some());
             row = row.child(
                 crate::askbar::target_chip(("design-ai-screen", i), IconName::Smartphone, label)
                     .tooltip(tip(if new {
                         "Take this new screen away, keeping the rest of AI's change"
+                    } else if compare {
+                        "Compare before and after, and put this screen back if it's worse"
                     } else {
                         "Put this screen back, keeping the rest of AI's change"
                     }))
-                    .on_click(cx.listener(move |this, _, _, cx| this.reject_screen(&id, cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if compare {
+                            this.compare_ai(id.clone(), cx)
+                        } else {
+                            this.reject_screen(&id, cx)
+                        }
+                    })),
             );
         }
         Some(row)

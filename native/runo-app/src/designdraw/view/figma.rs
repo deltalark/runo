@@ -153,7 +153,7 @@ impl DesignCanvas {
         out
     }
 
-    fn field_state(&self, id: &str) -> Option<&Entity<InputState>> {
+    pub(super) fn field_state(&self, id: &str) -> Option<&Entity<InputState>> {
         self.fields.iter().find(|(f, _)| *f == id).map(|(_, s)| s)
     }
 
@@ -211,11 +211,28 @@ impl DesignCanvas {
         self.op("styles", &[serde_json::Value::Object(map)], After::Same, cx);
     }
 
-    /// A typed field with its mark in front.
-    fn fld(&self, id: &'static str, mark: AnyElement) -> Div {
+    /// A typed field with its mark in front. Dragging the mark of a number moves it.
+    fn fld(&self, id: &'static str, mark: AnyElement, cx: &mut Context<Self>) -> Div {
         let input = self
             .field_state(id)
             .map(|s| Input::new(s).appearance(false).small().h(px(26.)));
+        let numeric = fields::field(id).is_some_and(|f| f.unit != fields::Unit::Color);
+        let mark = div()
+            .id(SharedString::from(format!("design-mark-{id}")))
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .child(mark)
+            .when(numeric, |el| {
+                el.cursor_ew_resize().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.start_scrub(id, e);
+                    }),
+                )
+            });
         div()
             .flex_1()
             .min_w_0()
@@ -234,7 +251,7 @@ impl DesignCanvas {
     }
 
     /// A colour field: a swatch of the colour, then its hex or token name.
-    fn color_fld(&self, id: &'static str, el: &Element) -> Div {
+    fn color_fld(&self, id: &'static str, el: &Element, cx: &mut Context<Self>) -> Div {
         let all: Vec<&Element> = std::iter::once(el).chain(&self.also).collect();
         let shown = fields::field(id)
             .map(|f| fields::shown(f, &all))
@@ -272,7 +289,7 @@ impl DesignCanvas {
                 .child(div().flex_1().h_full().bg(rgb(b))),
             None => swatch.bg(rgb(c.unwrap_or(0xffffff))),
         };
-        self.fld(id, swatch.into_any_element())
+        self.fld(id, swatch.into_any_element(), cx)
     }
 
     // ---- The layers panel on the left
@@ -834,8 +851,8 @@ impl DesignCanvas {
                 ),
             )
             .child(pair(
-                self.fld("opacity", mark_icon(IconName::Blend)),
-                self.fld("radius", mark_icon(IconName::SquareRoundCorner)),
+                self.fld("opacity", mark_icon(IconName::Blend), cx),
+                self.fld("radius", mark_icon(IconName::SquareRoundCorner), cx),
             )),
         );
 
@@ -881,8 +898,8 @@ impl DesignCanvas {
             text = text
                 .child(self.text_styles(el, cx))
                 .child(pair(
-                    self.fld("font-size", mark_icon(IconName::CaseSensitive)),
-                    self.color_fld("color", el),
+                    self.fld("font-size", mark_icon(IconName::CaseSensitive), cx),
+                    self.color_fld("color", el, cx),
                 ))
                 .child(self.choice_row(
                     "font-weight",
@@ -896,8 +913,8 @@ impl DesignCanvas {
                     cx,
                 ))
                 .child(pair(
-                    self.fld("line-height", mark_icon(IconName::Baseline)),
-                    self.fld("letter", mark("|A|")),
+                    self.fld("line-height", mark_icon(IconName::Baseline), cx),
+                    self.fld("letter", mark("|A|"), cx),
                 ))
                 .child(aligns);
             out = out.child(text);
@@ -963,7 +980,7 @@ impl DesignCanvas {
                                 .children(self.picture_library(cx))
                         }),
                     _ => body
-                        .child(self.color_fld("fill", el))
+                        .child(self.color_fld("fill", el, cx))
                         .child(self.token_swatches("background-color", cx)),
                 }
             });
@@ -997,12 +1014,12 @@ impl DesignCanvas {
                     ),
                 )
                 .child(pair(
-                    self.color_fld("stroke", el),
-                    div()
-                        .w(px(84.))
-                        .flex_none()
-                        .flex()
-                        .child(self.fld("stroke-w", mark_icon(IconName::Minus))),
+                    self.color_fld("stroke", el, cx),
+                    div().w(px(84.)).flex_none().flex().child(self.fld(
+                        "stroke-w",
+                        mark_icon(IconName::Minus),
+                        cx,
+                    )),
                 ))
             } else {
                 sec(
@@ -1505,6 +1522,17 @@ impl DesignCanvas {
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.focus_ask(window, cx))),
             )
+            .when(self.also.is_empty(), |d| {
+                d.child(
+                    mini(
+                        "design-sel-options",
+                        IconName::Shuffle,
+                        "Try options: three takes on it, toward what's typed in the ask bar",
+                        self.options.is_some(),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.try_options(window, cx))),
+                )
+            })
             .child(
                 div()
                     .relative()
@@ -1743,14 +1771,14 @@ impl DesignCanvas {
             let right = set("right") && !set("left");
             let bottom = set("bottom") && !set("top");
             let across = if right {
-                self.fld("r", mark("R"))
+                self.fld("r", mark("R"), cx)
             } else {
-                self.fld("x", mark("X"))
+                self.fld("x", mark("X"), cx)
             };
             let down = if bottom {
-                self.fld("b", mark("B"))
+                self.fld("b", mark("B"), cx)
             } else {
-                self.fld("y", mark("Y"))
+                self.fld("y", mark("Y"), cx)
             };
             out = out.child(if place == "sticky" {
                 div().flex().child(down)
@@ -1767,7 +1795,7 @@ impl DesignCanvas {
                 items,
                 cx,
             ),
-            self.fld("rotate", mark_icon(IconName::RotateCw)),
+            self.fld("rotate", mark_icon(IconName::RotateCw), cx),
         ));
         if !place.is_empty() {
             // The edges it keeps its distance to, as constraints do.
@@ -1830,10 +1858,10 @@ impl DesignCanvas {
                 cx,
             ),
         );
-        let dims = pair(self.fld("w", mark("W")), self.fld("h", mark("H")));
+        let dims = pair(self.fld("w", mark("W"), cx), self.fld("h", mark("H"), cx));
         let padding = pair(
-            self.fld("pad-x", mark_icon(IconName::ArrowLeftRight)),
-            self.fld("pad-y", mark_icon(IconName::ArrowUpDown)),
+            self.fld("pad-x", mark_icon(IconName::ArrowLeftRight), cx),
+            self.fld("pad-y", mark_icon(IconName::ArrowUpDown), cx),
         );
         let clips = el.style("overflow") == "hidden";
         let clip = div()
@@ -2003,6 +2031,7 @@ impl DesignCanvas {
                         } else {
                             IconName::AlignVerticalSpaceBetween
                         }),
+                        cx,
                     ))
                     .child(
                         chip_btn("design-al-spread", "Space between", spread).on_click(
