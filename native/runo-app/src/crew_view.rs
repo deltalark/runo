@@ -307,11 +307,23 @@ impl RunoApp {
         note: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // Shown only with "Show deleted threads" on, as one quiet line.
         let Some(s) = self.state.session(thread) else {
             return div()
                 .px_2()
-                .py_1()
-                .child(small("This thread was deleted."))
+                .py(px(2.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(14.))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(icon(IconName::Trash, 10., c_muted())),
+                )
+                .child(small("Deleted thread").text_size(px(11.)))
                 .into_any_element();
         };
         let status = thread_status(self.thread_working(thread), s);
@@ -441,13 +453,26 @@ impl RunoApp {
         .into_any_element()
     }
 
-    /// Whether message `index` of Crew's chat is news about a thread an earlier card
-    /// already shows. Those cards are live, so the thread shows once.
-    pub(crate) fn crew_news_repeats(&self, chat: &Session, index: usize) -> bool {
-        let Some(Card::News { thread }) = chat.messages.get(index).and_then(|m| m.crew.as_ref())
-        else {
-            return false;
+    /// Whether deleted threads keep their rows in Crew's chat.
+    fn show_deleted(cx: &App) -> bool {
+        cx.global::<AppSettings>().show_deleted_threads
+    }
+
+    /// Whether message `index` of Crew's chat is left out: news about a thread an earlier
+    /// card already shows (those cards are live, so the thread shows once), or a card
+    /// whose threads were all deleted while deleted threads are hidden.
+    pub(crate) fn crew_card_hidden(&self, chat: &Session, index: usize, cx: &App) -> bool {
+        let gone = |t: &u64| self.state.session(*t).is_none();
+        let thread = match chat.messages.get(index).and_then(|m| m.crew.as_ref()) {
+            Some(Card::News { thread }) => thread,
+            Some(Card::Started { threads }) => {
+                return !Self::show_deleted(cx) && threads.iter().all(gone);
+            }
+            _ => return false,
         };
+        if gone(thread) && !Self::show_deleted(cx) {
+            return true;
+        }
         chat.messages[..index]
             .iter()
             .filter_map(|m| m.crew.as_ref())
@@ -476,38 +501,45 @@ impl RunoApp {
             .child(icon(CREW_ICON, 12., c_muted()))
             .child(message.text.clone());
         let body = match card {
-            Card::Started { threads } => div()
-                .v_flex()
-                .gap_2()
-                .child(line.child({
-                    let finished = threads
-                        .iter()
-                        .filter_map(|t| self.state.session(*t))
-                        .filter(|t| {
-                            matches!(
-                                thread_status(self.thread_working(t.id), t),
-                                "done" | "resolved"
-                            )
+            Card::Started { threads } => {
+                let threads: Vec<u64> = threads
+                    .iter()
+                    .copied()
+                    .filter(|t| self.state.session(*t).is_some() || Self::show_deleted(cx))
+                    .collect();
+                div()
+                    .v_flex()
+                    .gap_2()
+                    .child(line.child({
+                        let finished = threads
+                            .iter()
+                            .filter_map(|t| self.state.session(*t))
+                            .filter(|t| {
+                                matches!(
+                                    thread_status(self.thread_working(t.id), t),
+                                    "done" | "resolved"
+                                )
+                            })
+                            .count();
+                        div().text_color(rgb(c_muted())).child(match finished {
+                            0 => String::new(),
+                            n if n == threads.len() => "· all finished".into(),
+                            n => format!("· {n} of {} finished", threads.len()),
                         })
-                        .count();
-                    div().text_color(rgb(c_muted())).child(match finished {
-                        0 => String::new(),
-                        n if n == threads.len() => "· all finished".into(),
-                        n => format!("· {n} of {} finished", threads.len()),
-                    })
-                }))
-                .child(
-                    div()
-                        .p_1()
-                        .v_flex()
-                        .rounded_lg()
-                        .bg(tint(c_subtle()))
-                        .children(
-                            threads
-                                .iter()
-                                .map(|t| self.thread_card(*t, &format!("m{index}"), None, cx)),
-                        ),
-                ),
+                    }))
+                    .child(
+                        div()
+                            .p_1()
+                            .v_flex()
+                            .rounded_lg()
+                            .bg(tint(c_subtle()))
+                            .children(
+                                threads
+                                    .iter()
+                                    .map(|t| self.thread_card(*t, &format!("m{index}"), None, cx)),
+                            ),
+                    )
+            }
             // The news is the row's line, so the thread shows once, with what happened.
             Card::News { thread } => {
                 let thread = *thread;
