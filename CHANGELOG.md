@@ -6,6 +6,7 @@ All notable changes to Runo are documented here.
 
 ### Added
 
+- Mixed values in Design. With several layers selected, each field shows the value they share, or Mixed where they differ, instead of only the first layer's. Fill opens when any of them has one, and its swatch is split between the colours in play. Typing a value still sets it on all of them.
 - Review an AI change screen by screen in Design. Each screen under "Changed" opens before and after over the canvas, as a slider that follows the pointer or side by side, with Put this screen back to drop that screen's part of the change and keep the rest. Comparing a screen with a version in History uses the slider too.
 - Queue asks while AI works in Design. The bar keeps a line to type in while the agent is busy; Enter puts the ask in line with what was selected when you typed it, and the queue shows under the working row with a way to take each one out. When a change ends, it's kept (it stays in History) and the next ask starts on its own.
 - Text in Design is edited where it is. Double-click a text layer (or press Enter) and the editor sits on the layer in its own size, weight and colours, over its own background, instead of a plain box. The screen takes the text as you type, a small layer's editor grows to fit, and the whole edit undoes with one Ctrl+Z. Escape keeps what you typed, like Enter.
@@ -25,6 +26,7 @@ All notable changes to Runo are documented here.
 
 ### Fixed
 
+- A fill made from a mixed token, such as `color-mix()`, shows its colour in the inspector instead of looking empty.
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
 
 ## [0.5.0] - 2026-10-23
