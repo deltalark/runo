@@ -84,6 +84,8 @@ pub struct AppSettings {
     pub quick_commands: String,
     /// Group the sidebar by status (Needs you, Running, Ready to review, Done) instead of project.
     pub group_by_status: bool,
+    /// Crew's chat keeps a line for each thread that was deleted.
+    pub show_deleted_threads: bool,
     /// Places pinned out on the rail beside the main ones, by label, such as "Notes".
     pub rail_pins: Vec<String>,
     /// Translucent window over a blurred desktop: "off", "subtle", "frosted" or "clear".
@@ -226,6 +228,7 @@ impl Default for AppSettings {
             quick_commands: "Test = cargo test\nBuild = cargo build\nStatus = git status --short"
                 .into(),
             group_by_status: false,
+            show_deleted_threads: false,
             rail_pins: Vec::new(),
             glass: "off".into(),
             glass_cards: true,

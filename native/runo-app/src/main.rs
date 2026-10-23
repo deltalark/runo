@@ -5988,14 +5988,24 @@ impl RunoApp {
         if let Some(strip) = self.thread_strip(session, false, cx) {
             list = list.child(strip);
         }
+        // Crew's news rows in a row sit close together, as one list.
+        let mut news: Vec<AnyElement> = Vec::new();
+        let close = |news: &mut Vec<AnyElement>| {
+            (!news.is_empty()).then(|| div().v_flex().gap(px(2.)).children(news.drain(..)))
+        };
         for (i, message) in session.messages.iter().enumerate() {
-            if self.crew_news_repeats(session, i) {
+            if self.crew_card_hidden(session, i, cx) {
                 continue;
             }
             if let Some(card) = self.crew_card(session.id, i, message, cx) {
-                list = list.child(card);
+                if matches!(message.crew, Some(crew::Card::News { .. })) {
+                    news.push(card);
+                } else {
+                    list = list.children(close(&mut news)).child(card);
+                }
                 continue;
             }
+            list = list.children(close(&mut news));
             let show = Some(i) == last_agent && !self.turn_changes(message).is_empty();
             list = list.child(
                 div()
@@ -6013,6 +6023,7 @@ impl RunoApp {
                     )),
             );
         }
+        list = list.children(close(&mut news));
         if let Some(task) = self.pending_start.get(&session.id) {
             list = list.child(
                 div()
