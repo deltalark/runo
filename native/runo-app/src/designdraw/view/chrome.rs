@@ -393,26 +393,7 @@ impl DesignCanvas {
             Shape::Arrow => IconName::MoveUpRight,
             Shape::Pen => IconName::PenTool,
         };
-        let mode = |id: &'static str, label: &'static str, on: bool| {
-            div()
-                .id(id)
-                .h(px(28.))
-                .px(px(9.))
-                .flex()
-                .items_center()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .font_weight(if on {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(rgb(if on { c_text() } else { c_muted() }))
-                .when(on, |el| el.bg(tint(c_active())))
-                .when(!on, |el| el.hover(|el| el.text_color(rgb(c_text()))))
-                .child(label)
-        };
+        let mode = segment;
         let design_on = !matches!(self.panel, Panel::Prototype | Panel::Code);
         let bar = div()
             .id("design-bar")
@@ -1226,4 +1207,26 @@ impl DesignCanvas {
         .with_priority(3)
         .into_any_element()
     }
+}
+
+/// One choice of a segmented control: Design, Prototype or Code.
+pub(super) fn segment(id: &'static str, label: &'static str, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(28.))
+        .px(px(9.))
+        .flex()
+        .items_center()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(if on {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        })
+        .text_color(rgb(if on { c_text() } else { c_muted() }))
+        .when(on, |el| el.bg(tint(c_active())))
+        .when(!on, |el| el.hover(|el| el.text_color(rgb(c_text()))))
+        .child(label)
 }

@@ -2,6 +2,7 @@
 //! name, what changed since each, a screen compared side by side with how it is now, and
 //! putting the design back as a version had it.
 
+use super::chrome::segment as mode;
 use super::figma::caption;
 use super::*;
 use crate::designdraw::notes;
@@ -19,6 +20,14 @@ pub(super) struct Compare {
     /// The version's screen, once drawn; None while drawing, or when it didn't have it.
     pub old: Option<Shot>,
     pub drawn: bool,
+    /// Comparing what an AI change did to the screen, with the screen as it was before.
+    pub ai: bool,
+    /// One picture over the other with a line between to slide, rather than side by side.
+    pub slide: bool,
+    /// Where the line is, from the left, as a share of the width.
+    pub split: f32,
+    /// Where the slider's picture was drawn, to place the line under the pointer.
+    pub frame: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl DesignCanvas {
@@ -130,7 +139,27 @@ impl DesignCanvas {
 
     /// Compare a screen with how version `id` had it.
     fn compare(&mut self, v: &Version, screen: String, cx: &mut Context<Self>) {
-        let file = versions::screen_file(&self.root, &v.id, &screen);
+        self.compare_file(v.title().to_string(), &v.id, screen, false, cx);
+    }
+
+    /// Compare a screen with how it was before the AI change waiting for Keep or Undo.
+    pub(super) fn compare_ai(&mut self, screen: String, cx: &mut Context<Self>) {
+        let Some(v) = self.ai.as_ref().and_then(|ai| ai.version.clone()) else {
+            return;
+        };
+        self.compare_file("Before AI".into(), &v, screen, true, cx);
+    }
+
+    /// Compare a screen with its file in version `version`, called `title`.
+    fn compare_file(
+        &mut self,
+        title: String,
+        version: &str,
+        screen: String,
+        ai: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let file = versions::screen_file(&self.root, version, &screen);
         let name = self
             .canvas
             .screen(&screen)
@@ -146,11 +175,15 @@ impl DesignCanvas {
             .unwrap_or(Device::Phone);
         self.drop_compare(cx);
         self.comparing = Some(Compare {
-            title: v.title().to_string(),
+            title,
             screen: screen.clone(),
             name,
             old: None,
             drawn: !file.exists(),
+            ai,
+            slide: true,
+            split: 0.5,
+            frame: Rc::new(Cell::new(Bounds::default())),
         });
         if !file.exists() {
             cx.notify();
@@ -418,6 +451,21 @@ impl DesignCanvas {
         } else {
             "Drawing…"
         };
+        let body = if c.slide && c.old.is_some() && now.is_some() {
+            self.slider(c, (w * scale, h * scale), scale, cx)
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(40.))
+                .child(frame(c.old.as_ref(), c.title.clone(), old_empty))
+                .child(frame(now, "Now".into(), "Not on the design now"))
+                .into_any_element()
+        };
+        let both = c.old.is_some() && now.is_some();
+        let pending = c.ai && self.ai.as_ref().is_some_and(|ai| !ai.busy());
+        let screen = c.screen.clone();
         Some(
             div()
                 .absolute()
@@ -432,7 +480,9 @@ impl DesignCanvas {
                     div()
                         .h(px(40.))
                         .w_full()
-                        .px_3()
+                        .pl_3()
+                        // Clear of the Chats button over the canvas's corner.
+                        .pr(px(112.))
                         .flex()
                         .items_center()
                         .gap_2()
@@ -443,6 +493,46 @@ impl DesignCanvas {
                                 .text_color(rgb(c_text()))
                                 .child(format!("{}  ·  {} and now", c.name, c.title)),
                         )
+                        .when(both, |d| {
+                            d.child(
+                                div()
+                                    .p(px(2.))
+                                    .flex()
+                                    .gap(px(2.))
+                                    .rounded(px(8.))
+                                    .bg(tint(c_subtle()))
+                                    .child(
+                                        mode("design-compare-slide", "Slider", c.slide).on_click(
+                                            cx.listener(|this, _, _, cx| this.set_slide(true, cx)),
+                                        ),
+                                    )
+                                    .child(
+                                        mode("design-compare-side", "Side by side", !c.slide)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.set_slide(false, cx)
+                                            })),
+                                    ),
+                            )
+                        })
+                        .when(pending, |d| {
+                            d.child(
+                                text_btn(
+                                    "design-compare-put-back",
+                                    "Put this screen back",
+                                    Some(IconName::Undo2),
+                                    false,
+                                )
+                                .tooltip(tip(
+                                    "Undo AI's change to this screen only, keeping the rest",
+                                ))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.drop_compare(cx);
+                                        this.reject_screen(&screen, cx);
+                                    },
+                                )),
+                            )
+                        })
                         .child(
                             icon_btn(
                                 "design-compare-close",
@@ -462,11 +552,116 @@ impl DesignCanvas {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .gap(px(40.))
-                        .child(frame(c.old.as_ref(), c.title.clone(), old_empty))
-                        .child(frame(now, "Now".into(), "Not on the design now")),
+                        .child(body),
                 )
                 .into_any_element(),
         )
+    }
+
+    fn set_slide(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(c) = self.comparing.as_mut() {
+            c.slide = on;
+        }
+        cx.notify();
+    }
+
+    /// The screen as it was over how it is now, cut at a line that follows the pointer:
+    /// left of it is before, right of it is now.
+    fn slider(
+        &self,
+        c: &Compare,
+        (w, h): (f32, f32),
+        scale: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (Some(old), Some(now)) = (c.old.as_ref(), self.shots.get(&c.screen)) else {
+            return div().into_any_element();
+        };
+        let at = c.split.clamp(0., 1.) * w;
+        let frame = c.frame.clone();
+        let picture = |shot: &Shot| {
+            img(ImageSource::Render(shot.image.clone()))
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(px(w))
+                .h(px(shot.size.1 * scale))
+        };
+        let tag = |text: &str, left: bool| {
+            div()
+                .absolute()
+                .top(px(8.))
+                .when(left, |d| d.left(px(8.)))
+                .when(!left, |d| d.right(px(8.)))
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(px(4.))
+                .bg(col(0x000000, 0.6))
+                .text_size(px(11.))
+                .text_color(rgb(0xffffff))
+                .child(text.to_string())
+        };
+        div()
+            .id("design-compare-slider")
+            .relative()
+            .w(px(w))
+            .h(px(h))
+            .rounded(px(10.))
+            .overflow_hidden()
+            .bg(rgb(0xffffff))
+            .shadow_lg()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                let b = frame.get();
+                let x = f32::from(e.position.x - b.origin.x);
+                if let Some(c) = this.comparing.as_mut() {
+                    c.split = (x / w).clamp(0., 1.);
+                    cx.notify();
+                }
+            }))
+            .child({
+                let frame = c.frame.clone();
+                canvas(move |b, _, _| frame.set(b), |_, _, _, _| {})
+                    .absolute()
+                    .size_full()
+            })
+            .child(picture(now))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(px(at))
+                    .h(px(h))
+                    .overflow_hidden()
+                    .child(picture(old)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(at - 1.))
+                    .w(px(2.))
+                    .h(px(h))
+                    .bg(rgb(0xffffff))
+                    .shadow_md(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(h / 2. - 14.))
+                    .left(px(at - 14.))
+                    .size(px(28.))
+                    .rounded_full()
+                    .bg(rgb(0xffffff))
+                    .shadow_md()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(IconName::ChevronsLeftRight, 14., c_text())),
+            )
+            .child(tag(&c.title, true))
+            .child(tag("Now", false))
+            .into_any_element()
     }
 }

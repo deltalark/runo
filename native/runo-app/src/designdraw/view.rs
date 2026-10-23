@@ -538,6 +538,8 @@ struct AiChange {
     /// The screen and layers it was asked about, when the ask was about a selection: it
     /// may change only those.
     scope: Option<(String, Vec<dom::Path>)>,
+    /// The version saved just before it, to compare its screens with.
+    version: Option<String>,
 }
 
 impl AiChange {
@@ -556,6 +558,7 @@ impl AiChange {
             comments: Vec::new(),
             direct: HashSet::new(),
             scope: None,
+            version: None,
         }
     }
 
@@ -1343,6 +1346,10 @@ impl DesignCanvas {
         if let Ok(Some(_)) = super::versions::save(&self.root, "", &who) {
             self.versions = super::versions::list(&self.root);
         }
+        let version = super::versions::list(&self.root)
+            .into_iter()
+            .next()
+            .map(|v| v.id);
         let (marked, marked_text) = self.take_marks();
         let picture =
             self.screen
@@ -1406,6 +1413,7 @@ impl DesignCanvas {
             comments: Vec::new(),
             direct: HashSet::new(),
             scope,
+            version,
         });
         // Leave the keys to the New session dialog that opens next.
         window.blur(cx);
