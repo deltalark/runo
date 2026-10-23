@@ -819,6 +819,18 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
             section("Git", "How Runo commits for you.", vec![
                 switch_row("Credit the agent in commits", "Adds a line such as \"Made with Claude Code in Runo\" to commits made from the Changes panel.", st.attribution, |s, v| s.attribution = v),
             ]),
+            section("Design", "Bring work in from other design tools.", vec![
+                row(
+                    "Figma access token",
+                    "Lets Design import frames from Figma. Make one in Figma under Settings > Security > Personal access tokens, with read access to files. It stays on this computer.",
+                    Ctl::Text {
+                        key: "figma_token".into(),
+                        value: st.figma_token.clone(),
+                        placeholder: "figd_…".into(),
+                        set: Rc::new(|s, v| s.figma_token = v.trim().to_string()),
+                    },
+                ),
+            ]),
             section("New worktrees", "Prepare each isolated worktree before the agent starts. Ignored files listed in the repository's .worktreeinclude (gitignore patterns, such as .env) are copied in automatically.", vec![
                 row(
                     "Setup command",
@@ -857,7 +869,12 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
                 row("Color theme", "Each theme has a light and a dark version; Theme above picks which one shows.", Ctl::Dropdown(crate::themes::THEMES.iter().map(|t| (t.id.to_string(), t.name.to_string())).collect(), st.color_theme.clone(), Rc::new(|s, v| s.color_theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
-                row("Background", "A fine grid of dots on the window's frame, warming into your accent at the top-left. With glass on it shows through the panels too.", Ctl::Segment(options(&[("off", "None"), ("dots", "Dot matrix")]), st.pattern.clone(), Rc::new(|s, v| s.pattern = v))),
+            ]),
+            section("Background", "A fine pattern behind your work, warming into your accent at the top-left.", vec![
+                row("Pattern", "Dots, lines or small marks on one grid across the window.", Ctl::Dropdown(crate::pattern::Pattern::ALL.iter().map(|p| (p.id().to_string(), p.label().to_string())).collect(), st.pattern.clone(), Rc::new(|s, v| s.pattern = v))),
+                switch_row("On the content", "The page and the terminal, where you read and work.", st.pattern_content, |s, v| s.pattern_content = v),
+                switch_row("On the side panels", "The sidebar and the panels beside the content, such as Changes and Files.", st.pattern_panels, |s, v| s.pattern_panels = v),
+                switch_row("On the frame", "The top bar, the rail and the status bar round your work. With glass on and all three areas on, it also shows through the panels.", st.pattern_frame, |s, v| s.pattern_frame = v),
             ]),
             section("Glass", "A translucent window over a blurred desktop, like macOS glass.", vec![
                 row("Window glass", "", Ctl::Glass(st.glass.clone())),
@@ -1964,6 +1981,8 @@ impl RunoApp {
             InputState::new(window, cx)
                 .placeholder(placeholder.to_string())
                 .default_value(value.to_string())
+                // An access token stays hidden as it's typed.
+                .masked(key.ends_with("_token"))
         });
         let sub = cx.subscribe_in(&entity, window, move |_, input, event, _, cx| {
             if matches!(event, InputEvent::Change) {
