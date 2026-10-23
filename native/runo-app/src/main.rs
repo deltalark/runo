@@ -84,6 +84,7 @@ mod review;
 mod reviewable;
 mod schedule;
 mod seatbelt;
+mod session_header;
 mod sessions;
 mod settings;
 mod settings_ui;
@@ -566,6 +567,8 @@ struct RunoApp {
     focus: FocusHandle,
     /// Last window-width class seen, so the panel auto-hides once when the window narrows.
     panel_wide: Option<bool>,
+    /// The session header's width as last laid out, for how much of it fits.
+    header_width: std::rc::Rc<std::cell::Cell<f32>>,
     /// Files changed by each session's latest turn, once it finished (for Undo / Keep).
     turn_files: HashMap<u64, usize>,
     /// Sessions whose checks are running after their last turn.
@@ -1747,6 +1750,7 @@ impl RunoApp {
             show_panel: true,
             focus: cx.focus_handle(),
             panel_wide: None,
+            header_width: std::rc::Rc::new(std::cell::Cell::new(f32::INFINITY)),
             turn_files: HashMap::new(),
             proving: Default::default(),
             reviewing: HashMap::new(),
@@ -5706,210 +5710,8 @@ impl RunoApp {
         let provider = agent::provider(&session.provider);
         let working = self.handles.contains_key(&Target::Session(session.id));
         let id = session.id;
-        let isolated = session.isolated;
         let list = self.chat_list(session, working, false, cx);
-        let header = div()
-            .h(px(44.))
-            .flex_none()
-            .px_4()
-            .flex()
-            .items_center()
-            .gap_3()
-            .border_b_1()
-            .border_color(divider())
-            .child(if self.renaming {
-                div()
-                    .w(px(360.))
-                    .child(Input::new(&self.rename).bordered(true).h(px(28.)))
-                    .into_any_element()
-            } else {
-                div()
-                    .id("session-title")
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    // A long title gives way, so the branch beside it stays readable.
-                    .min_w(px(64.))
-                    .flex_shrink(1.)
-                    .cursor_pointer()
-                    .group("title")
-                    .tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Click to rename")
-                            .build(window, cx)
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.start_rename(window, cx);
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(session.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .opacity(0.)
-                            .group_hover("title", |el| el.opacity(1.))
-                            .child(icon(IconName::Pencil, 12., c_muted())),
-                    )
-                    .into_any_element()
-            })
-            .child(
-                // The branch keeps room for a short name like "local folder" and a
-                // long one is cut, with the full name in the tooltip.
-                div()
-                    .id("session-branch")
-                    .flex()
-                    .min_w(px(96.))
-                    .flex_shrink(1.)
-                    .tooltip({
-                        let branch = session.branch.clone();
-                        move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(branch.clone())
-                                .build(window, cx)
-                        }
-                    })
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.))
-                    .text_color(rgb(c_muted()))
-                    .child(icon(IconName::GitBranch, 12., c_muted()).flex_none())
-                    .child(
-                        div()
-                            .max_w(px(160.))
-                            .truncate()
-                            .child(session.branch.clone()),
-                    )
-                    .when(isolated, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .px(px(6.))
-                                .py(px(1.))
-                                .rounded_sm()
-                                .bg(tint(c_subtle()))
-                                .text_size(px(11.))
-                                .child("worktree"),
-                        )
-                    }),
-            )
-            .child(div().flex_1())
-            // Asked from a canvas: back to it, where its changes show.
-            .children(shell::canvas_of(session).map(|view| {
-                let id = session.id;
-                div()
-                    .id("hdr-canvas")
-                    .h(px(26.))
-                    .px_2()
-                    .mr_2()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_subtle())))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_session(id, window, cx);
-                        cx.notify();
-                    }))
-                    .child(icon(
-                        if view == View::Design {
-                            Mode::Design.glyph()
-                        } else {
-                            Mode::Architecture.glyph()
-                        },
-                        12.,
-                        c_secondary(),
-                    ))
-                    .child(format!("Open {}", shell::canvas_title(view)))
-            }))
-            .child(
-                div()
-                    .id("hdr-playbooks")
-                    .h(px(26.))
-                    .px_2()
-                    .mr_2()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(5.))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_size(px(12.))
-                    .text_color(rgb(c_secondary()))
-                    .hover(|el| el.bg(tint(c_subtle())))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        self.on_context(ctxmenu::CtxTarget::Playbooks(session.project_id), cx),
-                    )
-                    .child(icon(IconName::Play, 11., c_secondary()))
-                    .child("Playbooks"),
-            )
-            // Only offered once something is being served for this session.
-            .when(
-                cx.global::<AppSettings>().browser_enabled && self.app_serving(session),
-                |el| {
-                    el.child(
-                        div()
-                            .id("hdr-browser")
-                            .h(px(26.))
-                            .px_2()
-                            .mr_2()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap(px(5.))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_size(px(12.))
-                            .text_color(rgb(c_secondary()))
-                            .hover(|el| el.bg(tint(c_subtle())))
-                            .tooltip(|window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(
-                                    "Open your app in a Browser tab",
-                                )
-                                .build(window, cx)
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_browser();
-                                cx.notify();
-                            }))
-                            .child(icon(IconName::Globe, 13., c_secondary())),
-                    )
-                },
-            )
-            .children(self.runs_on_badge(session, cx))
-            .child(self.view_toggle(session, cx))
-            .when(!working, |el| {
-                el.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(12.))
-                        .text_color(rgb(c_secondary()))
-                        .child(self.status_dot(session.status, "hdr-dot", 6.))
-                        .child(Self::status_label(session.status)),
-                )
-            })
-            .child(
-                self.ghost_button("delete", IconName::Trash, "Delete session")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if confirm_delete() {
-                            this.confirm_delete = Some(id);
-                        } else {
-                            this.delete_session(id);
-                        }
-                        cx.notify();
-                    })),
-            );
+        let header = self.session_header(session, working, cx);
         // Chat and CLI are two views of one conversation; the swap crossfades.
         let cli = session.cli;
         let body = if cli {

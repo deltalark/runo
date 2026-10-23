@@ -518,51 +518,17 @@ impl RunoApp {
         )
     }
 
-    /// The session header's "Runs on" control: where it runs; click to move it.
-    pub(crate) fn runs_on_badge(
-        &self,
-        session: &Session,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    /// The session header's "Runs on" label: where the session runs, or `None` when
+    /// there are no connections to move it to.
+    pub(crate) fn runs_on_label(&self, session: &Session) -> Option<String> {
         if connections::all().is_empty() && session.connection == connections::LOCAL {
             return None;
         }
-        let local = session.connection == connections::LOCAL;
-        Some(
-            div()
-                .id("hdr-runs-on")
-                .h(px(26.))
-                .px_2()
-                .mr_2()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(5.))
-                .rounded_md()
-                .cursor_pointer()
-                .text_size(px(12.))
-                .text_color(rgb(if local { c_secondary() } else { c_blue() }))
-                .hover(|el| el.bg(tint(c_subtle())))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    self.on_context(ctxmenu::CtxTarget::RunsOn(session.id), cx),
-                )
-                .child(icon(
-                    if local {
-                        IconName::Cpu
-                    } else {
-                        IconName::Server
-                    },
-                    11.,
-                    if local { c_secondary() } else { c_blue() },
-                ))
-                .child(if local {
-                    "This machine".to_string()
-                } else {
-                    connections::name(session.connection)
-                })
-                .into_any_element(),
-        )
+        Some(if session.connection == connections::LOCAL {
+            "This machine".to_string()
+        } else {
+            connections::name(session.connection)
+        })
     }
 
     /// Turns that were running on connections when Runo closed kept going there. Show
