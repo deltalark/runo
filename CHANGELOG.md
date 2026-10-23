@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Quick AI edits in Design. Ask about one selected layer ("make it a dark pill", "tighten the spacing") and the agent answers with just that layer's new markup in one fast call, instead of starting a session. The change lands on the canvas as one edit you undo with one Ctrl+Z, while a pill over the layer shows it's working. Asks that need more than the layer go on to a session as before.
+
 ### Fixed
 
 - The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
