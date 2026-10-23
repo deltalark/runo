@@ -30,11 +30,14 @@ const ASK_EASE_MS: u64 = 200;
 mod agents;
 mod chrome;
 mod codelinks;
+mod colours;
 mod comments;
 mod components;
 mod discard;
 mod figma;
+mod fromfigma;
 mod grids;
+mod handles;
 mod handoff;
 mod handoffs;
 mod history;
@@ -42,16 +45,30 @@ mod insert;
 mod layers;
 mod libraries;
 mod looks;
+mod marks;
 mod motion;
+mod options;
 mod pictures;
+mod queue;
+mod quick;
+mod scrub;
 mod shapes;
 mod spacing;
+mod tokensnap;
+mod typing;
 mod vars;
 mod vectors;
 
 actions!(
     design_canvas,
-    [DesignEscape, DesignUndo, DesignRedo, DesignCopy]
+    [
+        DesignEscape,
+        DesignUndo,
+        DesignRedo,
+        DesignCopy,
+        DesignNextLayer,
+        DesignPrevLayer
+    ]
 );
 
 /// Keys the canvas takes before the app's own bindings for them. A text box inside the
@@ -64,6 +81,9 @@ pub(crate) fn bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-shift-z", DesignRedo, canvas),
         KeyBinding::new("secondary-y", DesignRedo, canvas),
         KeyBinding::new("secondary-c", DesignCopy, canvas),
+        // Tab walks the layers, as in design tools, rather than moving focus.
+        KeyBinding::new("tab", DesignNextLayer, canvas),
+        KeyBinding::new("shift-tab", DesignPrevLayer, canvas),
     ]
 }
 
@@ -152,6 +172,8 @@ enum Drag {
         from: Pt,
         at: Pt,
         moved: bool,
+        /// Alt was held: drop a copy and leave the layer where it was.
+        copy: bool,
     },
     /// Dragging a box across a screen to select what's inside it. Until it moves, it's a
     /// click on the element under the pointer.
@@ -163,12 +185,14 @@ enum Drag {
         /// Shift was held: add to the selection rather than replace it.
         add: bool,
     },
-    /// Resizing the selected element from its right edge, bottom edge or corner.
+    /// Resizing the selected element from any side or corner; Shift keeps its shape and
+    /// Alt resizes it about its middle.
     Resize {
-        wide: bool,
-        tall: bool,
+        edges: handles::Edges,
         from: Pt,
         at: Pt,
+        ratio: bool,
+        centre: bool,
     },
     /// Dragging guide `index` of screen `id` to `at`, in page units.
     Guide {
@@ -183,6 +207,11 @@ enum Drag {
         from: Pt,
         start: f32,
         now: f32,
+    },
+    /// Drawing a mark on screen `id` with the marker, in canvas units.
+    Mark {
+        id: String,
+        pts: Vec<Pt>,
     },
     /// Dragging out a shape on a screen with a shape tool.
     Draw {
@@ -303,6 +332,14 @@ pub(crate) struct DesignCanvas {
     layers_hidden: bool,
     /// The next ask is about the selected layers.
     scoping: bool,
+    /// Asks typed while AI works, to start one after another.
+    queued: Vec<queue::Queued>,
+    /// A quick edit of the selected layer on its way.
+    quick: Option<quick::Quick>,
+    /// Takes on the selected layer, to pick one of.
+    options: Option<options::Options>,
+    /// An ask a quick edit handed on, to start as a session.
+    pending_session: Option<String>,
     /// Each screen's HTML before a change, for undo and redo.
     undo: Vec<Step>,
     redo: Vec<Step>,
@@ -361,6 +398,16 @@ pub(crate) struct DesignCanvas {
     field_vals: HashMap<&'static str, String>,
     /// The hand tool: dragging anywhere pans.
     hand: bool,
+    /// The colour picker, when open on a colour field.
+    picker: Option<colours::Picker>,
+    /// Colours set from the picker, newest first.
+    recent_colours: Vec<String>,
+    /// The eyedropper is out: the next click on the canvas takes the colour there.
+    eyedropper: bool,
+    /// Where the pointer is with the eyedropper, on screen, and the colour under it.
+    eye_at: Option<(Pt, u32)>,
+    /// Space is held down: dragging pans until it's let go.
+    space: bool,
     /// Whether layout grids are drawn and snapped to.
     show_grids: bool,
     /// The vector path whose points are being edited.
@@ -370,6 +417,10 @@ pub(crate) struct DesignCanvas {
     shape: Option<shapes::Shape>,
     pen: Option<(String, Vec<Pt>)>,
     pen_at: Option<Pt>,
+    /// The marker is on: a drag on a screen draws a mark for the next ask.
+    marking: bool,
+    /// Marks drawn for the next ask.
+    marks: Vec<marks::Mark>,
     /// How the Export section exports: pixels per CSS pixel, and the format.
     export_scale: u32,
     export_format: super::export::Format,
@@ -404,6 +455,10 @@ pub(crate) struct DesignCanvas {
     code_map: super::codemap::CodeMap,
     f_link_name: Entity<InputState>,
     f_link_import: Entity<InputState>,
+    /// Import from Figma: the link, and a token when Settings has none.
+    f_figma: Entity<InputState>,
+    f_figma_token: Entity<InputState>,
+    figma_busy: bool,
     code_link_for: String,
     f_variant: Entity<InputState>,
     comp_vals: (String, String),
@@ -441,6 +496,10 @@ pub(crate) struct DesignCanvas {
     people: Vec<String>,
     f_inline: Entity<InputState>,
     inline_open: bool,
+    /// Text being typed into a layer on the canvas.
+    typing: Option<typing::Typing>,
+    /// A field's mark being dragged to change its number.
+    scrub: Option<scrub::Scrub>,
     /// What the text fields were filled for.
     loaded: Option<(String, dom::Path)>,
     loaded_screen: Option<String>,
@@ -496,6 +555,8 @@ struct AiChange {
     /// The screen and layers it was asked about, when the ask was about a selection: it
     /// may change only those.
     scope: Option<(String, Vec<dom::Path>)>,
+    /// The version saved just before it, to compare its screens with.
+    version: Option<String>,
 }
 
 impl AiChange {
@@ -514,6 +575,7 @@ impl AiChange {
             comments: Vec::new(),
             direct: HashSet::new(),
             scope: None,
+            version: None,
         }
     }
 
@@ -556,13 +618,19 @@ impl DesignCanvas {
         let f_inline = cx.new(|cx| InputState::new(window, cx));
         subs.push(
             cx.subscribe_in(&f_inline, window, |this, state, ev, window, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur)
-                    && this.inline_open
-                {
-                    this.inline_open = false;
-                    let v = state.read(cx).value().to_string();
-                    this.set_text(v, cx);
-                    window.focus(&this.focus, cx);
+                if !this.inline_open {
+                    return;
+                }
+                let v = state.read(cx).value().to_string();
+                match ev {
+                    // The screen takes the text as it's typed.
+                    InputEvent::Change => this.typed(v, cx),
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        this.inline_open = false;
+                        this.end_typing(v, cx);
+                        window.focus(&this.focus, cx);
+                    }
+                    _ => {}
                 }
             }),
         );
@@ -608,6 +676,7 @@ impl DesignCanvas {
         let f_lib = Self::make_library_field(&root, window, cx);
         let f_version = Self::make_version_field(window, cx, &mut subs);
         let (f_link_name, f_link_import) = Self::make_code_link_fields(window, cx, &mut subs);
+        let (f_figma, f_figma_token) = Self::make_figma_fields(window, cx, &mut subs);
         let code_map = super::codemap::CodeMap::load(&root);
         let f_comment = Self::make_comment_field(window, cx, &mut subs);
         let (f_layer, f_find) = Self::make_layer_fields(window, cx, &mut subs);
@@ -651,6 +720,10 @@ impl DesignCanvas {
             layers_loading: false,
             layers_hidden: false,
             scoping: false,
+            queued: Vec::new(),
+            quick: None,
+            options: None,
+            pending_session: None,
             undo: Vec::new(),
             redo: Vec::new(),
             panel: Panel::Design,
@@ -686,11 +759,18 @@ impl DesignCanvas {
             fields,
             field_vals: HashMap::new(),
             hand: false,
+            picker: None,
+            recent_colours: Vec::new(),
+            eyedropper: false,
+            eye_at: None,
+            space: false,
             show_grids: true,
             points: None,
             shape: None,
             pen: None,
             pen_at: None,
+            marking: false,
+            marks: Vec::new(),
             export_scale: 2,
             export_format: Default::default(),
             library,
@@ -713,6 +793,9 @@ impl DesignCanvas {
             code_map,
             f_link_name,
             f_link_import,
+            f_figma,
+            f_figma_token,
+            figma_busy: false,
             code_link_for: String::new(),
             f_variant,
             comp_vals: Default::default(),
@@ -739,6 +822,8 @@ impl DesignCanvas {
             people: Vec::new(),
             f_inline,
             inline_open: false,
+            typing: None,
+            scrub: None,
             loaded: None,
             loaded_screen: None,
             seen: HashMap::new(),
@@ -1237,8 +1322,19 @@ impl DesignCanvas {
             Some(device) => brief::describe_task(&typed, device),
             None => typed,
         };
+        // An ask about one layer comes back as one quick edit when it can.
+        if self.ask_new.is_none() && self.quick_edit(&task, cx) {
+            self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
+            return;
+        }
         // Asked with layers selected, the ask is about them, and AI changes only them.
         self.scoping = self.ask_new.is_none() && self.element.is_some();
+        // While AI is working, the ask waits in line.
+        if self.ai.as_ref().is_some_and(|ai| ai.busy()) {
+            self.queue_ask(task, cx);
+            self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
+            return;
+        }
         if self.ask(task, window, cx) {
             self.ask_new = None;
             self.f_ask.update(cx, |s, cx| s.set_value("", window, cx));
@@ -1271,8 +1367,20 @@ impl DesignCanvas {
         if let Ok(Some(_)) = super::versions::save(&self.root, "", &who) {
             self.versions = super::versions::list(&self.root);
         }
-        let picture = self.screen.clone().and_then(|id| self.save_picture(&id));
+        let version = super::versions::list(&self.root)
+            .into_iter()
+            .next()
+            .map(|v| v.id);
+        let (marked, marked_text) = self.take_marks();
+        let picture =
+            self.screen
+                .clone()
+                .and_then(|id| match marked.iter().find(|(m, _)| *m == id) {
+                    Some((_, p)) => Some(p.clone()),
+                    None => self.save_picture(&id),
+                });
         let mut context = self.ask_context(picture.as_deref());
+        context.push_str(&marked_text);
         let scope = std::mem::take(&mut self.scoping)
             .then(|| Some((self.screen.clone()?, self.selected_paths())))
             .flatten()
@@ -1301,7 +1409,14 @@ impl DesignCanvas {
             }
         }
         let images: Vec<String> = picture
-            .into_iter()
+            .iter()
+            .cloned()
+            .chain(
+                marked
+                    .into_iter()
+                    .map(|(_, p)| p)
+                    .filter(|p| Some(p) != picture.as_ref()),
+            )
             .chain(picked.into_iter().map(|(p, _)| p))
             .collect();
         self.refs_picked.clear();
@@ -1319,6 +1434,7 @@ impl DesignCanvas {
             comments: Vec::new(),
             direct: HashSet::new(),
             scope,
+            version,
         });
         // Leave the keys to the New session dialog that opens next.
         window.blur(cx);
@@ -1615,6 +1731,7 @@ impl DesignCanvas {
         let before = ai.before.clone();
         let kept = super::guard::keep(&self.root, &before, &self.code_map);
         let outside = self.keep_scope(&before);
+        let snapped = self.snap_ai_change(&before);
         // Read what it wrote now rather than at the next look, and draw it.
         self.check_files(cx);
         self.sync_changed_components(&before, cx);
@@ -1628,6 +1745,17 @@ impl DesignCanvas {
             self.say(format!(
                 "AI was asked about the selection, so Design put back {} it changed besides.",
                 outside.join(", ")
+            ));
+        }
+        if snapped > 0 && self.ai.is_some() {
+            self.say(format!(
+                "Wrote {snapped} {} AI used as the theme's tokens, so {} with the theme.",
+                if snapped == 1 { "value" } else { "values" },
+                if snapped == 1 {
+                    "it changes"
+                } else {
+                    "they change"
+                }
             ));
         }
         // The chat that just ended takes the next ask a moment later.
@@ -1730,6 +1858,12 @@ impl DesignCanvas {
 
     /// Save how a screen looks now as a picture for an agent, and say where.
     fn save_picture(&self, id: &str) -> Option<String> {
+        let picture = self.picture_of(id)?;
+        self.write_picture(id, id, picture)
+    }
+
+    /// How a screen looks now, as a picture for an agent.
+    fn picture_of(&self, id: &str) -> Option<image::RgbaImage> {
         let shot = self.shots.get(id)?;
         let size = shot.image.size(0);
         let (w, h) = (size.width.0 as u32, size.height.0 as u32);
@@ -1743,9 +1877,18 @@ impl DesignCanvas {
             let h = (h as f32 * PICTURE_WIDTH as f32 / w as f32).round() as u32;
             picture = image::imageops::thumbnail(&picture, PICTURE_WIDTH, h.max(1));
         }
+        Some(picture)
+    }
+
+    /// Save a picture of screen `id` for an agent as `name`.png, and say where.
+    fn write_picture(&self, id: &str, name: &str, picture: image::RgbaImage) -> Option<String> {
         let dir = crate::design::folder(&self.root).join("shots");
         std::fs::create_dir_all(&dir).ok()?;
-        let file = dir.join(format!("{id}.png"));
+        let file = if name == id {
+            dir.join(format!("{id}.png"))
+        } else {
+            dir.join(format!("{id}-{name}.png"))
+        };
         picture
             .save_with_format(&file, image::ImageFormat::Png)
             .ok()?;
@@ -1807,6 +1950,8 @@ impl DesignCanvas {
                             .on_click(cx.listener(|this, _, _, cx| this.stop_ai(cx))),
                     ),
                 )
+                .children(self.queued_rows(cx))
+                .child(self.queue_input())
                 .into_any_element(),
             None => {
                 let empty = self.f_ask.read(cx).value().trim().is_empty();
@@ -2447,9 +2592,20 @@ impl DesignCanvas {
             cx,
             move |r| r.edit(&id, device, &js),
             move |this, out, cx| match out {
-                Ok(Some((before, shot))) => this.landed(id2, before, shot, after, cx),
-                Ok(None) => {}
-                Err(e) => this.say(e),
+                Ok(Some((before, shot))) => {
+                    this.landed(id2, before, shot, after, cx);
+                    this.typing_landed(cx);
+                    this.scrub_landed(cx);
+                }
+                Ok(None) => {
+                    this.typing_landed(cx);
+                    this.scrub_landed(cx);
+                }
+                Err(e) => {
+                    this.say(e);
+                    this.typing_landed(cx);
+                    this.scrub_landed(cx);
+                }
             },
         );
     }
@@ -2464,12 +2620,16 @@ impl DesignCanvas {
         after: After,
         cx: &mut Context<Self>,
     ) {
-        self.undo.push(Step {
-            id: id.clone(),
-            html: before,
-            by_ai: None,
-            lesson: None,
-        });
+        // Typing into a layer or dragging a field keeps the step its first edit made,
+        // so it undoes at once.
+        if !(self.typing_merges() | self.scrub_merges()) {
+            self.undo.push(Step {
+                id: id.clone(),
+                html: before,
+                by_ai: None,
+                lesson: None,
+            });
+        }
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
         }
@@ -3405,8 +3565,15 @@ impl DesignCanvas {
         self.new_open = false;
         let local = self.local(e.position);
         let w = self.world(local);
+        if self.eyedropper && e.button == MouseButton::Left {
+            self.eyedrop(w, cx);
+            return;
+        }
         if self.commenting && e.button == MouseButton::Left {
             self.comment_down(w, cx);
+            return;
+        }
+        if e.button == MouseButton::Left && self.mark_down(w, cx) {
             return;
         }
         if e.button == MouseButton::Left && self.points_down(w, e.modifiers.alt, cx) {
@@ -3415,7 +3582,8 @@ impl DesignCanvas {
         if e.button == MouseButton::Left && self.shape_down(w, e.click_count, cx) {
             return;
         }
-        if e.button == MouseButton::Left && !self.hand {
+        let hand = self.hand || self.space;
+        if e.button == MouseButton::Left && !hand {
             if let Some((id, index, vertical)) = self.guide_hit(w) {
                 if let Some(s) = self.canvas.screen(&id) {
                     let at = if vertical { w.0 - s.x } else { w.1 - s.y };
@@ -3430,7 +3598,7 @@ impl DesignCanvas {
                 }
             }
         }
-        if e.button == MouseButton::Middle || (self.hand && e.button == MouseButton::Left) {
+        if e.button == MouseButton::Middle || (hand && e.button == MouseButton::Left) {
             self.drag = Drag::Pan {
                 from: local,
                 start: self.pan,
@@ -3461,12 +3629,13 @@ impl DesignCanvas {
                 return;
             }
         }
-        if let Some((wide, tall)) = self.resize_edge(local) {
+        if let Some(edges) = self.resize_edges(local) {
             self.drag = Drag::Resize {
-                wide,
-                tall,
+                edges,
                 from: w,
                 at: w,
+                ratio: e.modifiers.shift,
+                centre: e.modifiers.alt,
             };
             return;
         }
@@ -3481,6 +3650,7 @@ impl DesignCanvas {
                         from: w,
                         at: w,
                         moved: false,
+                        copy: e.modifiers.alt,
                     };
                     return;
                 }
@@ -3531,9 +3701,17 @@ impl DesignCanvas {
         cx.notify();
     }
 
-    fn on_move(&mut self, e: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_move(&mut self, e: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker_drag(e.position, cx) || self.scrub_move(e, window, cx) {
+            return;
+        }
         let local = self.local(e.position);
         let w = self.world(local);
+        if self.eyedropper {
+            self.eye_at = self.colour_at(w).map(|c| (local, c));
+            cx.notify();
+            return;
+        }
         if matches!(self.drag, Drag::None) && self.pen.is_some() {
             self.pen_at = Some(w);
             cx.notify();
@@ -3570,12 +3748,28 @@ impl DesignCanvas {
                     w.1 + self.snap(id, false, &[y, y + r.h / 2., y + r.h]),
                 )
             }
-            Drag::Resize { from, .. } => match (&self.screen, &self.element) {
+            // The side being dragged goes to the lines nearby.
+            Drag::Resize { edges, from, .. } => match (&self.screen, &self.element) {
                 (Some(id), Some(el)) => {
                     let r = &el.rect;
+                    let (dx, dy) = (w.0 - from.0, w.1 - from.1);
+                    let across = if edges.r {
+                        vec![r.x + r.w + dx]
+                    } else if edges.l {
+                        vec![r.x + dx]
+                    } else {
+                        vec![]
+                    };
+                    let down = if edges.b {
+                        vec![r.y + r.h + dy]
+                    } else if edges.t {
+                        vec![r.y + dy]
+                    } else {
+                        vec![]
+                    };
                     (
-                        w.0 + self.snap(id, true, &[r.x + r.w + w.0 - from.0]),
-                        w.1 + self.snap(id, false, &[r.y + r.h + w.1 - from.1]),
+                        w.0 + self.snap(id, true, &across),
+                        w.1 + self.snap(id, false, &down),
                     )
                 }
                 _ => w,
@@ -3588,6 +3782,12 @@ impl DesignCanvas {
         };
         match &mut self.drag {
             Drag::None => return,
+            Drag::Mark { pts, .. } => {
+                let last = pts[pts.len() - 1];
+                if (w.0 - last.0).abs().max((w.1 - last.1).abs()) * self.zoom >= 2. {
+                    pts.push(w);
+                }
+            }
             Drag::Point { at, .. } => *at = w,
             Drag::Guide { vertical, at, .. } => {
                 if let Some((sx, sy)) = guide_off {
@@ -3605,7 +3805,13 @@ impl DesignCanvas {
                     self.drop = self.drop_at(w);
                 }
             }
-            Drag::Resize { at, .. } => *at = snapped,
+            Drag::Resize {
+                at, ratio, centre, ..
+            } => {
+                *at = snapped;
+                *ratio = e.modifiers.shift;
+                *centre = e.modifiers.alt;
+            }
             Drag::Spacing {
                 space,
                 from,
@@ -3666,6 +3872,13 @@ impl DesignCanvas {
     }
 
     fn on_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.picker_drop(cx) {
+            return;
+        }
+        if self.end_scrub() {
+            cx.notify();
+            return;
+        }
         let drop = self.drop.take();
         self.hover = None;
         match std::mem::replace(&mut self.drag, Drag::None) {
@@ -3673,6 +3886,7 @@ impl DesignCanvas {
             Drag::Spacing {
                 space, start, now, ..
             } => self.spacing_up(space, start, now, cx),
+            Drag::Mark { id, pts } => self.mark_up(id, pts, cx),
             Drag::Draw {
                 id,
                 from,
@@ -3740,8 +3954,15 @@ impl DesignCanvas {
                 moved: true,
                 from,
                 at,
+                copy,
                 ..
-            } if self.floating() => self.move_floating(at.0 - from.0, at.1 - from.1, cx),
+            } if self.floating() => {
+                if copy {
+                    self.copy_floating(at.0 - from.0, at.1 - from.1, cx)
+                } else {
+                    self.move_floating(at.0 - from.0, at.1 - from.1, cx)
+                }
+            }
             Drag::Guide { id, index, at, .. } => self.drop_guide(id, index, at, cx),
             Drag::Point {
                 contour,
@@ -3749,6 +3970,21 @@ impl DesignCanvas {
                 from,
                 at,
             } => self.drop_point(contour, index, from, at, cx),
+            Drag::Element {
+                moved: true,
+                copy: true,
+                ..
+            } => {
+                if let (Some(d), Some(path)) = (drop, self.element.as_ref().map(|e| e.path.clone()))
+                {
+                    let to = dom::copied_path(&d.target, d.after);
+                    self.edit(
+                        dom::op(&path, "copyTo", &[json!(d.target), json!(d.after)]),
+                        After::Path(to),
+                        cx,
+                    );
+                }
+            }
             Drag::Element { moved: true, .. } => {
                 if let (Some(d), Some(path)) = (drop, self.element.as_ref().map(|e| e.path.clone()))
                 {
@@ -3761,23 +3997,17 @@ impl DesignCanvas {
                 }
             }
             Drag::Resize {
-                wide,
-                tall,
+                edges,
                 from,
                 at,
+                ratio,
+                centre,
             } => {
                 if let Some(el) = &self.element {
-                    let mut map = serde_json::Map::new();
-                    if wide {
-                        let w = (el.rect.w + at.0 - from.0).max(8.).round();
-                        map.insert("width".into(), json!(format!("{w}px")));
-                    }
-                    if tall {
-                        let h = (el.rect.h + at.1 - from.1).max(8.).round();
-                        map.insert("height".into(), json!(format!("{h}px")));
-                    }
                     if (at.0 - from.0).abs() + (at.1 - from.1).abs() > 0.5 {
-                        self.op("styles", &[serde_json::Value::Object(map)], After::Same, cx);
+                        let d = (at.0 - from.0, at.1 - from.1);
+                        let new = handles::resized(&el.rect, edges, d, ratio, centre);
+                        self.finish_resize(new, cx);
                     }
                 }
             }
@@ -3977,6 +4207,21 @@ impl DesignCanvas {
                 self.nudge(1, cx);
                 true
             }
+            (false, shift, false, key @ ("left" | "right" | "up" | "down"))
+                if self.pen.is_none() && self.points.is_none() =>
+            {
+                self.arrow(key, shift, cx);
+                true
+            }
+            (false, _, _, "space") => {
+                if !self.space {
+                    self.space = true;
+                }
+                true
+            }
+            (false, true, false, "enter") if self.pen.is_none() => {
+                self.walk(handles::Walk::Out, cx)
+            }
             (false, _, _, "enter") if self.pen.is_some() => {
                 self.finish_pen(false, cx);
                 true
@@ -3992,9 +4237,12 @@ impl DesignCanvas {
                 self.start_points(cx);
                 true
             }
+            // Enter edits text in place, or steps into a layer's children.
             (false, false, false, "enter") => {
                 if self.element.as_ref().is_some_and(|e| e.text.is_some()) {
                     self.inline_open = true;
+                } else {
+                    self.walk(handles::Walk::In, cx);
                 }
                 true
             }
@@ -4066,6 +4314,14 @@ impl DesignCanvas {
                 self.new_open = !self.new_open;
                 true
             }
+            (false, false, false, "i") if self.element.is_some() => {
+                self.toggle_eyedropper(cx);
+                true
+            }
+            (false, false, false, "m") => {
+                self.toggle_marking(cx);
+                true
+            }
             (false, false, false, "t") if self.screen.is_some() => {
                 self.insert("<p>Text</p>", cx);
                 true
@@ -4080,7 +4336,14 @@ impl DesignCanvas {
 
     /// Escape: leave play, then the text being edited, then step out to the parent.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.comparing.is_some() {
+        if self.eyedropper {
+            self.eyedropper = false;
+            self.eye_at = None;
+        } else if self.picker.is_some() {
+            self.picker = None;
+        } else if self.options.is_some() {
+            self.close_options(cx);
+        } else if self.comparing.is_some() {
             self.drop_compare(cx);
         } else if self.points.is_some() {
             self.points = None;
@@ -4090,8 +4353,12 @@ impl DesignCanvas {
             self.finish_pen(false, cx);
         } else if self.shape.is_some() {
             self.shape = None;
+        } else if self.marking {
+            self.marking = false;
         } else if self.inline_open {
             self.inline_open = false;
+            let v = self.f_inline.read(cx).value().to_string();
+            self.end_typing(v, cx);
         } else if self.comment_open.is_some() {
             self.comment_open = None;
         } else if self.commenting {
@@ -4136,26 +4403,6 @@ impl DesignCanvas {
                 h: el.rect.h,
             },
         ))
-    }
-
-    /// Which edges of the picked element are under the pointer, for resizing it:
-    /// (right edge, bottom edge).
-    fn resize_edge(&self, local: Pt) -> Option<(bool, bool)> {
-        let (_, r) = self.picked_rect()?;
-        let (x0, y0) = self.screen_pt((r.x, r.y));
-        let (x1, y1) = self.screen_pt((r.x + r.w, r.y + r.h));
-        // The grip reaches a little outside the edge but only a sliver inside it, so a small
-        // element can still be grabbed and moved rather than always resized.
-        let near = |v: f32, edge: f32, size: f32| v <= edge + 6. && v >= edge - (size / 4.).min(4.);
-        let within = |v: f32, lo: f32, hi: f32| v >= lo - 5. && v <= hi + 5.;
-        let wide = near(local.0, x1, x1 - x0) && within(local.1, y0, y1);
-        let tall = near(local.1, y1, y1 - y0) && within(local.0, x0, x1);
-        // The link handle sits at the middle of the right edge.
-        let mid = (y0 + y1) / 2.;
-        if self.links_shown() && wide && !tall && (local.1 - mid).abs() < 10. {
-            return None;
-        }
-        (wide || tall).then_some((wide, tall))
     }
 
     /// The element under a point on the canvas, leaving out `skip` and what's inside it.
@@ -4327,6 +4574,7 @@ impl DesignCanvas {
                     ),
             )
             .on_click(cx.listener(|this, _, window, cx| this.start_describe(window, cx)));
+        let figma = self.figma_menu_item(cx);
         // It opens from the frame tool, above the toolbar.
         div()
             .absolute()
@@ -4352,6 +4600,7 @@ impl DesignCanvas {
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(devices)
                     .child(describe)
+                    .child(figma)
                     .child(list),
             )
             .into_any_element()
@@ -4672,7 +4921,12 @@ impl DesignCanvas {
                     })
                     .into_any_element(),
             );
-            out.push(
+            // While it's moved or resized, the size shows on where it's going instead.
+            let still = !matches!(
+                self.drag,
+                Drag::Element { moved: true, .. } | Drag::Resize { .. }
+            );
+            out.extend(still.then(|| {
                 div()
                     .absolute()
                     .left(px(x))
@@ -4690,8 +4944,8 @@ impl DesignCanvas {
                             .text_color(rgb(0xffffff))
                             .child(format!("{} × {}", el.rect.w.round(), el.rect.h.round())),
                     )
-                    .into_any_element(),
-            );
+                    .into_any_element()
+            }));
             // The link handle, in Prototype: drag it onto another screen.
             out.extend(self.links_shown().then(|| {
                 div()
@@ -4706,7 +4960,7 @@ impl DesignCanvas {
                     .cursor_pointer()
                     .into_any_element()
             }));
-            if !self.inline_open && self.ai.is_none() {
+            if !self.inline_open && self.ai.is_none() && still {
                 out.push(
                     div()
                         .id("design-ask-here")
@@ -4732,23 +4986,13 @@ impl DesignCanvas {
                 );
             }
             if self.inline_open {
-                out.push(
-                    div()
-                        .absolute()
-                        .left(px(x))
-                        .top(px(y))
-                        .w(px(w.max(160.)))
-                        .bg(float(c_canvas()))
-                        .rounded_md()
-                        .shadow_md()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(Input::new(&self.f_inline).h(px(h.clamp(28., 60.))))
-                        .into_any_element(),
-                );
+                out.push(self.text_editor(el, (x, y), (w, h)));
             }
         }
         out.extend(self.spacing_marks(cx));
         out.extend(self.editing_marks(cx));
+        out.extend(self.quick_mark());
+        out.extend(self.options_strip(cx));
         out
     }
 
@@ -4820,19 +5064,8 @@ impl DesignCanvas {
                 ..
             } => {
                 let (dx, dy) = ((at.0 - from.0) * z, (at.1 - from.1) * z);
-                out.push(
-                    div()
-                        .absolute()
-                        .left(px(x + dx))
-                        .top(px(y + dy))
-                        .w(px(w))
-                        .h(px(h))
-                        .border_1()
-                        .border_dashed()
-                        .border_color(rgb(c_blue()))
-                        .bg(col(c_blue(), 0.08))
-                        .into_any_element(),
-                );
+                // Its own pixels, lifted off the screen, leaving a gap where it was.
+                out.extend(self.lifted(&el.rect, (x, y), (x + dx, y + dy)));
                 if let Some(d) = &self.drop {
                     let (ax, ay) = self.screen_pt(d.line.0);
                     let (bx, by) = self.screen_pt(d.line.1);
@@ -4851,22 +5084,12 @@ impl DesignCanvas {
                 }
             }
             // The new size, as it will be.
-            Drag::Resize {
-                wide,
-                tall,
-                from,
-                at,
-            } => {
-                let nw = if *wide {
-                    (r.w + at.0 - from.0).max(8.)
-                } else {
-                    r.w
+            Drag::Resize { .. } => {
+                let Some(g) = self.ghost() else {
+                    return out;
                 };
-                let nh = if *tall {
-                    (r.h + at.1 - from.1).max(8.)
-                } else {
-                    r.h
-                };
+                let (nw, nh) = (g.w, g.h);
+                let (x, y) = self.screen_pt((r.x - el.rect.x + g.x, r.y - el.rect.y + g.y));
                 out.push(
                     div()
                         .absolute()
@@ -4882,53 +5105,32 @@ impl DesignCanvas {
                 out.push(
                     div()
                         .absolute()
-                        .left(px(x + nw * z + 6.))
+                        .left(px(x))
+                        .w(px(nw * z))
                         .top(px(y + nh * z + 6.))
-                        .px_1()
-                        .rounded_sm()
-                        .bg(rgb(c_blue()))
-                        .text_size(px(10.5))
-                        .text_color(rgb(0xffffff))
-                        .child(format!("{} × {}", nw.round(), nh.round()))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px(px(5.))
+                                .py(px(1.))
+                                .rounded(px(3.))
+                                .bg(rgb(c_blue()))
+                                .text_size(px(10.5))
+                                .text_color(rgb(0xffffff))
+                                .child(format!("{} × {}", nw.round(), nh.round())),
+                        )
                         .into_any_element(),
                 );
             }
             _ => {}
         }
+        out.extend(self.smart_guides());
         if !matches!(self.drag, Drag::None) || self.inline_open {
             return out;
         }
-        // Resize: drag the right or bottom edge, or the corner.
-        let edge = |id: &'static str| div().id(id).absolute();
-        out.push(
-            edge("design-resize-right")
-                .left(px(x + w - 1.))
-                .top(px(y))
-                .w(px(6.))
-                .h(px(h * 0.4))
-                .cursor_ew_resize()
-                .into_any_element(),
-        );
-        out.push(
-            edge("design-resize-bottom")
-                .left(px(x))
-                .top(px(y + h - 1.))
-                .w(px(w))
-                .h(px(6.))
-                .cursor_ns_resize()
-                .into_any_element(),
-        );
-        out.push(
-            edge("design-resize-corner")
-                .left(px(x + w - 4.))
-                .top(px(y + h - 4.))
-                .size(px(8.))
-                .border_1()
-                .border_color(rgb(c_blue()))
-                .bg(rgb(0xffffff))
-                .cursor_nwse_resize()
-                .into_any_element(),
-        );
+        // Resize from any side or corner.
+        out.extend(self.resize_grips((x, y), (w, h)));
         // The layout bar for a flex container: direction, gap and alignment in a click.
         if el.is_flex() && self.ai.is_none() {
             let row = !el.style("flex-direction").starts_with("column");
@@ -5380,6 +5582,7 @@ impl DesignCanvas {
         let bounds = self.bounds.clone();
         let (links, dragging) = self.paint_links();
         let sketch = self.sketch();
+        let mark_strokes = self.mark_strokes();
         let point_lines = self.point_lines();
         let notice = self
             .notice
@@ -5435,7 +5638,9 @@ impl DesignCanvas {
             .children(self.artboards(cx))
             .children(self.grid_marks())
             .children(self.shape_marks())
-            .when(self.shape.is_some(), |a| a.cursor_crosshair())
+            .when(self.shape.is_some() || self.marking, |a| {
+                a.cursor_crosshair()
+            })
             .child(
                 canvas(
                     |_, _, _| {},
@@ -5452,6 +5657,7 @@ impl DesignCanvas {
                         if let Some((pts, arrow)) = &sketch {
                             shapes::paint_sketch(pts, *arrow, &tf, window);
                         }
+                        marks::paint_marks(&mark_strokes, &tf, window);
                         for (pts, closed) in &point_lines {
                             let mut pts = pts.clone();
                             if *closed && !pts.is_empty() {
@@ -5467,6 +5673,10 @@ impl DesignCanvas {
                 .size_full(),
             )
             .children(self.point_handles())
+            .children(self.eyedropper_loupe())
+            .children(self.colour_picker(cx))
+            .when(self.eyedropper, |a| a.cursor_crosshair())
+            .children(self.mark_hint(cx))
             .children(self.empty_state(cx))
             .children(self.thinking())
             .when(self.playing.is_none(), |a| {
@@ -5674,6 +5884,8 @@ impl DesignCanvas {
                     .child(section("Add a screen"))
                     .child(div().pt_2().child(devices)),
             )
+            .child(section("Import from Figma"))
+            .child(self.figma_import_form(cx))
             .child(grid)
             .child(section("How it works"))
             .child(how)
@@ -5714,6 +5926,25 @@ impl DesignCanvas {
                     )
                     .on_click(cx.listener(|this, _, window, cx| this.fix_checks(None, window, cx))),
                 ),
+            );
+        }
+        if !self.canvas.screens.is_empty() {
+            out = out.child(
+                div()
+                    .pt_1()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        text_btn("design-snap-tokens", "Snap to tokens", Some(IconName::Palette), false)
+                            .on_click(cx.listener(|this, _, _, cx| this.snap_to_tokens(cx))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(c_muted()))
+                            .child("Colours, text sizes, corners and spacing that are all but a token use the token, so they follow the theme."),
+                    ),
             );
         }
         let mut n: usize = 0;
@@ -5901,6 +6132,11 @@ impl DesignCanvas {
             }
             self.fitted = true;
         }
+        if let Some(task) = self.pending_session.take() {
+            self.scoping = self.element.is_some();
+            self.ask(task, window, cx);
+        }
+        self.run_queued(window, cx);
         if self.inline_open {
             let input = self.f_inline.clone();
             if !input.read(cx).focus_handle(cx).is_focused(window) {
@@ -5916,13 +6152,26 @@ impl DesignCanvas {
             .key_context("DesignCanvas")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_key_up(cx.listener(|this, e: &KeyUpEvent, _, cx| {
+                if e.keystroke.key == "space" && this.space {
+                    this.space = false;
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &DesignEscape, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &DesignUndo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &DesignRedo, _, cx| this.redo(cx)))
             .on_action(cx.listener(|this, _: &DesignCopy, _, cx| this.copy(false, cx)))
+            .on_action(cx.listener(|this, _: &DesignNextLayer, window, cx| {
+                this.tab(handles::Walk::Next, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DesignPrevLayer, window, cx| {
+                this.tab(handles::Walk::Prev, window, cx)
+            }))
             .on_mouse_move(cx.listener(Self::on_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_up))
+            .when(self.scrubbing(), |el| el.cursor_ew_resize())
             .v_flex()
             .child(
                 div()

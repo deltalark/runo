@@ -282,6 +282,9 @@ fn rail_pattern() -> AnyElement {
     canvas(
         |_, _, _| (),
         |b, _, window, _| {
+            if !crate::pattern::shows(crate::pattern::Area::Frame) {
+                return;
+            }
             // The tab with the curves into it above and below.
             let skip = TAB_CUT.get().map(|t| {
                 Bounds::from_corners(
@@ -682,11 +685,18 @@ pub(crate) fn island(content: impl IntoElement, fill: Rgba, round: [bool; 4]) ->
     // A transparent fill leaves the corners to the content too, which knows what lies
     // under each; see `frame_corner`.
     let own = fill.a > 0.0;
+    // The content's fill takes the content's pattern; any other fill is a side panel's.
+    let area = if fill == settings::glass_fill(c_canvas()) {
+        crate::pattern::Area::Content
+    } else {
+        crate::pattern::Area::Panels
+    };
     div()
         .relative()
         .flex()
         .flex_col()
         .bg(fill)
+        .when(own, |el| el.children(crate::pattern::surface(area)))
         .child(content)
         .when(own && tl, |el| el.child(frame_corner(true, true, fill)))
         .when(own && tr, |el| el.child(frame_corner(true, false, fill)))
@@ -784,7 +794,7 @@ pub(crate) fn gutter() -> Div {
         .flex_none()
         .bg(settings::frame())
         .relative()
-        .child(crate::pattern::chrome())
+        .children(crate::pattern::chrome())
 }
 
 /// A card on an island: a borderless step lighter than the page, so groups read by
@@ -2189,7 +2199,7 @@ impl RunoApp {
             // The frame's grey, the same as the rail and the gutters between islands.
             .bg(settings::frame())
             .relative()
-            .child(crate::pattern::chrome())
+            .children(crate::pattern::chrome())
             .window_control_area(WindowControlArea::Drag)
             // Three zones: the two sides share what the search box leaves, so the box
             // sits in the middle of the window on every page instead of moving with the

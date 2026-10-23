@@ -414,6 +414,19 @@ if (!window.__runo) window.__runo = (() => {
     },
     remove: (el) => { el.remove(); },
     duplicate: (el) => { el.after(el.cloneNode(true)); },
+    // A copy dropped before or after the element at `target`, as Alt-drag leaves one.
+    copyTo: (el, target, after) => {
+      const t = at(target);
+      if (!t || el.contains(t)) return;
+      const c = el.cloneNode(true);
+      if (after) t.after(c); else t.before(c);
+    },
+    // A copy just after the element, restyled by `map`: Alt-drag on a floating layer.
+    copyStyled: (el, map) => {
+      const c = el.cloneNode(true);
+      el.after(c);
+      ops.styles(c, map);
+    },
     move: (el, d) => {
       const sib = d < 0 ? el.previousElementSibling : el.nextElementSibling;
       if (sib) { if (d < 0) sib.before(el); else sib.after(el); }
@@ -643,6 +656,16 @@ if (!window.__runo) window.__runo = (() => {
       return true;
     },
     infos: (ps) => ps.map(at).filter(Boolean).map(info),
+    // Every layer's inline style, by path, but a locked layer's.
+    inlineStyles: () => Array.from(document.body.querySelectorAll('[style]'))
+      .filter((el) => !SKIP.has(el.tagName) && !el.closest('[data-locked]'))
+      .map((el) => [pathOf(el), el.getAttribute('style')])
+      .filter(([p]) => p),
+    // Write each [path, style] given.
+    setStyles: (list) => {
+      for (const [p, s] of list) { const el = at(p); if (el) el.setAttribute('style', s); }
+      return true;
+    },
     // What an agent's selector matches, before changing it: how many, and each one's
     // component and variant; or why it can't be changed.
     find: (sel, scope) => {
@@ -1062,6 +1085,18 @@ pub(crate) fn moved_path(from: &Path, to: &Path, after: bool) -> Path {
     if t.len() > depth && t[..depth] == from[..depth] && t[depth] > from[depth] {
         t[depth] -= 1;
     }
+    if after {
+        if let Some(last) = t.last_mut() {
+            *last += 1;
+        }
+    }
+    t
+}
+
+/// Where a copy lands when dropped before or after the element at `to`: nothing is taken
+/// out, so only the place beside `to` matters.
+pub(crate) fn copied_path(to: &Path, after: bool) -> Path {
+    let mut t = to.clone();
     if after {
         if let Some(last) = t.last_mut() {
             *last += 1;

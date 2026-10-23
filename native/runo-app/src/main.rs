@@ -4877,6 +4877,7 @@ impl RunoApp {
             .relative()
             .v_flex()
             .bg(pane(c_sheet()))
+            .children(pattern::surface(pattern::Area::Panels))
             // Beside the session tabs the sheet meets the frame, so it curves away there.
             .when(
                 self.mode() == Mode::Sessions && !self.tabs.is_empty(),
@@ -9594,7 +9595,7 @@ impl Render for RunoApp {
                     .justify_between()
                     .bg(settings::frame())
                     .relative()
-                    .child(pattern::chrome())
+                    .children(pattern::chrome())
                     .text_size(px(11.5))
                     .gap_4()
                     .child(fade(

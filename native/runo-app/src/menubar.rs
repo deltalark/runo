@@ -270,8 +270,12 @@ pub(crate) fn to_background(cx: &mut App) {
         app.update(cx, |this, _| this.save_now());
     }
     panel::close(cx);
+    // Deferred: the close button and ⌘Q land here from inside the window's own update,
+    // where updating that window again fails and would leave it on screen.
     if let Some(window) = cx.try_global::<MainApp>().map(|m| m.1) {
-        let _ = window.update(cx, |_, window, _| platform::order_out(window));
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, _| platform::order_out(window));
+        });
     }
     platform::set_dock_icon(false);
     if !cx.global::<AppSettings>().background_told {
