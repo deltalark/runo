@@ -6,6 +6,12 @@ All notable changes to Runo are documented here.
 
 ### Added
 
+- Five more background patterns beside Dot matrix: Grid, Blueprint (a faint grid with every fourth line stronger), Crosses, Rings and Stitches. Pick one in Settings > Appearance > Background.
+- Choose where the background pattern lies: on the content (the page and the terminal), on the side panels (the sidebar, Changes and Files), and on the frame (the top bar, the rail and the status bar). Each is a switch under Settings > Appearance > Background.
+
+### Changed
+
+- The background pattern lies on the content only by default, leaving the top bar, the rail and the status bar plain. Turn on "On the frame" for the earlier look.
 - Design's canvas handles like a design tool. Every side and corner of the picked layer resizes it: Shift keeps its shape and Alt resizes it about its middle. Moving or resizing snaps to the sides and middles of the layers beside it, its container and the screen, with red lines for what it lines up with and, while moving, the gaps to its neighbours. Arrow keys move a floating layer 1px (10 with Shift), reorder one in a layout, or move a picked screen. A dragged layer carries its own pixels with it, lifted off the screen, leaving a washed-out gap where it was. Alt-drag leaves a copy, holding Space pans, Enter steps into a layer's children, Shift+Enter steps out, and Tab and Shift+Tab go to the next and previous layer.
 
 ### Fixed
