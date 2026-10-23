@@ -2757,7 +2757,7 @@ impl RunoApp {
         self.settings_page = SettingsPage::General;
         self.settings_search
             .update(cx, |s, cx| s.set_value("updates", window, cx));
-        self.check_for_updates(cx);
+        self.check_runo_now(cx);
     }
 
     pub(crate) fn open_settings(&mut self) {

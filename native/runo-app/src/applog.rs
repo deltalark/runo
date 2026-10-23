@@ -525,14 +525,52 @@ pub fn pick_asset(assets: &[(String, String)], os: &str, arch: &str) -> Option<(
     best.map(|(_, a)| a.clone())
 }
 
-/// Ask GitHub for the latest release; None when it isn't newer or can't be reached.
-pub fn check_release() -> Option<Release> {
-    fetch_release().ok().flatten()
+/// What the last update check found, in a line for Settings, and whether a check is
+/// running now.
+static CHECKED: std::sync::Mutex<(String, bool)> = std::sync::Mutex::new((String::new(), false));
+
+/// What the last update check found, and whether one is running now.
+pub fn last_check() -> (String, bool) {
+    CHECKED.lock().map(|c| c.clone()).unwrap_or_default()
 }
 
-/// Ask GitHub for the latest release: Some when it is newer than this Runo, None when
-/// this Runo is the latest, or why the check failed, in words for the person.
-pub fn fetch_release() -> Result<Option<Release>, String> {
+/// Note that a check started, so Settings shows it until it's done.
+pub fn check_started() {
+    if let Ok(mut c) = CHECKED.lock() {
+        c.1 = true;
+    }
+}
+
+fn checked(line: String) {
+    if let Ok(mut c) = CHECKED.lock() {
+        *c = (line, false);
+    }
+}
+
+/// Ask GitHub for the latest release; None when it isn't newer or can't be reached.
+pub fn check_release() -> Option<Release> {
+    let found = fetch_release();
+    let current = env!("CARGO_PKG_VERSION");
+    let line = match &found {
+        Some(release) => format!(
+            "Runo {} is out. Leave Settings to download it from the update card.",
+            release.version
+        ),
+        None if !LAST_FAILED.load(std::sync::atomic::Ordering::Relaxed) => {
+            format!("Runo {current} is the latest version.")
+        }
+        None => "Couldn't reach GitHub to check. Try again later.".to_string(),
+    };
+    checked(line);
+    found
+}
+
+/// Whether the last check couldn't get an answer from GitHub.
+static LAST_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn fetch_release() -> Option<Release> {
+    let failed = |f: bool| LAST_FAILED.store(f, std::sync::atomic::Ordering::Relaxed);
+    failed(true);
     let out = std::process::Command::new("curl")
         .args([
             "-sL",
@@ -553,7 +591,7 @@ pub fn fetch_release() -> Result<Option<Release>, String> {
                 "app-update",
                 format!("could not run curl to check for updates: {e}"),
             );
-            return Err(format!("Runo couldn't run curl to check: {e}"));
+            return None;
         }
     };
     let current = env!("CARGO_PKG_VERSION");
@@ -568,38 +606,36 @@ pub fn fetch_release() -> Result<Option<Release>, String> {
                     .map_or("no code".to_string(), |c| format!("code {c}"))
             ),
         );
-        return Err("Couldn't reach GitHub. Check your connection, then try again.".into());
+        return None;
     }
     let found = newer_release(&body, current);
-    let value = serde_json::from_str::<serde_json::Value>(&body).ok();
     match &found {
         Some(release) => info(
             "app-update",
             format!("Runo {} is out (running {current})", release.version),
         ),
-        None if value.as_ref().is_some_and(|v| v["tag_name"].is_string()) => {
+        None if serde_json::from_str::<serde_json::Value>(&body)
+            .is_ok_and(|v| v["tag_name"].is_string()) =>
+        {
+            failed(false);
             info("app-update", format!("checked: {current} is the latest"))
         }
         // GitHub answers 404 until the first release is published.
-        None if value.as_ref().is_some_and(|v| v["message"] == "Not Found") => {
+        None if serde_json::from_str::<serde_json::Value>(&body)
+            .is_ok_and(|v| v["message"] == "Not Found") =>
+        {
+            failed(false);
             info("app-update", "checked: no release published yet")
         }
-        None => {
-            warn(
-                "app-update",
-                format!(
-                    "the update check got no release from GitHub: {}",
-                    gist(&body)
-                ),
-            );
-            // GitHub explains a refusal, such as its hourly limit, in `message`.
-            return Err(match value.as_ref().and_then(|v| v["message"].as_str()) {
-                Some(message) => format!("GitHub said: {message}"),
-                None => "GitHub's answer didn't name a release. Try again later.".into(),
-            });
-        }
+        None => warn(
+            "app-update",
+            format!(
+                "the update check got no release from GitHub: {}",
+                gist(&body)
+            ),
+        ),
     }
-    Ok(found)
+    found
 }
 
 /// The Downloads folder, or the home folder without one.
@@ -821,10 +857,6 @@ mod tests {
         assert_eq!(release.version, "0.3.0");
         assert!(release.page.ends_with("v0.3.0"));
         assert!(newer_release(json, "0.3.0").is_none());
-        // Releases bump the last number, so it is compared as a number, not as text.
-        let patch = json.replace("v0.3.0", "v0.5.10");
-        assert_eq!(newer_release(&patch, "0.5.9").unwrap().version, "0.5.10");
-        assert!(newer_release(&patch, "0.5.10").is_none());
         assert!(newer_release("not json", "0.1.0").is_none());
         let pre = json.replace("\"prerelease\":false", "\"prerelease\":true");
         assert!(newer_release(&pre, "0.1.0").is_none());

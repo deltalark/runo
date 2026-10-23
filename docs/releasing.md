@@ -25,12 +25,12 @@ Add them in the repository's Settings → Secrets and variables → Actions.
 
 ## Version numbers
 
-Every release bumps the last number: 0.5.0, then 0.5.1, 0.5.2 and so on. Only a major release bumps the middle number and starts the last one again (0.5.4, then 0.6.0). Runo compares versions number by number, so 0.5.10 is newer than 0.5.9.
+Releases bump only the last number: 0.5.0, then 0.5.1, 0.5.2 and so on. Raise the middle number (0.6.0) only for a major release, decided ahead of time.
 
 ## Cutting a release
 
-1. Set `version` in the root `Cargo.toml` (for example `0.5.1`).
+1. Set `version` in the root `Cargo.toml` to the next patch version (for example `0.5.1` after `0.5.0`).
 2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [0.5.1] - YYYY-MM-DD` and start a new empty `## [Unreleased]` above it.
 3. Merge that to `main`, then tag it: `git tag v0.5.1 && git push origin v0.5.1`.
 
-The workflow stops if the tag doesn't match the version in `Cargo.toml`. A running Runo on an older version shows the update card on its next start, or within six hours while it runs (Settings can turn the check off). Settings > General > Updates also has Check now, and the Runo menu Check for Updates…, for checking by hand.
+The workflow stops if the tag doesn't match the version in `Cargo.toml`. A running Runo on an older version shows the update card on its next start, or within six hours while it runs (Settings can turn the check off). Settings > General > Updates also has Check now, which checks right away.
