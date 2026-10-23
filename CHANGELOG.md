@@ -8,6 +8,14 @@ All notable changes to Runo are documented here.
 
 - Try options on a layer in Design. The shuffle button on the selected layer asks AI for three different takes on it, toward whatever is typed in the ask bar, and shows them side by side under the layer, each drawn on the screen as it would look. Click one to use it, as one undo step; Esc keeps the layer as it is.
 - Quick AI edits in Design. Ask about one selected layer ("make it a dark pill", "tighten the spacing") and the agent answers with just that layer's new markup in one fast call, instead of starting a session. The change lands on the canvas as one edit you undo with one Ctrl+Z, while a pill over the layer shows it's working. Asks that need more than the layer go on to a session as before.
+- Design's number fields can be dragged like Figma's: drag a field's label or icon (W, H, radius, opacity, gap, padding, font size, X, Y, rotation and the rest) left or right to change it a step a pixel, or ten with Shift. The screen follows as you drag, and the whole drag undoes in one step.
+- Five more background patterns beside Dot matrix: Grid, Blueprint (a faint grid with every fourth line stronger), Crosses, Rings and Stitches. Pick one in Settings > Appearance > Background.
+- Choose where the background pattern lies: on the content (the page and the terminal), on the side panels (the sidebar, Changes and Files), and on the frame (the top bar, the rail and the status bar). Each is a switch under Settings > Appearance > Background.
+
+### Changed
+
+- The background pattern lies on the content only by default, leaving the top bar, the rail and the status bar plain. Turn on "On the frame" for the earlier look.
+- Design's canvas handles like a design tool. Every side and corner of the picked layer resizes it: Shift keeps its shape and Alt resizes it about its middle. Moving or resizing snaps to the sides and middles of the layers beside it, its container and the screen, with red lines for what it lines up with and, while moving, the gaps to its neighbours. Arrow keys move a floating layer 1px (10 with Shift), reorder one in a layout, or move a picked screen. A dragged layer carries its own pixels with it, lifted off the screen, leaving a washed-out gap where it was. Alt-drag leaves a copy, holding Space pans, Enter steps into a layer's children, Shift+Enter steps out, and Tab and Shift+Tab go to the next and previous layer.
 
 ### Fixed
 
