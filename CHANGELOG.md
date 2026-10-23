@@ -4,6 +4,8 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-23
+
 ### Added
 
 - A Data place for each project, beside Design and Architecture (⌘9). It finds the databases the project uses in its `.env` files, Docker Compose services, Prisma, Drizzle and Rails configs and SQLite files, and shows where each was found and whether it's running. Connect to a Postgres or SQLite database to browse its tables: filter by typing `status = failed`, sort by a column, follow keys to the rows they point at, and see the rows that point back. Every connection is read-only, enforced by the database itself. Columns that look personal or secret stay masked until you reveal them, and pasted passwords go to the Keychain, never to Runo's files. MySQL, Redis and MongoDB are found and listed now, and open in a later release.
@@ -25,6 +27,7 @@ All notable changes to Runo are documented here.
 - The menu bar glyph opens a panel instead of a menu, live as agents work. Allow, Always or Deny a waiting permission and Stop a working agent from it, click a session for its detail or to open it, and Ask Runo in the same chat as the assistant in the window, Run cards and all.
 - Runo keeps running in the menu bar: with it on, ⌘Q and closing the window hide Runo and its Dock icon while agents keep working, and Quit Runo in the panel quits. Turn it off under Settings > General > Alerts.
 - Dot matrix, a background for the window. A fine grid of dots lies on the frame round your work (the top bar, the rail, the gutters and the status bar), warming into your accent toward the top-left corner. With glass on it shows through the sidebars and panels too, like dotted glass. It follows the colour theme and accent. Turn it on in Settings > Appearance > Background.
+- Shortcuts to show Changes (⇧⌘G), search in files (⇧⌘F) and open the Browser tab (⇧⌘U). On Windows, typing works in terminals again (ConPTY), and a shell's exit status is kept when it exits.
 
 ### Changed
 
