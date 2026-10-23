@@ -4849,19 +4849,8 @@ impl DesignCanvas {
                 ..
             } => {
                 let (dx, dy) = ((at.0 - from.0) * z, (at.1 - from.1) * z);
-                out.push(
-                    div()
-                        .absolute()
-                        .left(px(x + dx))
-                        .top(px(y + dy))
-                        .w(px(w))
-                        .h(px(h))
-                        .border_1()
-                        .border_dashed()
-                        .border_color(rgb(c_blue()))
-                        .bg(col(c_blue(), 0.08))
-                        .into_any_element(),
-                );
+                // Its own pixels, lifted off the screen, leaving a gap where it was.
+                out.extend(self.lifted(&el.rect, (x, y), (x + dx, y + dy)));
                 if let Some(d) = &self.drop {
                     let (ax, ay) = self.screen_pt(d.line.0);
                     let (bx, by) = self.screen_pt(d.line.1);

@@ -367,6 +367,57 @@ impl DesignCanvas {
         out
     }
 
+    /// The picked layer's own pixels while it's dragged: cut from its screen's picture and
+    /// drawn at `to` (on screen), lifted with a shadow, with where it was at `from` washed
+    /// out. Nothing when the screen isn't drawn yet.
+    pub(super) fn lifted(&self, r: &dom::Box, from: Pt, to: Pt) -> Vec<AnyElement> {
+        let Some((s, shot)) = self
+            .screen
+            .as_ref()
+            .and_then(|id| Some((self.canvas.screen(id)?, self.shots.get(id)?)))
+        else {
+            return vec![];
+        };
+        let z = self.zoom;
+        let (bw, bh) = self.board_size(s);
+        let (w, h) = (r.w * z, r.h * z);
+        let hole = div()
+            .absolute()
+            .left(px(from.0))
+            .top(px(from.1))
+            .w(px(w))
+            .h(px(h))
+            .bg(col(if self.dark { 0x0b0d12 } else { 0xffffff }, 0.7))
+            .border_1()
+            .border_dashed()
+            .border_color(col(c_blue(), 0.6));
+        let pixels = div()
+            .absolute()
+            .left(px(to.0))
+            .top(px(to.1))
+            .w(px(w))
+            .h(px(h))
+            .overflow_hidden()
+            .shadow_lg()
+            .opacity(0.92)
+            .child(
+                img(ImageSource::Render(shot.image.clone()))
+                    .absolute()
+                    .left(px(-r.x * z))
+                    .top(px(-r.y * z))
+                    .w(px(bw * z))
+                    .h(px(bh * z)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .border_1()
+                    .border_color(rgb(c_blue())),
+            );
+        vec![hole.into_any_element(), pixels.into_any_element()]
+    }
+
     /// Which sides of the picked layer are under the pointer, for resizing it.
     pub(super) fn resize_edges(&self, local: Pt) -> Option<Edges> {
         let (_, r) = self.picked_rect()?;
