@@ -8,6 +8,10 @@ All notable changes to Runo are documented here.
 
 - A colour picker in Design. Click the swatch of a fill, text or stroke colour for a square of shades, a hue strip and an opacity strip, the colour's hex and RGB, the theme's colours, and the colours you used last. The eyedropper (the pipette in the picker, or I with a layer picked) takes a colour from anywhere on the screens, with a loupe showing the colour and its hex under the pointer.
 
+### Fixed
+
+- The session header fits a narrow window or panel. Nothing is cut off at the right any more: as it narrows, Open Design, Playbooks and Runs on become icons, then Chat / CLI and the status do too, and last those actions, the branch and Delete fold into a More menu. The title keeps its room until the very end.
+
 ## [0.5.0] - 2026-10-23
 
 ### Fixed
