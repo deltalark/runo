@@ -3,6 +3,7 @@
 //! `stream`, its event log and how it stands); `apply` puts the events on the session's
 //! conversation; `log` appends them to `sessions/<id>/events.jsonl`.
 
+pub mod acp;
 pub mod apply;
 pub mod event;
 #[cfg(test)]

@@ -74,6 +74,16 @@ impl Turn {
         }
     }
 
+    /// Read the turn the way its folder says it runs: under the agent host, taking
+    /// messages as it works, and over ACP.
+    pub fn follow(&mut self, folder: &Path) {
+        self.live = super::host::is_live(folder);
+        if super::acp::is_acp(folder) && !matches!(self.parser, Some(Parser::Acp(_))) {
+            let fallback = self.parser.take();
+            self.parser = Some(Parser::Acp(Box::new(super::acp::AcpStream::new(fallback))));
+        }
+    }
+
     /// Whether the agent's output is plain text rather than structured events.
     pub fn plain(&self) -> bool {
         self.parser.is_none()

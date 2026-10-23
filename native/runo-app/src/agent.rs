@@ -1667,6 +1667,64 @@ pub fn live_command(command: &Command) -> Option<(Command, String)> {
     Some((live, prompt.clone()))
 }
 
+/// The arguments that run `provider` as an ACP agent, once the installed CLI's help
+/// lists them. `RUNO_NO_ACP` set in Runo's environment keeps every agent in print mode.
+pub fn acp_args(provider: &str) -> Option<Vec<String>> {
+    if std::env::var_os("RUNO_NO_ACP").is_some() {
+        return None;
+    }
+    let knows = |text: &str| crate::caps::mentions(provider, text);
+    let args: &[&str] = match provider {
+        "opencode" | "cursor" if knows(" acp") => &["acp"],
+        "gemini" | "qwen" if knows("--acp") => &["--acp"],
+        "gemini" | "qwen" if knows("--experimental-acp") => &["--experimental-acp"],
+        "copilot" if knows("--acp") => &["--acp", "--stdio"],
+        _ => return None,
+    };
+    Some(args.iter().map(|a| a.to_string()).collect())
+}
+
+/// An ACP turn's settings, with `fallback` (the print-mode command) to run if the agent
+/// can't open a session. Returns them and the prompt, which goes as the first message.
+pub fn acp_config(
+    spec: &RunSpec,
+    dir: &str,
+    fallback: &Command,
+) -> Option<(crate::harness::acp::Config, String)> {
+    let args = acp_args(spec.provider)?;
+    let get = |id: &str| spec.sel.get(id).cloned().unwrap_or_default();
+    let model = match get("model") {
+        m if m.is_empty() => spec.opts.model_override.clone(),
+        m => m,
+    };
+    let argv = |c: &Command| -> Vec<String> {
+        std::iter::once(c.get_program())
+            .chain(c.get_args())
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    };
+    let mut command = vec![program(spec).to_string()];
+    command.extend(args);
+    let config = crate::harness::acp::Config {
+        provider: spec.provider.to_string(),
+        command,
+        fallback: argv(fallback),
+        cwd: dir.to_string(),
+        session: if spec.resume {
+            spec.session_id.to_string()
+        } else {
+            String::new()
+        },
+        model,
+        mode: get("mode"),
+        servers: mcp_servers(spec)
+            .into_iter()
+            .map(|(name, server)| server.acp_json(&name))
+            .collect(),
+    };
+    Some((config, with_images(spec)))
+}
+
 /// Run an agent turn, inside the session's Cove VM when `sandbox` is given.
 pub fn run_agent(
     target: Target,
@@ -1677,12 +1735,27 @@ pub fn run_agent(
 ) -> Result<Handle, String> {
     let bin = program(spec);
     let mut command = turn_command(spec);
-    prepare_folder(spec, dir, sandbox.is_some());
+    let acp = match (target, crate::detach::root(), sandbox) {
+        (Target::Session(_), Some(_), None) => acp_config(spec, dir, &command),
+        _ => None,
+    };
+    if acp.is_some() {
+        // The servers go in the session instead; nothing is merged into project files.
+        if spec.provider == "gemini" {
+            crate::gemini::trust(dir, &spec.opts.env);
+        }
+        crate::mcp::clean_project(std::path::Path::new(dir));
+    } else {
+        prepare_folder(spec, dir, sandbox.is_some());
+    }
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
     } else if let (Target::Session(id), Some(root)) = (target, crate::detach::root()) {
         // Local turns outlive Runo, so closing or a crash doesn't stop them.
         if crate::updater::resolve(bin).is_some() {
+            if let Some((config, prompt)) = acp {
+                return crate::detach::spawn_acp(root, id, &config, command, &prompt, dir, tx);
+            }
             if takes_live_input(spec.provider) {
                 if let Some((live, prompt)) = live_command(&command) {
                     return crate::detach::spawn_live(root, id, live, &prompt, dir, tx);

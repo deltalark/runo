@@ -658,12 +658,19 @@ fn opencode(bin: &str) -> Caps {
     if version.trim().is_empty() {
         return not_installed();
     }
-    parse_opencode(
+    let mut caps = parse_opencode(
         &version,
         &run(bin, &["models"]),
         &run(bin, &["agent", "list"]),
         &run(bin, &["run", "--help"]),
-    )
+    );
+    // The command list too, for commands only some releases have (`acp`).
+    caps.help = format!(
+        "{}\n{}",
+        run(bin, &["--help"]),
+        run(bin, &["run", "--help"])
+    );
+    caps
 }
 
 /// OpenCode: models from `opencode models`, agents from `opencode agent list`, and whether

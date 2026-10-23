@@ -14,6 +14,8 @@ use crate::store::{Question, Usage};
 pub enum Parser {
     Claude(ClaudeStream),
     Json(Box<JsonStream>),
+    /// An ACP session's output (see `harness::acp`).
+    Acp(Box<crate::harness::acp::AcpStream>),
 }
 
 impl Parser {
@@ -35,6 +37,7 @@ impl Parser {
         match self {
             Parser::Claude(p) => p.feed(line),
             Parser::Json(p) => p.feed(line),
+            Parser::Acp(p) => p.feed(line),
         }
     }
 }
@@ -385,7 +388,7 @@ fn is_todo_tool(tool: &str) -> bool {
 /// The todo list a todo tool was given, under any of the shapes the CLIs use:
 /// `{"todos":[{"content":…,"status":"in_progress"}]}` (Claude, Gemini, OpenCode, Cursor),
 /// `{"plan":[{"step":…,"status":…}]}` and Codex's `{"items":[{"text":…,"completed":true}]}`.
-fn todos(input: &Value) -> Option<Vec<Step>> {
+pub(crate) fn todos(input: &Value) -> Option<Vec<Step>> {
     let items = ["todos", "plan", "items"]
         .iter()
         .find_map(|k| input[*k].as_array())?;

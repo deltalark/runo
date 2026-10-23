@@ -274,9 +274,9 @@ impl RunoApp {
                 let model = sel.get("model").map(String::as_str).unwrap_or("");
                 let mut running =
                     crate::harness::turn::Turn::start(id, &provider, &dir, turn, model);
-                running.live = crate::detach::root().is_some_and(|root| {
-                    crate::harness::host::is_live(&crate::detach::turn_dir(root, id))
-                });
+                if let Some(root) = crate::detach::root() {
+                    running.follow(&crate::detach::turn_dir(root, id));
+                }
                 self.turns.insert(id, running);
                 self.handles.insert(Target::Session(id), handle);
                 self.turn_files.remove(&id);
