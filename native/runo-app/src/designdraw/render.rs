@@ -329,6 +329,21 @@ impl Renderer {
         Self::capture(surface, name, device)
     }
 
+    /// Draw the screen with `js` run on it first, without saving it: a look at a change
+    /// before it's made. The page is read from its file again for the next job.
+    pub(crate) fn shoot_trying(
+        &mut self,
+        id: &str,
+        device: Device,
+        js: &str,
+    ) -> Result<Shot, String> {
+        let engine = self.open(id, device, true)?;
+        engine.eval(js);
+        let shot = Self::capture(engine, id, device);
+        self.current = None;
+        shot
+    }
+
     /// Draw the screen from its file.
     pub(crate) fn shoot(&mut self, id: &str, device: Device) -> Result<Shot, String> {
         let engine = self.open(id, device, true)?;

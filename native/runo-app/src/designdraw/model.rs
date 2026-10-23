@@ -968,6 +968,11 @@ pub(crate) fn template(kind: &str, name: &str, device: Device) -> String {
             esc(name)
         ),
     };
+    page(name, device, &body)
+}
+
+/// A screen's file with `body` in it.
+pub(crate) fn page(name: &str, device: Device, body: &str) -> String {
     let device = match device {
         Device::Phone => "phone",
         Device::Tablet => "tablet",

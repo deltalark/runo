@@ -377,7 +377,11 @@ impl DesignCanvas {
 
     pub(super) fn bottom_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let sep = || div().w(px(1.)).h(px(22.)).mx(px(4.)).bg(divider());
-        let moving = !self.hand && !self.commenting && self.shape.is_none() && self.pen.is_none();
+        let moving = !self.hand
+            && !self.commenting
+            && !self.marking
+            && self.shape.is_none()
+            && self.pen.is_none();
         let shape_on = self.shape.is_some_and(|s| {
             matches!(s, Shape::Rect | Shape::Ellipse | Shape::Line | Shape::Arrow)
         });
@@ -389,26 +393,7 @@ impl DesignCanvas {
             Shape::Arrow => IconName::MoveUpRight,
             Shape::Pen => IconName::PenTool,
         };
-        let mode = |id: &'static str, label: &'static str, on: bool| {
-            div()
-                .id(id)
-                .h(px(28.))
-                .px(px(9.))
-                .flex()
-                .items_center()
-                .rounded(px(6.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .font_weight(if on {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                })
-                .text_color(rgb(if on { c_text() } else { c_muted() }))
-                .when(on, |el| el.bg(tint(c_active())))
-                .when(!on, |el| el.hover(|el| el.text_color(rgb(c_text()))))
-                .child(label)
-        };
+        let mode = segment;
         let design_on = !matches!(self.panel, Panel::Prototype | Panel::Code);
         let bar = div()
             .id("design-bar")
@@ -491,6 +476,18 @@ impl DesignCanvas {
                     self.commenting,
                 )
                 .on_click(cx.listener(|this, _, _, cx| this.pick_tool("comment", cx))),
+            )
+            .child(
+                self.tool(
+                    "design-tool-mark",
+                    IconName::Highlighter,
+                    "Mark for AI: draw what you mean (M)",
+                    self.marking,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.flyout = None;
+                    this.toggle_marking(cx)
+                })),
             )
             .child(
                 self.tool(
@@ -1210,4 +1207,26 @@ impl DesignCanvas {
         .with_priority(3)
         .into_any_element()
     }
+}
+
+/// One choice of a segmented control: Design, Prototype or Code.
+pub(super) fn segment(id: &'static str, label: &'static str, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(28.))
+        .px(px(9.))
+        .flex()
+        .items_center()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(if on {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::NORMAL
+        })
+        .text_color(rgb(if on { c_text() } else { c_muted() }))
+        .when(on, |el| el.bg(tint(c_active())))
+        .when(!on, |el| el.hover(|el| el.text_color(rgb(c_text()))))
+        .child(label)
 }

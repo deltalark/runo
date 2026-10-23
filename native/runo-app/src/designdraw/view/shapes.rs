@@ -186,6 +186,7 @@ impl DesignCanvas {
     pub(super) fn set_shape(&mut self, shape: Option<Shape>, cx: &mut Context<Self>) {
         self.finish_pen(false, cx);
         self.shape = shape;
+        self.marking = false;
         if shape.is_some() {
             self.hand = false;
             self.commenting = false;
