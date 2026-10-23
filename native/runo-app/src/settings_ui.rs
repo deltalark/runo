@@ -857,7 +857,12 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Theme", "Light, dark, or match the system.", Ctl::Segment(options(&[("system", "System"), ("light", "Light"), ("dark", "Dark")]), st.theme.clone(), Rc::new(|s, v| s.theme = v))),
                 row("Color theme", "Each theme has a light and a dark version; Theme above picks which one shows.", Ctl::Dropdown(crate::themes::THEMES.iter().map(|t| (t.id.to_string(), t.name.to_string())).collect(), st.color_theme.clone(), Rc::new(|s, v| s.color_theme = v))),
                 row("Accent color", "Used for selection, links and active states.", Ctl::Accent(st.accent.clone())),
-                row("Background", "A fine grid of dots on the window's frame, warming into your accent at the top-left. With glass on it shows through the panels too.", Ctl::Segment(options(&[("off", "None"), ("dots", "Dot matrix")]), st.pattern.clone(), Rc::new(|s, v| s.pattern = v))),
+            ]),
+            section("Background", "A fine pattern behind your work, warming into your accent at the top-left.", vec![
+                row("Pattern", "Dots, lines or small marks on one grid across the window.", Ctl::Dropdown(crate::pattern::Pattern::ALL.iter().map(|p| (p.id().to_string(), p.label().to_string())).collect(), st.pattern.clone(), Rc::new(|s, v| s.pattern = v))),
+                switch_row("On the content", "The page and the terminal, where you read and work.", st.pattern_content, |s, v| s.pattern_content = v),
+                switch_row("On the side panels", "The sidebar and the panels beside the content, such as Changes and Files.", st.pattern_panels, |s, v| s.pattern_panels = v),
+                switch_row("On the frame", "The top bar, the rail and the status bar round your work. With glass on and all three areas on, it also shows through the panels.", st.pattern_frame, |s, v| s.pattern_frame = v),
             ]),
             section("Glass", "A translucent window over a blurred desktop, like macOS glass.", vec![
                 row("Window glass", "", Ctl::Glass(st.glass.clone())),
