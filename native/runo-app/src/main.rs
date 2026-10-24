@@ -1220,6 +1220,8 @@ impl RunoApp {
         })
         .detach();
         let mut ticks = 0u32;
+        // The tick since when output from sessions not on screen has waited to be drawn.
+        let mut unshown_since: Option<u32> = None;
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(Duration::from_millis(50))
@@ -1227,6 +1229,12 @@ impl RunoApp {
             ticks = ticks.wrapping_add(1);
             let events: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
             if events.is_empty() {
+                if unshown_since.is_some_and(|t| ticks.wrapping_sub(t) >= BACKGROUND_TICKS) {
+                    unshown_since = None;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
                 // Repaint about once a second while agents run, for their elapsed time.
                 let tick = ticks.is_multiple_of(20);
                 let repaint = caps::take_updated();
@@ -1299,10 +1307,19 @@ impl RunoApp {
                 continue;
             }
             let alive = this.update(cx, |this, cx| {
+                let shown = events.iter().any(|e| this.event_shown(e));
                 for event in events {
                     this.handle_event(event, cx);
                 }
-                cx.notify();
+                // Output from sessions not on screen only changes the sidebar and the
+                // status bar, so it is drawn a few times a second rather than with every
+                // batch: a busy agent in the background doesn't redraw the whole window
+                // 20 times a second.
+                let waited = unshown_since.get_or_insert(ticks);
+                if shown || ticks.wrapping_sub(*waited) >= BACKGROUND_TICKS {
+                    unshown_since = None;
+                    cx.notify();
+                }
             });
             if alive.is_err() {
                 break;
@@ -2367,6 +2384,19 @@ impl RunoApp {
         self.space_tick(false);
         self.load_pr_status(id);
         self.jump_to_bottom();
+    }
+
+    /// Whether `event` changes what is on screen beyond the sidebar and status bar: anything
+    /// but output from an agent whose chat isn't open.
+    fn event_shown(&self, event: &Event) -> bool {
+        match event {
+            Event::Line(Target::Session(id), _)
+            | Event::Json(Target::Session(id), ..)
+            | Event::Err(Target::Session(id), _) => {
+                self.selected == Some(*id) || self.peek == Some(*id)
+            }
+            _ => true,
+        }
     }
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -9894,6 +9924,8 @@ const SIDEBAR_MAX: f32 = 400.;
 const PANEL_WIDTH: f32 = 460.;
 const PANEL_MIN: f32 = 320.;
 const PANEL_MAX: f32 = 900.;
+/// Event ticks (50 ms each) that output from sessions not on screen waits to be drawn.
+const BACKGROUND_TICKS: u32 = 5;
 /// Narrowest the chat gets when the right panel is dragged wider.
 const CHAT_MIN: f32 = 600.;
 
