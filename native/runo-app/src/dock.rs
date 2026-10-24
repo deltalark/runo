@@ -26,6 +26,7 @@ pub(crate) fn show(n: usize) {
 }
 
 /// Set the count again, when the Dock icon comes back from the menu bar.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn reapply() {
     let shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(label) = shown.as_ref() {
