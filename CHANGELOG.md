@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Stack, a fourth game in the Arcade: Tetris with all seven pieces, a next-piece preview and an outline of where the piece will land. Left and right move, Up (or X, and Z the other way) turns with a nudge off walls, Down drops a row and Space drops it all the way. Clearing lines scores more with each level, and every ten lines is a level that falls faster. Press 4 in the Arcade to pick it.
+
 ## [0.5.1] - 2026-10-23
 
 ### Added

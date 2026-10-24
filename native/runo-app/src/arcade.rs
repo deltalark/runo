@@ -1,7 +1,7 @@
-//! The Arcade: three small games to play while agents work. Spark (fly a spark through
-//! the gates), Commits (a snake that grows on commits) and Merge (2048). Each is drawn in
-//! the theme's own colours, keeps its best score in `arcade.json`, and pauses when the
-//! Arcade closes, so a round picks up where it left off.
+//! The Arcade: four small games to play while agents work. Spark (fly a spark through
+//! the gates), Commits (a snake that grows on commits), Merge (2048) and Stack (Tetris).
+//! Each is drawn in the theme's own colours, keeps its best score in `arcade.json`, and
+//! pauses when the Arcade closes, so a round picks up where it left off.
 
 use super::*;
 use std::path::PathBuf;
@@ -16,16 +16,18 @@ pub(crate) enum Game {
     Spark,
     Commits,
     Merge,
+    Stack,
 }
 
 impl Game {
-    const ALL: [Game; 3] = [Game::Spark, Game::Commits, Game::Merge];
+    const ALL: [Game; 4] = [Game::Spark, Game::Commits, Game::Merge, Game::Stack];
 
     fn name(self) -> &'static str {
         match self {
             Game::Spark => "Spark",
             Game::Commits => "Commits",
             Game::Merge => "Merge",
+            Game::Stack => "Stack",
         }
     }
 
@@ -34,6 +36,7 @@ impl Game {
             Game::Spark => "spark",
             Game::Commits => "commits",
             Game::Merge => "merge",
+            Game::Stack => "stack",
         }
     }
 
@@ -42,6 +45,7 @@ impl Game {
             Game::Spark => "Space or click to lift",
             Game::Commits => "Arrows to steer",
             Game::Merge => "Arrows to slide",
+            Game::Stack => "Arrows to move, ↑ to turn, Space to drop",
         }
     }
 }
@@ -338,6 +342,278 @@ impl Merge {
     }
 }
 
+// Stack: Tetris in a 10 by 20 well, with the seven tetrominoes, a next piece and levels
+// that speed it up.
+
+const WELL_W: usize = 10;
+const WELL_H: usize = 20;
+const BLOCK: f32 = 14.;
+/// The least time a piece rests on the stack before it locks, so it can still slide.
+const LOCK: f32 = 0.4;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    I,
+    O,
+    T,
+    S,
+    Z,
+    J,
+    L,
+}
+
+impl Kind {
+    const ALL: [Kind; 7] = [
+        Kind::I,
+        Kind::O,
+        Kind::T,
+        Kind::S,
+        Kind::Z,
+        Kind::J,
+        Kind::L,
+    ];
+
+    /// The side of the square box the piece turns in.
+    fn size(self) -> i32 {
+        match self {
+            Kind::I => 4,
+            Kind::O => 2,
+            _ => 3,
+        }
+    }
+
+    /// Its cells in its box, `(col, row)`, as it first appears.
+    fn cells(self) -> [(i32, i32); 4] {
+        match self {
+            Kind::I => [(0, 1), (1, 1), (2, 1), (3, 1)],
+            Kind::O => [(0, 0), (1, 0), (0, 1), (1, 1)],
+            Kind::T => [(1, 0), (0, 1), (1, 1), (2, 1)],
+            Kind::S => [(1, 0), (2, 0), (0, 1), (1, 1)],
+            Kind::Z => [(0, 0), (1, 0), (1, 1), (2, 1)],
+            Kind::J => [(0, 0), (0, 1), (1, 1), (2, 1)],
+            Kind::L => [(2, 0), (0, 1), (1, 1), (2, 1)],
+        }
+    }
+
+    fn color(self) -> u32 {
+        match self {
+            Kind::I => lit(),
+            Kind::O => c_amber(),
+            Kind::T => mix(c_blue(), c_red(), 0.5),
+            Kind::S => c_green(),
+            Kind::Z => c_red(),
+            Kind::J => c_blue(),
+            Kind::L => EMBER,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Piece {
+    kind: Kind,
+    /// Quarter turns clockwise.
+    rot: u8,
+    col: i32,
+    row: i32,
+}
+
+impl Piece {
+    fn spawn(kind: Kind) -> Self {
+        Piece {
+            kind,
+            rot: 0,
+            col: (WELL_W as i32 - kind.size()) / 2,
+            // The I piece lies on its box's second row; lift it so it starts at the top.
+            row: if kind == Kind::I { -1 } else { 0 },
+        }
+    }
+
+    /// Its cells in the well, `(col, row)`.
+    fn cells(self) -> [(i32, i32); 4] {
+        let n = self.kind.size();
+        self.kind.cells().map(|(mut c, mut r)| {
+            for _ in 0..self.rot {
+                (c, r) = (n - 1 - r, c);
+            }
+            (self.col + c, self.row + r)
+        })
+    }
+
+    fn moved(self, dc: i32, dr: i32) -> Self {
+        Piece {
+            col: self.col + dc,
+            row: self.row + dr,
+            ..self
+        }
+    }
+}
+
+struct Stack {
+    well: [[Option<Kind>; WELL_W]; WELL_H],
+    piece: Piece,
+    next: Kind,
+    /// What's left of the current shuffled set of all seven, so no piece is kept away long.
+    bag: Vec<Kind>,
+    lines: u32,
+    /// Seconds since the piece last fell a row.
+    acc: f32,
+}
+
+impl Stack {
+    fn new(rng: &mut Rng) -> Self {
+        let mut s = Stack {
+            well: [[None; WELL_W]; WELL_H],
+            piece: Piece::spawn(Kind::T),
+            next: Kind::T,
+            bag: Vec::new(),
+            lines: 0,
+            acc: 0.,
+        };
+        s.piece = Piece::spawn(s.draw(rng));
+        s.next = s.draw(rng);
+        s
+    }
+
+    fn draw(&mut self, rng: &mut Rng) -> Kind {
+        if self.bag.is_empty() {
+            self.bag = Kind::ALL.to_vec();
+            for i in (1..self.bag.len()).rev() {
+                self.bag.swap(i, rng.below(i + 1));
+            }
+        }
+        self.bag.pop().unwrap_or(Kind::T)
+    }
+
+    fn level(&self) -> u32 {
+        1 + self.lines / 10
+    }
+
+    /// Seconds per row: each level falls about 15% faster.
+    fn gravity(&self) -> f32 {
+        (0.8 * 0.85f32.powi(self.level() as i32 - 1)).max(0.04)
+    }
+
+    /// Whether a piece sits inside the well without overlapping the stack. Cells above
+    /// the top are allowed, so a piece can turn as it enters.
+    fn fits(&self, p: Piece) -> bool {
+        p.cells().into_iter().all(|(c, r)| {
+            c >= 0
+                && c < WELL_W as i32
+                && r < WELL_H as i32
+                && (r < 0 || self.well[r as usize][c as usize].is_none())
+        })
+    }
+
+    fn grounded(&self) -> bool {
+        !self.fits(self.piece.moved(0, 1))
+    }
+
+    fn shift(&mut self, dc: i32) -> bool {
+        let to = self.piece.moved(dc, 0);
+        let ok = self.fits(to);
+        if ok {
+            self.piece = to;
+        }
+        ok
+    }
+
+    /// Turns the piece a quarter, clockwise for 1 and back for -1, nudging it off a wall
+    /// or the stack when it would not fit where it is.
+    fn rotate(&mut self, dir: i32) -> bool {
+        if self.piece.kind == Kind::O {
+            return false;
+        }
+        let turned = Piece {
+            rot: (self.piece.rot as i32 + dir).rem_euclid(4) as u8,
+            ..self.piece
+        };
+        for (dc, dr) in [(0, 0), (-1, 0), (1, 0), (-2, 0), (2, 0), (0, -1)] {
+            let to = turned.moved(dc, dr);
+            if self.fits(to) {
+                self.piece = to;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Where the piece would land, drawn as a faint outline.
+    fn ghost(&self) -> Piece {
+        let mut p = self.piece;
+        while self.fits(p.moved(0, 1)) {
+            p = p.moved(0, 1);
+        }
+        p
+    }
+
+    /// Fixes the piece into the stack, clears full rows and brings on the next piece.
+    /// Returns the points scored, or None when the stack has reached the top.
+    fn lock(&mut self, rng: &mut Rng) -> Option<u32> {
+        for (c, r) in self.piece.cells() {
+            if r < 0 {
+                return None;
+            }
+            self.well[r as usize][c as usize] = Some(self.piece.kind);
+        }
+        let kept: Vec<[Option<Kind>; WELL_W]> = self
+            .well
+            .iter()
+            .copied()
+            .filter(|row| row.iter().any(Option::is_none))
+            .collect();
+        let cleared = WELL_H - kept.len();
+        let mut well = [[None; WELL_W]; WELL_H];
+        well[cleared..].copy_from_slice(&kept);
+        self.well = well;
+        let points = [0, 100, 300, 500, 800][cleared] * self.level();
+        self.lines += cleared as u32;
+        self.piece = Piece::spawn(self.next);
+        self.next = self.draw(rng);
+        self.acc = 0.;
+        self.fits(self.piece).then_some(points)
+    }
+
+    /// Moves the piece down one row, a point for the row, or locks it if it has landed.
+    fn soft_drop(&mut self, rng: &mut Rng) -> Option<u32> {
+        if self.grounded() {
+            return self.lock(rng);
+        }
+        self.piece = self.piece.moved(0, 1);
+        self.acc = 0.;
+        Some(1)
+    }
+
+    /// Drops the piece straight down and locks it, two points for each row.
+    fn hard_drop(&mut self, rng: &mut Rng) -> Option<u32> {
+        let ghost = self.ghost();
+        let rows = (ghost.row - self.piece.row) as u32;
+        self.piece = ghost;
+        Some(rows * 2 + self.lock(rng)?)
+    }
+
+    fn step(&mut self, dt: f32, rng: &mut Rng) -> Option<u32> {
+        self.acc += dt;
+        let mut points = 0;
+        loop {
+            let grounded = self.grounded();
+            let wait = if grounded {
+                self.gravity().max(LOCK)
+            } else {
+                self.gravity()
+            };
+            if self.acc < wait {
+                return Some(points);
+            }
+            self.acc -= wait;
+            if grounded {
+                points += self.lock(rng)?;
+            } else {
+                self.piece = self.piece.moved(0, 1);
+            }
+        }
+    }
+}
+
 fn bests_path() -> PathBuf {
     store::data_dir().join("arcade.json")
 }
@@ -371,6 +647,7 @@ pub(crate) struct Arcade {
     spark: Spark,
     commits: Commits,
     merge: Merge,
+    stack: Stack,
     last: Option<Instant>,
 }
 
@@ -379,6 +656,7 @@ impl Arcade {
         let mut rng = Rng::new();
         let commits = Commits::new(&mut rng);
         let merge = Merge::new(&mut rng);
+        let stack = Stack::new(&mut rng);
         Arcade {
             focus: cx.focus_handle(),
             game: Game::Spark,
@@ -390,6 +668,7 @@ impl Arcade {
             spark: Spark::new(),
             commits,
             merge,
+            stack,
             last: None,
         }
     }
@@ -406,6 +685,7 @@ impl Arcade {
             Game::Spark => self.spark = Spark::new(),
             Game::Commits => self.commits = Commits::new(&mut self.rng),
             Game::Merge => self.merge = Merge::new(&mut self.rng),
+            Game::Stack => self.stack = Stack::new(&mut self.rng),
         }
         // Merge has no clock, so it is ready to play as soon as it is dealt.
         self.phase = if self.game == Game::Merge {
@@ -445,6 +725,14 @@ impl Arcade {
         }
     }
 
+    /// Counts a move's points, or ends the round when the move crashed.
+    fn land(&mut self, points: Option<u32>) {
+        match points {
+            Some(points) => self.add(points),
+            None => self.over(),
+        }
+    }
+
     fn start(&mut self) {
         match self.phase {
             Phase::Over => {
@@ -481,12 +769,37 @@ impl Arcade {
             "1" => self.pick(Game::Spark),
             "2" => self.pick(Game::Commits),
             "3" => self.pick(Game::Merge),
+            "4" => self.pick(Game::Stack),
             "p" if self.phase == Phase::Playing => self.pause(),
             "p" if self.phase == Phase::Paused => self.start(),
             "r" => self.reset(),
             "space" | "up" | "w" if self.game == Game::Spark => self.lift(),
             "space" | "enter" if self.phase != Phase::Playing => self.start(),
+            "space" if self.game == Game::Stack => {
+                let points = self.stack.hard_drop(&mut self.rng);
+                self.land(points);
+            }
+            "z" | "x" if self.game == Game::Stack && self.phase == Phase::Playing => {
+                self.stack.rotate(if key == "z" { -1 } else { 1 });
+            }
             _ => match (self.game, dir) {
+                (Game::Stack, Some(d)) => {
+                    if self.phase != Phase::Playing {
+                        self.start();
+                    }
+                    match d {
+                        (-1, 0) => {
+                            self.stack.rotate(1);
+                        }
+                        (1, 0) => {
+                            let points = self.stack.soft_drop(&mut self.rng);
+                            self.land(points);
+                        }
+                        (_, dc) => {
+                            self.stack.shift(dc);
+                        }
+                    }
+                }
                 (Game::Commits, Some((dr, dc))) => {
                     if self.phase != Phase::Playing {
                         self.start();
@@ -524,11 +837,9 @@ impl Arcade {
             Game::Spark => self.spark.step(dt, &mut self.rng),
             Game::Commits => self.commits.step(dt, &mut self.rng),
             Game::Merge => Some(0),
+            Game::Stack => self.stack.step(dt, &mut self.rng),
         };
-        match stepped {
-            Some(points) => self.add(points),
-            None => self.over(),
-        }
+        self.land(stepped);
     }
 }
 
@@ -783,6 +1094,130 @@ impl Arcade {
         div().child(board)
     }
 
+    /// One block of a tetromino, `left`/`top` in pixels within its parent.
+    fn block(left: f32, top: f32, color: u32) -> Div {
+        div()
+            .absolute()
+            .left(px(left + 1.))
+            .top(px(top + 1.))
+            .size(px(BLOCK - 2.))
+            .rounded(px(3.))
+            .bg(rgb(color))
+            .border_1()
+            .border_color(rgb(mix(0xffffff, color, 0.3)))
+    }
+
+    fn stack_field(&self) -> Div {
+        let (ww, wh) = (WELL_W as f32 * BLOCK, WELL_H as f32 * BLOCK);
+        let ox = (W - ww) / 2. - 40.;
+        let oy = (H - wh) / 2.;
+        let mut well = div()
+            .absolute()
+            .left(px(ox))
+            .top(px(oy))
+            .w(px(ww))
+            .h(px(wh))
+            .rounded(px(6.))
+            .bg(alpha(c_text(), if is_dark() { 0.05 } else { 0.06 }));
+        for (r, row) in self.stack.well.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                if let Some(kind) = cell {
+                    well = well.child(Self::block(
+                        c as f32 * BLOCK,
+                        r as f32 * BLOCK,
+                        kind.color(),
+                    ));
+                }
+            }
+        }
+        let color = self.stack.piece.kind.color();
+        let ghost = self.stack.ghost();
+        if ghost != self.stack.piece {
+            for (c, r) in ghost.cells().into_iter().filter(|&(_, r)| r >= 0) {
+                well = well.child(
+                    div()
+                        .absolute()
+                        .left(px(c as f32 * BLOCK + 1.))
+                        .top(px(r as f32 * BLOCK + 1.))
+                        .size(px(BLOCK - 2.))
+                        .rounded(px(3.))
+                        .border_1()
+                        .border_color(alpha(color, 0.5)),
+                );
+            }
+        }
+        for (c, r) in self
+            .stack
+            .piece
+            .cells()
+            .into_iter()
+            .filter(|&(_, r)| r >= 0)
+        {
+            well = well.child(
+                Self::block(c as f32 * BLOCK, r as f32 * BLOCK, color)
+                    .shadow(glow(color, 0.45, 8.)),
+            );
+        }
+        // Beside the well: the next piece, then the level and lines.
+        let next = self.stack.next;
+        let box_side = 4. * BLOCK;
+        // Centre the piece's own cells in the box, not the box it turns in.
+        let cells = next.cells();
+        let span = |f: fn(&(i32, i32)) -> i32| {
+            let lo = cells.iter().map(f).min().unwrap_or(0);
+            let hi = cells.iter().map(f).max().unwrap_or(0);
+            (box_side - (hi - lo + 1) as f32 * BLOCK) / 2. - lo as f32 * BLOCK
+        };
+        let (pad_x, pad_y) = (span(|p| p.0), span(|p| p.1));
+        let preview = cells.into_iter().fold(
+            div()
+                .relative()
+                .size(px(box_side))
+                .rounded(px(6.))
+                .bg(alpha(c_text(), 0.04)),
+            |el, (c, r)| {
+                el.child(Self::block(
+                    pad_x + c as f32 * BLOCK,
+                    pad_y + r as f32 * BLOCK,
+                    next.color(),
+                ))
+            },
+        );
+        let stat = |label: &'static str, value: String| {
+            div()
+                .v_flex()
+                .gap(px(1.))
+                .text_size(px(11.))
+                .text_color(rgb(c_muted()))
+                .child(label)
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(c_text()))
+                        .child(value),
+                )
+        };
+        let side = div()
+            .absolute()
+            .left(px(ox + ww + 24.))
+            .top(px(oy))
+            .v_flex()
+            .gap_3()
+            .child(
+                div()
+                    .v_flex()
+                    .gap_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(c_muted()))
+                    .child("Next")
+                    .child(preview),
+            )
+            .child(stat("Level", self.stack.level().to_string()))
+            .child(stat("Lines", self.stack.lines.to_string()));
+        div().child(Self::dots(0.)).child(well).child(side)
+    }
+
     /// The card over the field before a round, when paused and after a crash.
     fn banner(&self) -> Option<Div> {
         let (title, line) = match self.phase {
@@ -852,6 +1287,7 @@ impl Render for Arcade {
             Game::Spark => self.spark_field(),
             Game::Commits => self.commits_field(),
             Game::Merge => self.merge_field(),
+            Game::Stack => self.stack_field(),
         };
         let tabs = Game::ALL.into_iter().enumerate().fold(
             div()
@@ -964,7 +1400,7 @@ impl Render for Arcade {
                     .text_size(px(11.5))
                     .text_color(rgb(c_muted()))
                     .child(self.game.hint())
-                    .child("1 2 3 switch · P pause · R restart"),
+                    .child("1–4 switch · P pause · R restart"),
             )
     }
 }
@@ -1191,5 +1627,117 @@ mod tests {
             }
         }
         assert!(!alive);
+    }
+
+    fn stack_with(rows: &[(usize, &[usize])]) -> Stack {
+        let mut s = Stack::new(&mut Rng::new());
+        for &(r, cols) in rows {
+            for &c in cols {
+                s.well[r][c] = Some(Kind::O);
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn every_tetromino_turns_back_to_where_it_started() {
+        for kind in Kind::ALL {
+            let p = Piece {
+                kind,
+                rot: 0,
+                col: 3,
+                row: 5,
+            };
+            let mut cells = p.cells();
+            cells.sort();
+            let mut turned = Piece { rot: 4, ..p }.cells();
+            turned.sort();
+            assert_eq!(cells, turned, "{kind:?}");
+            // A quarter turn keeps the four cells distinct.
+            let mut q = Piece { rot: 1, ..p }.cells().to_vec();
+            q.sort();
+            q.dedup();
+            assert_eq!(q.len(), 4, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_bag_deals_all_seven_before_repeating() {
+        let mut rng = Rng::new();
+        let mut s = Stack::new(&mut rng);
+        s.bag.clear();
+        let mut dealt: Vec<Kind> = (0..7).map(|_| s.draw(&mut rng)).collect();
+        dealt.sort_by_key(|k| *k as u8);
+        assert_eq!(dealt, Kind::ALL.to_vec());
+    }
+
+    #[test]
+    fn pieces_stop_at_the_walls_and_kick_off_them_to_turn() {
+        let mut s = stack_with(&[]);
+        s.piece = Piece::spawn(Kind::T);
+        while s.shift(-1) {}
+        assert_eq!(s.piece.cells().iter().map(|c| c.0).min(), Some(0));
+        // An upright I against the right wall still turns flat, nudged inward.
+        s.piece = Piece {
+            kind: Kind::I,
+            rot: 1,
+            col: 7,
+            row: 3,
+        };
+        while s.shift(1) {}
+        assert!(s.rotate(1));
+        assert!(s.piece.cells().iter().all(|c| c.0 < WELL_W as i32));
+    }
+
+    #[test]
+    fn a_full_row_clears_and_scores_by_level() {
+        let mut rng = Rng::new();
+        // The bottom row is full but for the last two columns, which an O fills.
+        let mut s = stack_with(&[(19, &[0, 1, 2, 3, 4, 5, 6, 7])]);
+        s.piece = Piece {
+            kind: Kind::O,
+            rot: 0,
+            col: 8,
+            row: 0,
+        };
+        assert_eq!(s.hard_drop(&mut rng), Some(18 * 2 + 100));
+        assert_eq!(s.lines, 1);
+        // The O's top half falls into the cleared row.
+        assert_eq!(s.well[19][8], Some(Kind::O));
+        assert_eq!(s.well[19][0], None);
+        assert_eq!(s.well[18][8], None);
+        // Ten lines make level 2, which falls faster and doubles line points.
+        s.lines = 10;
+        assert_eq!(s.level(), 2);
+        assert!(s.gravity() < 0.8);
+    }
+
+    #[test]
+    fn a_piece_that_cannot_enter_ends_the_round() {
+        let mut rng = Rng::new();
+        // A block where the next T appears.
+        let mut s = stack_with(&[(0, &[4])]);
+        s.next = Kind::T;
+        s.piece = Piece {
+            kind: Kind::O,
+            rot: 0,
+            col: 0,
+            row: 0,
+        };
+        assert_eq!(s.hard_drop(&mut rng), None);
+    }
+
+    #[test]
+    fn gravity_drops_the_piece_and_locks_it_on_the_floor() {
+        let mut rng = Rng::new();
+        let mut s = stack_with(&[]);
+        s.piece = Piece::spawn(Kind::O);
+        let mut steps = 0;
+        while s.well[19].iter().all(Option::is_none) {
+            assert!(s.step(0.1, &mut rng).is_some());
+            steps += 1;
+            assert!(steps < 1000);
+        }
+        assert_eq!(s.well[19][4], Some(Kind::O));
     }
 }
