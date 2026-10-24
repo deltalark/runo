@@ -259,6 +259,9 @@ impl ClaudeStream {
                 if let Some(cost) = event["total_cost_usd"].as_f64().filter(|c| *c > 0.0) {
                     parts.push(format!("${cost:.2}"));
                 }
+                if let Some(share) = cache_share(&event["usage"]) {
+                    parts.push(format!("{share}% from cache"));
+                }
                 if !parts.is_empty() {
                     out.push(AgentEvent::Summary(parts.join(" · ")));
                 }
@@ -267,11 +270,21 @@ impl ClaudeStream {
                         .as_str()
                         .or_else(|| event["subtype"].as_str())
                         .unwrap_or("The agent reported an error.");
+                    // A used-up plan says so in words only when no rate_limit_event came.
+                    if let Some(limit) = crate::planlimit::from_text(reason, chrono::Local::now()) {
+                        out.push(AgentEvent::Limit(limit));
+                    }
                     out.push(AgentEvent::Error(reason.to_string()));
                 } else if !self.any_text {
                     if let Some(text) = event["result"].as_str().filter(|t| !t.is_empty()) {
                         out.push(self.text(text.to_string()));
                     }
+                }
+            }
+            // Where the plan's usage window stands, sent with each turn.
+            "rate_limit_event" => {
+                if let Some(limit) = crate::planlimit::from_claude(&event["rate_limit_info"]) {
+                    out.push(AgentEvent::Limit(limit));
                 }
             }
             _ => {}
@@ -1113,9 +1126,43 @@ fn duration(ms: u64) -> String {
     }
 }
 
+/// The share of a run's prompt read from the cache, in percent: low means each call
+/// sent the context afresh, which costs more and uses more of a plan.
+fn cache_share(usage: &serde_json::Value) -> Option<u64> {
+    let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+    let read = n("cache_read_input_tokens");
+    let prompt = read + n("cache_creation_input_tokens") + n("input_tokens");
+    // A tiny prompt says nothing about the cache.
+    (prompt >= 10_000).then(|| read * 100 / prompt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limit_events_and_the_limit_line_are_read() {
+        let mut p = ClaudeStream::new("/x");
+        let out = p.feed(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1792840000,"rateLimitType":"five_hour","utilization":0.9},"session_id":"s"}"#);
+        assert!(matches!(
+            &out[..],
+            [AgentEvent::Limit(l)] if l.status == crate::planlimit::Status::Warning && l.kind == "five_hour"
+        ));
+        let out = p.feed(r#"{"type":"result","is_error":true,"result":"You've hit your session limit · resets 3pm (Asia/Calcutta)"}"#);
+        assert!(
+            matches!(&out[0], AgentEvent::Limit(l) if l.status == crate::planlimit::Status::Rejected)
+        );
+        assert!(matches!(&out[1], AgentEvent::Error(_)));
+    }
+
+    #[test]
+    fn the_summary_says_how_much_came_from_the_cache() {
+        let mut p = ClaudeStream::new("/x");
+        let out = p.feed(r#"{"type":"result","is_error":false,"duration_ms":2000,"usage":{"input_tokens":1000,"cache_read_input_tokens":90000,"cache_creation_input_tokens":9000,"output_tokens":50},"result":"ok"}"#);
+        assert!(out
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Summary(s) if s == "2s · 90% from cache")));
+    }
 
     #[test]
     fn usage_denials_plans_and_questions() {

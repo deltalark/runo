@@ -410,8 +410,22 @@ impl RunoApp {
             .iter()
             .filter(|st| st.mark == Mark::Done)
             .count();
-        let meta = if status == "working" && steps > 0 {
-            format!("{done}/{steps}")
+        let subagents = crate::health::running_subagents(s);
+        let meta = if status == "working" && (steps > 0 || subagents > 0) {
+            let mut parts = Vec::new();
+            if steps > 0 {
+                parts.push(format!("{done}/{steps}"));
+            }
+            match subagents {
+                0 => {}
+                1 => parts.push("1 subagent".into()),
+                n => parts.push(format!("{n} subagents")),
+            }
+            parts.join(" · ")
+        } else if s.queue.iter().any(|q| q.text == crate::planlimit::CONTINUE) {
+            "paused".into()
+        } else if self.waiting_for_slot(thread) {
+            "waiting".into()
         } else if status == "failed" {
             "failed".into()
         } else {
@@ -596,10 +610,24 @@ impl RunoApp {
                                 )
                             })
                             .count();
-                        div().text_color(rgb(c_muted())).child(match finished {
-                            0 => String::new(),
-                            n if n == threads.len() => "· all finished".into(),
-                            n => format!("· {n} of {} finished", threads.len()),
+                        let cents: f64 = threads
+                            .iter()
+                            .filter_map(|t| self.state.session(*t))
+                            .map(crate::health::session_cost)
+                            .sum();
+                        let mut parts: Vec<String> = Vec::new();
+                        match finished {
+                            0 => {}
+                            n if n == threads.len() => parts.push("all finished".into()),
+                            n => parts.push(format!("{n} of {} finished", threads.len())),
+                        }
+                        if cents > 0. {
+                            parts.push(format!("${:.2} so far", cents / 100.));
+                        }
+                        div().text_color(rgb(c_muted())).child(if parts.is_empty() {
+                            String::new()
+                        } else {
+                            format!("· {}", parts.join(" · "))
                         })
                     }))
                     .child(

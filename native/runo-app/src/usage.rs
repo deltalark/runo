@@ -64,6 +64,51 @@ pub fn get(provider: &str) -> Option<Usage> {
     STATE.read().ok()?.as_ref()?.get(provider).cloned()
 }
 
+/// What a running turn said about its agent's plan, so the status bar follows it between
+/// reads instead of up to five minutes behind.
+pub fn note_live(provider: &str, limit: &crate::planlimit::PlanLimit, now: i64) {
+    let rejected = limit.status == crate::planlimit::Status::Rejected;
+    let Some(used) = limit.used.or(rejected.then_some(100.0)) else {
+        return;
+    };
+    let label = match limit.kind.as_str() {
+        "five_hour" => "5-hour",
+        "seven_day" | "seven_day_overage_included" => "Weekly",
+        "seven_day_opus" => "Weekly Opus",
+        "seven_day_sonnet" => "Weekly Sonnet",
+        _ => return,
+    };
+    let Ok(mut state) = STATE.write() else {
+        return;
+    };
+    let usage = state
+        .get_or_insert_with(HashMap::new)
+        .entry(provider.to_string())
+        .or_insert(Usage {
+            reading: Reading::Limits(Vec::new()),
+            at: now,
+        });
+    if !matches!(usage.reading, Reading::Limits(_)) {
+        usage.reading = Reading::Limits(Vec::new());
+    }
+    if let Reading::Limits(windows) = &mut usage.reading {
+        match windows.iter_mut().find(|w| w.label == label) {
+            Some(w) => {
+                w.used = used;
+                w.resets_at = limit.resets_at.or(w.resets_at);
+            }
+            None => windows.push(Window {
+                label,
+                used,
+                resets_at: limit.resets_at,
+            }),
+        }
+    }
+    usage.at = now;
+    drop(state);
+    crate::caps::mark_updated();
+}
+
 /// Whether a read is running now, for the refresh button.
 pub fn busy() -> bool {
     BUSY.lock().map(|b| *b).unwrap_or(false)
@@ -523,5 +568,35 @@ mod tests {
         assert_eq!(left(3 * 3600 + 12 * 60, 0), "3h 12m");
         assert_eq!(left(30, 0), "1m");
         assert_eq!(ago(0, 7200), "2h ago");
+    }
+
+    #[test]
+    fn a_turns_limit_report_updates_the_reading_between_reads() {
+        let p = "test-live-usage";
+        let limit = |status, used, kind: &str| crate::planlimit::PlanLimit {
+            status,
+            kind: kind.into(),
+            resets_at: Some(2_000),
+            used,
+        };
+        use crate::planlimit::Status;
+        note_live(p, &limit(Status::Warning, Some(81.0), "five_hour"), 100);
+        let Reading::Limits(w) = get(p).unwrap().reading else {
+            panic!("limits")
+        };
+        assert_eq!(
+            (w[0].label, w[0].used, w[0].resets_at),
+            ("5-hour", 81.0, Some(2_000))
+        );
+        // Used up with no share given counts as full; an unknown window is left alone.
+        note_live(p, &limit(Status::Rejected, None, "five_hour"), 200);
+        note_live(p, &limit(Status::Allowed, Some(5.0), "odd"), 300);
+        let u = get(p).unwrap();
+        let Reading::Limits(w) = u.reading else {
+            panic!("limits")
+        };
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].used, 100.0);
+        assert_eq!(u.at, 200);
     }
 }

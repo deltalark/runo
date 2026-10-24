@@ -4,6 +4,22 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- A turn that hits Claude's usage limit pauses instead of being lost. Runo reads the limit Claude Code reports with every turn, so new Claude turns wait until the 5-hour or weekly window resets (Send anyway still sends one), and the failed turn offers Carry on at its reset time or Carry on now. Carrying on continues the same conversation from where it stopped, keeping what the turn and its subagents already did, where Retry would start the work over. A Crew thread the limit stops carries on by itself once the window resets, and Crew is told not to start it again.
+- Crew threads running at once, under Settings > Safety > Limits, 3 by default. Threads Crew starts past it wait for a slot and start in order as others finish, with Start now to let one go ahead; threads you start or approve never wait for it. Crew sees how many run and wait, so it plans in order instead of starting more.
+- Hold threads and playbooks past a share of the plan, under the same Limits: once Claude Code's 5-hour or weekly window is that full, Crew threads and playbook runs wait for it to reset, so what you start yourself still has room. Off by default.
+- Crew can give a thread a model, an effort and a budget. Its rules suggest a smaller model for mechanical work such as renames, docs and copy, list the agent's models, and ask for briefs that name the files and findings already known. A thread past its budget waits for you, with Send anyway.
+- Subagent model for Claude Code, under Settings > Agents > Claude Code: the model its subagents run on, such as sonnet or haiku, while the session keeps its own. Empty keeps today's behaviour.
+- A Crew thread's card shows how many subagents it has running, and whether it is waiting for a slot or paused at the limit. Crew's Started card adds up what its threads have cost so far.
+- A run's summary says how much of its prompt came from the cache, such as "94% from cache", so a run that kept re-sending its context stands out.
+
+### Changed
+
+- Crew threads are told to do their work in the thread, keep subagents for independent lookups (at most two at a time, never one per item) and run the full test suite once at the end. Crew is told to split work by area rather than by item and to start the riskiest first.
+- Claude Code's usage in the status bar follows each turn as it runs, rather than refreshing only every five minutes, and a window past its warning point is mentioned once.
+- The Usage popover notes that Chat runs Claude Code in print mode, which can use more of the plan windows than the same work in a terminal, and points to the CLI view.
+
 ## [0.5.3] - 2026-10-25
 
 ### Added

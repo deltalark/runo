@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::applog::{Crash, Release};
+use crate::store::Queued;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -34,6 +35,10 @@ pub(crate) struct Health {
     allow_once: HashSet<u64>,
     /// Sessions waiting for a free slot, first come first served.
     waiting_slot: Vec<u64>,
+    /// Sessions the person started ahead of the line, for one turn.
+    start_now: HashSet<u64>,
+    /// The plan window each agent was last warned about, by when it resets.
+    warned: HashMap<String, i64>,
     crash: Option<Crash>,
     crash_looked: bool,
     release: Arc<Mutex<Option<Release>>>,
@@ -58,6 +63,24 @@ impl Health {
             _ => {}
         }
     }
+}
+
+/// Subagents the session's agent has running now, from its latest reply's steps.
+pub(crate) fn running_subagents(session: &Session) -> usize {
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Agent)
+        .map_or(0, |m| {
+            m.steps
+                .iter()
+                .filter(|st| {
+                    st.kind == crate::harness::ToolKind::Subagent
+                        && st.state == crate::harness::StepState::Running
+                })
+                .count()
+        })
 }
 
 /// What a session's agents have cost so far, in US cents.
@@ -172,6 +195,83 @@ pub(crate) fn over_limit(used: &Used, limits: &settings::Limits) -> Option<Hold>
     }
 }
 
+/// A Crew thread: a session Crew routes to, not Crew's own chat.
+pub(crate) fn is_thread(session: &Session) -> bool {
+    session.crew.is_some() && session.canvas != crew::CANVAS
+}
+
+/// A thread Crew started on its own, rather than one the person started or approved.
+pub(crate) fn crew_started(session: &Session) -> bool {
+    is_thread(session)
+        && session
+            .crew
+            .as_ref()
+            .is_some_and(|i| matches!(i.origin, crew::Origin::Crew { .. }))
+}
+
+/// Why a thread's next turn waits on the budget Crew gave it, if it does.
+pub(crate) fn budget_hold(session: &Session) -> Option<Hold> {
+    let budget = session.crew.as_ref()?.budget?;
+    let spent = session_cost(session);
+    if budget.dollars > 0. && spent >= budget.dollars * 100. {
+        return Some(Hold {
+            title: "Thread budget reached",
+            why: format!(
+                "This thread has cost ${:.2} of the ${:.2} Crew gave it.",
+                spent / 100.,
+                budget.dollars
+            ),
+        });
+    }
+    let turns = session_turns(session);
+    if budget.turns > 0 && turns >= budget.turns {
+        return Some(Hold {
+            title: "Thread budget reached",
+            why: format!(
+                "This thread has had {turns} of the {} turns Crew gave it.",
+                budget.turns
+            ),
+        });
+    }
+    None
+}
+
+/// Why a new turn of `session` waits on its agent's plan: the plan is used up until it
+/// resets, or a thread or playbook run would start past the share set for those.
+pub(crate) fn plan_hold(session: &Session, now: i64) -> Option<Hold> {
+    let name = agent::provider(&session.provider).name;
+    if let Some(until) = planlimit::held_until(&session.provider, now) {
+        return Some(Hold {
+            title: "Plan limit reached",
+            why: format!(
+                "{name}'s plan limit is used up. This goes out when it resets at {}.",
+                planlimit::reset_clock(until, now)
+            ),
+        });
+    }
+    let share = settings::plan_hold_percent();
+    if share == 0 || !(crew_started(session) || session.playbook != 0) {
+        return None;
+    }
+    let usage::Reading::Limits(windows) = usage::get(&session.provider)?.reading else {
+        return None;
+    };
+    let w = windows
+        .iter()
+        .find(|w| w.used >= share as f32 && w.resets_at.is_none_or(|r| r > now))?;
+    Some(Hold {
+        title: "Plan almost used",
+        why: format!(
+            "{name} has used {:.0}% of its {} limit, past the {share}% set for threads and playbooks.{}",
+            w.used,
+            w.label.to_lowercase(),
+            w.resets_at
+                .map(|r| format!(" It resets at {}.", planlimit::reset_clock(r, now)))
+                .unwrap_or_default()
+        ),
+    })
+}
+
 impl RunoApp {
     /// Save now rather than on the next tick: the window is closing or Runo quitting.
     pub(crate) fn save_now(&mut self) {
@@ -201,31 +301,174 @@ impl RunoApp {
         }
     }
 
-    /// Why a new turn of `id` has to wait (a spending, turn or token limit, or no free
-    /// slot), noting it so the turn starts once it can. None lets it start.
+    /// Threads Crew started that are running now, for their own cap.
+    fn running_threads(&self) -> usize {
+        self.handles
+            .keys()
+            .filter_map(|t| match t {
+                Target::Session(id) => self.state.session(*id),
+                _ => None,
+            })
+            .filter(|s| crew_started(s))
+            .count()
+    }
+
+    /// Why a new turn of `session` must wait for a limit: spending, turns or tokens, or
+    /// the agent's plan used up (or past the share set for automatic starts).
+    fn limit_hold(&self, session: &Session) -> Option<Hold> {
+        over_limit(&self.used(session), &settings::limits())
+            .or_else(|| budget_hold(session))
+            .or_else(|| plan_hold(session, usage::now_secs()))
+    }
+
+    /// Why a new turn of `session` must wait for a slot, if it must.
+    fn slot_wait(&self, session: &Session) -> Option<String> {
+        let plural = |n: usize, one: &str, many: &str| {
+            if n == 1 {
+                one.to_string()
+            } else {
+                many.to_string()
+            }
+        };
+        let cap = settings::max_running();
+        if cap > 0 && self.running() >= cap {
+            return Some(format!(
+                "Waiting for a slot: {cap} {} already running.",
+                plural(cap, "agent is", "agents are")
+            ));
+        }
+        let threads = settings::crew_running();
+        if threads > 0 && crew_started(session) && self.running_threads() >= threads {
+            return Some(format!(
+                "Waiting for a slot: {threads} Crew {} already running.",
+                plural(threads, "thread is", "threads are")
+            ));
+        }
+        None
+    }
+
+    /// Why a new turn of `id` has to wait (a spending, turn, token or plan limit, or no
+    /// free slot), noting it so the turn starts once it can. None lets it start.
     pub(crate) fn hold_turn(&mut self, id: u64) -> Option<String> {
         let session = self.state.session(id)?;
         if !self.health.allow_once.contains(&id) {
-            if let Some(hold) = over_limit(&self.used(session), &settings::limits()) {
+            if let Some(hold) = self.limit_hold(session) {
                 let text = format!("Not sent. {}", hold.why);
                 self.health.held.insert(id, hold);
                 return Some(text);
             }
         }
-        let cap = settings::max_running();
-        if cap > 0 && self.running() >= cap {
-            if !self.health.waiting_slot.contains(&id) {
-                self.health.waiting_slot.push(id);
+        if !self.health.start_now.contains(&id) {
+            if let Some(why) = self.slot_wait(session) {
+                if !self.health.waiting_slot.contains(&id) {
+                    self.health.waiting_slot.push(id);
+                }
+                return Some(why);
             }
-            return Some(format!(
-                "Waiting for a slot: {cap} agent{} already running.",
-                if cap == 1 { " is" } else { "s are" }
-            ));
         }
         self.health.allow_once.remove(&id);
+        self.health.start_now.remove(&id);
         self.health.held.remove(&id);
         self.health.waiting_slot.retain(|w| *w != id);
         None
+    }
+
+    /// What a turn said about its agent's plan: the status bar's usage follows it, a
+    /// window near its limit is told once, and a used-up one holds the agent's new turns
+    /// until it resets. A Crew thread the limit stops carries on by itself then.
+    pub(crate) fn note_plan_limit(&mut self, id: u64, limit: &planlimit::PlanLimit) {
+        let Some(session) = self.state.session(id) else {
+            return;
+        };
+        let provider = session.provider.clone();
+        let thread = is_thread(session);
+        let project = session.project_id;
+        let title = session.title.clone();
+        let now = usage::now_secs();
+        usage::note_live(&provider, limit, now);
+        let name = agent::provider(&provider).name;
+        let window = planlimit::window_name(&limit.kind);
+        let reset = |at: Option<i64>| {
+            at.map(|t| format!(" It resets at {}.", planlimit::reset_clock(t, now)))
+                .unwrap_or_default()
+        };
+        match limit.status {
+            planlimit::Status::Allowed => {
+                planlimit::note(&provider, limit, now);
+            }
+            planlimit::Status::Warning => {
+                planlimit::note(&provider, limit, now);
+                let key = limit.resets_at.unwrap_or(0);
+                if self.health.warned.get(&provider) != Some(&key) {
+                    self.health.warned.insert(provider, key);
+                    let used = limit
+                        .used
+                        .map(|u| format!("{u:.0}% of "))
+                        .unwrap_or_default();
+                    self.info = Some((
+                        format!(
+                            "{name} has used {used}its {window} limit.{}",
+                            reset(limit.resets_at)
+                        ),
+                        Instant::now(),
+                    ));
+                }
+            }
+            planlimit::Status::Rejected => {
+                let newly = planlimit::note(&provider, limit, now);
+                let until = planlimit::held_until(&provider, now);
+                if thread {
+                    if let Some(s) = self.state.session_mut(id) {
+                        if !s.queue.iter().any(|q| q.text == planlimit::CONTINUE) {
+                            s.queue.push(Queued::new(planlimit::CONTINUE, Vec::new()));
+                        }
+                    }
+                    let note = format!(
+                        "Thread #{id} ({title}) stopped at {name}'s {window} limit and carries on by itself once it resets{}. Don't start it again or start new threads for its work.",
+                        until
+                            .map(|t| format!(" at {}", planlimit::reset_clock(t, now)))
+                            .unwrap_or_default()
+                    );
+                    if let Some(chat) = self.crew_chat(project).map(|c| c.id) {
+                        self.crew.inbox.entry(chat).or_default().push(note);
+                    }
+                }
+                if newly {
+                    self.info = Some((
+                        format!(
+                            "{name}'s {window} limit is used up. Its new turns wait until it resets{}.",
+                            until
+                                .map(|t| format!(" at {}", planlimit::reset_clock(t, now)))
+                                .unwrap_or_default()
+                        ),
+                        Instant::now(),
+                    ));
+                }
+                self.save();
+            }
+        }
+    }
+
+    /// Carry a turn the plan limit cut short on from where it stopped: now, past the
+    /// hold, or once the window resets.
+    pub(crate) fn continue_after_limit(&mut self, id: u64, now: bool, cx: &mut Context<Self>) {
+        if let Some(s) = self.state.session_mut(id) {
+            if !s.queue.iter().any(|q| q.text == planlimit::CONTINUE) {
+                s.queue
+                    .insert(0, Queued::new(planlimit::CONTINUE, Vec::new()));
+            }
+        }
+        if now {
+            if let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) {
+                planlimit::release(&provider);
+            }
+            self.health.allow_once.insert(id);
+        }
+        self.health.held.remove(&id);
+        self.save();
+        if !self.handles.contains_key(&Target::Session(id)) {
+            self.send_queued(id, 0, cx);
+        }
     }
 
     /// What holds a session's queued prompts, for the composer.
@@ -247,6 +490,44 @@ impl RunoApp {
     pub(crate) fn send_anyway(&mut self, id: u64, cx: &mut Context<Self>) {
         self.health.allow_once.insert(id);
         self.health.held.remove(&id);
+        self.send_queued(id, 0, cx);
+    }
+
+    /// Threads Crew started in project `pid`: how many run now, and how many wait for a
+    /// slot, for Crew to plan around.
+    pub(crate) fn thread_slots(&self, pid: u64) -> (usize, usize) {
+        let mine = |id: &u64| {
+            self.state
+                .session(*id)
+                .is_some_and(|s| s.project_id == pid && crew_started(s))
+        };
+        let running = self
+            .handles
+            .keys()
+            .filter_map(|t| match t {
+                Target::Session(id) => Some(id),
+                _ => None,
+            })
+            .filter(|id| mine(id))
+            .count();
+        let waiting = self
+            .health
+            .waiting_slot
+            .iter()
+            .filter(|id| mine(id))
+            .count();
+        (running, waiting)
+    }
+
+    /// Whether a session's next turn waits for a free slot.
+    pub(crate) fn waiting_for_slot(&self, id: u64) -> bool {
+        self.health.waiting_slot.contains(&id)
+    }
+
+    /// Start one turn waiting for a slot ahead of the line.
+    pub(crate) fn start_now(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.health.start_now.insert(id);
+        self.health.waiting_slot.retain(|w| *w != id);
         self.send_queued(id, 0, cx);
     }
 
@@ -389,21 +670,32 @@ impl RunoApp {
     fn start_waiting(&mut self, cx: &mut Context<Self>) {
         let held: Vec<u64> = self.health.held.keys().copied().collect();
         for id in held {
-            let free = self.state.session(id).is_none_or(|s| {
-                s.queue.is_empty() || over_limit(&self.used(s), &settings::limits()).is_none()
-            });
+            let free = self
+                .state
+                .session(id)
+                .is_none_or(|s| s.queue.is_empty() || self.limit_hold(s).is_none());
             if free {
                 self.health.held.remove(&id);
                 self.send_queued(id, 0, cx);
                 cx.notify();
             }
         }
+        // In order; a thread waiting on the Crew cap lets a session behind it go.
         let cap = settings::max_running();
-        while let Some(&id) = self.health.waiting_slot.first() {
+        let mut i = 0;
+        while let Some(&id) = self.health.waiting_slot.get(i) {
             if cap > 0 && self.running() >= cap {
                 break;
             }
-            self.health.waiting_slot.remove(0);
+            if self
+                .state
+                .session(id)
+                .is_some_and(|s| self.slot_wait(s).is_some())
+            {
+                i += 1;
+                continue;
+            }
+            self.health.waiting_slot.remove(i);
             let ready = self.state.session(id).is_some_and(|s| !s.queue.is_empty())
                 && !self.handles.contains_key(&Target::Session(id));
             if ready {
@@ -765,6 +1057,24 @@ impl RunoApp {
                             })),
                     )
                 })
+                .when(!limit, |el| {
+                    el.child(
+                        self.button("held-start", "Start now", false)
+                            .h(px(22.))
+                            .px_2()
+                            .text_size(px(12.))
+                            .tooltip(|window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(
+                                    "Start it ahead of the line, past the cap on agents running at once",
+                                )
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.start_now(id, cx);
+                                cx.notify();
+                            })),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -929,5 +1239,101 @@ mod tests {
         assert!(health.last_output.contains_key(&3) && !health.quiet_hidden.contains(&3));
         health.saw(&Event::Done(Target::Session(3), true));
         assert!(!health.last_output.contains_key(&3));
+    }
+
+    fn thread(origin: crew::Origin) -> Session {
+        Session {
+            provider: "claude".into(),
+            crew: Some(crew::ThreadInfo {
+                origin,
+                ..Default::default()
+            }),
+            ..Session::default()
+        }
+    }
+
+    #[test]
+    fn only_threads_crew_started_count_toward_its_cap() {
+        let by_crew = thread(crew::Origin::Crew { message: 1 });
+        let by_person = thread(crew::Origin::Person);
+        assert!(is_thread(&by_crew) && crew_started(&by_crew));
+        assert!(is_thread(&by_person) && !crew_started(&by_person));
+        let mut chat = thread(crew::Origin::Crew { message: 1 });
+        chat.canvas = crew::CANVAS.into();
+        assert!(!is_thread(&chat) && !crew_started(&chat));
+        assert!(!crew_started(&Session::default()));
+    }
+
+    #[test]
+    fn a_thread_waits_once_past_its_budget_and_has_none_by_default() {
+        let mut s = thread(crew::Origin::Crew { message: 1 });
+        let mut reply = Message::new(Role::Agent, "done");
+        reply.usage.cost_cents = 250.;
+        s.messages.push(Message::new(Role::User, "go"));
+        s.messages.push(reply);
+        assert_eq!(budget_hold(&s), None, "no budget, no hold");
+        let set = |s: &mut Session, dollars, turns| {
+            s.crew.as_mut().unwrap().budget = Some(crew::Budget { dollars, turns });
+        };
+        set(&mut s, 5., 0);
+        assert_eq!(budget_hold(&s), None);
+        set(&mut s, 2.5, 0);
+        let hold = budget_hold(&s).unwrap();
+        assert_eq!(hold.title, "Thread budget reached");
+        assert!(hold.why.contains("$2.50 of the $2.50"), "{}", hold.why);
+        set(&mut s, 0., 1);
+        assert!(budget_hold(&s).unwrap().why.contains("1 of the 1 turns"));
+    }
+
+    #[test]
+    fn a_used_up_plan_holds_every_turn_of_that_agent_until_it_resets() {
+        let mut s = Session {
+            provider: "test-plan-hold".into(),
+            ..Session::default()
+        };
+        assert_eq!(plan_hold(&s, 1_000), None);
+        let used_up = planlimit::PlanLimit {
+            status: planlimit::Status::Rejected,
+            kind: "five_hour".into(),
+            resets_at: Some(5_000),
+            used: Some(100.),
+        };
+        planlimit::note(&s.provider, &used_up, 1_000);
+        let hold = plan_hold(&s, 1_000).unwrap();
+        assert_eq!(hold.title, "Plan limit reached");
+        // A session the person started waits too: the agent refuses every request.
+        s.crew = None;
+        assert!(plan_hold(&s, 1_000).is_some());
+        assert_eq!(plan_hold(&s, 5_000), None, "reset");
+    }
+
+    #[test]
+    fn running_subagents_are_counted_from_the_latest_reply() {
+        let mut s = Session::default();
+        let mut old = Message::new(Role::Agent, "");
+        old.steps.push(crate::harness::ToolStep::running(
+            "a",
+            "Task",
+            "Ran a subagent",
+        ));
+        s.messages.push(old);
+        let mut reply = Message::new(Role::Agent, "");
+        reply.steps.push(crate::harness::ToolStep::running(
+            "b",
+            "Task",
+            "Ran a subagent",
+        ));
+        reply.steps.push(crate::harness::ToolStep::running(
+            "c",
+            "Agent",
+            "Ran a subagent",
+        ));
+        reply
+            .steps
+            .push(crate::harness::ToolStep::running("d", "Bash", "Ran ls"));
+        s.messages.push(reply);
+        assert_eq!(running_subagents(&s), 2);
+        s.messages.last_mut().unwrap().finish_step("b", true);
+        assert_eq!(running_subagents(&s), 1);
     }
 }

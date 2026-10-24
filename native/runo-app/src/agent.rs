@@ -350,6 +350,13 @@ fn file_servers(spec: &RunSpec) -> Vec<(String, crate::mcp::McpSpec)> {
 /// Environment for one run, for CLIs that take settings that way.
 fn provider_env(spec: &RunSpec) -> Vec<(String, String)> {
     let mut env = Vec::new();
+    // The person's own environment lines come after these and win.
+    if spec.provider == "claude" && !spec.opts.subagent_model.trim().is_empty() {
+        env.push((
+            "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+            spec.opts.subagent_model.trim().to_string(),
+        ));
+    }
     if spec.provider == "opencode" {
         let servers: serde_json::Map<String, serde_json::Value> = mcp_servers(spec)
             .into_iter()
@@ -2114,6 +2121,41 @@ mod arg_tests {
             local: true,
             thread: 0,
         })
+    }
+
+    #[test]
+    fn the_subagent_model_goes_to_claude_only_when_set_and_the_persons_env_wins() {
+        let sel = HashMap::new();
+        let env_of = |provider, opts: &AgentOptions| {
+            let spec = RunSpec {
+                provider,
+                prompt: "hi",
+                resume: false,
+                sel: &sel,
+                opts,
+                in_git: true,
+                session_id: "",
+                images: &[],
+                memory: None,
+                local: true,
+                thread: 0,
+            };
+            turn_command(&spec)
+                .get_envs()
+                .filter(|(k, _)| *k == "CLAUDE_CODE_SUBAGENT_MODEL")
+                .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+                .last()
+                .flatten()
+        };
+        assert_eq!(env_of("claude", &AgentOptions::default()), None);
+        let mut opts = AgentOptions {
+            subagent_model: " sonnet ".into(),
+            ..AgentOptions::default()
+        };
+        assert_eq!(env_of("claude", &opts).as_deref(), Some("sonnet"));
+        assert_eq!(env_of("codex", &opts), None);
+        opts.env = "CLAUDE_CODE_SUBAGENT_MODEL=haiku".into();
+        assert_eq!(env_of("claude", &opts).as_deref(), Some("haiku"));
     }
 
     #[test]
