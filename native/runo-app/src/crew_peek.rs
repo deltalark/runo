@@ -16,6 +16,17 @@ impl RunoApp {
         self.show_panel = true;
     }
 
+    /// Open `thread` from a "#34" in Crew's chat: beside the chat as its cards do, or in
+    /// the main view when `main` (a ⌘-click) or when the chat isn't open.
+    pub(crate) fn open_thread_ref(&mut self, thread: u64, main: bool) {
+        if !main && self.current().is_some_and(|s| s.canvas == crew::CANVAS) {
+            self.open_peek(thread);
+        } else {
+            self.close_peek();
+            self.select(thread);
+        }
+    }
+
     /// Back from the thread to the list of threads.
     fn close_peek(&mut self) {
         self.peek = None;
@@ -117,8 +128,9 @@ impl RunoApp {
         if let Some(strip) = self.thread_strip(session, true, cx) {
             list = list.child(strip);
         }
+        let links = self.thread_links(cx);
         for (i, message) in session.messages.iter().enumerate() {
-            list = list.child(peek_message(thread, i, message));
+            list = list.child(peek_message(thread, i, message, links.as_ref()));
         }
         if working {
             let since = self
@@ -220,8 +232,14 @@ impl RunoApp {
 }
 
 /// One message of a thread, compact: the person's words on the right, the agent's reply
-/// with how many steps it took, and anything else as a quiet line.
-fn peek_message(thread: u64, index: usize, message: &Message) -> AnyElement {
+/// with how many steps it took, and anything else as a quiet line. Thread numbers in the
+/// reply link to their thread through `links`.
+fn peek_message(
+    thread: u64,
+    index: usize,
+    message: &Message,
+    links: Option<&crate::thread_refs::ThreadLinks>,
+) -> AnyElement {
     match message.role {
         Role::User => div()
             .flex()
@@ -255,9 +273,13 @@ fn peek_message(thread: u64, index: usize, message: &Message) -> AnyElement {
                         div().text_size(px(12.5)).child(
                             TextView::markdown(
                                 SharedString::from(format!("peek-body-{thread}-{index}")),
-                                message.text.clone(),
+                                match links {
+                                    Some(links) => links.link(&message.text),
+                                    None => message.text.clone(),
+                                },
                             )
-                            .selectable(true),
+                            .selectable(true)
+                            .when_some(links.cloned(), |view, links| view.plugin(links)),
                         ),
                     )
                 })
