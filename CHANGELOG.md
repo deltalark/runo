@@ -4,6 +4,14 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-10-25
+
+### Fixed
+
+- Runo no longer says an agent isn't signed in when it is. A turn whose errors read like a sign-in problem now asks the agent first (Claude Code's `claude auth status`, Codex's and Cursor's status). Still signed in, most often because another run was renewing the login token at that moment, the turn goes again once after a few seconds with a quiet note, and queued prompts carry on. Only a real sign-out, or a second failure, shows the sign-in card.
+- A turn that ends without a reply says why where it can tell: the disk is full, the agent ran out of memory or was killed, or it timed out; otherwise "stopped without replying", with Retry.
+- Words such as "unauthorized" or "401" from an MCP server, a plugin or a hook, or from an earlier turn, no longer count as the agent being signed out.
+
 ## [0.5.4] - 2026-10-25
 
 ### Added
