@@ -252,11 +252,28 @@ pub fn folders(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Bytes the files under `path` take, without following symlinks.
+/// Whether `meta` (from `symlink_metadata`) is a link: a symlink, or on Windows any
+/// reparse point, junctions included (pnpm's node_modules is full of them).
+pub fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
+}
+
+/// Bytes the files under `path` take. Links are neither followed nor counted.
 pub fn size(path: &Path) -> u64 {
     let Ok(meta) = path.symlink_metadata() else {
         return 0;
     };
+    if is_link(&meta) {
+        return 0;
+    }
     if !meta.is_dir() {
         return meta.len();
     }

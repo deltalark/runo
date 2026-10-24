@@ -17,6 +17,7 @@ mod assistant_mem;
 mod branches;
 mod browser;
 mod browser_engine;
+mod buildclean;
 mod caps;
 mod cargotarget;
 mod chat_follow;
@@ -96,6 +97,7 @@ mod shell;
 mod shellenv;
 mod ship;
 mod signin;
+mod space_ui;
 mod startup;
 mod store;
 mod stream;
@@ -191,6 +193,8 @@ enum View {
     AllSessions,
     History,
     Worktrees,
+    /// A project's worktrees and the disk space they take.
+    WorktreeSpace,
     Settings,
     Notes,
     Activity,
@@ -590,6 +594,8 @@ struct RunoApp {
     turn_files: HashMap<u64, usize>,
     /// Sessions whose checks are running after their last turn.
     proving: std::collections::HashSet<u64>,
+    /// Worktree sizes and build output being freed.
+    space: space_ui::Space,
     /// Sessions waiting on a second opinion, with the agent giving it.
     reviewing: HashMap<u64, &'static str>,
     /// Crew's chats and threads while the app runs.
@@ -1318,6 +1324,14 @@ impl RunoApp {
                     if check {
                         this.maybe_check_updates();
                     }
+                    // Half a minute in, the build output done threads left from before;
+                    // every ~5s the open worktree's size, and once a minute another try
+                    // at done threads something was running in.
+                    if ticks == 600 {
+                        this.queue_done_build_clean();
+                    } else if ticks % 100 == 75 {
+                        this.space_tick(ticks % 1200 == 75);
+                    }
                     // Every ~5s, look for dev servers so the header's Browser button
                     // appears once the app is being served, and goes when it stops.
                     if ticks % 100 == 50
@@ -1778,6 +1792,7 @@ impl RunoApp {
             header_width: std::rc::Rc::new(std::cell::Cell::new(f32::INFINITY)),
             turn_files: HashMap::new(),
             proving: Default::default(),
+            space: Default::default(),
             reviewing: HashMap::new(),
             crew: Default::default(),
             attachments: HashMap::new(),
@@ -2418,6 +2433,8 @@ impl RunoApp {
         self.confirm_git = None;
         self.file_hits = None;
         self.refresh();
+        // The worktree chip's size, unless it was measured lately.
+        self.space_tick(false);
         self.load_pr_status(id);
         self.jump_to_bottom();
     }
@@ -3407,6 +3424,9 @@ impl RunoApp {
         session.archived = !session.archived;
         let (archived, title) = (session.archived, session.title.clone());
         self.save();
+        if archived {
+            self.queue_build_clean(id);
+        }
         self.info = Some((
             if archived {
                 format!("Archived “{title}”. Find it under All sessions.")
@@ -9261,6 +9281,7 @@ impl Render for RunoApp {
             View::AllSessions => self.list_view(View::AllSessions, cx),
             View::History => self.history_view(cx),
             View::Worktrees => self.list_view(View::Worktrees, cx),
+            View::WorktreeSpace => self.worktree_space_view(cx),
             View::Settings => self.settings_view(window, cx),
             View::Notes => self.notes_view(cx),
             View::Activity => self.activity_view(cx),

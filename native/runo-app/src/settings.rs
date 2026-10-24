@@ -72,6 +72,8 @@ pub struct AppSettings {
     pub notifications: bool,
     pub confirm_delete: bool,
     pub remove_worktree_on_delete: bool,
+    /// Delete a worktree's build output once its thread is done or merged.
+    pub remove_build_output: bool,
     /// Rust builds in a session's worktree go to the main checkout's `target`.
     pub share_cargo_target: bool,
     pub send_on_enter: bool,
@@ -241,6 +243,7 @@ impl Default for AppSettings {
             notifications: true,
             confirm_delete: true,
             remove_worktree_on_delete: true,
+            remove_build_output: true,
             share_cargo_target: true,
             send_on_enter: true,
             autoscroll: true,
@@ -386,6 +389,7 @@ impl AppSettings {
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
+        REMOVE_BUILD_OUTPUT.store(self.remove_build_output, Ordering::Relaxed);
         SHARE_CARGO_TARGET.store(self.share_cargo_target, Ordering::Relaxed);
         AUTOSCROLL.store(self.autoscroll, Ordering::Relaxed);
         KEEP_AWAKE.store(self.keep_awake, Ordering::Relaxed);
@@ -466,6 +470,7 @@ static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 static NOTIFY: AtomicBool = AtomicBool::new(false);
 static CONFIRM_DELETE: AtomicBool = AtomicBool::new(true);
 static REMOVE_WORKTREE: AtomicBool = AtomicBool::new(true);
+static REMOVE_BUILD_OUTPUT: AtomicBool = AtomicBool::new(true);
 static SHARE_CARGO_TARGET: AtomicBool = AtomicBool::new(true);
 static AUTOSCROLL: AtomicBool = AtomicBool::new(true);
 static KEEP_AWAKE: AtomicBool = AtomicBool::new(true);
@@ -576,6 +581,9 @@ pub fn confirm_delete() -> bool {
 }
 pub fn remove_worktree() -> bool {
     REMOVE_WORKTREE.load(Ordering::Relaxed)
+}
+pub fn remove_build_output() -> bool {
+    REMOVE_BUILD_OUTPUT.load(Ordering::Relaxed)
 }
 pub fn share_cargo_target() -> bool {
     SHARE_CARGO_TARGET.load(Ordering::Relaxed)

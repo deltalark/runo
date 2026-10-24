@@ -131,6 +131,35 @@ pub fn is_tracked(dir: &str, path: &str) -> bool {
     git(dir, &["ls-files", "--error-unmatch", "--", path]).is_ok()
 }
 
+/// Which of `paths` (relative to `dir`) git ignores.
+pub fn ignored(dir: &str, paths: &[String]) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = paths.join("\0");
+    match git_with(
+        dir,
+        &["check-ignore", "--stdin", "-z"],
+        &[],
+        Some(input.as_bytes()),
+    ) {
+        Ok(out) => Ok(split_z(&out)),
+        // Exit status 1 with nothing said: none of them is ignored.
+        Err(error) if error.is_empty() => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/// The tracked files in or under `paths` (relative to `dir`).
+pub fn tracked_in(dir: &str, paths: &[String]) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["ls-files", "-z", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    git(dir, &args).map(|out| split_z(&out))
+}
+
 /// Keep one file in `dir` (given relative to it) out of `git status`.
 pub fn exclude_path(dir: &str, path: &str) {
     let Ok(prefix) = git(dir, &["rev-parse", "--show-prefix"]) else {

@@ -1034,6 +1034,7 @@ impl Mode {
             | View::NewSession
             | View::AllSessions
             | View::Worktrees
+            | View::WorktreeSpace
             | View::Activity
             | View::Editor => Mode::Sessions,
         }

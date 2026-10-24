@@ -1367,6 +1367,11 @@ impl RunoApp {
         if let Some(s) = self.state.session_mut(id) {
             s.archived = true;
         }
+        // Worktrees kept after a merge (see Remove worktree with session) lose only
+        // their build output.
+        if session.isolated && !remove_worktree() {
+            self.queue_build_clean(id);
+        }
         self.state.log(id, "Cleaned up the worktree and branch");
         self.info = Some((
             format!("Cleaned up “{}” and archived it.", session.title),
