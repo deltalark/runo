@@ -1721,7 +1721,7 @@ impl RunoApp {
             update_checked: None,
             alerts_hidden: Default::default(),
             alerts_expanded: false,
-            window_active: true,
+            window_active: window.is_window_active(),
             approvals: Vec::new(),
             always_allowed: Default::default(),
             refused: HashMap::new(),
