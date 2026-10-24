@@ -2370,6 +2370,11 @@ impl RunoApp {
     }
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
+        // A JSON line arrives already parsed by the thread that read it.
+        let (event, mut parsed) = match event {
+            Event::Json(target, line, json) => (Event::Line(target, line), Some(json)),
+            other => (other, None),
+        };
         self.health.saw(&event);
         match event {
             Event::Line(Target::Session(id), line) => {
@@ -2377,7 +2382,7 @@ impl RunoApp {
                     self.sign_in_wait(id, &line);
                 }
                 let (updates, plain) = match self.turns.get_mut(&id) {
-                    Some(turn) => (turn.feed(&line), turn.plain()),
+                    Some(turn) => (turn.feed_parsed(&line, parsed.take()), turn.plain()),
                     None => (vec![AgentEvent::Text(line)], true),
                 };
                 // Crew's chat and its threads have Runo's blocks taken out as they stream.
@@ -2453,6 +2458,8 @@ impl RunoApp {
                 }
             }
             Event::Err(..) => {}
+            // Made a `Line` above.
+            Event::Json(..) => {}
             Event::Line(Target::Terminal(id), line) => {
                 let log = self.terminal.entry(id).or_default();
                 log.push(line);

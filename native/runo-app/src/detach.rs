@@ -316,7 +316,7 @@ fn follow(target: Target, turn: PathBuf, pid: u32, mut child: Option<Child>, tx:
                 };
             let lines = read_lines(&turn.join("out"), &mut out, ended)
                 .into_iter()
-                .map(|l| Event::Line(target, l))
+                .map(|l| crate::agent::line_event(target, false, l))
                 .chain(
                     read_lines(&turn.join("err"), &mut err, ended)
                         .into_iter()
@@ -365,7 +365,7 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         loop {
             match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
-                Event::Line(_, l) => out.push(l),
+                Event::Line(_, l) | Event::Json(_, l, _) => out.push(l),
                 Event::Err(_, l) => err.push(l),
                 Event::Done(_, ok) => return (out, err, ok),
                 _ => {}

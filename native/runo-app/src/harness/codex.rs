@@ -520,8 +520,14 @@ impl CodexAppStream {
         }
     }
 
+    /// Tests feed lines unparsed; the app hands them over parsed (see `feed_parsed`).
+    #[cfg(test)]
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        let message = serde_json::from_str::<Value>(line.trim()).ok();
+        self.feed_parsed(line, crate::stream::parse_line(line))
+    }
+
+    /// `feed`, with the line already parsed if it is JSON.
+    pub fn feed_parsed(&mut self, line: &str, message: Option<Value>) -> Vec<AgentEvent> {
         if let Some(events) = self.host.feed(line, message.as_ref()) {
             return events;
         }
