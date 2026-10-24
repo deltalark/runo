@@ -1554,4 +1554,11 @@ mod tests {
             serde_json::from_str(r#"{"model_override": "opus"}"#).unwrap();
         assert!(claude.subagent_model.is_empty());
     }
+
+    #[test]
+    fn settings_from_0_5_4_with_the_shared_build_folder_switch_still_load() {
+        let old: AppSettings =
+            serde_json::from_str(r#"{"theme":"dark","share_cargo_target":false}"#).unwrap();
+        assert_eq!(old.theme, "dark");
+    }
 }
