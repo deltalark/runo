@@ -4,9 +4,15 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-24
+
 ### Added
 
 - Stack, a fourth game in the Arcade: Tetris with all seven pieces, a next-piece preview and an outline of where the piece will land. Left and right move, Up (or X, and Z the other way) turns with a nudge off walls, Down drops a row and Space drops it all the way. Clearing lines scores more with each level, and every ten lines is a level that falls faster. Press 4 in the Arcade to pick it.
+
+### Fixed
+
+- The chat stays where it is while you scroll up during a run, instead of snapping to the bottom on every streamed line. It follows the bottom only while it's there; scrolling back down, sending or opening a chat brings it back. While scrolled up, a "New messages" pill over the bottom of the chat jumps to the newest. The Help assistant's answer follows only while its panel is at the bottom, too.
 
 ## [0.5.1] - 2026-10-23
 
