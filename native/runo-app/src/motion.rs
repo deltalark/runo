@@ -2,7 +2,9 @@
 //! indicator, live dots, pulses. Each frame of a loop redraws the whole window, so rather
 //! than every loop asking for the next display refresh (120 a second on a ProMotion
 //! screen), they read the time from here and ask for motion, and the window then redraws
-//! at most 60 times a second, in step with the display. While the window isn't the
+//! about 30 times a second, in step with the display: enough for a glow or a spinner, at
+//! a quarter of the work. Scrolling and typing still draw at the display's own rate, and
+//! loops move on those frames too. While the window isn't the
 //! active one, with Animations off, or with Reduce motion on in macOS, loops hold still
 //! and the window redraws only twice a second, for elapsed times.
 
@@ -10,9 +12,9 @@ use super::*;
 use std::cell::Cell;
 use std::time::Instant;
 
-/// The shortest gap between two frames of motion: a little under a 60 Hz refresh, so a
-/// 120 Hz display draws every other refresh and a 60 Hz one draws every refresh.
-const MIN_GAP: Duration = Duration::from_millis(14);
+/// The shortest gap between two frames of motion: a little under a 30 Hz refresh, so a
+/// 120 Hz display draws every fourth refresh and a 60 Hz one every other.
+const MIN_GAP: Duration = Duration::from_millis(30);
 /// How often the window redraws while something shows a running time but nothing moves.
 const SECONDS_GAP: Duration = Duration::from_millis(500);
 
