@@ -1855,10 +1855,6 @@ pub fn run_agent(
     } else {
         prepare_folder(spec, dir, sandbox.is_some());
     }
-    if sandbox.is_none() {
-        // Drivers and detached turns take the command's environment, so this reaches them too.
-        crate::cargotarget::apply(&mut command, dir);
-    }
     if let Some(sandbox) = sandbox {
         command = sandbox.wrap(&command, dir, false)?;
     } else if let (Target::Session(id), Some(root)) = (target, crate::detach::root()) {

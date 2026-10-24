@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Each worktree of a Rust project builds into its own `target` again, as before 0.5.4: the shared build folder, its switch under Settings > Worktrees and the two-jobs limit for checks on 8 GB computers are gone. A settings file that still has the switch loads as before.
+
 ## [0.5.5] - 2026-10-25
 
 ### Fixed
