@@ -1050,6 +1050,8 @@ impl RunoApp {
             return None;
         }
         let waiting = self.approvals.len() + self.waiting_sessions().len();
+        // The same count as the Dock icon's, so the two agree.
+        let badge = self.attention();
         let state = if self.assistant.asking.is_some() {
             Mood::Thinking
         } else if self.assistant.open {
@@ -1079,7 +1081,7 @@ impl RunoApp {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_assistant(window, cx)))
             .child(live_mark(
                 state,
-                (waiting > 0).then_some(waiting),
+                (badge > 0).then_some(badge),
                 self.assistant.hover,
             ));
         let mut layer = div().absolute().top_0().left_0().size_full().child(mark);
@@ -1636,7 +1638,7 @@ fn badge_dot(n: usize) -> Div {
         .text_color(rgb(0x1a1205))
         .text_size(px(11.))
         .font_weight(FontWeight::SEMIBOLD)
-        .child(n.to_string())
+        .child(crate::dock::label(n).unwrap_or_default())
 }
 
 /// Runo's icon, three staggered bars on a rounded square, posed for `mood`. At `size` 46 it

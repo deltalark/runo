@@ -648,8 +648,9 @@ mod mac {
             NSApplicationActivationPolicy::Accessory
         });
         if shown {
-            // The icon comes back as the bundle's; set Runo's own again.
+            // The icon comes back as the bundle's; set Runo's own again, and its count.
             crate::set_dock_icon();
+            crate::dock::reapply();
         }
     }
 }

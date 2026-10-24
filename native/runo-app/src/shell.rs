@@ -1268,6 +1268,40 @@ impl RunoApp {
         out
     }
 
+    /// How many things need the person, for the corner mark's badge and the Dock icon:
+    /// sessions and threads waiting on them or finished unseen, permission requests,
+    /// unread Crew replies, and Reviews' review requests and failed checks. Each session
+    /// counts once, and the one on screen in the focused window counts as seen.
+    pub(crate) fn attention(&self) -> usize {
+        let seen = (self.window_active && self.view == View::Session)
+            .then_some(self.selected)
+            .flatten();
+        let mut sessions: std::collections::HashSet<u64> = self
+            .needs_you()
+            .into_iter()
+            .map(|(s, _)| s.id)
+            .chain(
+                // Crew's own chat sits on its canvas, out of `needs_you`.
+                self.state
+                    .sessions
+                    .iter()
+                    .filter(|s| s.canvas == crew::CANVAS && !s.archived && s.unread)
+                    .map(|s| s.id),
+            )
+            .collect();
+        // A permission request from a canvas chat, which `needs_you` leaves out.
+        sessions.extend(
+            self.approvals
+                .iter()
+                .filter(|r| !self.alerts_hidden.contains(&format!("a:{}", r.id)))
+                .filter_map(|r| self.approval_session(r)),
+        );
+        if let Some(id) = seen {
+            sessions.remove(&id);
+        }
+        sessions.len() + self.gh.needs_you()
+    }
+
     /// Where a session sits on Home and in the counts. Canvas chats sit on their canvas.
     pub(crate) fn bucket(&self, s: &Session) -> Option<Bucket> {
         if s.archived || !s.canvas.is_empty() {

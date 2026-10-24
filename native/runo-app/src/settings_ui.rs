@@ -793,6 +793,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                     switch_row("Notifications", "Show a desktop notification when an agent finishes, fails or needs you. Clicking it opens the session.", st.notifications, |s, v| s.notifications = v),
                 ];
                 if cfg!(target_os = "macos") {
+                    rows.push(switch_row("Show badge on Dock icon", "A red count on Runo's Dock icon of what needs you: agents waiting, runs you haven't seen, Crew replies and reviews. It clears as you open them.", st.dock_badge, |s, v| s.dock_badge = v));
                     rows.push(switch_row("Show Runo in the menu bar", "A Runo glyph by the clock counts what needs you and what's working. Click it to allow or stop agents and Ask Runo without opening the window.", st.menu_bar, |s, v| s.menu_bar = v));
                     if st.menu_bar {
                         rows.push(switch_row("Keep running in the menu bar", "⌘Q and closing the window hide Runo to the menu bar, and agents keep working. Quit from the menu bar to quit.", st.run_in_background, |s, v| s.run_in_background = v));
