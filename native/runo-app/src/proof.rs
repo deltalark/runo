@@ -415,6 +415,35 @@ pub fn review_summary(name: &str, findings: usize, said_none: bool) -> String {
 mod tests {
     use super::*;
 
+    /// Runs a real `cargo build` of a tiny crate, so it needs cargo and must run without
+    /// `CARGO_TARGET_DIR` (which `cargo test` passes on).
+    #[test]
+    #[ignore = "env -u CARGO_TARGET_DIR <test binary> rust_checks_in_a_worktree --ignored"]
+    fn rust_checks_in_a_worktree_build_into_the_main_checkout() {
+        let base = std::env::temp_dir().join(format!("runo-proof-cargo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let main = base.join("app");
+        let tree = crate::git::worktree_path(main.to_str().unwrap(), "runo/x");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        std::fs::write(tree.join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(
+            tree.join("Cargo.toml"),
+            "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(tree.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let runs = run_all(
+            tree.to_str().unwrap(),
+            &["cargo build --offline".into()],
+            Duration::from_secs(120),
+        );
+        assert!(runs[0].ok, "{}", runs[0].tail);
+        assert!(!tree.join("target").exists());
+        assert!(main.join("target/debug").is_dir());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn the_guide_hears_how_the_checks_went() {
         let mut proof = Proof {
