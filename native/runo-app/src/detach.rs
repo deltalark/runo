@@ -209,6 +209,7 @@ fn start(
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    crate::shellenv::ready();
     for (key, value) in command.get_envs() {
         match value {
             Some(value) => wrapper.env(key, value),

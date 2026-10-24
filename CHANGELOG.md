@@ -4,6 +4,10 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Runo's window opens and responds about a second sooner. It no longer waits for your login shell's profile to finish before showing the window; agents, terminals and git still start with that shell's PATH and variables. Set `RUNO_TRACE_STARTUP=1` to log how long each step of starting up takes.
+
 ## [0.5.2] - 2026-10-24
 
 ### Added

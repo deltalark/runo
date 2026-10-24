@@ -363,6 +363,7 @@ impl RunoApp {
         crate::applog::check_started();
         let slot = self.health.release.clone();
         std::thread::spawn(move || {
+            crate::shellenv::ready();
             // Newer agent manifests come with the same check, used from the next start.
             crate::registry::fetch();
             if let Some(release) = crate::applog::check_release() {

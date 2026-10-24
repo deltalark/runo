@@ -1920,6 +1920,7 @@ pub(crate) fn spawn(
     dir: &str,
     tx: Sender<Event>,
 ) -> Result<Handle, String> {
+    crate::shellenv::ready();
     let runner = command
         .get_args()
         .next()
