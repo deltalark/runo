@@ -1,13 +1,14 @@
 //! The chat follows the bottom only while it is pinned there. Scrolling up unpins it, so
 //! streamed output no longer moves the view and a "New messages" pill shows instead;
-//! scrolling back down, sending, or opening a chat pins it again.
+//! scrolling back down, sending, or opening a chat pins it again. The main chat and the
+//! thread open in the Threads tab each keep their own `ChatFollow`.
 
 use super::*;
 
 /// Within this distance of the bottom the chat counts as at the bottom.
 const NEAR: f32 = 4.;
 
-/// Whether `chat_scroll` follows the bottom, and what was in the chat when it stopped.
+/// Whether a chat's scroll follows the bottom, and what was in the chat when it stopped.
 pub(crate) struct ChatFollow {
     pinned: bool,
     /// The person's last scroll was upward: a chat a few pixels from the bottom stays
@@ -69,50 +70,48 @@ pub(crate) fn at_bottom(scroll: &ScrollHandle) -> bool {
     -scroll.offset().y >= scroll.max_offset().y - px(NEAR)
 }
 
-impl RunoApp {
-    /// Scroll the chat to the bottom only when it is pinned there.
-    pub(crate) fn follow_bottom(&self) {
-        if self.chat_follow.pinned && autoscroll() {
-            self.chat_scroll.scroll_to_bottom();
+impl ChatFollow {
+    /// Scroll to the bottom only when pinned there.
+    fn follow(&self, scroll: &ScrollHandle) {
+        if self.pinned && autoscroll() {
+            scroll.scroll_to_bottom();
         }
     }
 
-    /// Jump the chat to the bottom and pin it there: after sending, or opening a chat.
-    pub(crate) fn jump_to_bottom(&mut self) {
-        self.chat_scroll.scroll_to_bottom();
-        self.chat_follow = ChatFollow::default();
+    /// Jump to the bottom and pin there.
+    fn jump(&mut self, scroll: &ScrollHandle) {
+        scroll.scroll_to_bottom();
+        *self = Self::default();
     }
 
-    /// The person scrolled the chat: scrolling up unpins it where it is.
-    pub(crate) fn chat_wheel(&mut self, event: &ScrollWheelEvent, window: &Window) {
+    /// The person scrolled over `session`'s chat: scrolling up unpins it where it is.
+    fn wheel(&mut self, event: &ScrollWheelEvent, window: &Window, session: Option<&Session>) {
         let dy = event.delta.pixel_delta(window.line_height()).y;
         if dy == px(0.) {
             return;
         }
-        let now = self
-            .selected
-            .and_then(|id| self.state.session(id))
-            .map(|s| (s.id, seen(s)));
-        self.chat_follow.scrolled(dy > px(0.), now);
+        self.scrolled(dy > px(0.), session.map(|s| (s.id, seen(s))));
     }
 
-    /// Before each frame: pin the chat again once the person has scrolled back down to
-    /// the bottom, and keep a pinned chat at the bottom of whatever it now shows.
-    pub(crate) fn update_chat_follow(&mut self) {
-        self.chat_follow.settle(at_bottom(&self.chat_scroll));
-        self.follow_bottom();
+    /// Before each frame: pin again once scrolled back down to the bottom, and keep a
+    /// pinned chat at the bottom of whatever it now shows.
+    fn update(&mut self, scroll: &ScrollHandle) {
+        self.settle(at_bottom(scroll));
+        self.follow(scroll);
     }
 
     /// The pill floating over the bottom of an unpinned chat once more has arrived:
-    /// clicking it goes to the newest and pins the chat again.
-    pub(crate) fn new_messages_pill(
+    /// clicking it runs `jump`, which goes to the newest and pins the chat again.
+    fn pill(
         &self,
         session: &Session,
-        cx: &mut Context<Self>,
+        id: &'static str,
+        jump: fn(&mut RunoApp),
+        cx: &mut Context<RunoApp>,
     ) -> Option<Div> {
-        let (id, then) = self.chat_follow.seen.filter(|_| !self.chat_follow.pinned)?;
+        let (was, then) = self.seen.filter(|_| !self.pinned)?;
         let now = seen(session);
-        if id != session.id || now == then {
+        if was != session.id || now == then {
             return None;
         }
         let more = now.messages.saturating_sub(then.messages);
@@ -131,7 +130,7 @@ impl RunoApp {
                 .justify_center()
                 .child(
                     div()
-                        .id("new-messages")
+                        .id(id)
                         .h(px(26.))
                         .px(px(10.))
                         .flex()
@@ -159,12 +158,76 @@ impl RunoApp {
                         })
                         .child(icon(IconName::ArrowDown, 11., c_blue()))
                         .child(label)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.jump_to_bottom();
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            jump(this);
                             cx.notify();
                         })),
                 ),
         )
+    }
+}
+
+impl RunoApp {
+    /// Scroll the chat to the bottom only when it is pinned there.
+    pub(crate) fn follow_bottom(&self) {
+        self.chat_follow.follow(&self.chat_scroll);
+    }
+
+    /// Jump the chat to the bottom and pin it there: after sending, or opening a chat.
+    pub(crate) fn jump_to_bottom(&mut self) {
+        self.chat_follow.jump(&self.chat_scroll);
+    }
+
+    /// The person scrolled the chat: scrolling up unpins it where it is.
+    pub(crate) fn chat_wheel(&mut self, event: &ScrollWheelEvent, window: &Window) {
+        let session = self.selected.and_then(|id| self.state.session(id));
+        self.chat_follow.wheel(event, window, session);
+    }
+
+    /// Before each frame: the chat, and the thread open in the Threads tab, follow the
+    /// bottom while pinned there.
+    pub(crate) fn update_chat_follow(&mut self) {
+        self.chat_follow.update(&self.chat_scroll);
+        if self.peek.is_some() {
+            self.peek_follow.update(&self.peek_scroll);
+        }
+    }
+
+    /// The chat's "New messages" pill, while unpinned and more has arrived.
+    pub(crate) fn new_messages_pill(
+        &self,
+        session: &Session,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        self.chat_follow
+            .pill(session, "new-messages", Self::jump_to_bottom, cx)
+    }
+
+    /// Scroll the thread open in the Threads tab to the bottom only when pinned there.
+    pub(crate) fn peek_follow_bottom(&self) {
+        self.peek_follow.follow(&self.peek_scroll);
+    }
+
+    /// Jump the thread open in the Threads tab to the bottom and pin it there: on opening
+    /// it, switching threads, or sending to it.
+    pub(crate) fn peek_jump_to_bottom(&mut self) {
+        self.peek_follow.jump(&self.peek_scroll);
+    }
+
+    /// The person scrolled the thread open in the Threads tab.
+    pub(crate) fn peek_wheel(&mut self, event: &ScrollWheelEvent, window: &Window) {
+        let session = self.peek.and_then(|id| self.state.session(id));
+        self.peek_follow.wheel(event, window, session);
+    }
+
+    /// The Threads tab's "New messages" pill over the open thread.
+    pub(crate) fn peek_messages_pill(
+        &self,
+        session: &Session,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        self.peek_follow
+            .pill(session, "peek-new-messages", Self::peek_jump_to_bottom, cx)
     }
 }
 
@@ -207,6 +270,16 @@ mod tests {
         assert!(!f.pinned);
         f.settle(true);
         assert!(f.pinned);
+        assert!(f.seen.is_none());
+    }
+
+    #[test]
+    fn jumping_pins_again_and_forgets_the_last_chat() {
+        let mut f = ChatFollow::default();
+        f.scrolled(true, NOW);
+        f.jump(&ScrollHandle::new());
+        assert!(f.pinned);
+        assert!(!f.up);
         assert!(f.seen.is_none());
     }
 

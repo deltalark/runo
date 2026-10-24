@@ -9,7 +9,7 @@ impl RunoApp {
     /// Open `thread` in the Threads tab.
     pub(crate) fn open_peek(&mut self, thread: u64) {
         if self.peek != Some(thread) {
-            self.peek_scroll.scroll_to_bottom();
+            self.peek_jump_to_bottom();
         }
         self.peek = Some(thread);
         self.right_tab = RightTab::Threads;
@@ -34,7 +34,7 @@ impl RunoApp {
         self.peek_prompt
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.message_thread(thread, text, Vec::new(), cx);
-        self.peek_scroll.scroll_to_bottom();
+        self.peek_jump_to_bottom();
         self.save();
     }
 
@@ -193,12 +193,25 @@ impl RunoApp {
                 .child(head)
                 .child(
                     div()
-                        .id(SharedString::from(format!("peek-scroll-{thread}")))
+                        .relative()
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.peek_scroll)
-                        .child(list),
+                        .v_flex()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("peek-scroll-{thread}")))
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.peek_scroll)
+                                .on_scroll_wheel(cx.listener(
+                                    |this, e: &ScrollWheelEvent, window, _| {
+                                        this.peek_wheel(e, window)
+                                    },
+                                ))
+                                .child(list),
+                        )
+                        .children(self.peek_messages_pill(session, cx)),
                 )
                 .child(composer)
                 .into_any_element(),
