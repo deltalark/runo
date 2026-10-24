@@ -232,7 +232,9 @@ fn shimmer_text(label: SharedString, shimmer: Option<f32>) -> StyledText {
 fn band(i: usize, n: usize, phase: f32) -> f32 {
     let t = (phase / 0.75).min(1.);
     let t = t * t * (3. - 2. * t);
-    let pos = -3. + (n as f32 + 6.) * t;
+    // From three letters before the first to three after the last, so it's centred on
+    // the middle letter half way across.
+    let pos = -3. + (n as f32 + 5.) * t;
     let d = (i as f32 - pos) / 1.8;
     (-d * d).exp()
 }
