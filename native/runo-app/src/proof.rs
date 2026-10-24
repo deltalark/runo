@@ -155,6 +155,13 @@ fn run_one(dir: &str, command: &str, limit: Duration) -> CheckRun {
         .stderr(Stdio::piped())
         .env("CI", "1")
         .env("NO_COLOR", "1");
+    // A worktree's build goes to the main checkout's target, not a copy of its own.
+    crate::cargotarget::apply(&mut cmd, dir);
+    if crate::cargotarget::is_rust(dir) && std::env::var_os("CARGO_BUILD_JOBS").is_none() {
+        if let Some(jobs) = crate::cargotarget::check_jobs() {
+            cmd.env("CARGO_BUILD_JOBS", jobs.to_string());
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

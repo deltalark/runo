@@ -70,6 +70,8 @@ pub struct AppSettings {
     pub notifications: bool,
     pub confirm_delete: bool,
     pub remove_worktree_on_delete: bool,
+    /// Rust builds in a session's worktree go to the main checkout's `target`.
+    pub share_cargo_target: bool,
     pub send_on_enter: bool,
     pub autoscroll: bool,
     pub default_mode: String,
@@ -228,6 +230,7 @@ impl Default for AppSettings {
             notifications: true,
             confirm_delete: true,
             remove_worktree_on_delete: true,
+            share_cargo_target: true,
             send_on_enter: true,
             autoscroll: true,
             default_mode: "edit".into(),
@@ -368,6 +371,7 @@ impl AppSettings {
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
+        SHARE_CARGO_TARGET.store(self.share_cargo_target, Ordering::Relaxed);
         AUTOSCROLL.store(self.autoscroll, Ordering::Relaxed);
         KEEP_AWAKE.store(self.keep_awake, Ordering::Relaxed);
         crate::mcp::set_shared(&self.mcp_shared);
@@ -445,6 +449,7 @@ static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 static NOTIFY: AtomicBool = AtomicBool::new(false);
 static CONFIRM_DELETE: AtomicBool = AtomicBool::new(true);
 static REMOVE_WORKTREE: AtomicBool = AtomicBool::new(true);
+static SHARE_CARGO_TARGET: AtomicBool = AtomicBool::new(true);
 static AUTOSCROLL: AtomicBool = AtomicBool::new(true);
 static KEEP_AWAKE: AtomicBool = AtomicBool::new(true);
 static COVE_TOOLS: AtomicBool = AtomicBool::new(true);
@@ -542,6 +547,9 @@ pub fn confirm_delete() -> bool {
 }
 pub fn remove_worktree() -> bool {
     REMOVE_WORKTREE.load(Ordering::Relaxed)
+}
+pub fn share_cargo_target() -> bool {
+    SHARE_CARGO_TARGET.load(Ordering::Relaxed)
 }
 pub fn autoscroll() -> bool {
     AUTOSCROLL.load(Ordering::Relaxed)
