@@ -50,9 +50,19 @@ pub(crate) enum Action {
     Approve { request: String },
     /// Refuse a permission request.
     Deny { request: String },
-    /// Change one of a few settings.
+    /// Run one of Quick open's commands, by its id.
+    Command { id: String },
+    /// Change a setting, or press a button in Settings, by the names Settings shows: the
+    /// page and the row's title (or its button's label). The older form names one of a
+    /// few settings by `key`.
     Setting {
+        #[serde(default)]
         key: String,
+        #[serde(default)]
+        page: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
         value: serde_json::Value,
     },
     /// Keep a preference or fact for later chats, in the current project.
@@ -110,6 +120,26 @@ fn setting(key: &str, value: &serde_json::Value) -> Result<SettingChange, String
             .map(SettingChange::DefaultAgent)
             .ok_or_else(|| "That isn't an agent Runo knows.".into()),
         _ => Err(format!("The assistant can't change {key}.")),
+    }
+}
+
+/// What changing a setting found by name does.
+enum Apply {
+    Bool(crate::settings_ui::SetBool, bool),
+    Str(crate::settings_ui::SetStr, String),
+    Press(crate::settings_ui::Action),
+}
+
+/// The value the agent gave for a switch.
+fn on_off(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(b) => Some(*b),
+        serde_json::Value::String(s) => match s.trim().to_lowercase().as_str() {
+            "true" | "on" | "yes" => Some(true),
+            "false" | "off" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -197,6 +227,70 @@ impl RunoApp {
             .iter()
             .find(|r| r.id == id)
             .ok_or_else(|| "That request isn't waiting any more.".into())
+    }
+
+    /// The setting on `page` called `name`, and what setting it to `value` (or pressing
+    /// it, for a button) does: the card's title and detail, and the change.
+    fn named_setting(
+        &self,
+        page: &str,
+        name: &str,
+        value: &serde_json::Value,
+        cx: &App,
+    ) -> Result<(String, String, Apply), String> {
+        use crate::settings_ui::Knob;
+        let data = self.discovered.clone().unwrap_or_default();
+        let found = crate::settings_ui::find_setting(page, name, &data, cx)
+            .ok_or_else(|| format!("Settings has nothing called {name}."))?;
+        let place = crate::settings_ui::place(found.page);
+        let title = found.title;
+        match found.knob {
+            Knob::Switch(now, set) => {
+                let on = on_off(value).ok_or_else(|| format!("{title} is on or off."))?;
+                if on == now {
+                    return Err(format!(
+                        "{title} is already {}.",
+                        if on { "on" } else { "off" }
+                    ));
+                }
+                Ok((
+                    format!("Turn {} {}", title, if on { "on" } else { "off" }),
+                    place,
+                    Apply::Bool(set, on),
+                ))
+            }
+            Knob::Choice(opts, now, set) => {
+                let wanted = match value {
+                    serde_json::Value::String(v) => v.trim().to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    _ => String::new(),
+                };
+                let (v, label) = opts
+                    .iter()
+                    .find(|(v, l)| {
+                        v.eq_ignore_ascii_case(&wanted) || l.eq_ignore_ascii_case(&wanted)
+                    })
+                    .cloned()
+                    .ok_or_else(|| {
+                        let names: Vec<&str> = opts.iter().map(|(_, l)| l.as_str()).collect();
+                        format!("{title} is one of {}.", names.join(", "))
+                    })?;
+                if v == now {
+                    return Err(format!("{title} is already {label}."));
+                }
+                Ok((format!("Set {title} to {label}"), place, Apply::Str(set, v)))
+            }
+            Knob::Text(_) => Err(format!(
+                "{title} is typed in {place}; open it there to change it."
+            )),
+            Knob::Button(label, press) => {
+                if !value.is_null() {
+                    return Err(format!("{title} is a button, not a setting."));
+                }
+                Ok((label, format!("{place} → {title}"), Apply::Press(press)))
+            }
+        }
     }
 
     /// The card for `action`, written from Runo's state, or why it can't be done now.
@@ -335,7 +429,39 @@ impl RunoApp {
                     excerpt(&approvals::describe(&r.tool, &r.input), 90),
                 )
             }
-            Action::Setting { key, value } => {
+            Action::Command { id } => {
+                let c = commands::find(id).ok_or_else(|| format!("Runo has no command {id}."))?;
+                let keys = c.keys(cx);
+                let detail = if c.id == "quit" {
+                    match self.local_runs() {
+                        0 => keys,
+                        1 => "1 agent is running here; Runo asks once more before stopping it."
+                            .to_string(),
+                        n => format!(
+                            "{n} agents are running here; Runo asks once more before stopping them."
+                        ),
+                    }
+                } else {
+                    keys
+                };
+                let card = Card {
+                    icon: c.icon,
+                    title: c.label.to_string(),
+                    detail,
+                    changes: matches!(c.id, "quit" | "stop" | "archive" | "close-tab"),
+                };
+                return Ok(card);
+            }
+            Action::Setting {
+                key,
+                page,
+                name,
+                value,
+            } if !name.trim().is_empty() => {
+                let (title, detail, _) = self.named_setting(page, name, value, cx)?;
+                change(IconName::Settings, title, detail)
+            }
+            Action::Setting { key, value, .. } => {
                 let (title, detail) = match setting(key, value)? {
                     SettingChange::Theme(t) => ("Change the theme".to_string(), t),
                     SettingChange::Animations(on) => (
@@ -457,7 +583,28 @@ impl RunoApp {
                 let allow = matches!(action, Action::Approve { .. });
                 self.answer_approval(&r, allow.then_some(false), cx);
             }
-            Action::Setting { key, value } => {
+            Action::Command { id } => {
+                let c = commands::find(&id).ok_or("No such command.")?;
+                if c.id == "quit" {
+                    // Quits for real even when Runo keeps running in the menu bar, with
+                    // the usual warning first when agents are running.
+                    cx.defer(crate::menubar::quit);
+                } else {
+                    self.assistant.open = false;
+                    match c.run {
+                        commands::Run::Action(action) => window.dispatch_action(action(), cx),
+                        _ => self.palette_jump(c.jump(), window, cx),
+                    }
+                }
+            }
+            Action::Setting {
+                page, name, value, ..
+            } if !name.trim().is_empty() => match self.named_setting(&page, &name, &value, cx)?.2 {
+                Apply::Bool(set, on) => settings::update(cx, move |s| set(s, on)),
+                Apply::Str(set, v) => settings::update(cx, move |s| set(s, v)),
+                Apply::Press(press) => press(self, cx),
+            },
+            Action::Setting { key, value, .. } => {
                 let change = setting(&key, &value)?;
                 settings::update(cx, move |s| match change {
                     SettingChange::Theme(t) => s.theme = t,
@@ -698,6 +845,54 @@ mod tests {
             Some(Action::Stop { session: 4 })
         );
         assert_eq!(parse("Start a race."), None);
+    }
+
+    #[test]
+    fn commands_and_named_settings_parse() {
+        assert_eq!(
+            parse(r#"ACTION: {"do":"command","id":"quit"}"#),
+            Some(Action::Command { id: "quit".into() })
+        );
+        assert_eq!(
+            parse(
+                r#"ACTION: {"do":"setting","page":"General","name":"Show Runo in the menu bar","value":true}"#
+            ),
+            Some(Action::Setting {
+                key: String::new(),
+                page: "General".into(),
+                name: "Show Runo in the menu bar".into(),
+                value: serde_json::json!(true),
+            })
+        );
+        // A button has no value.
+        assert_eq!(
+            parse(r#"ACTION: {"do":"setting","page":"General","name":"Check for updates"}"#),
+            Some(Action::Setting {
+                key: String::new(),
+                page: "General".into(),
+                name: "Check for updates".into(),
+                value: serde_json::Value::Null,
+            })
+        );
+        // The older form still reads.
+        assert_eq!(
+            parse(r#"ACTION: {"do":"setting","key":"theme","value":"dark"}"#),
+            Some(Action::Setting {
+                key: "theme".into(),
+                page: String::new(),
+                name: String::new(),
+                value: serde_json::json!("dark"),
+            })
+        );
+    }
+
+    #[test]
+    fn switches_take_on_and_off_in_several_words() {
+        use serde_json::json;
+        assert_eq!(on_off(&json!(true)), Some(true));
+        assert_eq!(on_off(&json!("Off")), Some(false));
+        assert_eq!(on_off(&json!("on")), Some(true));
+        assert_eq!(on_off(&json!(3)), None);
     }
 
     #[test]
