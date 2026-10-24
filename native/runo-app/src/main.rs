@@ -14,6 +14,7 @@ mod assistant_act;
 mod assistant_cmds;
 mod assistant_deck;
 mod assistant_mem;
+mod assistant_ref;
 mod branches;
 mod browser;
 mod browser_engine;
@@ -22,6 +23,7 @@ mod chatctl;
 mod clashes;
 mod cleanup;
 mod cliview;
+mod commands;
 mod compat;
 mod connections;
 mod connections_ui;
@@ -2909,113 +2911,17 @@ impl RunoApp {
         let mut groups: Vec<(CommandGroup, Vec<Jump>)> = Vec::new();
         let mut commands = CommandGroup::new().label("Commands");
         let mut command_jumps = Vec::new();
-        let actions: [(&str, IconName, Box<dyn Action>); 16] = [
-            ("New session", IconName::Plus, Box::new(NewSession)),
-            ("Open settings", IconName::Settings, Box::new(OpenSettings)),
-            (
-                "Switch between Chat and CLI",
-                IconName::SquareTerminal,
-                Box::new(ToggleView),
-            ),
-            (
-                "Toggle the Changes panel",
-                IconName::PanelRightOpen,
-                Box::new(TogglePanel),
-            ),
-            (
-                "Toggle the Terminal",
-                IconName::SquareTerminal,
-                Box::new(ToggleTerminal),
-            ),
-            (
-                "New terminal",
-                IconName::SquareTerminal,
-                Box::new(NewTerminal),
-            ),
-            (
-                "Expand or shrink the Terminal",
-                IconName::ChevronsUpDown,
-                Box::new(ToggleTermSize),
-            ),
-            ("Show Changes", IconName::GitCompare, Box::new(FocusChanges)),
-            ("Show Files", IconName::FileText, Box::new(FocusFiles)),
-            ("Search in files", IconName::Search, Box::new(SearchFiles)),
-            ("Open Browser", IconName::Globe, Box::new(OpenBrowser)),
-            (
-                "Toggle the sidebar",
-                IconName::PanelLeft,
-                Box::new(ToggleSidebar),
-            ),
-            (
-                "Stop the running agent",
-                IconName::CircleStop,
-                Box::new(StopAgent),
-            ),
-            ("Close tab", IconName::X, Box::new(CloseTab)),
-            (
-                "Archive session",
-                IconName::Archive,
-                Box::new(ArchiveSession),
-            ),
-            ("Quit Runo", IconName::LogOut, Box::new(Quit)),
-        ];
-        for (label, name, action) in actions {
-            commands = commands.item(CommandItem::new().label(label).icon(name).action(action));
-            command_jumps.push(Jump::Action);
+        for c in commands::COMMANDS {
+            let mut item = CommandItem::new()
+                .label(c.label)
+                .icon(c.icon)
+                .keywords(c.keywords.iter().copied());
+            if let commands::Run::Action(action) = c.run {
+                item = item.action(action());
+            }
+            commands = commands.item(item);
+            command_jumps.push(c.jump());
         }
-        for (label, name, view) in [
-            ("Go to Home", IconName::House, View::Home),
-            ("Go to Inbox", IconName::Inbox, View::Inbox),
-            ("Go to Sessions", IconName::Layers, View::AllSessions),
-            (
-                "Go to Isolated sessions",
-                IconName::GitBranch,
-                View::Worktrees,
-            ),
-            (
-                "Go to Agent history",
-                IconName::RotateCcwClock,
-                View::History,
-            ),
-            ("Go to Git: Changes", IconName::GitCompare, View::Review),
-            (
-                "Go to Git: History",
-                IconName::GitCommitHorizontal,
-                View::GitHistory,
-            ),
-            ("Go to Git: Branches", IconName::GitBranch, View::Branches),
-            ("Go to Git: GitHub", IconName::GitPullRequest, View::GitHub),
-            ("Go to Playbooks", IconName::BookOpen, View::Automations),
-            ("Go to Timeline", IconName::Activity, View::Activity),
-            ("Go to Design", IconName::PanelsTopLeft, View::Design),
-            ("Go to Architecture", IconName::Network, View::Architecture),
-            ("Go to Data", IconName::Database, View::Data),
-            ("Go to Project notes", IconName::NotebookPen, View::Notes),
-        ] {
-            commands = commands.item(CommandItem::new().label(label).icon(name));
-            command_jumps.push(Jump::View(view));
-        }
-        commands = commands.item(
-            CommandItem::new()
-                .label("Add a project folder…")
-                .icon(IconName::FolderPlus)
-                .keywords(["new project", "open folder", "clone repository"]),
-        );
-        command_jumps.push(Jump::AddProject);
-        commands = commands.item(
-            CommandItem::new()
-                .label("Take the tour")
-                .icon(IconName::Sparkles)
-                .keywords(["welcome", "help", "guide", "onboarding"]),
-        );
-        command_jumps.push(Jump::Tour);
-        commands = commands.item(
-            CommandItem::new()
-                .label("Open the Arcade")
-                .icon(IconName::Gamepad2)
-                .keywords(["game", "play", "break", "snake", "2048", "flappy", "spark"]),
-        );
-        command_jumps.push(Jump::Arcade);
         if Self::assistant_enabled(cx) {
             commands = commands.item(
                 CommandItem::new()

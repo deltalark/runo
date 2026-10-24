@@ -392,6 +392,28 @@ pub(crate) fn display(keys: &str) -> Vec<String> {
     out
 }
 
+/// The keys bound to `action` now, as `label` writes them, or "" when none are.
+pub(crate) fn label_for(cx: &App, action: &dyn Action) -> String {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    let Some(binding) = keymap.bindings_for_action(action).next() else {
+        return String::new();
+    };
+    binding
+        .keystrokes()
+        .iter()
+        .map(|k| {
+            let parts = display(&k.inner().unparse());
+            if cfg!(target_os = "macos") {
+                parts.concat()
+            } else {
+                parts.join("+")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// A shortcut as one short label, such as "⌘K" or "Ctrl+K", for hints.
 pub(crate) fn label(cx: &App, id: &str) -> String {
     let keys = keys_for(&cx.global::<AppSettings>().keybindings, id);
