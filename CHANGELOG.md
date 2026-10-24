@@ -4,8 +4,12 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-25
+
 ### Added
 
+- Thread numbers in Crew's chat open their thread. A `#34` that names one of the project's threads is a link, with the thread's title beside it and its status in a tooltip; click opens it in the peek pane and Cmd-click in the main view. Numbers in code, after "PR" or "issue", and ones that aren't threads stay as written. Turn the titles off in Settings > Behavior > Thread titles beside numbers.
+- Worktrees of a Rust project share one build folder, the main checkout's `target`, for agent turns, checks and terminals, instead of a full `target` each. A `CARGO_TARGET_DIR` or `build.target-dir` you set is kept. On a computer with 8 GB of memory or less, checks in a Rust project build two jobs at a time. Turn sharing off in Settings > Worktrees > Share one Rust build folder across worktrees.
 - A turn that hits Claude's usage limit pauses instead of being lost. Runo reads the limit Claude Code reports with every turn, so new Claude turns wait until the 5-hour or weekly window resets (Send anyway still sends one), and the failed turn offers Carry on at its reset time or Carry on now. Carrying on continues the same conversation from where it stopped, keeping what the turn and its subagents already did, where Retry would start the work over. A Crew thread the limit stops carries on by itself once the window resets, and Crew is told not to start it again.
 - Crew threads running at once, under Settings > Safety > Limits, 3 by default. Threads Crew starts past it wait for a slot and start in order as others finish, with Start now to let one go ahead; threads you start or approve never wait for it. Crew sees how many run and wait, so it plans in order instead of starting more.
 - Hold threads and playbooks past a share of the plan, under the same Limits: once Claude Code's 5-hour or weekly window is that full, Crew threads and playbook runs wait for it to reset, so what you start yourself still has room. Off by default.
@@ -16,6 +20,7 @@ All notable changes to Runo are documented here.
 
 ### Changed
 
+- The Crew row in the sidebar has its own look: a soft wash of the accent colour, the mark in an accent chip that glows while Crew works, and its threads hanging off it on an accent line, with a hairline below the Crew block.
 - Crew threads are told to do their work in the thread, keep subagents for independent lookups (at most two at a time, never one per item) and run the full test suite once at the end. Crew is told to split work by area rather than by item and to start the riskiest first.
 - Claude Code's usage in the status bar follows each turn as it runs, rather than refreshing only every five minutes, and a window past its warning point is mentioned once.
 - The Usage popover notes that Chat runs Claude Code in print mode, which can use more of the plan windows than the same work in a terminal, and points to the CLI view.
