@@ -22,6 +22,7 @@ mod caps;
 mod chat_follow;
 mod chat_list;
 mod chatctl;
+mod checks;
 mod clashes;
 mod cleanup;
 mod cliview;
@@ -4744,7 +4745,7 @@ impl RunoApp {
         for project in &self.state.projects {
             let pid = project.id;
             let open = self.expanded.contains(&pid);
-            let missing = !std::path::Path::new(&project.path).is_dir();
+            let missing = !checks::is_dir(&project.path);
             let sessions = self.project_sessions(project, &filter);
             if !filter.is_empty() && sessions.is_empty() {
                 continue;
@@ -7015,7 +7016,7 @@ impl RunoApp {
         let project = self
             .new_project
             .and_then(|id| self.state.projects.iter().find(|p| p.id == id));
-        let is_git = project.is_some_and(|p| git::is_repo(&p.path));
+        let is_git = project.is_some_and(|p| checks::is_repo(&p.path));
         let racing = self.racing() && is_git;
         let isolated = (self.new_isolated || racing) && is_git;
         let typed = git::sanitize_branch(&self.branch.read(cx).value());

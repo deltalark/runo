@@ -71,6 +71,12 @@ pub(crate) fn drawing() -> bool {
     DRAWING.get()
 }
 
+/// The frame the main window is drawing, while it draws: everything worked out from the
+/// app's state can be worked out once per frame.
+pub(crate) fn frame() -> Option<Instant> {
+    DRAWING.get().then(|| NOW.get()).flatten()
+}
+
 /// Whether loops move this frame. Asks for the next frame when they do.
 pub(crate) fn moving() -> bool {
     let on = MOVING.get();
