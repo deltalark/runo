@@ -51,6 +51,7 @@ mod explain;
 mod files;
 mod fileview;
 mod fixes;
+mod framestats;
 mod gemini;
 mod git;
 mod githistory;
@@ -8867,6 +8868,7 @@ impl RunoApp {
 
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        framestats::begin();
         motion::begin(self.window_active, cx);
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| {
@@ -9743,10 +9745,17 @@ impl Render for RunoApp {
             .children(self.whats_new_view(cx))
             // Painted last, once everything that moves has asked for motion.
             .child(
-                canvas(|_, _, _| (), |_, _, window, cx| motion::end(window, cx))
-                    .absolute()
-                    .size_0(),
+                canvas(
+                    |_, _, _| (),
+                    |_, _, window, cx| {
+                        motion::end(window, cx);
+                        framestats::painted();
+                    },
+                )
+                .absolute()
+                .size_0(),
             );
+        framestats::rendered();
         fade(root, "app-root", 450)
     }
 }
