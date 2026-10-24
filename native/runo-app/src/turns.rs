@@ -335,6 +335,76 @@ impl RunoApp {
         }
     }
 
+    /// A turn failed with what reads like a sign-in error: ask the CLI whether it is
+    /// signed in, off the UI thread. Signed in, the turn goes again once after a short
+    /// wait (most often another run was renewing the login token); otherwise, or with no
+    /// way to check, it says the agent isn't signed in, as before.
+    pub(crate) fn check_sign_in(&mut self, id: u64) {
+        let Some(provider) = self.state.session(id).map(|s| s.provider.clone()) else {
+            return;
+        };
+        self.sign_in_checks.insert(id);
+        self.bg(
+            move || {
+                let signed_in = crate::signin::verify(&provider);
+                if signed_in == Some(true) {
+                    std::thread::sleep(crate::turnend::retry_delay());
+                }
+                signed_in
+            },
+            move |this, signed_in, cx| this.sign_in_checked(id, signed_in, cx),
+        );
+    }
+
+    fn sign_in_checked(&mut self, id: u64, signed_in: Option<bool>, cx: &mut Context<Self>) {
+        if !self.sign_in_checks.remove(&id) {
+            return;
+        }
+        // The person sent something else meanwhile; that turn speaks for itself.
+        if self.handles.contains_key(&Target::Session(id)) {
+            return;
+        }
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        let provider = session.provider.clone();
+        let waiting = crate::turnend::checking(&provider);
+        let note = session
+            .messages
+            .iter()
+            .rposition(|m| m.meta == "note" && m.text == waiting);
+        let next = crate::turnend::sign_in(signed_in, false);
+        crate::applog::info(
+            "turn",
+            format!("session #{id} ({provider}): sign-in check found {signed_in:?}, {next:?}"),
+        );
+        match next {
+            crate::turnend::SignIn::Retry => {
+                if let Some(m) = note.map(|i| &mut session.messages[i]) {
+                    m.text = crate::turnend::RETRIED.into();
+                }
+                self.sign_in_retried.insert(id);
+                self.save();
+                self.retry_last(id, cx);
+            }
+            crate::turnend::SignIn::SignedOut => {
+                if let Some(i) = note {
+                    session.messages.remove(i);
+                }
+                let hint = crate::agent::sign_in_help(&provider);
+                session.messages.push(Message::new(Role::System, hint));
+                crate::signin::turn_showed(&provider, false);
+                let title = session.title.clone();
+                crate::desktop_notify::send(cx, Some(id), &title, "Agent failed");
+                self.finish_turn(id, false, false, true, cx);
+                self.design_turn_done(id, false, cx);
+                self.playbook_turn_done(id, false);
+                self.save();
+            }
+        }
+        cx.notify();
+    }
+
     /// Copilot without `--session-id` prints no conversation id. After a run, take the
     /// newest saved session written during it, if it ran in this session's folder and
     /// no other session already uses it.
@@ -1817,7 +1887,9 @@ impl RunoApp {
         let attached = self.attached();
         let working = self.handles.contains_key(&Target::Session(id));
         // A turn that failed or was stopped can be sent again as it was.
+        // Not while a sign-in error is checked: the turn may yet go again by itself.
         let retry = !working
+            && !self.sign_in_checks.contains(&id)
             && matches!(session.status, Status::Failed | Status::Stopped)
             && session
                 .messages

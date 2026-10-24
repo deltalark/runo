@@ -1351,8 +1351,18 @@ pub fn recap_command(
 /// What to do to sign an agent in, when its output says it isn't. Only lines from the
 /// CLI itself are checked (its errors and stderr), never the agent's reply.
 pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
-    let lower = log.to_lowercase();
-    let signs = [
+    if !log.lines().any(signs_out) {
+        return None;
+    }
+    Some(sign_in_help(provider))
+}
+
+/// Whether one line of a CLI's error output says it isn't signed in. Broad words such as
+/// "unauthorized" or "401" count only on the agent's own errors: an MCP server or a tool
+/// refused for its own login doesn't sign the agent out.
+fn signs_out(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let plain = [
         "not logged in",
         "please log in",
         "please login",
@@ -1363,13 +1373,23 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
         "please sign in",
         "not authenticated",
         "authentication required",
-        "authentication failed",
-        "unauthorized",
         "invalid api key",
         "no api key",
         "api key not found",
         "missing api key",
         "starting login flow",
+        // Gemini, signed out.
+        "set an auth method",
+        "must specify the gemini_api_key",
+    ];
+    if plain.iter().any(|s| lower.contains(s)) {
+        return true;
+    }
+    // Words any refused request uses: an MCP server's, a plugin's or a hook's as much as
+    // the agent's own.
+    let broad = [
+        "authentication failed",
+        "unauthorized",
         "token expired",
         "could not be validated",
         "status 401",
@@ -1378,14 +1398,9 @@ pub fn sign_in_hint(provider: &str, log: &str) -> Option<String> {
         // OpenCode, when its saved sign-in has expired.
         "token refresh failed",
         "providerautherror",
-        // Gemini, signed out.
-        "set an auth method",
-        "must specify the gemini_api_key",
     ];
-    if !signs.iter().any(|s| lower.contains(s)) {
-        return None;
-    }
-    Some(sign_in_help(provider))
+    let elsewhere = ["mcp", "plugin", "hook "].iter().any(|s| lower.contains(s));
+    !elsewhere && broad.iter().any(|s| lower.contains(s))
 }
 
 /// How to sign an agent in, as "Codex isn't signed in. Open a terminal and run …".
@@ -3107,6 +3122,14 @@ mod arg_tests {
         assert!(hint.contains("codex login"));
         assert!(sign_in_hint("claude", "Invalid API key · Please run /login").is_some());
         assert!(sign_in_hint("claude", "error: model not found").is_none());
+        // An MCP server refused for its own login: the agent is still signed in.
+        assert!(sign_in_hint(
+            "claude",
+            "MCP server \"github\": HTTP 401 Unauthorized\nerror: model not found"
+        )
+        .is_none());
+        // The words count line by line, not across lines.
+        assert!(sign_in_hint("claude", "Token\nexpired").is_none());
         let tip = model_hint(
             "codex",
             "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.",

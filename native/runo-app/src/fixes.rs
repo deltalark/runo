@@ -566,7 +566,7 @@ impl RunoApp {
             .iter()
             .rev()
             .take_while(|m| m.role != Role::User)
-            .filter(|m| m.role == Role::System)
+            .filter(|m| m.role == Role::System && m.meta.is_empty())
             .map(|m| m.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
@@ -694,7 +694,7 @@ impl RunoApp {
             .iter()
             .rev()
             .take_while(|m| m.role != Role::User)
-            .filter(|m| m.role == Role::System)
+            .filter(|m| m.role == Role::System && m.meta.is_empty())
             .map(|m| m.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");

@@ -316,7 +316,7 @@ pub fn fall_back(turn: &Path, fallback: &[String], cwd: &str, out: &Out, why: &s
         command.stderr(Stdio::from(err));
     }
     match command.status() {
-        Ok(status) => status.code().unwrap_or(1),
+        Ok(status) => crate::harness::host::exit_code(status),
         Err(e) => {
             note(
                 out,
