@@ -946,17 +946,7 @@ const GOLD: u32 = 0xffc83d;
 /// Whether to calm the Arcade's motion: the system asks for less (Accessibility >
 /// Display > Reduce motion), or animations are off in Runo's settings.
 fn calm_motion(cx: &App) -> bool {
-    !anim_on() || cx.reduce_motion() || system_reduce_motion()
-}
-
-#[cfg(target_os = "macos")]
-fn system_reduce_motion() -> bool {
-    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn system_reduce_motion() -> bool {
-    false
+    !anim_on() || crate::motion::calm(cx)
 }
 
 /// Overshoots a little and settles: a bounce in.
@@ -2733,10 +2723,13 @@ impl RunoApp {
                         })),
                 )
         } else if working > 0 {
-            chip(c_blue()).child(working_indicator(Some(format!(
-                "{working} agent{}",
-                if working == 1 { "" } else { "s" }
-            ))))
+            chip(c_blue()).child(working::indicator(
+                "Working",
+                Some(format!(
+                    "{working} agent{}",
+                    if working == 1 { "" } else { "s" }
+                )),
+            ))
         } else {
             chip(c_muted())
                 .text_color(rgb(c_muted()))
