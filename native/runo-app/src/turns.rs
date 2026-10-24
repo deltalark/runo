@@ -55,6 +55,7 @@ impl RunoApp {
                 images,
                 opts: opts.clone(),
                 tag: None,
+                from_thread: None,
             });
             self.info = Some((
                 "Starts as soon as the worktree is ready.".into(),
@@ -615,7 +616,10 @@ impl RunoApp {
             .map(|s| (s.queue.remove(index), s.provider.clone()));
         if let Some((item, provider)) = next {
             let opts = cx.global::<AppSettings>().agent(&provider);
-            self.start_turn(id, item.text, item.images, &opts);
+            match item.from_thread {
+                Some(thread) => self.start_from_thread(id, thread, item.text, &opts),
+                None => self.start_turn(id, item.text, item.images, &opts),
+            }
         }
     }
 
@@ -2589,16 +2593,15 @@ fn mentions_folder(text: &str, dir: &str) -> bool {
 /// queue, in the order they were sent.
 fn take_unsent(session: &mut store::Session, unsent: &[String]) {
     for text in unsent.iter().rev() {
+        let mut queued = Queued::new(text.clone(), Vec::new());
         if let Some(i) = session
             .messages
             .iter()
             .rposition(|m| m.role == Role::User && m.meta == STEER && m.text == *text)
         {
-            session.messages.remove(i);
+            queued.from_thread = session.messages.remove(i).from_thread;
         }
-        session
-            .queue
-            .insert(0, Queued::new(text.clone(), Vec::new()));
+        session.queue.insert(0, queued);
     }
 }
 
@@ -2625,6 +2628,18 @@ mod tests {
         assert_eq!(texts, ["Fix it", "also the docs", "Done."]);
         let queued: Vec<&str> = session.queue.iter().map(|q| q.text.as_str()).collect();
         assert_eq!(queued, ["and the tests", "later"]);
+    }
+
+    #[test]
+    fn a_thread_message_the_agent_never_read_keeps_its_thread() {
+        let mut session = store::Session::default();
+        let mut wake = Message::new(Role::User, "Thread #7 (Docs) says: done");
+        wake.meta = STEER.into();
+        wake.from_thread = Some(7);
+        session.messages.push(wake);
+        take_unsent(&mut session, &["Thread #7 (Docs) says: done".to_string()]);
+        assert!(session.messages.is_empty());
+        assert_eq!(session.queue[0].from_thread, Some(7));
     }
 
     #[test]

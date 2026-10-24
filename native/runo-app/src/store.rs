@@ -90,6 +90,10 @@ pub struct Message {
     /// In a Crew chat: a card drawn with the message, such as the threads it started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crew: Option<crate::crew::Card>,
+    /// User turns in a Crew chat: the thread whose message woke Crew, drawn as a chip
+    /// naming the thread instead of as something the person typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_thread: Option<u64>,
 }
 
 /// Token use of one agent turn.
@@ -276,7 +280,24 @@ impl Message {
             playbook: String::new(),
             note: String::new(),
             crew: None,
+            from_thread: None,
         }
+    }
+
+    /// The thread that sent this message to Crew, if a thread did. Before `from_thread`
+    /// such messages were saved as a playbook named "From <title>" with the wake's text;
+    /// those count too, unless `is_playbook` knows a playbook by that name.
+    pub fn thread_origin(&self, is_playbook: impl Fn(&str) -> bool) -> Option<u64> {
+        if self.role != Role::User {
+            return None;
+        }
+        if self.from_thread.is_some() {
+            return self.from_thread;
+        }
+        if !self.playbook.starts_with("From ") || is_playbook(&self.playbook) {
+            return None;
+        }
+        crate::crew::parse_wake(&self.text).map(|(thread, _)| thread)
     }
 
     /// Where step `i` stands, for its icon: still running (only while the turn is live),
@@ -471,6 +492,9 @@ pub struct Queued {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<String>,
+    /// A thread's message to Crew waiting for Crew's turn: the thread that sent it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_thread: Option<u64>,
 }
 
 impl Queued {
@@ -478,6 +502,7 @@ impl Queued {
         Self {
             text: text.into(),
             images,
+            from_thread: None,
         }
     }
 }
@@ -1278,6 +1303,34 @@ impl State {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn thread_messages_saved_as_playbooks_are_recognised() {
+        let mut old = Message::new(Role::User, "Thread #41 (Refine Arcade) says: Ready.");
+        old.playbook = "From Refine Arcade".into();
+        assert_eq!(old.thread_origin(|_| false), Some(41));
+        // A playbook really named that is still a playbook run.
+        assert_eq!(old.thread_origin(|n| n == "From Refine Arcade"), None);
+        // Saved before the field existed, it loads and is still recognised.
+        let json = r#"{"role":"User","text":"Thread #41 (Refine Arcade) says: Ready.","playbook":"From Refine Arcade"}"#;
+        let loaded: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.from_thread, None);
+        assert_eq!(loaded.thread_origin(|_| false), Some(41));
+    }
+
+    #[test]
+    fn playbook_runs_are_not_thread_messages() {
+        let mut run = Message::new(Role::User, "Write the release notes for…");
+        run.playbook = "Release notes".into();
+        assert_eq!(run.thread_origin(|_| true), None);
+        assert_eq!(run.thread_origin(|_| false), None);
+        // "From …" alone isn't enough: the text must be a thread's message.
+        run.playbook = "From scratch".into();
+        assert_eq!(run.thread_origin(|_| false), None);
+        assert!(!serde_json::to_string(&run).unwrap().contains("from_thread"));
+        let typed = Message::new(Role::User, "Thread #3 (x) says: hi");
+        assert_eq!(typed.thread_origin(|_| false), None);
+    }
 
     #[test]
     fn a_shared_folder_counts_only_what_the_agent_changed() {

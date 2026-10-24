@@ -547,6 +547,8 @@ struct RunoApp {
     term_escape: Option<std::time::Instant>,
     /// Agent replies whose step list is expanded, by (session, message index).
     open_steps: std::collections::HashSet<(u64, usize)>,
+    /// Threads' messages to Crew shown in full, by (Crew chat, message index).
+    open_wakes: std::collections::HashSet<(u64, usize)>,
     show_sidebar: bool,
     /// When each panel last opened or closed, so it can slide instead of snapping.
     panel_anim: HashMap<&'static str, (bool, std::time::Instant)>,
@@ -1558,6 +1560,7 @@ impl RunoApp {
             window_place: None,
             term_escape: None,
             open_steps: Default::default(),
+            open_wakes: Default::default(),
             show_sidebar: true,
             panel_anim: HashMap::new(),
             was_settings: false,
@@ -5373,6 +5376,8 @@ impl RunoApp {
                 );
             }
             let group = SharedString::from(format!("user-msg-{sid}-{index}"));
+            let origin =
+                message.thread_origin(|name| self.state.automations.iter().any(|a| a.name == name));
             return fade(
                 shell::reveal_group(div().id(("message", index)), group.clone())
                     .group("user-msg")
@@ -5426,7 +5431,15 @@ impl RunoApp {
                                     group.clone(),
                                 ))
                             })
-                            .child(if message.playbook.is_empty() {
+                            .child(if let Some(thread) = origin {
+                                let said = crew::parse_wake(&message.text)
+                                    .map_or(message.text.as_str(), |(_, said)| said);
+                                let body = self
+                                    .open_wakes
+                                    .contains(&(sid, index))
+                                    .then(|| markdown(said.to_string()).into_any_element());
+                                self.thread_message(index, thread, said, body, cx)
+                            } else if message.playbook.is_empty() {
                                 div()
                                     .max_w(px(560.))
                                     .px(px(14.))

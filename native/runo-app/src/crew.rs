@@ -548,6 +548,21 @@ pub const MAX_ACTIONS: usize = 12;
 /// Turns Crew takes on its own, to answer threads, between two messages from the person.
 pub const MAX_WAKES: u32 = 4;
 
+/// The prompt that gives Crew a thread's message: who sent it, then what it says.
+pub fn wake_text(thread: u64, title: &str, text: &str) -> String {
+    format!("Thread #{thread} ({title}) says: {text}")
+}
+
+/// The thread and its words in a prompt `wake_text` made.
+pub fn parse_wake(text: &str) -> Option<(u64, &str)> {
+    let rest = text.strip_prefix("Thread #")?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let thread = rest[..digits].parse().ok()?;
+    let rest = rest[digits..].strip_prefix(" (")?;
+    let at = rest.find(") says: ")?;
+    Some((thread, &rest[at + ") says: ".len()..]))
+}
+
 /// What Crew asks Runo to do, from the `runo-actions` block that ends its reply.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(tag = "do", rename_all = "snake_case")]
@@ -1087,6 +1102,15 @@ pub fn thread_rules(tools: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_text_reads_back() {
+        let text = wake_text(41, "Refine Arcade: pro + fun", "Line one\nLine two");
+        assert_eq!(parse_wake(&text), Some((41, "Line one\nLine two")));
+        assert_eq!(parse_wake("Thread # (x) says: y"), None);
+        assert_eq!(parse_wake("Thread #4 says hi"), None);
+        assert_eq!(parse_wake("Fix the build"), None);
+    }
 
     #[test]
     fn old_titles_are_cut_back_to_a_word() {
