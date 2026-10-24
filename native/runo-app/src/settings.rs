@@ -178,6 +178,8 @@ pub struct AppSettings {
     pub daily_token_limit_k: u32,
     /// Agents that may run at the same time on this machine; 0 for no cap.
     pub max_running: u32,
+    /// Run the checks after each turn at low priority, one set at a time across sessions.
+    pub background_checks: bool,
     /// Crew threads that may run at the same time; the rest wait for a slot. 0 for no cap.
     pub crew_running: u32,
     /// Percent of an agent plan's usage window past which threads Crew starts and
@@ -292,6 +294,7 @@ impl Default for AppSettings {
             daily_turn_limit: 0,
             daily_token_limit_k: 0,
             max_running: 0,
+            background_checks: true,
             crew_running: 3,
             plan_hold_percent: 0,
             check_runo_updates: true,

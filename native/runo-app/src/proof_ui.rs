@@ -16,7 +16,8 @@ impl RunoApp {
     /// Run the project's checks on the session's last turn. `auto` is set when a turn
     /// just finished, so failures may go back to the agent on their own.
     pub(crate) fn prove_turn(&mut self, id: u64, auto: bool, cx: &mut Context<Self>) {
-        if self.proving.contains(&id) {
+        // Checks still waiting for their go move on to the newer turn, keeping their place.
+        if self.proving.contains(&id) && !self.check_queue.is_waiting(id) {
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -35,7 +36,6 @@ impl RunoApp {
         if checks.is_empty() {
             return;
         }
-        let dir = session.dir.clone();
         let remote = session.connection != 0;
         let Some(session) = self.state.session_mut(id) else {
             return;
@@ -64,15 +64,77 @@ impl RunoApp {
             ..Default::default()
         });
         self.proving.insert(id);
+        if !cx.global::<AppSettings>().background_checks {
+            self.check_queue.drop_waiting(id);
+            self.start_checks(id, auto, false, cx);
+        } else if self.check_queue.join(id, auto) {
+            if !self.start_checks(id, auto, true, cx) {
+                self.next_checks(id, cx);
+            }
+        } else {
+            crate::applog::info(
+                "proof",
+                format!("session #{id}: checks wait for another session's checks"),
+            );
+        }
+        cx.notify();
+    }
+
+    /// Start the session's checks on the turn its card is for. False when there is
+    /// nothing to run any more, such as a deleted session or one already on a newer turn.
+    fn start_checks(&mut self, id: u64, auto: bool, low: bool, cx: &mut Context<Self>) -> bool {
+        let Some(session) = self.state.session(id) else {
+            self.proving.remove(&id);
+            return false;
+        };
+        let turn = session.proof.as_ref().map(|p| p.turn);
+        let checks = self
+            .state
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .map(|p| proof::commands(&p.checks))
+            .unwrap_or_default();
+        let Some(turn) = turn.filter(|t| last_turn(session) == Some(*t) && !checks.is_empty())
+        else {
+            self.proving.remove(&id);
+            cx.notify();
+            return false;
+        };
+        let dir = session.dir.clone();
         crate::applog::info(
             "proof",
-            format!("session #{id}: running {} check(s)", checks.len()),
+            format!(
+                "session #{id}: running {} check(s){}",
+                checks.len(),
+                if low { " in the background" } else { "" }
+            ),
         );
         self.bg(
-            move || proof::run_all(&dir, &checks, proof::CHECK_LIMIT),
+            move || proof::run_all(&dir, &checks, proof::CHECK_LIMIT, low),
             move |this, results, cx| this.proof_done(id, turn, auto, results, cx),
         );
-        cx.notify();
+        true
+    }
+
+    /// The session's checks are over: start the next session's waiting in line.
+    fn next_checks(&mut self, id: u64, cx: &mut Context<Self>) {
+        let mut next = self.check_queue.done(id);
+        while let Some((id, auto)) = next {
+            let low = cx.global::<AppSettings>().background_checks;
+            if self.start_checks(id, auto, low, cx) {
+                break;
+            }
+            next = self.check_queue.done(id);
+        }
+    }
+
+    /// Take the session's checks out of the line while they wait. Running ones finish.
+    pub(crate) fn cancel_checks(&mut self, id: u64) {
+        if self.check_queue.drop_waiting(id) {
+            self.proving.remove(&id);
+            crate::applog::info("proof", format!("session #{id}: waiting checks cancelled"));
+        }
     }
 
     fn proof_done(
@@ -84,6 +146,7 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) {
         self.proving.remove(&id);
+        self.next_checks(id, cx);
         let busy = self.handles.contains_key(&Target::Session(id));
         let rounds_allowed = self
             .state
@@ -424,6 +487,7 @@ impl RunoApp {
             return None;
         }
         let proving = self.proving.contains(&id);
+        let waiting = self.check_queue.is_waiting(id);
         let reviewer = self.reviewing.get(&id).copied();
         let verdict = session.proof.as_ref().filter(|p| p.turn == turn);
         let changed = self.turn_files.get(&id).copied().unwrap_or(0) > 0;
@@ -446,6 +510,11 @@ impl RunoApp {
         };
 
         let (tone, glyph, headline) = match verdict {
+            _ if waiting => (
+                c_secondary(),
+                IconName::Clock,
+                "Waiting for another check…".to_string(),
+            ),
             _ if proving => (
                 c_secondary(),
                 IconName::LoaderCircle,
@@ -522,6 +591,22 @@ impl RunoApp {
                         .child(icon(IconName::Settings, 12., c_secondary()))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_up_checks(pid, cx);
+                        })),
+                )
+            })
+            .when(waiting, |el| {
+                el.child(
+                    small(self, "proof-cancel", "Cancel", false)
+                        .child(icon(IconName::X, 12., c_secondary()))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Another session's checks are running. These start when they finish; Cancel skips them for this turn",
+                            )
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.cancel_checks(id);
+                            cx.notify();
                         })),
                 )
             })
