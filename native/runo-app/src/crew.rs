@@ -563,6 +563,16 @@ pub enum Action {
         /// Work in its own worktree; unset leaves it to the person's New session default.
         #[serde(default)]
         isolated: Option<bool>,
+        /// A model its agent knows, such as "sonnet"; empty for the agent's default.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        model: String,
+        /// Reasoning effort, such as "low"; empty for the default.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        effort: String,
+        /// What the thread may cost in US dollars before its next turn waits for the
+        /// person; 0 for no limit.
+        #[serde(default, skip_serializing_if = "is_zero_dollars")]
+        budget_usd: f64,
     },
     /// Send a thread a message, as its next prompt.
     MessageThread { thread: u64, text: String },
@@ -589,7 +599,49 @@ pub enum Card {
     News { thread: u64 },
 }
 
+/// The optional parts of a thread Crew starts: model, effort and budget.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct ThreadPick {
+    pub model: String,
+    pub effort: String,
+    pub budget_usd: f64,
+}
+
+fn is_zero_dollars(n: &f64) -> bool {
+    *n == 0.0
+}
+
+/// A model or effort name as an agent takes it: letters, digits and `-._:/[]`.
+fn option_name(text: &str, max: usize) -> String {
+    let name = clip(text, max);
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-._:/[]".contains(c))
+    {
+        name
+    } else {
+        String::new()
+    }
+}
+
 impl Action {
+    /// A new thread's model, effort and budget; the defaults for any other action.
+    pub fn pick(&self) -> ThreadPick {
+        match self {
+            Action::StartThread {
+                model,
+                effort,
+                budget_usd,
+                ..
+            } => ThreadPick {
+                model: model.clone(),
+                effort: effort.clone(),
+                budget_usd: *budget_usd,
+            },
+            _ => ThreadPick::default(),
+        }
+    }
+
     /// The thread it is about, for actions on an existing one.
     pub fn thread(&self) -> Option<u64> {
         match self {
@@ -651,6 +703,9 @@ pub fn parse_actions(body: &str) -> (Vec<Action>, Vec<String>) {
                 brief,
                 agent,
                 isolated,
+                model,
+                effort,
+                budget_usd,
             } => {
                 let title = clip(&title, 80);
                 let brief = clip(&brief, MAX_TEXT);
@@ -663,6 +718,13 @@ pub fn parse_actions(body: &str) -> (Vec<Action>, Vec<String>) {
                     brief,
                     agent: clip(&agent, 40).to_ascii_lowercase(),
                     isolated,
+                    model: option_name(&model, 80),
+                    effort: option_name(&effort, 20).to_ascii_lowercase(),
+                    budget_usd: if budget_usd.is_finite() {
+                        budget_usd.clamp(0.0, 1000.0)
+                    } else {
+                        0.0
+                    },
                 }
             }
             Action::MessageThread { thread, text } => {
@@ -967,12 +1029,22 @@ pub fn board_changes(before: &str, now: &[String]) -> String {
 }
 
 /// Crew's rules, sent with the first message of its conversation.
-pub fn rules(project: &str, agents: &[(&str, &str)], default_agent: &str) -> String {
+pub fn rules(
+    project: &str,
+    agents: &[(&str, &str)],
+    default_agent: &str,
+    models: &[String],
+) -> String {
     let roster = agents
         .iter()
         .map(|(id, name)| format!("{id} ({name})"))
         .collect::<Vec<_>>()
         .join(", ");
+    let models = if models.is_empty() {
+        String::new()
+    } else {
+        format!(" {default_agent}'s models: {}.", models.join(", "))
+    };
     format!(
         r##"## You are Crew
 You run the project "{project}" for the person in this chat. You can read the code here but never change it: threads do the work. A thread is an agent session of its own.
@@ -986,12 +1058,14 @@ To act, end your reply with one fenced block like this, and nothing after it:
 ```
 
 Actions:
-- start_thread: title (2 to 5 words), brief (complete: the thread has not seen this chat), agent (empty for the default, {default_agent}; or one of: {roster}), isolated (true for its own worktree and branch, false to work in the project folder).
+- start_thread: title (2 to 5 words), brief (complete: the thread has not seen this chat; name the files, lines and findings you already have, so it doesn't search for them again), agent (empty for the default, {default_agent}; or one of: {roster}), isolated (true for its own worktree and branch, false to work in the project folder). Optional: model (empty for the agent's default; pick a smaller, cheaper model for mechanical work such as renames, docs, copy or simple UI tweaks, and keep the default for hard or risky work),{models} effort (such as "low" or "high"; empty for the default), budget_usd (what the thread may cost before its next turn waits for the person; 0 or absent for no limit).
 - message_thread: thread (its number), text. It becomes that thread's next prompt.
 - read_thread: thread. Its latest replies come back with the next message.
 - resolve_thread: thread. Use it once its work is merged or no longer needed.
 
 Limits: at most {MAX_NEW_THREADS} new threads and one message per thread per reply. Never start a thread for something you can answer. Say in your reply what you started and why, in a sentence.
+
+Cost: every thread is a full agent session that reads the code afresh, and the person's plan has a usage window shared by all of them. Split work into threads by independent area, not by item: one thread for related fixes beats one per fix. When the work has an order (the riskiest first), start those threads first and the rest once they report. Only a few threads run at once; the others wait for a slot and start on their own, so don't start a thread again because it is waiting.
 
 Each message may open with a Threads section: what changed in this project's threads since your last turn. Threads report through their own tools; use those reports to answer the person, with links.
 "##
@@ -1006,7 +1080,7 @@ pub fn thread_rules(tools: bool) -> String {
         "Write these fenced blocks in your reply; Runo takes them out of the text. ```runo-checklist with a first line such as \"title: Settings spacing pass\" naming the task in 2 to 5 words, then one step per line (- [x] done, - [~] doing, - [ ] to do), written again at the end so every step shows how it ended, ```runo-report opening with a short sentence on the outcome, then a few sentences and any links on lines of their own, and ```runo-decision with JSON {\"question\":…, \"options\":[{\"label\":…, \"consequence\":…}], \"recommended\":0} when a choice changes what the person gets or can't be undone."
     };
     format!(
-        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\n## Your task\n"
+        "## You are a Crew thread\nCrew, which runs this project for the person, started you for the task below. Work on it until it's done. {how}\n\nOther threads may be running side by side, and all of them share the person's plan usage. Do the work in this thread. Use subagents only for independent lookups or reviews that would otherwise fill your context, at most two at a time, and never one per item of a list. Run the full test suite once at the end rather than after every change.\n\n## Your task\n"
     )
 }
 
@@ -1369,6 +1443,9 @@ mod tests {
             brief: format!("Do {title}"),
             agent: String::new(),
             isolated: None,
+            model: String::new(),
+            effort: String::new(),
+            budget_usd: 0.0,
         }
     }
 
@@ -1384,8 +1461,35 @@ mod tests {
                 brief: "Measure it".into(),
                 agent: "codex".into(),
                 isolated: Some(true),
+                model: String::new(),
+                effort: String::new(),
+                budget_usd: 0.0,
             }]
         );
+        let picked = r#"{"do":"start_thread","title":"Docs","brief":"Fix typos","model":"sonnet","effort":"LOW","budget_usd":2.5}"#;
+        match &parse_actions(picked).0[..] {
+            [Action::StartThread {
+                model,
+                effort,
+                budget_usd,
+                ..
+            }] => {
+                assert_eq!(model, "sonnet");
+                assert_eq!(effort, "low");
+                assert_eq!(*budget_usd, 2.5);
+            }
+            other => panic!("{other:?}"),
+        }
+        let odd = r#"{"do":"start_thread","title":"Docs","brief":"Fix typos","model":"sonnet; rm -rf","budget_usd":-4}"#;
+        match &parse_actions(odd).0[..] {
+            [Action::StartThread {
+                model, budget_usd, ..
+            }] => {
+                assert!(model.is_empty());
+                assert_eq!(*budget_usd, 0.0);
+            }
+            other => panic!("{other:?}"),
+        }
         let list = r#"[{"do":"message_thread","thread":4,"text":"Also the docs"},{"do":"read_thread","thread":4}]"#;
         assert_eq!(parse_actions(list).0.len(), 2);
         let wrapped = r#"{"actions":[{"do":"resolve_thread","thread":9}]}"#;
@@ -1638,8 +1742,10 @@ mod tests {
             "runo",
             &[("claude", "Claude Code"), ("codex", "Codex")],
             "Claude Code",
+            &["opus".to_string(), "sonnet".to_string()],
         );
         assert!(rules.contains("```runo-actions"));
+        assert!(rules.contains("Claude Code's models: opus, sonnet."));
         assert!(rules.contains("codex (Codex)"));
         assert!(rules.contains(&format!("at most {MAX_NEW_THREADS} new threads")));
         // The example in the rules is itself a valid block.
@@ -1648,6 +1754,7 @@ mod tests {
         assert_eq!(parse_actions(example).0.len(), 1);
         assert!(thread_rules(true).contains("set_checklist"));
         assert!(thread_rules(false).contains("```runo-checklist"));
+        assert!(thread_rules(true).contains("subagents only for independent"));
     }
 
     #[test]

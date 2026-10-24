@@ -28,6 +28,8 @@ pub struct AgentOptions {
     /// Claude and Codex: comma-separated extra directories the agent may access.
     pub add_dirs: String,
     pub fallback_model: String,
+    /// Claude: the model its subagents run on; empty lets each use the main model.
+    pub subagent_model: String,
     /// Codex config profile.
     pub profile: String,
     /// OpenCode: model variant (reasoning effort).
@@ -172,6 +174,11 @@ pub struct AppSettings {
     pub daily_token_limit_k: u32,
     /// Agents that may run at the same time on this machine; 0 for no cap.
     pub max_running: u32,
+    /// Crew threads that may run at the same time; the rest wait for a slot. 0 for no cap.
+    pub crew_running: u32,
+    /// Percent of an agent plan's usage window past which threads Crew starts and
+    /// playbook runs wait; 0 for never. What you start yourself always goes.
+    pub plan_hold_percent: u32,
     /// Look for a newer Runo on GitHub now and then.
     pub check_runo_updates: bool,
     /// Serve the phone bridge from the app while it is open.
@@ -279,6 +286,8 @@ impl Default for AppSettings {
             daily_turn_limit: 0,
             daily_token_limit_k: 0,
             max_running: 0,
+            crew_running: 3,
+            plan_hold_percent: 0,
             check_runo_updates: true,
             phone_bridge: false,
             phone_everywhere: false,
@@ -387,6 +396,8 @@ impl AppSettings {
         DAILY_TURNS.store(self.daily_turn_limit, Ordering::Relaxed);
         DAILY_TOKENS_K.store(self.daily_token_limit_k, Ordering::Relaxed);
         MAX_RUNNING.store(self.max_running, Ordering::Relaxed);
+        CREW_RUNNING.store(self.crew_running, Ordering::Relaxed);
+        PLAN_HOLD.store(self.plan_hold_percent, Ordering::Relaxed);
         CATCH_UP.store(self.playbook_catch_up, Ordering::Relaxed);
         crate::pbrunner::sync_job(self.playbooks_while_closed);
         crate::phone::sync(self.phone_bridge, self.phone_everywhere);
@@ -462,6 +473,8 @@ static SESSION_TURNS: AtomicU32 = AtomicU32::new(0);
 static DAILY_TURNS: AtomicU32 = AtomicU32::new(0);
 static DAILY_TOKENS_K: AtomicU32 = AtomicU32::new(0);
 static MAX_RUNNING: AtomicU32 = AtomicU32::new(0);
+static CREW_RUNNING: AtomicU32 = AtomicU32::new(3);
+static PLAN_HOLD: AtomicU32 = AtomicU32::new(0);
 
 /// Minutes of silence before an agent is flagged as maybe stuck; 0 never.
 pub fn stuck_after_mins() -> u32 {
@@ -497,6 +510,16 @@ pub fn limits() -> Limits {
 /// Agents allowed to run at once; 0 for no cap.
 pub fn max_running() -> usize {
     MAX_RUNNING.load(Ordering::Relaxed) as usize
+}
+
+/// Crew threads allowed to run at once; 0 for no cap.
+pub fn crew_running() -> usize {
+    CREW_RUNNING.load(Ordering::Relaxed) as usize
+}
+
+/// Percent of a plan window past which automatic starts wait; 0 for never.
+pub fn plan_hold_percent() -> u32 {
+    PLAN_HOLD.load(Ordering::Relaxed)
 }
 static CATCH_UP: AtomicBool = AtomicBool::new(true);
 
@@ -1516,5 +1539,16 @@ mod tests {
         scan_skills(&dir, "claude", &mut out);
         assert_eq!(out.len(), 2);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cost_controls_default_to_todays_behaviour_but_a_crew_cap_of_three() {
+        let old: AppSettings = serde_json::from_str(r#"{"max_running": 0}"#).unwrap();
+        assert_eq!(old.crew_running, 3);
+        assert_eq!(old.plan_hold_percent, 0);
+        assert_eq!(old.max_running, 0);
+        let claude: super::AgentOptions =
+            serde_json::from_str(r#"{"model_override": "opus"}"#).unwrap();
+        assert!(claude.subagent_model.is_empty());
     }
 }

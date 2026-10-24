@@ -46,6 +46,8 @@ pub enum AgentEvent {
     Todos(Vec<Step>),
     /// The turn's process ended; `ok` is how Runo judged it.
     TurnEnded { ok: bool },
+    /// Where the agent's plan stands: a usage window near or past its limit.
+    Limit(crate::planlimit::PlanLimit),
 }
 
 /// What kind of work a tool call does, whatever the CLI calls the tool.

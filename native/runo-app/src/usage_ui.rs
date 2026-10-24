@@ -326,6 +326,16 @@ impl RunoApp {
                             usage::ago(u.at, now)
                         )));
                     }
+                    // Runo runs Claude Code in print mode, which Anthropic meters as SDK
+                    // use; people measure it taking more of the window for the same work.
+                    if p.id == "claude" {
+                        list = list.child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(rgb(c_muted()))
+                                .child("Chat runs Claude Code in print mode, which can use more of these windows than the same work typed into claude in a terminal. For long hands-on work, the CLI view runs claude itself on the same conversation."),
+                        );
+                    }
                     body = Some(list);
                 } else if let Some(w) = u.headline() {
                     head = head

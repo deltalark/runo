@@ -75,6 +75,7 @@ mod pbrunner;
 mod pbshare;
 mod persist;
 mod phone;
+mod planlimit;
 mod playbooks;
 mod projects;
 mod proof;
@@ -2443,6 +2444,11 @@ impl RunoApp {
                         other => Some(other),
                     })
                     .collect();
+                for update in &updates {
+                    if let AgentEvent::Limit(limit) = update {
+                        self.note_plan_limit(id, limit);
+                    }
+                }
                 let refused = self.refused.get(&id).cloned().unwrap_or_default();
                 // The reply's run summary names the model it ran on.
                 let model = updates

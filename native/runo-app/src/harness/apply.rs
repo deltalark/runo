@@ -47,6 +47,8 @@ pub fn apply(session: &mut Session, events: Vec<AgentEvent>, cx: &Context) -> bo
             }
             // Written to the log by whoever starts and ends the turn.
             AgentEvent::TurnStarted { .. } | AgentEvent::TurnEnded { .. } => {}
+            // The window holds or warns about the agent's turns; see `note_plan_limit`.
+            AgentEvent::Limit(_) => {}
             AgentEvent::Summary(summary) => {
                 m.meta = match &cx.model {
                     Some(model) => format!("{model} · {summary}"),

@@ -220,10 +220,24 @@ impl RunoApp {
             let roster: Vec<(&str, &str)> =
                 agent::PROVIDERS.iter().map(|p| (p.id, p.name)).collect();
             let default = agent::provider(&s.provider).name;
-            parts.push(crew::rules(&project, &roster, default));
+            let models: Vec<String> = crate::caps::get(&s.provider)
+                .models
+                .iter()
+                .take(8)
+                .map(|m| m.choice.value.clone())
+                .filter(|v| !v.is_empty())
+                .collect();
+            parts.push(crew::rules(&project, &roster, default, &models));
         }
         if !changes.is_empty() {
             parts.push(format!("## Threads\n{}", changes.trim_end()));
+        }
+        let (running, waiting) = self.thread_slots(pid);
+        let cap = settings::crew_running();
+        if cap > 0 && (waiting > 0 || running >= cap) {
+            parts.push(format!(
+                "## Slots\nThreads run {cap} at a time: {running} running, {waiting} waiting. Waiting threads start on their own as others finish."
+            ));
         }
         if let Some(inbox) = self.crew.inbox.remove(&id).filter(|i| !i.is_empty()) {
             parts.push(format!("## From threads\n{}", inbox.join("\n\n")));
@@ -294,7 +308,16 @@ impl RunoApp {
             Route::NewThread => {
                 self.crew_note(id, Role::User, text.to_string(), None);
                 let title = crew::title_from(text);
-                match self.start_thread(pid, &title, text, "", None, Origin::Person, cx) {
+                match self.start_thread(
+                    pid,
+                    &title,
+                    text,
+                    "",
+                    None,
+                    crew::ThreadPick::default(),
+                    Origin::Person,
+                    cx,
+                ) {
                     Ok(thread) => self.crew_note(
                         id,
                         Role::System,
@@ -335,6 +358,7 @@ impl RunoApp {
         brief: &str,
         agent_id: &str,
         isolated: Option<bool>,
+        pick: crew::ThreadPick,
         origin: Origin,
         cx: &mut Context<Self>,
     ) -> Result<u64, String> {
@@ -353,6 +377,7 @@ impl RunoApp {
         let is_git = git::is_repo(&project.path);
         // Threads run side by side, so each gets its own worktree unless Crew says not to.
         let isolated = isolated.unwrap_or(true) && is_git;
+        let model = thread_model(agent::PROVIDERS[provider].id, &pick.model);
         let id = self.spawn_session_from(
             &project, provider, "", isolated, is_git, title, None, None, cx,
         )?;
@@ -360,9 +385,19 @@ impl RunoApp {
         if let Some(s) = self.state.session_mut(id) {
             s.title = title.to_string();
             s.connection = connection;
+            if let Some(model) = model {
+                s.set_model(model);
+            }
+            if !pick.effort.is_empty() {
+                s.opts.insert("effort".into(), pick.effort.clone());
+            }
             s.crew = Some(ThreadInfo {
                 origin,
                 brief: brief.to_string(),
+                budget: (pick.budget_usd > 0.0).then_some(crew::Budget {
+                    dollars: pick.budget_usd,
+                    turns: 0,
+                }),
                 ..Default::default()
             });
         }
@@ -523,17 +558,19 @@ impl RunoApp {
         for action in run {
             match action {
                 Action::StartThread {
-                    title,
-                    brief,
-                    agent,
+                    ref title,
+                    ref brief,
+                    ref agent,
                     isolated,
+                    ..
                 } => {
                     match self.start_thread(
                         pid,
-                        &title,
-                        &brief,
-                        &agent,
+                        title,
+                        brief,
+                        agent,
                         isolated,
+                        action.pick(),
                         Origin::Crew { message },
                         cx,
                     ) {
@@ -637,16 +674,25 @@ impl RunoApp {
         };
         let mut started = Vec::new();
         for action in actions {
+            let pick = action.pick();
             if let Action::StartThread {
                 title,
                 brief,
                 agent,
                 isolated,
+                ..
             } = action
             {
-                if let Ok(id) =
-                    self.start_thread(pid, &title, &brief, &agent, isolated, Origin::Person, cx)
-                {
+                if let Ok(id) = self.start_thread(
+                    pid,
+                    &title,
+                    &brief,
+                    &agent,
+                    isolated,
+                    pick,
+                    Origin::Person,
+                    cx,
+                ) {
                     started.push(id);
                 }
             }
@@ -813,4 +859,33 @@ impl RunoApp {
             self.tag_playbook(chat, &format!("From {from}"), "");
         }
     }
+}
+
+/// The model a thread Crew started runs on: the one Crew picked, as its agent's CLI
+/// names it, when the CLI lists it. `None` keeps the agent's default.
+fn thread_model(provider: &str, picked: &str) -> Option<String> {
+    if picked.is_empty() {
+        return None;
+    }
+    let caps = crate::caps::get(provider);
+    let known: Vec<String> = crate::caps::all_models(&caps)
+        .map(|m| m.choice.value.clone())
+        .filter(|v| !v.is_empty())
+        .collect();
+    if known.is_empty() {
+        return Some(picked.to_string());
+    }
+    let lower = picked.to_lowercase();
+    let found = known
+        .iter()
+        .find(|v| v.to_lowercase() == lower)
+        .or_else(|| known.iter().find(|v| v.to_lowercase().contains(&lower)))
+        .cloned();
+    if found.is_none() {
+        crate::applog::info(
+            "crew",
+            format!("thread model {picked:?} isn't one {provider} lists; using its default"),
+        );
+    }
+    found
 }
