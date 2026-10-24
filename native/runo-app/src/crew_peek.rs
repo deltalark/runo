@@ -138,7 +138,13 @@ impl RunoApp {
                 .get(&thread)
                 .map(|t| &t.started)
                 .map(|t| elapsed(t.elapsed()));
-            list = list.child(div().text_size(px(12.5)).child(working_indicator(since)));
+            list = list.child(
+                div()
+                    .text_size(px(12.5))
+                    .child(working::indicator(working::doing(&session.messages), since)),
+            );
+        } else if let Some(done) = self.finished_row(thread) {
+            list = list.child(div().text_size(px(12.5)).child(done));
         }
         let queued = session.queue.len();
 

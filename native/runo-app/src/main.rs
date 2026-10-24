@@ -68,6 +68,7 @@ mod memory_mcp;
 mod menubar;
 mod modelcheck;
 mod models;
+mod motion;
 mod notes;
 mod parts;
 mod pattern;
@@ -110,6 +111,7 @@ mod turns;
 mod updater;
 mod usage;
 mod usage_ui;
+mod working;
 mod workspace;
 
 use agent::{Event, Handle, Target};
@@ -440,6 +442,9 @@ struct RunoApp {
     stderr: HashMap<u64, Vec<String>>,
     /// Each session's running turn: its parser, event log, start time and how it stands.
     turns: HashMap<u64, harness::turn::Turn>,
+    /// Turns that just ended on their own, by session: when, and how long they took, for
+    /// the chat's "Worked" row.
+    finished: HashMap<u64, (std::time::Instant, Duration)>,
     search: Entity<InputState>,
     prompt: Entity<TextareaState>,
     new_task: Entity<TextareaState>,
@@ -745,7 +750,8 @@ fn page_settling() -> bool {
 }
 
 /// `with_animation` that is skipped entirely when animations are switched off, and that
-/// starts at its end while a page switch is settling (see `page_settling`).
+/// starts at its end while a page switch is settling (see `page_settling`). Loops in the
+/// main window run on its shared clock (see `motion`) instead of their own.
 trait Animate: IntoElement + Sized + 'static {
     fn animated(
         self,
@@ -753,7 +759,14 @@ trait Animate: IntoElement + Sized + 'static {
         animation: Animation,
         f: impl Fn(Self, f32) -> Self + 'static,
     ) -> AnyElement {
-        if anim_on() {
+        if !animation.oneshot && motion::drawing() {
+            if motion::moving() {
+                let t = (animation.easing)(motion::phase(animation.duration));
+                f(self, t).into_any_element()
+            } else {
+                self.into_any_element()
+            }
+        } else if anim_on() {
             // A one-shot animation drawn during a switch shows its end. Every one-shot
             // `animated` is shorter than the settling time, so by the time settling ends
             // it has run out anyway and stays at its end. Loops (a pulse, a spinner)
@@ -1046,109 +1059,6 @@ fn stagger<E: IntoElement + Styled + 'static>(
             el.opacity(ease_out_cubic(t))
         },
     )
-}
-
-/// "Working" row: a small orbit (a comet circling a breathing core) and the label with
-/// a soft accent glint sweeping across it, then the elapsed time. With animations off
-/// both hold still: the comet rests on the ring and the label is plain.
-fn working_indicator(elapsed: Option<String>) -> impl IntoElement {
-    const BOX: f32 = 16.;
-    const RING: f32 = 6.;
-    // Brighter in dark mode, where the accent alone sits too close to the canvas.
-    let accent = if is_dark() {
-        mix(c_blue(), 0xffffff, 0.6)
-    } else {
-        c_blue()
-    };
-    // Where a point `t` of the way round the orbit sits, as the top-left of a dot of `size`.
-    let at = |t: f32, size: f32| {
-        let a = (t - 0.25) * std::f32::consts::TAU;
-        let c = BOX / 2. - size / 2.;
-        (px(c + RING * a.cos()), px(c + RING * a.sin()))
-    };
-    let mut orbit = div()
-        .relative()
-        .flex_none()
-        .size(px(BOX))
-        .child(
-            div()
-                .absolute()
-                .left(px(BOX / 2. - RING))
-                .top(px(BOX / 2. - RING))
-                .size(px(RING * 2.))
-                .rounded_full()
-                .border_1()
-                .border_color(rgb(mix(accent, c_canvas(), 0.22))),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(BOX / 2. - 2.))
-                .top(px(BOX / 2. - 2.))
-                .size(px(4.))
-                .rounded_full()
-                .bg(rgb(accent))
-                .animated(
-                    "working-core",
-                    Animation::new(Duration::from_millis(1600))
-                        .repeat()
-                        .with_easing(pulsating_between(0.35, 1.)),
-                    |el, t| el.opacity(t),
-                ),
-        );
-    // The comet: a head and a fading tail a few steps behind it.
-    for (i, (lag, size, alpha)) in [(0., 3.5, 1.), (0.07, 2.6, 0.55), (0.14, 1.8, 0.28)]
-        .into_iter()
-        .enumerate()
-    {
-        let (x, y) = at(-lag, size);
-        orbit = orbit.child(
-            div()
-                .absolute()
-                .left(x)
-                .top(y)
-                .size(px(size))
-                .rounded_full()
-                .bg(rgb(accent))
-                .opacity(alpha)
-                .animated(
-                    ("working-comet", i),
-                    Animation::new(Duration::from_millis(1100))
-                        .repeat()
-                        .with_easing(ease_in_out_cubic),
-                    move |el, t| {
-                        let (x, y) = at(t - lag, size);
-                        el.left(x).top(y)
-                    },
-                ),
-        );
-    }
-    // The label, one letter at a time so a glint can pass along it.
-    let word = "Working";
-    let base = c_secondary();
-    let n = word.chars().count() as f32;
-    let mut label = div().flex().items_center();
-    for (i, ch) in word.chars().enumerate() {
-        label = label.child(div().text_color(rgb(base)).child(ch.to_string()).animated(
-            ("working-glint", i),
-            Animation::new(Duration::from_millis(2000)).repeat(),
-            move |el, t| {
-                // The glint travels from before the first letter to past the last one.
-                let pos = t * (n + 6.) - 3.;
-                let near = (1. - (i as f32 - pos).abs() / 2.5).max(0.);
-                el.text_color(rgb(mix(accent, base, near * near)))
-            },
-        ));
-    }
-    div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(orbit)
-        .child(label)
-        .when_some(elapsed, |row, e| {
-            row.child(div().text_color(rgb(c_muted())).child(format!("· {e}")))
-        })
 }
 
 /// Most files listed for a folder that is not a git repository; the Files tab says so
@@ -1718,6 +1628,7 @@ impl RunoApp {
             peek_follow: Default::default(),
             stderr: HashMap::new(),
             turns: HashMap::new(),
+            finished: HashMap::new(),
             search,
             prompt,
             new_task: cx.new(|cx| {
@@ -2544,6 +2455,12 @@ impl RunoApp {
                 }
                 let stopped = turn.as_ref().is_some_and(|t| t.stopping);
                 let took = turn.as_ref().map(|t| t.started.elapsed());
+                self.finished
+                    .retain(|_, (at, _)| at.elapsed() < working::FINISH);
+                let failed = turn.as_ref().is_some_and(|t| t.failed || t.signed_out);
+                if let Some(took) = took.filter(|_| ok && !stopped && !failed) {
+                    self.finished.insert(id, (std::time::Instant::now(), took));
+                }
                 self.handles.remove(&Target::Session(id));
                 self.end_approvals(id);
                 if let Some(start) = turn.as_ref().map(|t| t.started) {
@@ -6038,7 +5955,8 @@ impl RunoApp {
                     ),
             );
         }
-        // While the agent works, the chat ends with what it is doing and for how long.
+        // While the agent works, the chat ends with what it is doing and for how long, and
+        // for a moment after, that it finished.
         if working && !self.pending_start.contains_key(&id) {
             let since = self
                 .turns
@@ -6051,11 +5969,19 @@ impl RunoApp {
                     .items_center()
                     .gap_3()
                     .text_size(px(13.))
-                    .child(working_indicator(since))
+                    .child(working::indicator(working::doing(&session.messages), since))
                     .child(self.arcade_chip(cx)),
             );
+        } else if let Some(done) = self.finished_row(id) {
+            list = list.child(div().text_size(px(13.)).child(done));
         }
         list
+    }
+
+    /// The "Worked" row for a session whose turn just ended, while it shows.
+    fn finished_row(&self, id: u64) -> Option<AnyElement> {
+        let (at, took) = self.finished.get(&id)?;
+        working::finished(*at, *took)
     }
 
     fn menu_button(
@@ -9078,6 +9004,7 @@ impl RunoApp {
 
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        motion::begin(self.window_active, cx);
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| {
             startup::mark("first render");
@@ -9950,7 +9877,13 @@ impl Render for RunoApp {
             .children(self.arcade_view(cx))
             .children(self.tour_view(window, cx))
             .children(self.browser_offer(cx))
-            .children(self.whats_new_view(cx));
+            .children(self.whats_new_view(cx))
+            // Painted last, once everything that moves has asked for motion.
+            .child(
+                canvas(|_, _, _| (), |_, _, window, cx| motion::end(window, cx))
+                    .absolute()
+                    .size_0(),
+            );
         fade(root, "app-root", 450)
     }
 }

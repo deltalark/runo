@@ -119,18 +119,15 @@ impl RunoApp {
                 .size(px(28.))
                 .rounded(px(8.))
                 .bg(accent_wash(0x30));
-            chip = chip.child(if anim_on() {
-                halo.with_animation(
+            chip = chip.child(
+                halo.opacity(0.7).animated(
                     ("crew-glow", pid as usize),
                     Animation::new(Duration::from_millis(1800))
                         .repeat()
                         .with_easing(pulsating_between(0.15, 1.)),
                     |el, d| el.opacity(d),
-                )
-                .into_any_element()
-            } else {
-                halo.opacity(0.7).into_any_element()
-            });
+                ),
+            );
         }
         let chip = chip.child(icon(CREW_ICON, 14., c_blue()));
         div()
