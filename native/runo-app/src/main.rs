@@ -4862,6 +4862,10 @@ impl RunoApp {
                     .copied()
                     .filter(|s| !threads.iter().any(|t| t.id == s.id))
                     .collect();
+                if crew_on && !sessions.is_empty() {
+                    // A hairline closes Crew's block off from the project's own sessions.
+                    rows = rows.child(div().mx_2().my(px(3.)).h(px(1.)).bg(divider()));
+                }
                 let mut raced: Vec<u64> = Vec::new();
                 if sessions.is_empty() && !crew_on {
                     rows = rows.child(
