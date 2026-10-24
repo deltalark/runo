@@ -353,6 +353,7 @@ fn paint_ring(b: Bounds<Pixels>, ring: Ring, accent: u32, green: u32, window: &m
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::prelude::v1::test;
 
     fn agent(text: &str, steps: Vec<ToolStep>) -> Message {
         let mut m = Message::new(Role::Agent, text);

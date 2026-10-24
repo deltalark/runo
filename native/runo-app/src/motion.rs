@@ -140,6 +140,7 @@ fn next_frame(view: EntityId, window: &mut Window, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::prelude::v1::test;
 
     #[test]
     fn phase_wraps_within_a_period() {
