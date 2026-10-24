@@ -61,8 +61,9 @@ impl Parts {
         if fit < Fit::Narrow {
             if self.branch > 0 {
                 let cap = if fit >= Fit::Tight { 96. } else { 160. };
-                items
-                    .push(18. + label(self.branch).min(cap) + if self.worktree { 68. } else { 0. });
+                items.push(
+                    18. + label(self.branch).min(cap) + if self.worktree { 118. } else { 0. },
+                );
             }
             items.extend(self.canvas.map(action));
             items.push(action("Playbooks".len()));
@@ -252,15 +253,33 @@ impl RunoApp {
                                 .child(session.branch.clone()),
                         )
                         .when(isolated, |el| {
+                            // Its size once measured; a click offers to free its build
+                            // output.
+                            let size = self.space.chip_label(&session.dir);
                             el.child(
                                 div()
+                                    .id("session-worktree")
                                     .flex_none()
+                                    .flex()
+                                    .gap(px(4.))
                                     .px(px(6.))
                                     .py(px(1.))
                                     .rounded_sm()
+                                    .cursor_pointer()
                                     .bg(tint(c_subtle()))
+                                    .hover(|el| el.bg(rgb(c_active())))
                                     .text_size(px(11.))
-                                    .child("worktree"),
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        self.on_context(ctxmenu::CtxTarget::Worktree(id), cx),
+                                    )
+                                    .child("worktree")
+                                    .child(div().when(size.is_none(), |el| el.opacity(0.4)).child(
+                                        match size {
+                                            Some(size) => format!("· {size}"),
+                                            None => "· …".into(),
+                                        },
+                                    )),
                             )
                         }),
                 )

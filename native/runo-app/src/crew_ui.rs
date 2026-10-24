@@ -613,6 +613,7 @@ impl RunoApp {
                         info.resolved = true;
                         info.attention = None;
                     }
+                    self.queue_build_clean(thread);
                 }
             }
         }

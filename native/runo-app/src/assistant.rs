@@ -590,6 +590,7 @@ impl RunoApp {
             View::AllSessions => "Sessions",
             View::History => "History",
             View::Worktrees => "Isolated sessions",
+            View::WorktreeSpace => "a project's worktrees and their disk space",
             View::Settings => "Settings",
             View::Notes => "Project notes",
             View::Activity => "Timeline",

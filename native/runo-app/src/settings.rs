@@ -72,6 +72,8 @@ pub struct AppSettings {
     pub notifications: bool,
     pub confirm_delete: bool,
     pub remove_worktree_on_delete: bool,
+    /// Delete a worktree's build output once its thread is done or merged.
+    pub remove_build_output: bool,
     pub send_on_enter: bool,
     pub autoscroll: bool,
     pub default_mode: String,
@@ -239,6 +241,7 @@ impl Default for AppSettings {
             notifications: true,
             confirm_delete: true,
             remove_worktree_on_delete: true,
+            remove_build_output: true,
             send_on_enter: true,
             autoscroll: true,
             default_mode: "edit".into(),
@@ -383,6 +386,7 @@ impl AppSettings {
         NOTIFY.store(self.notifications, Ordering::Relaxed);
         CONFIRM_DELETE.store(self.confirm_delete, Ordering::Relaxed);
         REMOVE_WORKTREE.store(self.remove_worktree_on_delete, Ordering::Relaxed);
+        REMOVE_BUILD_OUTPUT.store(self.remove_build_output, Ordering::Relaxed);
         AUTOSCROLL.store(self.autoscroll, Ordering::Relaxed);
         KEEP_AWAKE.store(self.keep_awake, Ordering::Relaxed);
         crate::mcp::set_shared(&self.mcp_shared);
@@ -462,6 +466,7 @@ static ANIMATIONS: AtomicBool = AtomicBool::new(true);
 static NOTIFY: AtomicBool = AtomicBool::new(false);
 static CONFIRM_DELETE: AtomicBool = AtomicBool::new(true);
 static REMOVE_WORKTREE: AtomicBool = AtomicBool::new(true);
+static REMOVE_BUILD_OUTPUT: AtomicBool = AtomicBool::new(true);
 static AUTOSCROLL: AtomicBool = AtomicBool::new(true);
 static KEEP_AWAKE: AtomicBool = AtomicBool::new(true);
 static COVE_TOOLS: AtomicBool = AtomicBool::new(true);
@@ -571,6 +576,9 @@ pub fn confirm_delete() -> bool {
 }
 pub fn remove_worktree() -> bool {
     REMOVE_WORKTREE.load(Ordering::Relaxed)
+}
+pub fn remove_build_output() -> bool {
+    REMOVE_BUILD_OUTPUT.load(Ordering::Relaxed)
 }
 pub fn autoscroll() -> bool {
     AUTOSCROLL.load(Ordering::Relaxed)

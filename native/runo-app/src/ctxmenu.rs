@@ -23,6 +23,8 @@ pub(crate) enum CtxTarget {
     Header(u64),
     /// The branch chip in the top bar, for a session.
     Branch(u64),
+    /// The worktree chip in a session's header: its size and build output.
+    Worktree(u64),
     /// The terminal panel's Run menu of quick commands.
     Run,
 }
@@ -67,6 +69,12 @@ enum Act {
     /// Show a session's changes in the right panel.
     Changes(u64),
     Worktrees,
+    /// Delete the build output in a session's worktree.
+    FreeBuild(u64),
+    /// A project's worktrees and the space they take.
+    WorktreeSpace(u64),
+    /// A disabled entry.
+    Nothing,
     /// Compact or clear a session's agent conversation.
     Compact(u64),
     ClearContext(u64),
@@ -85,6 +93,7 @@ struct Item {
     glyph: IconName,
     act: Act,
     danger: bool,
+    disabled: bool,
 }
 
 fn item(label: impl Into<String>, glyph: IconName, act: Act) -> Option<Item> {
@@ -93,6 +102,18 @@ fn item(label: impl Into<String>, glyph: IconName, act: Act) -> Option<Item> {
         glyph,
         act,
         danger: false,
+        disabled: false,
+    })
+}
+
+/// Shown greyed out, doing nothing, with why in its label.
+fn disabled(label: impl Into<String>, glyph: IconName) -> Option<Item> {
+    Some(Item {
+        label: label.into(),
+        glyph,
+        act: Act::Nothing,
+        danger: false,
+        disabled: true,
     })
 }
 
@@ -102,6 +123,7 @@ fn danger(label: impl Into<String>, glyph: IconName, act: Act) -> Option<Item> {
         glyph,
         act,
         danger: true,
+        disabled: false,
     })
 }
 
@@ -239,6 +261,11 @@ impl RunoApp {
                         Act::Toggle(*pid),
                     ),
                     item("Edit project…", IconName::Palette, Act::EditProject(*pid)),
+                    item(
+                        "Worktrees and disk space",
+                        IconName::HardDrive,
+                        Act::WorktreeSpace(*pid),
+                    ),
                     item(
                         "Project notes",
                         IconName::NotebookPen,
@@ -401,6 +428,41 @@ impl RunoApp {
                         "Isolated sessions and worktrees",
                         IconName::GitBranch,
                         Act::Worktrees,
+                    ),
+                ]
+            }
+            CtxTarget::Worktree(sid) => {
+                let Some(s) = self.state.session(*sid) else {
+                    return Vec::new();
+                };
+                let free = match (self.space.build_of(&s.dir), self.worktree_busy(&s.dir)) {
+                    (_, Some(why)) => {
+                        disabled(format!("Free build output: {why}"), IconName::Eraser)
+                    }
+                    (None, None) => disabled("Free build output: measuring…", IconName::Eraser),
+                    (Some(0), None) => disabled("No build output to free", IconName::Eraser),
+                    (Some(build), None) => item(
+                        format!("Free build output ({})", crate::cleanup::human(build)),
+                        IconName::Eraser,
+                        Act::FreeBuild(*sid),
+                    ),
+                };
+                vec![
+                    free,
+                    item(
+                        if cfg!(target_os = "macos") {
+                            "Open in Finder"
+                        } else {
+                            "Open in file manager"
+                        },
+                        IconName::FolderOpen,
+                        Act::Reveal(PathBuf::from(&s.dir)),
+                    ),
+                    None,
+                    item(
+                        "Worktrees and disk space",
+                        IconName::HardDrive,
+                        Act::WorktreeSpace(s.project_id),
                     ),
                 ]
             }
@@ -691,6 +753,9 @@ impl RunoApp {
                 self.save();
             }
             Act::Worktrees => self.view = View::Worktrees,
+            Act::FreeBuild(id) => self.free_session_build(id),
+            Act::WorktreeSpace(pid) => self.open_worktree_space(pid),
+            Act::Nothing => {}
             Act::Task(name, command) => self.run_task(name, command, cx),
             Act::QuickCommands => {
                 self.open_settings();
@@ -763,40 +828,56 @@ impl RunoApp {
                 list = list.child(div().my_1().mx_2().h(px(1.)).bg(divider()));
                 continue;
             };
-            let color = if entry.danger { c_red() } else { c_text() };
+            let color = if entry.disabled {
+                c_muted()
+            } else if entry.danger {
+                c_red()
+            } else {
+                c_text()
+            };
             let act = entry.act.clone();
+            let off = entry.disabled;
             let picked = self.ctx_index == Some(i);
-            list =
-                list.child(
-                    div()
-                        .id(("ctx-item", i))
-                        .h(px(28.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_size(px(13.))
-                        .text_color(rgb(color))
-                        .when(picked, |el| el.bg(rgb(c_active())))
-                        .hover(|el| {
+            list = list.child(
+                div()
+                    .id(("ctx-item", i))
+                    .h(px(28.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .when(!off, |el| el.cursor_pointer())
+                    .text_size(px(13.))
+                    .text_color(rgb(color))
+                    .when(picked && !off, |el| el.bg(rgb(c_active())))
+                    .when(!off, |el| {
+                        el.hover(|el| {
                             el.bg(rgb(if entry.danger {
                                 settings::mix(c_red(), c_raised(), 0.14)
                             } else {
                                 c_active()
                             }))
                         })
-                        .on_click(cx.listener(move |this, _, window, cx| {
+                    })
+                    .when(!off, |el| {
+                        el.on_click(cx.listener(move |this, _, window, cx| {
                             this.run_ctx(act.clone(), window, cx)
                         }))
-                        .child(icon(
-                            entry.glyph,
-                            14.,
-                            if entry.danger { c_red() } else { c_secondary() },
-                        ))
-                        .child(entry.label),
-                );
+                    })
+                    .child(icon(
+                        entry.glyph,
+                        14.,
+                        if off {
+                            c_muted()
+                        } else if entry.danger {
+                            c_red()
+                        } else {
+                            c_secondary()
+                        },
+                    ))
+                    .child(entry.label),
+            );
         }
         let menu = div()
             .id("ctx-menu")
