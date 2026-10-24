@@ -864,7 +864,7 @@ impl RunoApp {
         id: u64,
         thread: u64,
         text: String,
-        opts: &crate::agent::AgentOptions,
+        opts: &AgentOptions,
     ) {
         let before = self.state.session(id).map_or(0, |s| s.messages.len());
         self.start_turn(id, text.clone(), Vec::new(), opts);
