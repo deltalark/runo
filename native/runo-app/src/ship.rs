@@ -61,6 +61,8 @@ pub(crate) struct Deferred {
     pub opts: AgentOptions,
     /// Playbook name and note to tag the message with once it is sent.
     pub tag: Option<(String, String)>,
+    /// A thread's message to Crew: the thread that sent it.
+    pub from_thread: Option<u64>,
 }
 
 /// What `refresh` reads from git for the selected session.
@@ -475,9 +477,14 @@ impl RunoApp {
                     let busy = self.turn_running(id) || self.pending_start.contains_key(&id);
                     if busy {
                         if let Some(s) = self.state.session_mut(id) {
-                            s.queue
-                                .push(crate::store::Queued::new(turn.prompt, turn.images));
+                            let mut queued = crate::store::Queued::new(turn.prompt, turn.images);
+                            queued.from_thread = turn.from_thread;
+                            s.queue.push(queued);
                         }
+                        continue;
+                    }
+                    if let Some(thread) = turn.from_thread {
+                        self.start_from_thread(id, thread, turn.prompt, &turn.opts);
                         continue;
                     }
                     self.start_turn(id, turn.prompt, turn.images, &turn.opts);

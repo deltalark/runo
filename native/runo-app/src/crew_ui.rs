@@ -807,8 +807,8 @@ impl RunoApp {
             let chat = self.crew_chat(pid).map(|c| c.id);
             match (&event.kind, chat) {
                 (crew::EventKind::Message { text }, Some(chat)) => {
-                    let text = format!("Thread #{} ({title}) says: {text}", event.thread);
-                    self.wake_crew(chat, &title, text, cx);
+                    let text = crew::wake_text(event.thread, &title, text);
+                    self.wake_crew(chat, event.thread, text, cx);
                 }
                 (crew::EventKind::Decision(d), Some(chat)) if changed => {
                     self.crew_note(
@@ -842,8 +842,9 @@ impl RunoApp {
     }
 
     /// Give Crew a turn of its own to answer a thread, up to `crew::MAX_WAKES` between two
-    /// messages from the person; past that the message waits for the person's next one.
-    fn wake_crew(&mut self, chat: u64, from: &str, text: String, cx: &mut Context<Self>) {
+    /// messages from the person. Past that the message goes into the context of the
+    /// person's next message, which stays theirs and is drawn as typed.
+    fn wake_crew(&mut self, chat: u64, thread: u64, text: String, cx: &mut Context<Self>) {
         let wakes = self.crew.wakes.entry(chat).or_default();
         if *wakes >= crew::MAX_WAKES {
             self.crew.inbox.entry(chat).or_default().push(text);
@@ -854,11 +855,48 @@ impl RunoApp {
             return;
         };
         let opts = cx.global::<AppSettings>().agent(&provider);
-        let before = self.state.session(chat).map_or(0, |s| s.messages.len());
-        self.start_turn(chat, text, Vec::new(), &opts);
-        if self.state.session(chat).map_or(0, |s| s.messages.len()) > before {
-            self.tag_playbook(chat, &format!("From {from}"), "");
+        self.start_from_thread(chat, thread, text, &opts);
+    }
+
+    /// Start a turn with a thread's message, marking it with the thread wherever it lands:
+    /// the conversation, the queue, or a turn waiting for its worktree.
+    pub(crate) fn start_from_thread(
+        &mut self,
+        id: u64,
+        thread: u64,
+        text: String,
+        opts: &AgentOptions,
+    ) {
+        let before = self.state.session(id).map_or(0, |s| s.messages.len());
+        self.start_turn(id, text.clone(), Vec::new(), opts);
+        if let Some(turn) = self.preparing.get_mut(&id).and_then(|w| w.last_mut()) {
+            turn.from_thread = Some(thread);
+        } else if let Some(s) = self.state.session_mut(id) {
+            mark_from_thread(s, before, &text, thread);
         }
+        self.save();
+    }
+}
+
+/// Mark what a thread's message to Crew became, given the conversation was `before`
+/// messages long when it was sent: the user message it added, or else the queued prompt
+/// holding it.
+pub(crate) fn mark_from_thread(session: &mut Session, before: usize, text: &str, thread: u64) {
+    if session.messages.len() > before {
+        if let Some(m) = session.messages[before..]
+            .iter_mut()
+            .rev()
+            .find(|m| m.role == Role::User)
+        {
+            m.from_thread = Some(thread);
+        }
+    } else if let Some(q) = session
+        .queue
+        .iter_mut()
+        .rev()
+        .find(|q| q.text == text && q.from_thread.is_none())
+    {
+        q.from_thread = Some(thread);
     }
 }
 
@@ -889,4 +927,41 @@ fn thread_model(provider: &str, picked: &str) -> Option<String> {
         );
     }
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Queued;
+    use std::prelude::v1::test;
+
+    #[test]
+    fn a_wake_marks_its_message_with_the_thread_not_a_playbook() {
+        let mut chat = Session::default();
+        chat.messages
+            .push(Message::new(Role::User, "Plan the release"));
+        let before = chat.messages.len();
+        let text = crew::wake_text(41, "Refine Arcade: pro + fun", "Ready for review.");
+        chat.messages.push(Message::new(Role::User, text.clone()));
+        mark_from_thread(&mut chat, before, &text, 41);
+        let m = chat.messages.last().unwrap();
+        assert_eq!(m.from_thread, Some(41));
+        assert!(m.playbook.is_empty());
+        assert_eq!(m.thread_origin(|_| false), Some(41));
+        assert_eq!(chat.messages[0].from_thread, None);
+    }
+
+    #[test]
+    fn a_wake_that_waits_in_the_queue_keeps_its_thread() {
+        let mut chat = Session::default();
+        chat.queue.push(Queued::new("Ship it", Vec::new()));
+        let text = crew::wake_text(9, "Docs", "Done.");
+        chat.queue.push(Queued::new(text.clone(), Vec::new()));
+        mark_from_thread(&mut chat, 0, &text, 9);
+        assert_eq!(chat.queue[0].from_thread, None);
+        assert_eq!(chat.queue[1].from_thread, Some(9));
+        // Saved queues from before still load.
+        let old: Queued = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
+        assert_eq!(old.from_thread, None);
+    }
 }

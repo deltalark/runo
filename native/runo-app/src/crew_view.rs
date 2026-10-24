@@ -313,6 +313,138 @@ impl RunoApp {
             .into_any_element()
     }
 
+    /// A thread's message to Crew, where the person's own messages go: "From", the
+    /// thread's number and title as a link to it, and its status, with the first line of
+    /// what it said below. A click on the chip shows the whole message as `body`.
+    pub(crate) fn thread_message(
+        &self,
+        index: usize,
+        thread: u64,
+        said: &str,
+        body: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = (self.selected.unwrap_or(0), index);
+        let open = body.is_some();
+        let found = self.state.session(thread);
+        let title = found
+            .map(|t| crew::shown_title(&t.title))
+            .unwrap_or_default();
+        let link = div()
+            .id(("wake-link", index))
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .text_size(px(13.))
+            .child(
+                div()
+                    .flex_none()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(format!("#{thread}")),
+            )
+            .when(!title.is_empty(), |el| {
+                el.child(div().truncate().child(title))
+            })
+            .map(|el| match found {
+                Some(_) => el
+                    .text_color(rgb(c_blue()))
+                    .cursor_pointer()
+                    .hover(|el| el.underline())
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("Open this thread")
+                            .build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.open_thread_ref(thread, event.modifiers().platform);
+                        cx.notify();
+                    })),
+                None => el
+                    .text_color(rgb(c_muted()))
+                    .child(div().flex_none().text_size(px(11.5)).child("deleted")),
+            });
+        let status = found.map(|t| thread_status(self.thread_working(thread), t));
+        let preview = said.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        div()
+            .max_w(px(560.))
+            .min_w(px(220.))
+            .v_flex()
+            .rounded(px(14.))
+            .border_1()
+            .border_color(rgb(c_border()))
+            .bg(tint(c_raised()))
+            .overflow_hidden()
+            .child(
+                div()
+                    .id(("wake-head", index))
+                    .px_3()
+                    .py(px(8.))
+                    .v_flex()
+                    .gap(px(2.))
+                    .cursor_pointer()
+                    .hover(|el| el.bg(tint(c_active())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.open_wakes.remove(&key) {
+                            this.open_wakes.insert(key);
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(icon(IconName::MessagesSquare, 13., c_muted()))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(c_muted()))
+                                    .child("From"),
+                            )
+                            .child(link)
+                            .when_some(status, |el, status| {
+                                el.child(self.thread_glyph(thread, status, "wake"))
+                            })
+                            .child(div().flex_1())
+                            .child(icon(
+                                if open {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                },
+                                12.,
+                                c_muted(),
+                            )),
+                    )
+                    .when(!open && !preview.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .pl(px(21.))
+                                .truncate()
+                                .text_size(px(12.5))
+                                .text_color(rgb(c_muted()))
+                                .child(preview.trim().to_string()),
+                        )
+                    }),
+            )
+            .when_some(body, |el, body| {
+                el.child(
+                    div()
+                        .px(px(14.))
+                        .py(px(10.))
+                        .border_t_1()
+                        .border_color(divider())
+                        .text_size(px(13.5))
+                        .text_color(rgb(c_text()))
+                        .whitespace_normal()
+                        .child(body),
+                )
+            })
+            .into_any_element()
+    }
+
     /// The glyph before a thread's title: a check once done, the working pulse, or a dot
     /// in its status colour.
     pub(crate) fn thread_glyph(&self, thread: u64, status: &str, key: &str) -> AnyElement {
