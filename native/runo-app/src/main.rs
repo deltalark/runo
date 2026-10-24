@@ -590,6 +590,8 @@ struct RunoApp {
     turn_files: HashMap<u64, usize>,
     /// Sessions whose checks are running after their last turn.
     proving: std::collections::HashSet<u64>,
+    /// Post-turn checks taking turns, when they run in the background one at a time.
+    check_queue: crate::proof::CheckQueue,
     /// Sessions waiting on a second opinion, with the agent giving it.
     reviewing: HashMap<u64, &'static str>,
     /// Crew's chats and threads while the app runs.
@@ -1778,6 +1780,7 @@ impl RunoApp {
             header_width: std::rc::Rc::new(std::cell::Cell::new(f32::INFINITY)),
             turn_files: HashMap::new(),
             proving: Default::default(),
+            check_queue: Default::default(),
             reviewing: HashMap::new(),
             crew: Default::default(),
             attachments: HashMap::new(),
@@ -2918,6 +2921,7 @@ impl RunoApp {
 
     /// Stop a session's agent, and everything it started.
     pub(crate) fn stop_session(&mut self, id: u64) {
+        self.cancel_checks(id);
         if let Some(handle) = self.handles.get(&Target::Session(id)) {
             if let Some(turn) = self.turns.get_mut(&id) {
                 turn.stopping = true;
@@ -4090,6 +4094,7 @@ impl RunoApp {
     }
 
     fn delete_session(&mut self, id: u64) {
+        self.cancel_checks(id);
         if let Some(handle) = self.handles.remove(&Target::Session(id)) {
             handle.kill();
         }

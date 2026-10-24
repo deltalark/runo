@@ -1,9 +1,11 @@
 //! Proof of done: the project's checks run after each turn that changed files, a red
 //! result goes back to the agent, and an agent from another vendor reviews the change.
 
+use std::collections::VecDeque;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -132,23 +134,155 @@ pub fn detect(dir: &Path) -> Vec<String> {
     out
 }
 
-/// Run each check in turn in `dir`. Every check runs, so one card shows all that failed.
-pub fn run_all(dir: &str, commands: &[String], limit: Duration) -> Vec<CheckRun> {
-    commands.iter().map(|c| run_one(dir, c, limit)).collect()
+/// Post-turn check sets, one at a time across every session and project. The rest wait
+/// in order; the time limit only starts once a set leaves the queue.
+#[derive(Default, Debug)]
+pub struct CheckQueue {
+    running: Option<u64>,
+    /// Sessions waiting, first in line first, each with whether its turn just finished.
+    waiting: VecDeque<(u64, bool)>,
 }
 
-fn run_one(dir: &str, command: &str, limit: Duration) -> CheckRun {
-    let started = Instant::now();
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", command]);
-        c
+impl CheckQueue {
+    /// Line up a session's checks. True when they may start now.
+    pub fn join(&mut self, id: u64, auto: bool) -> bool {
+        if self.running.is_none() {
+            self.running = Some(id);
+            return true;
+        }
+        if self.running != Some(id) && !self.is_waiting(id) {
+            self.waiting.push_back((id, auto));
+        }
+        false
+    }
+
+    /// The session's running checks finished: the next in line, now running.
+    pub fn done(&mut self, id: u64) -> Option<(u64, bool)> {
+        if self.running != Some(id) {
+            return None;
+        }
+        let next = self.waiting.pop_front();
+        self.running = next.map(|(id, _)| id);
+        next
+    }
+
+    /// Take a waiting session out of the line. True when it was waiting.
+    pub fn drop_waiting(&mut self, id: u64) -> bool {
+        let before = self.waiting.len();
+        self.waiting.retain(|(w, _)| *w != id);
+        self.waiting.len() != before
+    }
+
+    pub fn is_waiting(&self, id: u64) -> bool {
+        self.waiting.iter().any(|(w, _)| *w == id)
+    }
+}
+
+/// Windows' priority class for checks; processes they start inherit it.
+#[cfg_attr(not(windows), allow(dead_code))]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+/// The programs that run a check at low CPU and disk priority on this OS, found by `find`
+/// (a usable path, or `None` when the tool is missing). Children inherit the priority.
+fn low_prefix(mut find: impl FnMut(&str, &[&str]) -> Option<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    if cfg!(target_os = "macos") {
+        // Background QoS: low CPU, disk and network priority.
+        if let Some(tp) = find("taskpolicy", &["-b"]) {
+            out.extend([tp, "-b".into()]);
+        }
+    } else if cfg!(unix) {
+        if let Some(ionice) = find("ionice", &["-c", "3"]) {
+            out.extend([ionice, "-c".into(), "3".into()]);
+        }
+        if let Some(nice) = find("nice", &["-n", "10"]) {
+            out.extend([nice, "-n".into(), "10".into()]);
+        }
+    }
+    out
+}
+
+/// The program and arguments that run `command`, after `prefix`.
+fn check_argv(command: &str, prefix: &[String]) -> Vec<String> {
+    let mut out = prefix.to_vec();
+    if cfg!(windows) {
+        out.extend(["cmd".into(), "/C".into(), command.into()]);
     } else {
         // One pipe for both streams keeps errors next to what led to them.
-        let mut c = Command::new("sh");
-        c.args(["-c", &format!("exec 2>&1\n{command}")]);
-        c
-    };
+        out.extend(["sh".into(), "-c".into(), format!("exec 2>&1\n{command}")]);
+    }
+    out
+}
+
+/// A priority tool that is on this computer and works here (a container may refuse
+/// `ionice`), tried once with `true`.
+fn working_tool(name: &str, args: &[&str]) -> Option<String> {
+    let dirs = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let fixed = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"].map(std::path::PathBuf::from);
+    let path = dirs
+        .into_iter()
+        .chain(fixed)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())?;
+    let ok = Command::new(&path)
+        .args(args)
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    ok.then(|| path.to_string_lossy().into_owned())
+}
+
+/// The low-priority prefix for this computer, looked up once. A missing tool is noted
+/// once in the log and its checks run at normal priority.
+fn low_prefix_here() -> &'static [String] {
+    static PREFIX: OnceLock<Vec<String>> = OnceLock::new();
+    PREFIX.get_or_init(|| {
+        let mut missing = Vec::new();
+        let prefix = low_prefix(|name, args| {
+            let found = working_tool(name, args);
+            if found.is_none() {
+                missing.push(name.to_string());
+            }
+            found
+        });
+        if !missing.is_empty() {
+            crate::applog::info(
+                "proof",
+                format!(
+                    "{} isn't available, so checks run without it at normal priority",
+                    missing.join(" and ")
+                ),
+            );
+        }
+        prefix
+    })
+}
+
+/// Run each check in turn in `dir`. Every check runs, so one card shows all that failed.
+/// `low` runs them at low CPU and disk priority, with everything they start.
+pub fn run_all(dir: &str, commands: &[String], limit: Duration, low: bool) -> Vec<CheckRun> {
+    commands
+        .iter()
+        .map(|c| run_one(dir, c, limit, low))
+        .collect()
+}
+
+fn run_one(dir: &str, command: &str, limit: Duration, low: bool) -> CheckRun {
+    let started = Instant::now();
+    let prefix = if low { low_prefix_here() } else { &[] };
+    let argv = check_argv(command, prefix);
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    #[cfg(windows)]
+    if low {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+    }
     cmd.current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -437,6 +571,7 @@ mod tests {
             tree.to_str().unwrap(),
             &["cargo build --offline".into()],
             Duration::from_secs(120),
+            false,
         );
         assert!(runs[0].ok, "{}", runs[0].tail);
         assert!(!tree.join("target").exists());
@@ -541,14 +676,143 @@ mod tests {
             &d,
             &["echo fine".into(), "echo broke >&2; exit 3".into()],
             Duration::from_secs(20),
+            false,
         );
         assert!(runs[0].ok);
         assert_eq!(runs[0].tail, "fine");
         assert!(!runs[1].ok);
         assert_eq!(runs[1].tail, "broke");
-        let timed = run_one(&d, "sleep 5", Duration::from_millis(300));
+        let timed = run_one(&d, "sleep 5", Duration::from_millis(300), true);
         assert!(!timed.ok && timed.timed_out);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checks_wait_their_turn_in_order() {
+        let mut q = CheckQueue::default();
+        assert!(q.join(1, true));
+        assert!(!q.join(2, true));
+        assert!(!q.join(3, false));
+        // Asking again while waiting or running keeps its place.
+        assert!(!q.join(2, false));
+        assert!(!q.join(1, true));
+        assert!(q.is_waiting(2) && q.is_waiting(3) && !q.is_waiting(1));
+        // Only the running set's end moves the line on.
+        assert_eq!(q.done(3), None);
+        assert_eq!(q.done(1), Some((2, true)));
+        assert!(!q.is_waiting(2));
+        assert_eq!(q.done(2), Some((3, false)));
+        assert_eq!(q.done(3), None);
+        assert!(q.join(4, true));
+    }
+
+    #[test]
+    fn a_cancelled_session_leaves_the_line() {
+        let mut q = CheckQueue::default();
+        q.join(1, true);
+        q.join(2, true);
+        q.join(3, true);
+        assert!(q.drop_waiting(2));
+        assert!(!q.drop_waiting(2));
+        // The running set isn't dropped; it finishes and hands on.
+        assert!(!q.drop_waiting(1));
+        assert_eq!(q.done(1), Some((3, true)));
+        assert_eq!(q.done(3), None);
+    }
+
+    /// The limit is each check's own, counted from when it starts: two checks that each
+    /// take most of it both pass, though together they take longer than it.
+    #[cfg(unix)]
+    #[test]
+    fn the_time_limit_starts_when_the_check_starts() {
+        let dir = temp("limit");
+        let d = dir.to_string_lossy().to_string();
+        let limit = Duration::from_millis(1500);
+        // Time spent waiting in the queue before the run doesn't count either.
+        let mut q = CheckQueue::default();
+        q.join(1, true);
+        q.join(2, true);
+        std::thread::sleep(Duration::from_millis(1600));
+        assert_eq!(q.done(1), Some((2, true)));
+        let runs = run_all(&d, &["sleep 1".into(), "sleep 1".into()], limit, true);
+        assert!(runs.iter().all(|r| r.ok && !r.timed_out), "{runs:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checks_run_normally_without_a_priority_tool() {
+        let argv = check_argv("make test", &low_prefix(|_, _| None));
+        if cfg!(windows) {
+            assert_eq!(argv, ["cmd", "/C", "make test"]);
+        } else {
+            assert_eq!(argv, ["sh", "-c", "exec 2>&1\nmake test"]);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_checks_run_with_background_priority() {
+        let prefix = low_prefix(|name, _| Some(format!("/usr/sbin/{name}")));
+        assert_eq!(
+            check_argv("npm test", &prefix),
+            [
+                "/usr/sbin/taskpolicy",
+                "-b",
+                "sh",
+                "-c",
+                "exec 2>&1\nnpm test"
+            ]
+        );
+        // What the check starts runs in the background band too (priority 4).
+        let dir = temp("mac-low");
+        let run = run_one(
+            &dir.to_string_lossy(),
+            "sh -c 'ps -o pri= -p $$'",
+            Duration::from_secs(20),
+            true,
+        );
+        assert_eq!(run.tail.trim(), "4", "{run:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_checks_run_niced_and_idle_for_disk() {
+        let prefix = low_prefix(|name, _| Some(format!("/usr/bin/{name}")));
+        assert_eq!(
+            check_argv("go test ./...", &prefix),
+            [
+                "/usr/bin/ionice",
+                "-c",
+                "3",
+                "/usr/bin/nice",
+                "-n",
+                "10",
+                "sh",
+                "-c",
+                "exec 2>&1\ngo test ./..."
+            ]
+        );
+        // Without ionice, nice alone.
+        let prefix = low_prefix(|name, _| (name == "nice").then(|| "nice".to_string()));
+        assert_eq!(prefix, ["nice", "-n", "10"]);
+        // What the check starts inherits the niceness.
+        let dir = temp("linux-low");
+        let run = run_one(
+            &dir.to_string_lossy(),
+            "sh -c nice",
+            Duration::from_secs(20),
+            true,
+        );
+        assert_eq!(run.tail.trim(), "10", "{run:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_checks_start_below_normal() {
+        assert!(low_prefix(|_, _| Some("x".into())).is_empty());
+        assert_eq!(BELOW_NORMAL_PRIORITY_CLASS, 0x4000);
     }
 
     #[test]
