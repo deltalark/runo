@@ -2012,6 +2012,8 @@ impl RunoApp {
         cx.on_app_quit(|this, _| {
             this.browser = None;
             this.before_quit();
+            // Events still on their way to the turn logs.
+            harness::log::drain();
             async {}
         })
         .detach();
