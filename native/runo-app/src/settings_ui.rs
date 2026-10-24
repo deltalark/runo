@@ -805,6 +805,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 switch_row("Keep the computer awake", "Hold off sleep while any agent is running (caffeinate on macOS, systemd-inhibit on Linux).", st.keep_awake, |s, v| s.keep_awake = v),
                 switch_row("Group sidebar by status", "Show Needs you, Running, Ready to review and Done groups instead of projects.", st.group_by_status, |s, v| s.group_by_status = v),
                 switch_row("Show deleted threads", "Keep a line in Crew's chat where a thread you deleted was.", st.show_deleted_threads, |s, v| s.show_deleted_threads = v),
+                switch_row("Thread titles beside numbers", "In Crew's chat, #34 shows the thread's title next to it. The number alone still opens the thread, and shows its title on hover.", st.thread_ref_titles, |s, v| s.thread_ref_titles = v),
             ]),
             section("Rail", "Pin places out on the rail so they're one click away. The rest stay in its ⋯ menu.", vec![
                 switch_row("Playbooks", "Saved tasks you run in any project.", st.pinned("Playbooks"), |s, v| s.pin("Playbooks", v)),

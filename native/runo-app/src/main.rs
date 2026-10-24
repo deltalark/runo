@@ -97,6 +97,7 @@ mod store;
 mod stream;
 mod terminal;
 mod themes;
+mod thread_refs;
 mod timemachine;
 mod tour;
 mod turns;
@@ -5228,12 +5229,19 @@ impl RunoApp {
                 |el, delta| el.opacity(delta).mt(px((1.0 - delta) * 6.0)),
             )
         };
+        // In Crew's chat, thread numbers such as "#34" open their thread.
+        let links = self.thread_links(cx);
         let markdown = |text: String| {
+            let text = match &links {
+                Some(links) => links.link(&text),
+                None => text,
+            };
             TextView::markdown(
                 SharedString::from(format!("body-{}-{}", self.selected.unwrap_or(0), index)),
                 text,
             )
             .selectable(true)
+            .when_some(links.clone(), |view, links| view.plugin(links))
         };
         if message.role == Role::User {
             let sid = self.selected.unwrap_or(0);

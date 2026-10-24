@@ -86,6 +86,8 @@ pub struct AppSettings {
     pub group_by_status: bool,
     /// Crew's chat keeps a line for each thread that was deleted.
     pub show_deleted_threads: bool,
+    /// A thread number in Crew's chat, such as "#34", shows the thread's title beside it.
+    pub thread_ref_titles: bool,
     /// Places pinned out on the rail beside the main ones, by label, such as "Notes".
     pub rail_pins: Vec<String>,
     /// Translucent window over a blurred desktop: "off", "subtle", "frosted" or "clear".
@@ -239,6 +241,7 @@ impl Default for AppSettings {
                 .into(),
             group_by_status: false,
             show_deleted_threads: false,
+            thread_ref_titles: true,
             rail_pins: Vec::new(),
             glass: "off".into(),
             glass_cards: true,

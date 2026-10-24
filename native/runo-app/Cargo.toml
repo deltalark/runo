@@ -100,3 +100,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKWebView",
     "WKWebViewConfiguration",
 ] }
+
+[dev-dependencies]
+# Parses Markdown as TextView does, to check the links thread_refs writes.
+markdown = "1.0.0"

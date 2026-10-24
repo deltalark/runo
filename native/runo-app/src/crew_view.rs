@@ -68,7 +68,7 @@ impl RunoApp {
             .collect()
     }
 
-    fn thread_working(&self, id: u64) -> bool {
+    pub(crate) fn thread_working(&self, id: u64) -> bool {
         self.handles.contains_key(&Target::Session(id))
     }
 
