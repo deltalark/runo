@@ -357,6 +357,8 @@ impl RunoApp {
     ) {
         let tx = self.ui_tx.clone();
         std::thread::spawn(move || {
+            // Background work runs git and other programs, with the login shell's PATH.
+            crate::shellenv::ready();
             let result = work();
             let _ = tx.send(Box::new(
                 move |this: &mut RunoApp, cx: &mut Context<RunoApp>| done(this, result, cx),

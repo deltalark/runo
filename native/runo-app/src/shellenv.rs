@@ -11,7 +11,8 @@
 //! and leaving out what only makes sense inside that shell.
 
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Mutex, Once, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Where each folder on the PATH came from, for Settings.
@@ -30,21 +31,63 @@ static FOUND: RwLock<Vec<(PathBuf, Source)>> = RwLock::new(Vec::new());
 /// The login shell's variables, as it had them, for forwarding to connections.
 static LOGIN_ENV: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
 
+/// Variables as `name, value` pairs.
+type Vars = Vec<(String, String)>;
+
+/// The login shell `start` asked, until `ready` takes its answer.
+static PENDING: Mutex<Option<JoinHandle<Vars>>> = Mutex::new(None);
+
+/// Set once `ready` has put the answer from `start` in the environment.
+static APPLIED: Once = Once::new();
+
 /// Build the full PATH and put it in this process's environment. Call before any thread
 /// starts; Settings > Providers > Re-detect calls it again.
 pub fn init() {
+    // An answer from `start` still on its way is older than the one asked for now.
+    ready();
+    apply(ask_shell());
+}
+
+/// Ask the login shell for its environment on a thread, so the window can open while
+/// the person's profile runs (often most of a second); `ready` waits for the answer.
+pub fn start() {
+    let shell = std::thread::spawn(ask_shell);
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some(shell);
+    }
+}
+
+/// Wait for the login shell `start` asked, and put its PATH and variables in this
+/// process's environment. Whatever starts agents, terminals or other programs calls this
+/// first; after the first call it returns at once.
+pub fn ready() {
+    APPLIED.call_once(|| {
+        let pending = PENDING.lock().ok().and_then(|mut p| p.take());
+        if let Some(shell) = pending {
+            apply(shell.join().unwrap_or_default());
+        }
+    });
+}
+
+/// The login shell's environment, or none where it isn't asked.
+fn ask_shell() -> Vec<(String, String)> {
+    if cfg!(windows) || std::env::var_os("RUNO_NO_SHELL_PATH").is_some() {
+        Vec::new()
+    } else {
+        login_shell_env(Duration::from_secs(4)).unwrap_or_default()
+    }
+}
+
+/// Put the shell's variables and the merged PATH in this process's environment.
+fn apply(env: Vec<(String, String)>) {
     let home = home();
     let inherited: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    let env = if cfg!(windows) || std::env::var_os("RUNO_NO_SHELL_PATH").is_some() {
-        Vec::new()
-    } else {
-        login_shell_env(Duration::from_secs(4)).unwrap_or_default()
-    };
     let shell = env_path(&env).unwrap_or_default();
+    // At startup nothing has started a program yet (see `ready`); on Re-detect the
+    // change is what we want children to see.
     for (key, value) in importable(&env, |k| std::env::var_os(k).is_some()) {
-        // Single-threaded at startup, like PATH below.
         std::env::set_var(key, value);
     }
     if let Ok(mut vars) = LOGIN_ENV.write() {
@@ -53,7 +96,6 @@ pub fn init() {
     let known = known_dirs(&home);
     let merged = merge(&shell, &inherited, &known);
     if let Ok(joined) = std::env::join_paths(merged.iter().map(|(p, _)| p)) {
-        // Single-threaded at startup; on Re-detect the change is what we want children to see.
         std::env::set_var("PATH", joined);
     }
     if let Ok(mut found) = FOUND.write() {

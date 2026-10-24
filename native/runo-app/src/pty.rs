@@ -200,6 +200,7 @@ impl Shell {
         program: Option<Program>,
         wake: impl Fn(u64) + Send + 'static,
     ) -> Result<Self, String> {
+        crate::shellenv::ready();
         let (rows, cols) = (rows.max(2), cols.max(10));
         let pair = native_pty_system()
             .openpty(PtySize {

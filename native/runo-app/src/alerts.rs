@@ -634,6 +634,7 @@ impl RunoApp {
         self.update_checked = Some(std::time::Instant::now());
         let tx = self.tx.clone();
         std::thread::spawn(move || {
+            crate::shellenv::ready();
             // Discovery runs at start; give it a moment to read installed versions.
             let start = std::time::Instant::now();
             let ready = || {

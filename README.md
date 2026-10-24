@@ -333,7 +333,7 @@ On Linux the same command makes a `.deb`, and on Windows the icon is built into 
 
 ### Where Runo keeps its data
 
-Projects are stored in `~/.runo/state.json`, each session in its own file under `~/.runo/sessions`, and settings in `~/.runo/settings.json`. A log for each launch and any crash reports are in `~/.runo/logs`; after a crash, Runo offers to show or report it on the next start. Set `RUNO_HOME` to move them all.
+Projects are stored in `~/.runo/state.json`, each session in its own file under `~/.runo/sessions`, and settings in `~/.runo/settings.json`. A log for each launch and any crash reports are in `~/.runo/logs`; after a crash, Runo offers to show or report it on the next start. Set `RUNO_HOME` to move them all. Start Runo with `RUNO_TRACE_STARTUP=1` to write how long each step of starting up took to that launch's log.
 
 ## Connections: run anywhere
 

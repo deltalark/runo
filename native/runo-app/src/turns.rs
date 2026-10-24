@@ -38,6 +38,9 @@ impl RunoApp {
         images: Vec<String>,
         opts: &AgentOptions,
     ) {
+        // The agent is found on the login shell's PATH; in the first moment after launch
+        // that may still be on its way.
+        crate::shellenv::ready();
         // Whatever goes to a Crew thread next answers the decision it waits on: a choice,
         // a reply typed in the thread, or a message from Crew.
         if let Some(info) = self.state.session_mut(id).and_then(|s| s.crew.as_mut()) {

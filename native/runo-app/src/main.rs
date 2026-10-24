@@ -94,6 +94,7 @@ mod shell;
 mod shellenv;
 mod ship;
 mod signin;
+mod startup;
 mod store;
 mod stream;
 mod terminal;
@@ -1250,6 +1251,7 @@ impl RunoApp {
         caps::refresh();
         // Find MCP servers in every app's config, so shared ones reach the first run.
         std::thread::spawn(|| {
+            shellenv::ready();
             settings::discover(None);
         });
         let (tx, rx) = channel::<Event>();
@@ -1364,7 +1366,9 @@ impl RunoApp {
         })
         .detach();
 
+        startup::mark("RunoApp::new begins");
         let state = State::load();
+        startup::mark("store opened");
         let selected = state.sessions.first().map(|s| s.id);
 
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter sessions"));
@@ -2143,12 +2147,25 @@ impl RunoApp {
         if let Some(id) = app.selected.filter(|id| !app.tabs.contains(id)) {
             app.tabs.push(id);
         }
-        app.resume_remote_turns();
         app.resume_local_turns();
-        app.send_waiting_queues(cx);
         app.refresh();
+        // Turns on connections and queued messages start programs, so they wait for the
+        // login shell's PATH, off the UI thread, while the window shows what was saved.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async { shellenv::ready() })
+                .await;
+            startup::mark("login shell environment");
+            let _ = this.update(cx, |this, cx| {
+                this.resume_remote_turns();
+                this.send_waiting_queues(cx);
+                cx.notify();
+            });
+        })
+        .detach();
         app.jump_to_bottom();
         window.focus(&app.focus, cx);
+        startup::mark("RunoApp built");
         app
     }
 
@@ -8940,6 +8957,20 @@ impl RunoApp {
 
 impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| {
+            startup::mark("first render");
+            window.on_next_frame(|_, cx| {
+                startup::mark("first frame painted");
+                cx.spawn(async |cx| {
+                    startup::mark("responsive");
+                    if startup::exit_when_ready() {
+                        cx.update(|cx| cx.quit());
+                    }
+                })
+                .detach();
+            });
+        });
         self.prepare_playbook_run(window, cx);
         self.prepare_playbook_editor(window, cx);
         self.update_chat_follow();
@@ -9931,6 +9962,7 @@ const PANEL_MAX: f32 = 900.;
 const CHAT_MIN: f32 = 600.;
 
 fn main() {
+    startup::begin();
     // `runo --mcp-memory <folder> [--thread <id>]`: serve the memory tools to an agent,
     // without a window; a Crew thread also gets the tools it reports through.
     let args: Vec<String> = std::env::args().collect();
@@ -9982,12 +10014,14 @@ fn main() {
             connections::connection_shell(file)
         });
     }
-    // Before any thread starts: find agents and Node.js where the person's terminal would.
-    shellenv::init();
+    // Find agents and Node.js where the person's terminal would. The login shell answers
+    // on a thread while the window opens; whatever starts a program waits for it.
+    shellenv::start();
     applog::init();
     detach::enable(store::data_dir());
     harness::log::enable(store::data_dir());
     let app = application().with_assets(assets::AllAssets);
+    startup::mark("gpui application");
     // Clicking the Dock icon with the window closed (macOS keeps Runo running) opens it again.
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
@@ -9995,20 +10029,29 @@ fn main() {
         }
     });
     app.run(|cx| {
+        startup::mark("app running");
         init(cx);
+        startup::mark("components");
         load_fonts(cx);
+        startup::mark("fonts");
         let settings = AppSettings::load();
         settings.apply();
+        startup::mark("settings");
         // Before any text is drawn: the renderer reads this once.
         set_font_smoothing(settings.font_smoothing);
         set_dock_icon();
+        startup::mark("dock icon");
         cx.set_global(settings);
         bind_keys(cx);
         cx.on_action(quit);
+        startup::mark("keys");
         desktop_notify::install(cx);
         menubar::install(cx);
+        startup::mark("notifications, menu bar");
         cx.set_menus(app_menus());
+        startup::mark("menus");
         open_main_window(cx);
+        startup::mark("window opened");
     });
 }
 
@@ -10125,7 +10168,9 @@ fn open_main_window(cx: &mut App) {
         app_id: Some("runo".into()),
         ..Default::default()
     };
+    startup::mark("window options");
     let (handle, _) = open_window(options, cx, |window, cx| {
+        startup::mark("window created");
         cx.new(|cx| RunoApp::new(window, cx))
     })
     .expect("failed to open Runo window");
