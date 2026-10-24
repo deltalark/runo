@@ -35,6 +35,11 @@ fn short_age(then: u64, now: u64) -> String {
 /// How many finished threads the Threads tab lists before "Show all".
 const DONE_SHOWN: usize = 5;
 
+/// The accent at `alpha` (0 to 0xff), for Crew's wash, outline and guide line.
+fn accent_wash(alpha: u32) -> Rgba {
+    rgba((c_blue() << 8) | alpha)
+}
+
 fn small(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(11.5))
@@ -72,7 +77,10 @@ impl RunoApp {
         self.handles.contains_key(&Target::Session(id))
     }
 
-    /// The pinned Crew row at the top of a Crew project's sessions.
+    /// The pinned Crew row at the top of a Crew project's sessions. It is Crew's own
+    /// place, not one more session, so it always sits on a soft wash of the accent with a
+    /// thin accent outline, its mark in a small accent chip; picked, both grow fuller.
+    /// While Crew works the chip glows, steady with Animations off.
     pub(crate) fn crew_row(&self, pid: u64, cx: &mut Context<Self>) -> AnyElement {
         let chat = self.crew_chat(pid);
         let on = chat.is_some_and(|c| self.selected == Some(c.id) && self.view == View::Session);
@@ -84,34 +92,76 @@ impl RunoApp {
             .iter()
             .filter(|t| thread_status(self.thread_working(t.id), t) == "needs you")
             .count();
+        let dark = is_dark();
+        let (wash, hover, edge) = match (on, dark) {
+            (true, true) => (0x36, 0x36, 0x99),
+            (true, false) => (0x2a, 0x2a, 0x88),
+            (false, true) => (0x16, 0x24, 0x40),
+            (false, false) => (0x10, 0x1c, 0x38),
+        };
+        let mut chip = div()
+            .relative()
+            .size(px(22.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .bg(accent_wash(if on { 0x40 } else { 0x26 }))
+            .border_1()
+            .border_color(accent_wash(if working { 0xcc } else { 0x00 }));
+        if working {
+            // A soft halo just outside the chip, breathing while Crew works.
+            let halo = div()
+                .absolute()
+                .top(px(-3.))
+                .left(px(-3.))
+                .size(px(28.))
+                .rounded(px(8.))
+                .bg(accent_wash(0x30));
+            chip = chip.child(if anim_on() {
+                halo.with_animation(
+                    ("crew-glow", pid as usize),
+                    Animation::new(Duration::from_millis(1800))
+                        .repeat()
+                        .with_easing(pulsating_between(0.15, 1.)),
+                    |el, d| el.opacity(d),
+                )
+                .into_any_element()
+            } else {
+                halo.opacity(0.7).into_any_element()
+            });
+        }
+        let chip = chip.child(icon(CREW_ICON, 14., c_blue()));
         div()
             .id(("crew-row", pid as usize))
             .relative()
-            .h(px(30.))
-            .px_2()
+            .h(px(34.))
+            .pl(px(6.))
+            .pr_2()
             .flex()
             .items_center()
-            .gap(px(7.))
+            .gap(px(8.))
             .rounded_md()
             .cursor_pointer()
-            .when(on, |el| el.bg(tint(c_active())))
-            .when(!on, |el| el.hover(|el| el.bg(tint(c_subtle()))))
+            .bg(accent_wash(wash))
+            .border_1()
+            .border_color(accent_wash(edge))
+            .hover(move |el| el.bg(accent_wash(hover)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_crew(pid, cx);
                 this.right_tab = RightTab::Threads;
                 cx.notify();
             }))
-            .child(icon(CREW_ICON, 13., c_blue()))
+            .child(chip)
             .child(
                 div()
                     .flex_1()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::MEDIUM)
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(c_text()))
                     .child("Crew"),
             )
-            .when(working, |el| {
-                el.child(self.status_dot(Status::Working, ("crew-dot", pid as usize), 7.))
-            })
             .when(unread && !working, |el| {
                 el.child(div().size(px(7.)).rounded_full().bg(rgb(c_blue())))
             })
@@ -120,14 +170,27 @@ impl RunoApp {
                     div()
                         .px(px(7.))
                         .rounded_full()
-                        .bg(rgba((c_amber() << 8) | 0x28))
+                        .bg(rgba((c_amber() << 8) | if dark { 0x33 } else { 0x2a }))
                         .text_size(px(10.5))
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(c_amber()))
                         .child(format!("{waiting} needs you")),
                 )
             })
             .when(open > 0 && waiting == 0, |el| {
-                el.child(small(format!("{open}")))
+                el.child(
+                    div()
+                        .min_w(px(18.))
+                        .px(px(5.))
+                        .flex()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(accent_wash(if on { 0x30 } else { 0x1c }))
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(c_blue()))
+                        .child(format!("{open}")),
+                )
             })
             .into_any_element()
     }
@@ -213,7 +276,19 @@ impl RunoApp {
                 open.extend(selected_done);
             }
         }
-        Self::child_rail(open).into_any_element()
+        // Crew's threads hang off its chip on an accent guide line, so they read as
+        // Crew's and not as the project's other sessions.
+        div()
+            .ml(px(17.))
+            .mt(px(1.))
+            .mb_1()
+            .pl(px(6.))
+            .border_l_2()
+            .border_color(accent_wash(if is_dark() { 0x55 } else { 0x4a }))
+            .v_flex()
+            .gap(px(1.))
+            .children(open)
+            .into_any_element()
     }
 
     /// Crew or Direct for project `pid`, as a two-way switch.
