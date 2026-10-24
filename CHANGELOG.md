@@ -4,9 +4,22 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-10-25
+
+### Added
+
+- Finished threads free their build output. When a Crew thread is resolved, a session is archived or its branch is merged, the build and dependency folders git ignores in its worktree (target, node_modules, .venv, dist, build and the like) are deleted, while the worktree, its code and its branch stay. Worktrees in use are skipped and tried again later. Turn it off in Settings > Worktrees > Remove build output when a thread is done.
+- Worktree sizes. A session's `worktree` chip shows its size, with Free build output in its menu, and a project's right-click menu has Worktrees and disk space, listing each worktree biggest first with a Free space button.
+
 ### Changed
 
 - Each worktree of a Rust project builds into its own `target` again, as before 0.5.4: the shared build folder, its switch under Settings > Worktrees and the two-jobs limit for checks on 8 GB computers are gone. A settings file that still has the switch loads as before.
+- Post-turn checks run in the background, one session at a time: at low CPU and disk priority, with what they start, and in order when several threads finish together, with "Waiting for another check…" and Cancel on the waiting ones. Turn it off in Settings > Safety > Limits > Run checks in the background, one at a time.
+- The working indicator is a glowing ring with one label that says what the agent is doing, such as Reading, Editing or Running Bash, with a band of the accent passing along it. When a turn ends on its own, the ring closes, turns green and shows a check with "Worked" and the time. Moving parts of the main window redraw at most 60 times a second, and hold still while the window isn't active, with Animations off or with Reduce motion on, while elapsed times keep counting.
+
+### Fixed
+
+- A thread's message to Crew shows as a From-thread chip, with the thread's number and title as a link and its status, instead of a red "Ran playbook · deleted" card.
 
 ## [0.5.5] - 2026-10-25
 

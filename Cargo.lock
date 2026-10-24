@@ -5877,7 +5877,7 @@ dependencies = [
 
 [[package]]
 name = "runo"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "base64",
