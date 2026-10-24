@@ -425,6 +425,8 @@ struct RunoApp {
     chat_scroll: ScrollHandle,
     /// Whether the chat follows the bottom; see `chat_follow`.
     chat_follow: chat_follow::ChatFollow,
+    /// Whether the thread open in the Threads tab follows its bottom.
+    peek_follow: chat_follow::ChatFollow,
     /// Recent error output of each session's run, for failure messages and the log.
     stderr: HashMap<u64, Vec<String>>,
     /// Each session's running turn: its parser, event log, start time and how it stands.
@@ -1680,6 +1682,7 @@ impl RunoApp {
             tx,
             chat_scroll: ScrollHandle::new(),
             chat_follow: Default::default(),
+            peek_follow: Default::default(),
             stderr: HashMap::new(),
             turns: HashMap::new(),
             search,
@@ -2430,8 +2433,8 @@ impl RunoApp {
                 if self.selected == Some(id) {
                     self.follow_bottom();
                 }
-                if self.peek == Some(id) && autoscroll() {
-                    self.peek_scroll.scroll_to_bottom();
+                if self.peek == Some(id) {
+                    self.peek_follow_bottom();
                 }
             }
             Event::Err(Target::Session(id), line) => {
