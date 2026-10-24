@@ -44,6 +44,7 @@ mod design;
 mod designdraw;
 mod desktop_notify;
 mod detach;
+mod dock;
 mod explain;
 mod files;
 mod fileview;
@@ -474,6 +475,8 @@ struct RunoApp {
     /// Popups the person hid ("s:<session>:<message>" or "u:<agent>:<version>").
     alerts_hidden: std::collections::HashSet<String>,
     alerts_expanded: bool,
+    /// Whether the window has focus, so the session on screen counts as seen.
+    window_active: bool,
     /// Permission requests agents are waiting on mid-turn.
     approvals: Vec<approvals::Request>,
     /// Tools the person always allowed for a session, answered without asking again.
@@ -1721,6 +1724,7 @@ impl RunoApp {
             update_checked: None,
             alerts_hidden: Default::default(),
             alerts_expanded: false,
+            window_active: window.is_window_active(),
             approvals: Vec::new(),
             always_allowed: Default::default(),
             refused: HashMap::new(),
@@ -2007,7 +2011,8 @@ impl RunoApp {
         ]);
         // Coming back to the window picks up git commands run elsewhere.
         let activation_sub = cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+            this.window_active = window.is_window_active();
+            if this.window_active {
                 this.refresh();
                 cx.notify();
             }
@@ -2021,6 +2026,21 @@ impl RunoApp {
         cx.set_global(MainApp(cx.entity().downgrade(), window.window_handle()));
         app.init_github(window, cx);
         app.restore_layout();
+        // The Dock icon's count. A timer rather than render, since a minimised or hidden
+        // window doesn't draw; AppKit only hears about a change.
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let shown = this.update(cx, |this, cx| {
+                let on = cx.global::<AppSettings>().dock_badge;
+                dock::show(if on { this.attention() } else { 0 });
+            });
+            if shown.is_err() {
+                break;
+            }
+        })
+        .detach();
         // The Browser tab's live page: pick up frames at display rate while it is open.
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
