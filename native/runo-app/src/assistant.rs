@@ -742,7 +742,11 @@ impl RunoApp {
     pub(crate) fn assistant_partial(&mut self, key: String, text: String) {
         if self.assistant.asking.as_ref() == Some(&key) {
             self.assistant.streamed = text;
-            self.assistant.scroll.scroll_to_bottom();
+            // Follow the answer only while the panel is at the bottom, so reading back
+            // isn't interrupted.
+            if crate::chat_follow::at_bottom(&self.assistant.scroll) {
+                self.assistant.scroll.scroll_to_bottom();
+            }
         }
     }
 

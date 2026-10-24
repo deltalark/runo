@@ -3581,7 +3581,7 @@ impl RunoApp {
         // `select` turns to the session's page; the canvas stays and the chat floats over it.
         self.view = view;
         self.canvas_chat = Some(id);
-        self.chat_scroll.scroll_to_bottom();
+        self.jump_to_bottom();
         self.prompt.update(cx, |p, cx| p.focus(window, cx));
     }
 
@@ -3652,12 +3652,23 @@ impl RunoApp {
                         })),
                 );
         let body = div()
-            .id("canvas-chat-body")
+            .relative()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.chat_scroll)
-            .child(self.chat_list(session, working, true, cx));
+            .v_flex()
+            .child(
+                div()
+                    .id("canvas-chat-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.chat_scroll)
+                    .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, _| {
+                        this.chat_wheel(e, window)
+                    }))
+                    .child(self.chat_list(session, working, true, cx)),
+            )
+            .children(self.new_messages_pill(session, cx));
         let (top, right, bottom) = inset;
         Some(
             div()

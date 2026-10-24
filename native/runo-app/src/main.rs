@@ -18,6 +18,7 @@ mod branches;
 mod browser;
 mod browser_engine;
 mod caps;
+mod chat_follow;
 mod chatctl;
 mod clashes;
 mod cleanup;
@@ -422,6 +423,8 @@ struct RunoApp {
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
     chat_scroll: ScrollHandle,
+    /// Whether the chat follows the bottom; see `chat_follow`.
+    chat_follow: chat_follow::ChatFollow,
     /// Recent error output of each session's run, for failure messages and the log.
     stderr: HashMap<u64, Vec<String>>,
     /// Each session's running turn: its parser, event log, start time and how it stands.
@@ -1676,6 +1679,7 @@ impl RunoApp {
             handles: HashMap::new(),
             tx,
             chat_scroll: ScrollHandle::new(),
+            chat_follow: Default::default(),
             stderr: HashMap::new(),
             turns: HashMap::new(),
             search,
@@ -2120,7 +2124,7 @@ impl RunoApp {
         app.resume_local_turns();
         app.send_waiting_queues(cx);
         app.refresh();
-        app.chat_scroll.scroll_to_bottom();
+        app.jump_to_bottom();
         window.focus(&app.focus, cx);
         app
     }
@@ -2365,7 +2369,7 @@ impl RunoApp {
         self.file_hits = None;
         self.refresh();
         self.load_pr_status(id);
-        self.chat_scroll.scroll_to_bottom();
+        self.jump_to_bottom();
     }
 
     fn handle_event(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -2423,8 +2427,8 @@ impl RunoApp {
                         }
                     }
                 }
-                if self.selected == Some(id) && autoscroll() {
-                    self.chat_scroll.scroll_to_bottom();
+                if self.selected == Some(id) {
+                    self.follow_bottom();
                 }
                 if self.peek == Some(id) && autoscroll() {
                     self.peek_scroll.scroll_to_bottom();
@@ -2667,9 +2671,7 @@ impl RunoApp {
                 self.save();
                 if self.selected == Some(id) {
                     self.refresh();
-                    if autoscroll() {
-                        self.chat_scroll.scroll_to_bottom();
-                    }
+                    self.follow_bottom();
                 }
             }
             Event::Output(key, result) => {
@@ -5723,12 +5725,25 @@ impl RunoApp {
                 .v_flex()
                 .child(
                     div()
-                        .id("chat")
+                        .relative()
                         .flex_1()
                         .min_h_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.chat_scroll)
-                        .child(list),
+                        .v_flex()
+                        .child(
+                            div()
+                                .id("chat")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.chat_scroll)
+                                .on_scroll_wheel(cx.listener(
+                                    |this, e: &ScrollWheelEvent, window, _| {
+                                        this.chat_wheel(e, window)
+                                    },
+                                ))
+                                .child(list),
+                        )
+                        .children(self.new_messages_pill(session, cx)),
                 )
                 .children(self.crew_route_bar(session, cx))
                 .child(self.composer(provider, working, cx))
@@ -8904,6 +8919,7 @@ impl Render for RunoApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_playbook_run(window, cx);
         self.prepare_playbook_editor(window, cx);
+        self.update_chat_follow();
         let st = cx.global::<AppSettings>().clone();
         // Opening or leaving Settings swaps the whole window, so it happens without motion.
         let in_settings = self.view == View::Settings;

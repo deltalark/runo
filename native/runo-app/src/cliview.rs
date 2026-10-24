@@ -440,7 +440,9 @@ impl RunoApp {
                 if prompts == 1 { "" } else { "s" }
             ),
         );
-        self.chat_scroll.scroll_to_bottom();
+        if self.selected == Some(id) {
+            self.jump_to_bottom();
+        }
     }
 
     /// The CLI quit on its own (for example `/exit`): go back to Chat.
