@@ -230,11 +230,6 @@ impl Shell {
         if !dir.is_empty() {
             cmd.cwd(dir);
         }
-        if cmd.get_env("CARGO_TARGET_DIR").is_none() {
-            if let Some(target) = crate::cargotarget::for_dir(dir) {
-                cmd.env("CARGO_TARGET_DIR", target);
-            }
-        }
         // xterm TERM confuses some Windows hosts in ConPTY; keep it for Unix only.
         if !cfg!(windows) {
             cmd.env("TERM", "xterm-256color");
