@@ -18,6 +18,7 @@ mod branches;
 mod browser;
 mod browser_engine;
 mod caps;
+mod cargotarget;
 mod chat_follow;
 mod chatctl;
 mod clashes;

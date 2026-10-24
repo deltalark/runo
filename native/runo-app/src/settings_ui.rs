@@ -1289,6 +1289,7 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
         SettingsPage::Worktrees => vec![section("Location", "Isolated sessions get their own git worktree and branch.", vec![
             row("Worktree folder", "Created next to each repository as .runo-worktrees/<repo>/<branch>.", Ctl::Chip(".runo-worktrees".into(), 3)),
             row("Runo data", "Projects are saved in state.json and each session in its own file under sessions. Settings live next to them in settings.json.", Ctl::Chip(tilde(&store::data_dir()), 3)),
+            switch_row("Share one Rust build folder across worktrees", "Cargo in a session's worktree (its checks, the agent, its Terminal) builds into the main checkout's target folder instead of a full copy per worktree. Builds share a lock, so parallel builds take turns. A CARGO_TARGET_DIR or build.target-dir you set yourself is kept.", st.share_cargo_target, |s, v| s.share_cargo_target = v),
         ])],
     }
 }

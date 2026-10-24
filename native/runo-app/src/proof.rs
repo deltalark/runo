@@ -155,6 +155,13 @@ fn run_one(dir: &str, command: &str, limit: Duration) -> CheckRun {
         .stderr(Stdio::piped())
         .env("CI", "1")
         .env("NO_COLOR", "1");
+    // A worktree's build goes to the main checkout's target, not a copy of its own.
+    crate::cargotarget::apply(&mut cmd, dir);
+    if crate::cargotarget::is_rust(dir) && std::env::var_os("CARGO_BUILD_JOBS").is_none() {
+        if let Some(jobs) = crate::cargotarget::check_jobs() {
+            cmd.env("CARGO_BUILD_JOBS", jobs.to_string());
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -407,6 +414,35 @@ pub fn review_summary(name: &str, findings: usize, said_none: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs a real `cargo build` of a tiny crate, so it needs cargo and must run without
+    /// `CARGO_TARGET_DIR` (which `cargo test` passes on).
+    #[test]
+    #[ignore = "env -u CARGO_TARGET_DIR <test binary> rust_checks_in_a_worktree --ignored"]
+    fn rust_checks_in_a_worktree_build_into_the_main_checkout() {
+        let base = std::env::temp_dir().join(format!("runo-proof-cargo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let main = base.join("app");
+        let tree = crate::git::worktree_path(main.to_str().unwrap(), "runo/x");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        std::fs::write(tree.join(".git"), "gitdir: elsewhere\n").unwrap();
+        std::fs::write(
+            tree.join("Cargo.toml"),
+            "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(tree.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let runs = run_all(
+            tree.to_str().unwrap(),
+            &["cargo build --offline".into()],
+            Duration::from_secs(120),
+        );
+        assert!(runs[0].ok, "{}", runs[0].tail);
+        assert!(!tree.join("target").exists());
+        assert!(main.join("target/debug").is_dir());
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     #[test]
     fn the_guide_hears_how_the_checks_went() {
