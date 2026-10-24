@@ -70,17 +70,30 @@ pub(crate) fn at_bottom(scroll: &ScrollHandle) -> bool {
     -scroll.offset().y >= scroll.max_offset().y - px(NEAR)
 }
 
+/// `list` was at, or within a few pixels of, its bottom when last laid out: its last row
+/// ended inside the view. Rows out of view may not be measured yet, so this goes by the last
+/// row itself rather than by the list's total height.
+pub(crate) fn list_at_bottom(list: &ListState) -> bool {
+    let count = list.item_count();
+    if count == 0 {
+        return true;
+    }
+    let view = list.viewport_bounds();
+    list.bounds_for_item(count - 1)
+        .is_some_and(|last| last.bottom() <= view.bottom() + px(NEAR))
+}
+
 impl ChatFollow {
     /// Scroll to the bottom only when pinned there.
-    fn follow(&self, scroll: &ScrollHandle) {
+    fn follow(&self, scroll: &ListState) {
         if self.pinned && autoscroll() {
-            scroll.scroll_to_bottom();
+            scroll.scroll_to_end();
         }
     }
 
     /// Jump to the bottom and pin there.
-    fn jump(&mut self, scroll: &ScrollHandle) {
-        scroll.scroll_to_bottom();
+    fn jump(&mut self, scroll: &ListState) {
+        scroll.scroll_to_end();
         *self = Self::default();
     }
 
@@ -95,8 +108,8 @@ impl ChatFollow {
 
     /// Before each frame: pin again once scrolled back down to the bottom, and keep a
     /// pinned chat at the bottom of whatever it now shows.
-    fn update(&mut self, scroll: &ScrollHandle) {
-        self.settle(at_bottom(scroll));
+    fn update(&mut self, scroll: &ListState) {
+        self.settle(list_at_bottom(scroll));
         self.follow(scroll);
     }
 
@@ -170,12 +183,12 @@ impl ChatFollow {
 impl RunoApp {
     /// Scroll the chat to the bottom only when it is pinned there.
     pub(crate) fn follow_bottom(&self) {
-        self.chat_follow.follow(&self.chat_scroll);
+        self.chat_follow.follow(&self.chat_list);
     }
 
     /// Jump the chat to the bottom and pin it there: after sending, or opening a chat.
     pub(crate) fn jump_to_bottom(&mut self) {
-        self.chat_follow.jump(&self.chat_scroll);
+        self.chat_follow.jump(&self.chat_list);
     }
 
     /// The person scrolled the chat: scrolling up unpins it where it is.
@@ -187,9 +200,9 @@ impl RunoApp {
     /// Before each frame: the chat, and the thread open in the Threads tab, follow the
     /// bottom while pinned there.
     pub(crate) fn update_chat_follow(&mut self) {
-        self.chat_follow.update(&self.chat_scroll);
+        self.chat_follow.update(&self.chat_list);
         if self.peek.is_some() {
-            self.peek_follow.update(&self.peek_scroll);
+            self.peek_follow.update(&self.peek_list);
         }
     }
 
@@ -205,13 +218,13 @@ impl RunoApp {
 
     /// Scroll the thread open in the Threads tab to the bottom only when pinned there.
     pub(crate) fn peek_follow_bottom(&self) {
-        self.peek_follow.follow(&self.peek_scroll);
+        self.peek_follow.follow(&self.peek_list);
     }
 
     /// Jump the thread open in the Threads tab to the bottom and pin it there: on opening
     /// it, switching threads, or sending to it.
     pub(crate) fn peek_jump_to_bottom(&mut self) {
-        self.peek_follow.jump(&self.peek_scroll);
+        self.peek_follow.jump(&self.peek_list);
     }
 
     /// The person scrolled the thread open in the Threads tab.
@@ -277,7 +290,7 @@ mod tests {
     fn jumping_pins_again_and_forgets_the_last_chat() {
         let mut f = ChatFollow::default();
         f.scrolled(true, NOW);
-        f.jump(&ScrollHandle::new());
+        f.jump(&chat_list::new_list_state());
         assert!(f.pinned);
         assert!(!f.up);
         assert!(f.seen.is_none());

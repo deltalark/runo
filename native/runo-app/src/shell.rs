@@ -3696,8 +3696,6 @@ impl RunoApp {
                     .id("canvas-chat-body")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.chat_scroll)
                     .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, _| {
                         this.chat_wheel(e, window)
                     }))

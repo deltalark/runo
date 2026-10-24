@@ -20,6 +20,7 @@ mod browser_engine;
 mod buildclean;
 mod caps;
 mod chat_follow;
+mod chat_list;
 mod chatctl;
 mod clashes;
 mod cleanup;
@@ -326,7 +327,9 @@ struct RunoApp {
     threads_done_shut: bool,
     /// The Crew thread open in the Threads tab, beside Crew's chat.
     peek: Option<u64>,
-    peek_scroll: ScrollHandle,
+    /// The thread's conversation in the Threads tab, as a list that lays out only what is in view.
+    peek_list: ListState,
+    peek_rows: std::cell::RefCell<chat_list::ChatRows>,
     /// What the person writes to the thread open in the Threads tab.
     peek_prompt: Entity<TextareaState>,
     /// The Threads tab lists every finished thread, not only the latest few.
@@ -433,7 +436,11 @@ struct RunoApp {
     terminal: HashMap<u64, Vec<String>>,
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
-    chat_scroll: ScrollHandle,
+    /// The chat as a list that lays out only the rows in view; see `chat_list`.
+    chat_list: ListState,
+    chat_rows: std::cell::RefCell<chat_list::ChatRows>,
+    /// Parsed Markdown of the messages of recently shown chats.
+    md_cache: std::cell::RefCell<chat_list::MarkdownCache>,
     /// Whether the chat follows the bottom; see `chat_follow`.
     chat_follow: chat_follow::ChatFollow,
     /// Whether the thread open in the Threads tab follows its bottom.
@@ -744,9 +751,10 @@ thread_local! {
 /// as it ends up rather than played in, so a switch lands at once instead of rows and
 /// cards rising and fading in, which reads as a blink.
 fn page_settling() -> bool {
-    SWITCHED_AT
-        .get()
-        .is_some_and(|at| at.elapsed() < Duration::from_millis(700))
+    chat_list::ROW_SETTLED.get()
+        || SWITCHED_AT
+            .get()
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(700))
 }
 
 /// `with_animation` that is skipped entirely when animations are switched off, and that
@@ -1547,7 +1555,8 @@ impl RunoApp {
             right_tab: RightTab::Changes,
             threads_done_shut: false,
             peek: None,
-            peek_scroll: ScrollHandle::new(),
+            peek_list: chat_list::new_list_state(),
+            peek_rows: Default::default(),
             peek_prompt,
             threads_done_all: false,
             sidebar_done_open: HashSet::new(),
@@ -1623,7 +1632,9 @@ impl RunoApp {
             terminal,
             handles: HashMap::new(),
             tx,
-            chat_scroll: ScrollHandle::new(),
+            chat_list: chat_list::new_list_state(),
+            chat_rows: Default::default(),
+            md_cache: Default::default(),
             chat_follow: Default::default(),
             peek_follow: Default::default(),
             stderr: HashMap::new(),
@@ -5291,17 +5302,9 @@ impl RunoApp {
         };
         // In Crew's chat, thread numbers such as "#34" open their thread.
         let links = self.thread_links(cx);
-        let markdown = |text: String| {
-            let text = match &links {
-                Some(links) => links.link(&text),
-                None => text,
-            };
-            TextView::markdown(
-                SharedString::from(format!("body-{}-{}", self.selected.unwrap_or(0), index)),
-                text,
-            )
-            .selectable(true)
-            .when_some(links.clone(), |view, links| view.plugin(links))
+        let sid = self.selected.unwrap_or(0);
+        let markdown = |text: &str, cx: &mut Context<Self>| {
+            self.markdown_view(sid, index, 0, text, links.as_ref(), cx)
         };
         if message.role == Role::User {
             let sid = self.selected.unwrap_or(0);
@@ -5375,10 +5378,11 @@ impl RunoApp {
                             .child(if let Some(thread) = origin {
                                 let said = crew::parse_wake(&message.text)
                                     .map_or(message.text.as_str(), |(_, said)| said);
-                                let body = self
-                                    .open_wakes
-                                    .contains(&(sid, index))
-                                    .then(|| markdown(said.to_string()).into_any_element());
+                                let body = if self.open_wakes.contains(&(sid, index)) {
+                                    Some(markdown(said, cx).into_any_element())
+                                } else {
+                                    None
+                                };
                                 self.thread_message(index, thread, said, body, cx)
                             } else if message.playbook.is_empty() {
                                 div()
@@ -5390,7 +5394,7 @@ impl RunoApp {
                                     .text_size(px(13.5))
                                     .text_color(rgb(c_text()))
                                     .whitespace_normal()
-                                    .child(markdown(message.text.clone()))
+                                    .child(markdown(&message.text, cx))
                                     .into_any_element()
                             } else {
                                 self.playbook_message(index, message, cx)
@@ -5459,12 +5463,7 @@ impl RunoApp {
                             .pt(px(2.))
                             .child(icon(IconName::TriangleAlert, 14., c_red())),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(markdown(message.text.clone())),
-                    ),
+                    .child(div().flex_1().min_w_0().child(markdown(&message.text, cx))),
             )
             .into_any_element();
         }
@@ -5543,7 +5542,7 @@ impl RunoApp {
                             .whitespace_normal()
                             .text_size(px(13.5))
                             .text_color(rgb(c_text()))
-                            .child(markdown(message.text.clone())),
+                            .child(markdown(&message.text, cx)),
                     )
                 })
                 .when(!message.plan.is_empty(), |el| {
@@ -5812,8 +5811,6 @@ impl RunoApp {
                                 .id("chat")
                                 .flex_1()
                                 .min_h_0()
-                                .overflow_y_scroll()
-                                .track_scroll(&self.chat_scroll)
                                 .on_scroll_wheel(cx.listener(
                                     |this, e: &ScrollWheelEvent, window, _| {
                                         this.chat_wheel(e, window)
@@ -5842,140 +5839,6 @@ impl RunoApp {
             .flex()
             .child(main)
             .into_any_element()
-    }
-
-    /// A session's conversation, top to bottom, ending with what the agent is doing while
-    /// it works. `compact` is the narrower spacing of the panel floating over a canvas.
-    fn chat_list(
-        &self,
-        session: &Session,
-        working: bool,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let id = session.id;
-        let provider = agent::provider(&session.provider);
-        let last_agent = session.messages.iter().rposition(|m| m.role == Role::Agent);
-        let mut list = div()
-            .w_full()
-            .when_some(cx.global::<AppSettings>().content_max_width(), |el, w| {
-                el.max_w(px(w))
-            })
-            .mx_auto()
-            .v_flex()
-            .gap_6()
-            .when(compact, |el| el.px_4().pt_4().pb_4())
-            .when(!compact, |el| el.px_8().pt_6().pb_8());
-        if session.race != 0 {
-            list = list.child(self.race_strip(session, cx));
-        }
-        if let Some(card) = self.kept_card(id, cx) {
-            list = list.child(card);
-        }
-        if let Some(first) = session.messages.first().filter(|m| !m.time.is_empty()) {
-            list = list.child(
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(rgb(c_muted()))
-                    .text_size(px(11.5))
-                    .child(format!("Started {}", first.time)),
-            );
-        }
-        if let Some(strip) = self.thread_strip(session, false, cx) {
-            list = list.child(strip);
-        }
-        // Crew's news rows in a row sit close together, as one list.
-        let mut news: Vec<AnyElement> = Vec::new();
-        let close = |news: &mut Vec<AnyElement>| {
-            (!news.is_empty()).then(|| div().v_flex().gap(px(2.)).children(news.drain(..)))
-        };
-        for (i, message) in session.messages.iter().enumerate() {
-            if self.crew_card_hidden(session, i, cx) {
-                continue;
-            }
-            if let Some(card) = self.crew_card(session.id, i, message, cx) {
-                if matches!(message.crew, Some(crew::Card::News { .. })) {
-                    news.push(card);
-                } else {
-                    list = list.children(close(&mut news)).child(card);
-                }
-                continue;
-            }
-            list = list.children(close(&mut news));
-            let show = Some(i) == last_agent && !self.turn_changes(message).is_empty();
-            list = list.child(
-                div()
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        self.on_context(ctxmenu::CtxTarget::Message(i), cx),
-                    )
-                    .child(self.message_view(
-                        i,
-                        message,
-                        handoff::provider_at(session, i),
-                        show,
-                        working && Some(i) == last_agent,
-                        cx,
-                    )),
-            );
-        }
-        list = list.children(close(&mut news));
-        if let Some(task) = self.pending_start.get(&session.id) {
-            list = list.child(
-                div()
-                    .p_4()
-                    .v_flex()
-                    .gap_2()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(divider())
-                    .bg(tint(c_subtle()))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(icon(IconName::Loader, 14., c_blue()))
-                            .child("Preparing the worktree"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(c_secondary()))
-                            .child(format!(
-                                "The setup command is running in the Setup terminal tab, where you can answer what it asks. {} starts on “{}” when it finishes.",
-                                provider.name,
-                                task.lines().next().unwrap_or_default()
-                            )),
-                    ),
-            );
-        }
-        // While the agent works, the chat ends with what it is doing and for how long, and
-        // for a moment after, that it finished.
-        if working && !self.pending_start.contains_key(&id) {
-            let since = self
-                .turns
-                .get(&id)
-                .map(|t| &t.started)
-                .map(|start| elapsed(start.elapsed()));
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .text_size(px(13.))
-                    .child(working::indicator(working::doing(&session.messages), since))
-                    .child(self.arcade_chip(cx)),
-            );
-        } else if let Some(done) = self.finished_row(id) {
-            list = list.child(div().text_size(px(13.)).child(done));
-        }
-        list
     }
 
     /// The "Worked" row for a session whose turn just ended, while it shows.
