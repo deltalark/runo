@@ -275,6 +275,11 @@ fn read_lines(path: &Path, offset: &mut u64, all: bool) -> Vec<String> {
         .collect()
 }
 
+/// How session `id`'s last detached turn ended: its exit code, if it got to write one.
+pub(crate) fn last_exit(id: u64) -> Option<i32> {
+    exit_code(&turn_dir(root()?, id))
+}
+
 /// How the turn ended: its exit code, if it got to write one.
 fn exit_code(turn: &Path) -> Option<i32> {
     std::fs::read_to_string(turn.join("exit"))

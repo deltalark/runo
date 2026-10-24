@@ -99,6 +99,7 @@ mod terminal;
 mod themes;
 mod timemachine;
 mod tour;
+mod turnend;
 mod turns;
 mod updater;
 mod usage;
@@ -479,6 +480,10 @@ struct RunoApp {
     /// Tools the person refused during a session's turn; they don't come back as
     /// "Allow" cards when the turn ends.
     refused: HashMap<u64, Vec<String>>,
+    /// Sessions whose turn failed with a sign-in error, while Runo checks the sign-in.
+    sign_in_checks: std::collections::HashSet<u64>,
+    /// Sessions whose running turn is the one retry after a sign-in error.
+    sign_in_retried: std::collections::HashSet<u64>,
     /// Switching agents, waiting for the person to confirm.
     switch_plan: Option<handoff::SwitchPlan>,
     switch_preview: bool,
@@ -1721,6 +1726,8 @@ impl RunoApp {
             approvals: Vec::new(),
             always_allowed: Default::default(),
             refused: HashMap::new(),
+            sign_in_checks: Default::default(),
+            sign_in_retried: Default::default(),
             switch_plan: None,
             switch_preview: false,
             ctx_menu: None,
@@ -2494,6 +2501,10 @@ impl RunoApp {
                 // Some CLIs report a failed turn in their output and still exit cleanly.
                 let reported = turn.as_ref().is_some_and(|t| t.failed);
                 let mut hold = false;
+                // This turn was the one retry after a sign-in error.
+                let retried = self.sign_in_retried.remove(&id);
+                let mut checking = false;
+                let exit = detach::last_exit(id);
                 let sync_warning = self.sync_warning(id);
                 if let Some(session) = self.state.session_mut(id) {
                     for m in session
@@ -2509,10 +2520,16 @@ impl RunoApp {
                     let silent = session.messages.last().is_some_and(|m| {
                         m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty()
                     });
-                    let errors: String = session.messages
-                        [session.messages.len().saturating_sub(3)..]
+                    // Only the CLI's own error output: the errors it reported this turn and
+                    // its stderr, never Runo's notes or an earlier turn's messages.
+                    let asked = session
+                        .messages
                         .iter()
-                        .filter(|m| m.role == Role::System)
+                        .rposition(|m| m.role == Role::User)
+                        .map_or(0, |i| i + 1);
+                    let errors: String = session.messages[asked..]
+                        .iter()
+                        .filter(|m| m.role == Role::System && m.meta.is_empty())
                         .map(|m| m.text.as_str())
                         .chain(all.iter().map(String::as_str))
                         .collect::<Vec<_>>()
@@ -2533,7 +2550,31 @@ impl RunoApp {
                     } else {
                         None
                     };
-                    let ok = ok && sign_in.is_none() && !reported;
+                    // A sign-in error is checked before it is believed: with several runs at
+                    // once, one can fail for a moment while another renews the login token.
+                    // A CLI that asked for a browser login, a turn that was already the
+                    // retry, or one on another machine is believed as before.
+                    checking =
+                        sign_in.is_some() && !signed_out && !retried && !session.elsewhere();
+                    // A CLI that stopped without a word, and why where that can be told.
+                    // Claude Code always ends a turn with a result, so an empty one is a
+                    // fault; other agents may finish quietly, unless the disk is full.
+                    let compacted = session
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == Role::User)
+                        .is_some_and(|m| m.text.starts_with("/compact"));
+                    let no_reply = if silent && !reported && !stopped && !compacted && sign_in.is_none() {
+                        let name = agent::provider(&session.provider).name;
+                        let free = turnend::free_space(&session.dir);
+                        let why = turnend::no_reply(name, exit, &all.join("\n"), free);
+                        let quiet = ok && session.provider != "claude" && !why.contains("disk is full");
+                        (!quiet).then_some(why)
+                    } else {
+                        None
+                    };
+                    let ok = ok && sign_in.is_none() && !reported && no_reply.is_none();
                     // A reply that never started is dropped, leaving the error.
                     if reported {
                         let at = session
@@ -2584,18 +2625,35 @@ impl RunoApp {
                     } else {
                         "Agent failed"
                     };
-                    desktop_notify::send(cx, Some(id), &session.title, body);
+                    // While the sign-in is checked the turn may yet be retried: nothing is said.
+                    if !checking {
+                        desktop_notify::send(cx, Some(id), &session.title, body);
+                    }
                     if let Some(warning) = sync_warning {
                         session.messages.push(warning);
                     }
                     if !stopped && !session.elsewhere() {
-                        if sign_in.is_some() {
+                        if sign_in.is_some() && !checking {
                             signin::turn_showed(&session.provider, false);
                         } else if ok {
                             signin::turn_showed(&session.provider, true);
                         }
                     }
-                    if let Some(hint) = sign_in {
+                    if checking {
+                        // The queue waits for the check, and for the retry if there is one.
+                        hold = true;
+                        // The CLI's error stays, quietly, under a note saying what happens.
+                        for m in session.messages[asked..]
+                            .iter_mut()
+                            .filter(|m| m.role == Role::System && m.meta.is_empty())
+                        {
+                            m.meta = "warning".into();
+                        }
+                        let mut note =
+                            Message::new(Role::System, turnend::checking(&session.provider));
+                        note.meta = "note".into();
+                        session.messages.push(note);
+                    } else if let Some(hint) = sign_in {
                         hold = true;
                         let turn = session
                             .messages
@@ -2629,13 +2687,15 @@ impl RunoApp {
                         } else {
                             tail.join("\n")
                         };
-                        let mut text = String::from(if stopped {
-                            "Stopped."
+                        let mut text = if stopped {
+                            "Stopped.".to_string()
                         } else if reported {
-                            ""
+                            String::new()
+                        } else if let Some(why) = &no_reply {
+                            why.clone()
                         } else {
-                            "The agent stopped with an error."
-                        });
+                            "The agent stopped with an error.".to_string()
+                        };
                         if !log.trim().is_empty() && !stopped && !reported {
                             text.push_str(&format!(
                                 "\n```text\n{}\n```",
@@ -2663,10 +2723,14 @@ impl RunoApp {
                 if let Some(turn) = turn {
                     turn.end(ok);
                 }
-                self.log_turn_end(id, ok, stopped, hold, took, &all);
-                self.finish_turn(id, ok, stopped, hold, cx);
-                self.design_turn_done(id, stopped, cx);
-                self.playbook_turn_done(id, ok);
+                self.log_turn_end(id, ok, stopped, hold && !checking, took, &all);
+                if checking {
+                    self.check_sign_in(id);
+                } else {
+                    self.finish_turn(id, ok, stopped, hold, cx);
+                    self.design_turn_done(id, stopped, cx);
+                    self.playbook_turn_done(id, ok);
+                }
                 self.write_memory(id);
                 self.save();
                 if self.selected == Some(id) {
