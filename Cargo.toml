@@ -25,6 +25,17 @@ opt-level = 3
 panic = "abort"
 strip = "symbols"
 
+# Debug builds keep only line tables (file and line in backtraces and panics) for
+# Runo itself and no debug info for dependencies. Full debug info for a crate this size
+# made each rustc run take gigabytes of memory, on machines also running the agents,
+# and on macOS its object files pile up in target/debug/deps by the gigabyte.
+# `cargo build --profile profiling` still gives full symbols.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 # vt100 0.15 (vendored in vendor/vt100) subtracts with wrap-around when the view
 # is scrolled back more than a screen; release builds rely on that, so debug
 # builds must not trap on it.
