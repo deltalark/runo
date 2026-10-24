@@ -2554,8 +2554,7 @@ impl RunoApp {
                     // once, one can fail for a moment while another renews the login token.
                     // A CLI that asked for a browser login, a turn that was already the
                     // retry, or one on another machine is believed as before.
-                    checking =
-                        sign_in.is_some() && !signed_out && !retried && !session.elsewhere();
+                    checking = sign_in.is_some() && !signed_out && !retried && !session.elsewhere();
                     // A CLI that stopped without a word, and why where that can be told.
                     // Claude Code always ends a turn with a result, so an empty one is a
                     // fault; other agents may finish quietly, unless the disk is full.
@@ -2565,15 +2564,17 @@ impl RunoApp {
                         .rev()
                         .find(|m| m.role == Role::User)
                         .is_some_and(|m| m.text.starts_with("/compact"));
-                    let no_reply = if silent && !reported && !stopped && !compacted && sign_in.is_none() {
-                        let name = agent::provider(&session.provider).name;
-                        let free = turnend::free_space(&session.dir);
-                        let why = turnend::no_reply(name, exit, &all.join("\n"), free);
-                        let quiet = ok && session.provider != "claude" && !why.contains("disk is full");
-                        (!quiet).then_some(why)
-                    } else {
-                        None
-                    };
+                    let no_reply =
+                        if silent && !reported && !stopped && !compacted && sign_in.is_none() {
+                            let name = agent::provider(&session.provider).name;
+                            let free = turnend::free_space(&session.dir);
+                            let why = turnend::no_reply(name, exit, &all.join("\n"), free);
+                            let quiet =
+                                ok && session.provider != "claude" && !why.contains("disk is full");
+                            (!quiet).then_some(why)
+                        } else {
+                            None
+                        };
                     let ok = ok && sign_in.is_none() && !reported && no_reply.is_none();
                     // A reply that never started is dropped, leaving the error.
                     if reported {

@@ -325,19 +325,37 @@ mod tests {
         let unset = |_: &str| false;
         let says = |text: &'static str| move |_: &str, _: &[&str]| Some((true, text.into()));
         assert_eq!(
-            judge("claude", "claude", &dir, &unset, &says("{\"loggedIn\": true}")),
+            judge(
+                "claude",
+                "claude",
+                &dir,
+                &unset,
+                &says("{\"loggedIn\": true}")
+            ),
             Some(true)
         );
         // Logged out, even with an old login file lying about.
         std::fs::create_dir_all(dir.join(".claude")).unwrap();
         std::fs::write(dir.join(".claude/.credentials.json"), "{}").unwrap();
         assert_eq!(
-            judge("claude", "claude", &dir, &unset, &says("{\"loggedIn\": false}")),
+            judge(
+                "claude",
+                "claude",
+                &dir,
+                &unset,
+                &says("{\"loggedIn\": false}")
+            ),
             Some(false)
         );
         // An older CLI without `auth status` falls back to the login file.
         assert_eq!(
-            judge("claude", "claude", &dir, &unset, &says("error: unknown command 'auth'")),
+            judge(
+                "claude",
+                "claude",
+                &dir,
+                &unset,
+                &says("error: unknown command 'auth'")
+            ),
             Some(true)
         );
     }

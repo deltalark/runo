@@ -57,7 +57,9 @@ pub fn no_reply(name: &str, exit: Option<i32>, log: &str, free: Option<u64>) -> 
         || lower.contains("no space left")
         || free.is_some_and(|f| f < LOW_DISK)
     {
-        return format!("{name} stopped without replying: the disk is full. Free some space, then retry.");
+        return format!(
+            "{name} stopped without replying: the disk is full. Free some space, then retry."
+        );
     }
     if lower.contains("out of memory")
         || lower.contains("heap out of memory")
@@ -122,11 +124,21 @@ mod tests {
     fn an_empty_exit_says_why_where_it_can() {
         let full = no_reply("Claude Code", Some(0), "", Some(10 * 1024 * 1024));
         assert!(full.contains("disk is full"), "{full}");
-        let enospc = no_reply("Claude Code", Some(1), "Error: ENOSPC: no space left on device, write", Some(u64::MAX));
+        let enospc = no_reply(
+            "Claude Code",
+            Some(1),
+            "Error: ENOSPC: no space left on device, write",
+            Some(u64::MAX),
+        );
         assert!(enospc.contains("disk is full"), "{enospc}");
         let killed = no_reply("Claude Code", Some(137), "", Some(u64::MAX));
         assert!(killed.contains("killed"), "{killed}");
-        let oom = no_reply("Claude Code", Some(1), "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory", None);
+        let oom = no_reply(
+            "Claude Code",
+            Some(1),
+            "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory",
+            None,
+        );
         assert!(oom.contains("out of memory"), "{oom}");
         assert_eq!(
             no_reply("Claude Code", Some(0), "", Some(u64::MAX)),
