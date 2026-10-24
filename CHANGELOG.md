@@ -4,9 +4,20 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-25
+
+### Added
+
+- Runo's Dock icon shows a red count of what needs you: sessions and threads waiting on you or finished and not yet seen, permission requests, unread Crew replies, and review requests and failed checks on GitHub. The corner mark's badge shows the same count. Turn it off in Settings > Alerts > Show badge on Dock icon.
+
 ### Changed
 
 - Runo's window opens and responds about a second sooner. It no longer waits for your login shell's profile to finish before showing the window; agents, terminals and git still start with that shell's PATH and variables. Set `RUNO_TRACE_STARTUP=1` to log how long each step of starting up takes.
+- The Arcade is redesigned as a games corner: a glowing ring in the game's colour, cartridge tabs, a score strip that ticks up, and a scene of its own for each game. Rules, keys, scoring and best scores are unchanged.
+
+### Fixed
+
+- A thread's peek pane in Crew stays where it is while you scroll up during a run, with the same "New messages" pill as the chat, instead of snapping to the bottom on every update.
 
 ## [0.5.2] - 2026-10-24
 
