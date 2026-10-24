@@ -1492,6 +1492,12 @@ pub fn model_hint(provider: &str, log: &str) -> Option<String> {
 /// Whether a line shows the CLI waiting for a browser sign-in, which never finishes in
 /// a run without a terminal.
 pub fn waits_for_sign_in(line: &str) -> bool {
+    // An event of a JSON stream is the agent's own output, such as its reply or a tool's
+    // result, which can quote these very words; a CLI waiting for a sign-in prints a
+    // plain line.
+    if line.trim_start().starts_with('{') {
+        return false;
+    }
     let lower = line.to_lowercase();
     lower.contains("starting login flow")
         || (lower.contains("visit") && lower.contains("/auth/") && lower.contains("login"))
@@ -3161,6 +3167,10 @@ mod arg_tests {
         .is_some());
         assert!(waits_for_sign_in(
             "No API key found. Starting login flow..."
+        ));
+        // The same words quoted in a JSON event, such as a tool's result, are not the CLI.
+        assert!(!waits_for_sign_in(
+            &serde_json::json!({ "type": "user", "content": "No API key found. Starting login flow..." }).to_string()
         ));
         assert!(!waits_for_sign_in("Reading src/login.rs"));
     }
