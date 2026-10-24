@@ -312,7 +312,9 @@ impl RunoApp {
             }
         }
         self.save();
-        self.chat_scroll.scroll_to_bottom();
+        if self.selected == Some(id) {
+            self.follow_bottom();
+        }
         self.keep_awake_update();
     }
 
@@ -613,6 +615,8 @@ impl RunoApp {
             }
         }
         self.prompt.update(cx, |p, cx| p.set_value("", window, cx));
+        // Sending goes to the newest, even when the person had scrolled up.
+        self.jump_to_bottom();
         self.drafts.remove(&id);
         self.mention = None;
         self.thread_mention = None;
