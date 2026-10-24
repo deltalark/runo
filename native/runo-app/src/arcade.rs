@@ -1,7 +1,8 @@
 //! The Arcade: four small games to play while agents work. Spark (fly a spark through
 //! the gates), Commits (a snake that grows on commits), Merge (2048) and Stack (Tetris).
-//! Each is drawn in the theme's own colours, keeps its best score in `arcade.json`, and
-//! pauses when the Arcade closes, so a round picks up where it left off.
+//! Each has its own palette and scene, with particles, score pops and a shake on a crash
+//! that calm down when the system asks for less motion. Each keeps its best score in
+//! `arcade.json`, and pauses when the Arcade closes, so a round picks up where it left off.
 
 use super::*;
 use std::path::PathBuf;
@@ -244,6 +245,8 @@ struct Merge {
     cells: [[u32; 4]; 4],
     /// The tile that appeared last, so it can pop in.
     fresh: Option<(usize, usize)>,
+    /// The tiles the last move made by merging, so they can bump.
+    merged: Vec<(usize, usize)>,
     moves: u64,
 }
 
@@ -252,6 +255,7 @@ impl Merge {
         let mut m = Merge {
             cells: [[0; 4]; 4],
             fresh: None,
+            merged: Vec::new(),
             moves: 0,
         };
         m.spawn(rng);
@@ -274,13 +278,22 @@ impl Merge {
 
     /// Slides one line toward its start, merging equal neighbours once. Returns the line
     /// and the points scored.
+    #[cfg(test)]
     fn slide(line: [u32; 4]) -> ([u32; 4], u32) {
+        let (out, score, _) = Self::slide_marked(line);
+        (out, score)
+    }
+
+    /// `slide`, also marking which places in the line hold a merged tile.
+    fn slide_marked(line: [u32; 4]) -> ([u32; 4], u32, [bool; 4]) {
         let tiles: Vec<u32> = line.into_iter().filter(|&v| v != 0).collect();
         let mut out = [0; 4];
+        let mut marks = [false; 4];
         let (mut i, mut n, mut score) = (0, 0, 0);
         while i < tiles.len() {
             if i + 1 < tiles.len() && tiles[i] == tiles[i + 1] {
                 out[n] = tiles[i] * 2;
+                marks[n] = true;
                 score += out[n];
                 i += 2;
             } else {
@@ -289,7 +302,7 @@ impl Merge {
             }
             n += 1;
         }
-        (out, score)
+        (out, score, marks)
     }
 
     /// Slides the board one way, `(dr, dc)`. Returns the points scored, or None when
@@ -297,6 +310,7 @@ impl Merge {
     fn shift(&mut self, d: (i32, i32), rng: &mut Rng) -> Option<u32> {
         let before = self.cells;
         let mut score = 0;
+        let mut merged = Vec::new();
         for k in 0..4 {
             // The line's cells, in the order tiles slide toward.
             let at = |i: usize| -> (usize, usize) {
@@ -311,17 +325,21 @@ impl Merge {
                 let (r, c) = at(i);
                 self.cells[r][c]
             });
-            let (out, s) = Self::slide(line);
+            let (out, s, marks) = Self::slide_marked(line);
             score += s;
             for (i, v) in out.into_iter().enumerate() {
                 let (r, c) = at(i);
                 self.cells[r][c] = v;
+                if marks[i] {
+                    merged.push((r, c));
+                }
             }
         }
         if self.cells == before {
             return None;
         }
         self.moves += 1;
+        self.merged = merged;
         self.spawn(rng);
         Some(score)
     }
@@ -395,15 +413,16 @@ impl Kind {
         }
     }
 
+    /// The classic colours, vivid on the well's dark glass in either theme.
     fn color(self) -> u32 {
         match self {
-            Kind::I => lit(),
-            Kind::O => c_amber(),
-            Kind::T => mix(c_blue(), c_red(), 0.5),
-            Kind::S => c_green(),
-            Kind::Z => c_red(),
-            Kind::J => c_blue(),
-            Kind::L => EMBER,
+            Kind::I => 0x22d3ee,
+            Kind::O => 0xfacc15,
+            Kind::T => 0xa855f7,
+            Kind::S => 0x22c55e,
+            Kind::Z => 0xef4444,
+            Kind::J => 0x3b82f6,
+            Kind::L => 0xf97316,
         }
     }
 }
@@ -455,6 +474,8 @@ struct Stack {
     /// What's left of the current shuffled set of all seven, so no piece is kept away long.
     bag: Vec<Kind>,
     lines: u32,
+    /// The rows the last lock cleared, counted before they went, so they can flash.
+    cleared: Vec<usize>,
     /// Seconds since the piece last fell a row.
     acc: f32,
 }
@@ -467,6 +488,7 @@ impl Stack {
             next: Kind::T,
             bag: Vec::new(),
             lines: 0,
+            cleared: Vec::new(),
             acc: 0.,
         };
         s.piece = Piece::spawn(s.draw(rng));
@@ -555,6 +577,9 @@ impl Stack {
             }
             self.well[r as usize][c as usize] = Some(self.piece.kind);
         }
+        self.cleared = (0..WELL_H)
+            .filter(|&r| self.well[r].iter().all(Option::is_some))
+            .collect();
         let kept: Vec<[Option<Kind>; WELL_W]> = self
             .well
             .iter()
@@ -649,6 +674,16 @@ pub(crate) struct Arcade {
     merge: Merge,
     stack: Stack,
     last: Option<Instant>,
+    /// Particles, score pops, shake and the counters, on their own clock.
+    fx: Fx,
+    /// Draws for the effects, kept apart so they never change what the games deal.
+    fx_rng: Rng,
+    /// Animations are calmed: the system asks for less motion, or Runo's are off.
+    calm: bool,
+    /// Counts tab picks, so the picked cartridge bounces each time.
+    picks: u32,
+    /// Counts rounds, so each round's cards play in afresh.
+    rounds: u32,
 }
 
 impl Arcade {
@@ -670,7 +705,17 @@ impl Arcade {
             merge,
             stack,
             last: None,
+            fx: Fx::default(),
+            fx_rng: Rng(Rng::new().0.rotate_left(29) | 1),
+            calm: calm_motion(cx),
+            picks: 0,
+            rounds: 0,
         }
+    }
+
+    /// Reads the motion settings again: called as the Arcade opens.
+    pub(crate) fn refresh_motion(&mut self, cx: &App) {
+        self.calm = calm_motion(cx);
     }
 
     fn best(&self) -> u32 {
@@ -681,6 +726,7 @@ impl Arcade {
         self.score = 0;
         self.record = false;
         self.last = None;
+        self.rounds += 1;
         match self.game {
             Game::Spark => self.spark = Spark::new(),
             Game::Commits => self.commits = Commits::new(&mut self.rng),
@@ -698,6 +744,8 @@ impl Arcade {
     fn pick(&mut self, game: Game) {
         if self.game != game {
             self.game = game;
+            self.picks += 1;
+            self.fx.clear();
             self.reset();
         }
     }
@@ -755,6 +803,17 @@ impl Arcade {
             self.start();
         }
         self.spark.vy = LIFT;
+        if !self.calm {
+            self.fx.squash = SQUASH;
+        }
+    }
+
+    /// Handles a key, then plays whatever it set off.
+    fn press(&mut self, key: &str) -> bool {
+        let before = self.before();
+        let handled = self.key(key);
+        self.react(before);
+        handled
     }
 
     fn key(&mut self, key: &str) -> bool {
@@ -833,6 +892,7 @@ impl Arcade {
             .last
             .map_or(0., |t| now.duration_since(t).as_secs_f32().min(1. / 30.));
         self.last = Some(now);
+        let before = self.before();
         let stepped = match self.game {
             Game::Spark => self.spark.step(dt, &mut self.rng),
             Game::Commits => self.commits.step(dt, &mut self.rng),
@@ -840,6 +900,7 @@ impl Arcade {
             Game::Stack => self.stack.step(dt, &mut self.rng),
         };
         self.land(stepped);
+        self.react(before);
     }
 }
 
@@ -848,78 +909,728 @@ fn alpha(color: u32, a: f32) -> Rgba {
 }
 
 fn glow(color: u32, a: f32, blur: f32) -> Vec<BoxShadow> {
-    vec![BoxShadow {
+    vec![soft(color, a, blur, 0.)]
+}
+
+/// A soft shadow `lift` pixels below, or a glow when `lift` is 0.
+fn soft(color: u32, a: f32, blur: f32, lift: f32) -> BoxShadow {
+    BoxShadow {
         color: alpha(color, a).into(),
-        offset: point(px(0.), px(0.)),
+        offset: point(px(0.), px(lift)),
         blur_radius: px(blur),
         spread_radius: px(0.),
         inset: false,
-    }]
-}
-
-/// The accent, a touch brighter on dark themes where it sits close to the canvas.
-fn lit() -> u32 {
-    if is_dark() {
-        mix(c_blue(), 0xffffff, 0.75)
-    } else {
-        c_blue()
     }
 }
 
-const EMBER: u32 = 0xd97757;
+/// A two-stop gradient, `angle` in degrees with 0 pointing up.
+fn grad(angle: f32, from: impl Into<Hsla>, to: impl Into<Hsla>) -> Background {
+    linear_gradient(
+        angle,
+        linear_color_stop(from, 0.),
+        linear_color_stop(to, 1.),
+    )
+}
+
+fn lighten(color: u32, t: f32) -> u32 {
+    mix(0xffffff, color, t)
+}
+
+fn darken(color: u32, t: f32) -> u32 {
+    mix(0x000000, color, t)
+}
+
+/// The gold of a record: confetti, the NEW BEST ribbon.
+const GOLD: u32 = 0xffc83d;
+
+/// Whether to calm the Arcade's motion: the system asks for less (Accessibility >
+/// Display > Reduce motion), or animations are off in Runo's settings.
+fn calm_motion(cx: &App) -> bool {
+    !anim_on() || cx.reduce_motion() || system_reduce_motion()
+}
+
+#[cfg(target_os = "macos")]
+fn system_reduce_motion() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_reduce_motion() -> bool {
+    false
+}
+
+/// Overshoots a little and settles: a bounce in.
+fn back_out(t: f32) -> f32 {
+    let (c1, c3) = (1.70158, 2.70158);
+    let u = t - 1.;
+    1. + c3 * u * u * u + c1 * u * u
+}
+
+impl Game {
+    /// Its own colour, bright: cartridges, the bezel, particles.
+    fn hue(self) -> u32 {
+        match self {
+            Game::Spark => 0xff7a2f,
+            Game::Commits => 0x22b36b,
+            Game::Merge => 0xec4f9b,
+            Game::Stack => 0x7b5cff,
+        }
+    }
+
+    /// Its colour, deep enough to carry white text.
+    fn deep(self) -> u32 {
+        match self {
+            Game::Spark => 0xc94b14,
+            Game::Commits => 0x13804a,
+            Game::Merge => 0xc0367a,
+            Game::Stack => 0x5b3fdc,
+        }
+    }
+
+    /// Its colour as text on the sheet: deep on light themes, bright on dark ones.
+    fn ink(self) -> u32 {
+        if is_dark() {
+            lighten(self.hue(), 0.75)
+        } else {
+            self.deep()
+        }
+    }
+
+    fn glyph(self) -> IconName {
+        match self {
+            Game::Spark => IconName::Zap,
+            Game::Commits => IconName::GitCommitHorizontal,
+            Game::Merge => IconName::LayoutGrid,
+            Game::Stack => IconName::Layers,
+        }
+    }
+
+    /// The keys of its hint, drawn as keycaps, each with what it does.
+    fn keys(self) -> &'static [(&'static [&'static str], &'static str)] {
+        match self {
+            Game::Spark => &[(&["Space"], "or click to lift")],
+            Game::Commits => &[(&["←", "↑", "↓", "→"], "steer")],
+            Game::Merge => &[(&["←", "↑", "↓", "→"], "slide")],
+            Game::Stack => &[
+                (&["←", "→"], "move"),
+                (&["↑"], "turn"),
+                (&["Space"], "drop"),
+            ],
+        }
+    }
+}
+
+// The effects: particles, floating score pops, a shake on a crash, a squash on a lift,
+// a glow over cleared rows, and counters that tick up to the score. None of them touch
+// the games themselves.
+
+/// How long the spark squashes after a lift, and the snake's head swells after a commit.
+const SQUASH: f32 = 0.14;
+const SHAKE: f32 = 0.45;
+const FLASH: f32 = 0.42;
+const CHEER: f32 = 1.6;
+const POP: f32 = 0.85;
+const BIG_POP: f32 = 1.4;
+/// At most this many particles at once, so a busy moment can't slow the frame.
+const MAX_PARTS: usize = 180;
+
+struct Particle {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    life: f32,
+    span: f32,
+    size: f32,
+    color: u32,
+    /// Confetti: a little square instead of a round spark.
+    square: bool,
+}
+
+struct Pop {
+    x: f32,
+    y: f32,
+    text: SharedString,
+    color: u32,
+    age: f32,
+    /// An announcement (NEW BEST!, a multi-line clear), larger and longer.
+    big: bool,
+}
+
+#[derive(Default)]
+struct Fx {
+    parts: Vec<Particle>,
+    pops: Vec<Pop>,
+    shake: f32,
+    squash: f32,
+    flash: f32,
+    flash_rows: Vec<usize>,
+    /// Seconds left of the NEW BEST glow on the Best counter.
+    cheer: f32,
+    /// The score counter's bump when points land.
+    bump: f32,
+    shown: f32,
+    shown_best: f32,
+    time: f32,
+    last: Option<Instant>,
+}
+
+impl Fx {
+    fn clear(&mut self) {
+        let time = self.time;
+        *self = Fx {
+            time,
+            ..Fx::default()
+        };
+    }
+
+    fn busy(&self, score: u32, best: u32) -> bool {
+        !self.parts.is_empty()
+            || !self.pops.is_empty()
+            || self.shake > 0.
+            || self.squash > 0.
+            || self.flash > 0.
+            || self.cheer > 0.
+            || self.bump > 0.
+            || self.shown != score as f32
+            || self.shown_best != best as f32
+    }
+
+    fn step(&mut self, dt: f32, score: u32, best: u32, calm: bool) {
+        self.time += dt;
+        for p in &mut self.parts {
+            p.vy += 520. * dt;
+            p.vx *= (1. - 1.8 * dt).max(0.);
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.life -= dt;
+        }
+        self.parts.retain(|p| p.life > 0.);
+        for p in &mut self.pops {
+            p.age += dt;
+        }
+        self.pops
+            .retain(|p| p.age < if p.big { BIG_POP } else { POP });
+        for t in [
+            &mut self.shake,
+            &mut self.squash,
+            &mut self.flash,
+            &mut self.cheer,
+        ] {
+            *t = (*t - dt).max(0.);
+        }
+        self.bump = (self.bump - dt * 5.).max(0.);
+        // The counters run up to the score, quicker the further behind, and drop at once
+        // when a round starts over.
+        let tick = |shown: &mut f32, to: u32| {
+            let to = to as f32;
+            if calm || to < *shown {
+                *shown = to;
+            } else if *shown < to {
+                *shown = (*shown + ((to - *shown) * 9.).max(14.) * dt).min(to);
+            }
+        };
+        tick(&mut self.shown, score);
+        tick(&mut self.shown_best, best);
+    }
+}
+
+/// The state an action starts from, to tell afterwards what it did.
+struct Before {
+    game: Game,
+    phase: Phase,
+    score: u32,
+    record: bool,
+    best: u32,
+    food: (i32, i32),
+    head: (i32, i32),
+    lines: u32,
+    rounds: u32,
+}
+
+// Where things sit in the field, for effects to start from.
+
+const M_SIDE: f32 = 270.;
+const M_GAP: f32 = 8.;
+
+fn merge_tile() -> f32 {
+    (M_SIDE - M_GAP * 5.) / 4.
+}
+
+fn merge_origin() -> (f32, f32) {
+    ((W - M_SIDE) / 2., (H - M_SIDE) / 2.)
+}
+
+fn merge_centre((r, c): (usize, usize)) -> (f32, f32) {
+    let (ox, oy) = merge_origin();
+    let t = merge_tile();
+    (
+        ox + M_GAP + c as f32 * (t + M_GAP) + t / 2.,
+        oy + M_GAP + r as f32 * (t + M_GAP) + t / 2.,
+    )
+}
+
+fn well_origin() -> (f32, f32) {
+    (
+        (W - WELL_W as f32 * BLOCK) / 2. - 40.,
+        (H - WELL_H as f32 * BLOCK) / 2.,
+    )
+}
+
+fn cell_centre((c, r): (i32, i32)) -> (f32, f32) {
+    (c as f32 * CELL + CELL / 2., r as f32 * CELL + CELL / 2.)
+}
+
+/// The tile colours of 2048, light to deep as the value climbs, with text that reads.
+fn tile_colors(v: u32) -> (u32, u32) {
+    let ink = 0x5a3412;
+    match v {
+        2 => (0xfff1c9, ink),
+        4 => (0xffdf94, ink),
+        8 => (0xffbd6b, ink),
+        16 => (0xff9a5c, ink),
+        32 => (0xf2557a, 0xffffff),
+        64 => (0xd2409f, 0xffffff),
+        128 => (0x8e55f0, 0xffffff),
+        256 => (0x5470e8, 0xffffff),
+        512 => (0x1f8fd0, 0xffffff),
+        1024 => (0x139a76, 0xffffff),
+        2048 => (0x4f9a24, 0xffffff),
+        _ => (0x2b2d42, GOLD),
+    }
+}
+
+/// A key drawn as a small keycap.
+fn keycap(label: &str) -> Div {
+    div()
+        .flex_none()
+        .h(px(19.))
+        .min_w(px(19.))
+        .px(px(5.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .bg(grad(180., rgb(lighten(c_raised(), 0.92)), rgb(c_raised())))
+        .border_1()
+        .border_b_2()
+        .border_color(rgb(mix(c_border(), c_text(), 0.8)))
+        .shadow(vec![soft(
+            0x000000,
+            if is_dark() { 0.35 } else { 0.1 },
+            2.,
+            1.,
+        )])
+        .text_size(px(10.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(c_text()))
+        .child(label.to_string())
+}
+
+/// Keycaps followed by what they do.
+fn key_hint(keys: &[&str], what: &str) -> Div {
+    keys.iter()
+        .fold(div().flex().items_center().gap(px(3.)), |row, k| {
+            row.child(keycap(k))
+        })
+        .child(div().ml(px(3.)).child(what.to_string()))
+}
 
 impl Arcade {
-    /// The faint dot grid every field sits on, drifting by `shift` pixels.
-    fn dots(shift: f32) -> Div {
-        let step = 22.;
-        let mut field = div().absolute().inset_0();
-        let off = shift % step;
-        let dot = alpha(c_text(), if is_dark() { 0.09 } else { 0.11 });
-        let mut y = step / 2.;
-        while y < H {
-            let mut x = step / 2. - off;
+    fn before(&self) -> Before {
+        Before {
+            game: self.game,
+            phase: self.phase,
+            score: self.score,
+            record: self.record,
+            best: self.best(),
+            food: self.commits.food,
+            head: self.commits.body[0],
+            lines: self.stack.lines,
+            rounds: self.rounds,
+        }
+    }
+
+    /// Plays what an action did: points pop, clears burst, a crash shakes.
+    fn react(&mut self, b: Before) {
+        if b.game != self.game || b.rounds != self.rounds {
+            return;
+        }
+        let gained = self.score.saturating_sub(b.score);
+        if gained > 0 {
+            self.fx.bump = 1.;
+        }
+        let hue = self.game.hue();
+        match self.game {
+            Game::Spark if gained > 0 => {
+                let y = self.spark.y;
+                self.pop(SPARK_X + 16., y - 22., format!("+{gained}"), hue, false);
+                self.burst(SPARK_X, y, &[GOLD, 0xffffff, hue], 10, 150.);
+            }
+            Game::Commits if self.commits.food != b.food && gained > 0 => {
+                let (x, y) = cell_centre(b.food);
+                self.pop(x, y - 16., format!("+{gained}"), hue, false);
+                self.burst(x, y, &[GOLD, 0x7ef2a8, hue], 14, 170.);
+                if !self.calm {
+                    self.fx.squash = SQUASH;
+                }
+            }
+            Game::Merge if gained > 0 => {
+                let merged = self.merge.merged.clone();
+                for &at in &merged {
+                    let (x, y) = merge_centre(at);
+                    let v = self.merge.cells[at.0][at.1];
+                    self.burst(x, y, &[tile_colors(v).0, GOLD, 0xffffff], 8, 150.);
+                }
+                let top = merged
+                    .iter()
+                    .copied()
+                    .max_by_key(|&(r, c)| self.merge.cells[r][c])
+                    .unwrap_or((0, 0));
+                let (x, y) = merge_centre(top);
+                self.pop(x, y - 24., format!("+{gained}"), hue, false);
+            }
+            Game::Stack if self.stack.lines > b.lines => {
+                let rows = self.stack.cleared.clone();
+                let (ox, oy) = well_origin();
+                let ww = WELL_W as f32 * BLOCK;
+                for &r in &rows {
+                    let y = oy + r as f32 * BLOCK + BLOCK / 2.;
+                    for k in 0..5 {
+                        let x = ox + ww * (k as f32 + 0.5) / 5.;
+                        self.burst(x, y, &[0xffffff, 0x22d3ee, 0xfacc15, 0xa855f7], 3, 170.);
+                    }
+                }
+                self.fx.flash_rows = rows;
+                self.fx.flash = FLASH;
+                let cheer = match self.stack.lines - b.lines {
+                    1 => None,
+                    2 => Some("Double!"),
+                    3 => Some("Triple!"),
+                    _ => Some("STACK!"),
+                };
+                let (x, y) = (ox + ww / 2., oy + 60.);
+                self.pop(x, y + 26., format!("+{gained}"), hue, false);
+                if let Some(word) = cheer {
+                    self.pop(x, y, word, GOLD, true);
+                }
+            }
+            _ => {}
+        }
+        // Beating the record mid-round: a cheer, once.
+        if !b.record && self.record && b.best > 0 {
+            self.cheer();
+        }
+        if b.phase != Phase::Over && self.phase == Phase::Over {
+            let (x, y) = match self.game {
+                Game::Spark => (SPARK_X, self.spark.y),
+                Game::Commits => cell_centre(b.head),
+                Game::Merge => (W / 2., H / 2.),
+                Game::Stack => {
+                    let (ox, oy) = well_origin();
+                    (ox + WELL_W as f32 * BLOCK / 2., oy + 16.)
+                }
+            };
+            self.burst(x, y, &[c_red(), 0xff9a3d, GOLD, 0xffffff], 34, 260.);
+            if !self.calm {
+                self.fx.shake = SHAKE;
+            }
+            if self.record {
+                self.cheer();
+            }
+        }
+    }
+
+    fn cheer(&mut self) {
+        self.fx.cheer = CHEER;
+        self.pop(W / 2., 54., "NEW BEST!", GOLD, true);
+        let hue = self.game.hue();
+        for x in [W * 0.25, W / 2., W * 0.75] {
+            self.burst(x, 40., &[GOLD, hue, 0xffffff, 0x22d3ee, 0xec4f9b], 16, 280.);
+        }
+    }
+
+    fn burst(&mut self, x: f32, y: f32, colors: &[u32], n: usize, speed: f32) {
+        if self.calm {
+            return;
+        }
+        let r = &mut self.fx_rng;
+        for i in 0..n {
+            let a = r.unit() * std::f32::consts::TAU;
+            let s = speed * (0.35 + 0.65 * r.unit());
+            let span = 0.45 + 0.45 * r.unit();
+            self.fx.parts.push(Particle {
+                x,
+                y,
+                vx: a.cos() * s,
+                vy: a.sin() * s - speed * 0.35,
+                life: span,
+                span,
+                size: 3. + 3.5 * r.unit(),
+                color: colors[i % colors.len().max(1)],
+                square: i % 3 == 0,
+            });
+        }
+        let over = self.fx.parts.len().saturating_sub(MAX_PARTS);
+        self.fx.parts.drain(..over);
+    }
+
+    fn pop(&mut self, x: f32, y: f32, text: impl Into<SharedString>, color: u32, big: bool) {
+        // A newer announcement replaces an older one, so they never stack up unread.
+        if big {
+            self.fx.pops.retain(|p| !p.big);
+        }
+        self.fx.pops.push(Pop {
+            x,
+            y,
+            text: text.into(),
+            color,
+            age: 0.,
+            big,
+        });
+    }
+
+    /// Moves the effects on to now.
+    fn advance_fx(&mut self) {
+        let (score, best) = (self.score, self.best());
+        // A running round keeps the clock going too, for the commit's breathing.
+        let running = self.phase == Phase::Playing && self.game != Game::Merge;
+        if !running && !self.fx.busy(score, best) {
+            self.fx.last = None;
+            return;
+        }
+        let now = Instant::now();
+        let dt = self.fx.last.map_or(1. / 60., |t| {
+            now.duration_since(t).as_secs_f32().min(1. / 20.)
+        });
+        self.fx.last = Some(now);
+        self.fx.step(dt, score, best, self.calm);
+    }
+
+    /// Particles and pops, over the field.
+    fn fx_layer(&self) -> Div {
+        let mut layer = div().absolute().inset_0();
+        for p in &self.fx.parts {
+            let t = (p.life / p.span).clamp(0., 1.);
+            let s = p.size * (0.5 + 0.5 * t);
+            let el = div()
+                .absolute()
+                .left(px(p.x - s / 2.))
+                .top(px(p.y - s / 2.))
+                .w(px(s))
+                .h(px(if p.square { s * 0.7 } else { s }))
+                .bg(alpha(p.color, t.min(1.) * 0.95));
+            layer = layer.child(if p.square {
+                el.rounded(px(1.5))
+            } else {
+                el.rounded_full()
+            });
+        }
+        for p in &self.fx.pops {
+            let life = if p.big { BIG_POP } else { POP };
+            let t = p.age / life;
+            let rise = if self.calm {
+                0.
+            } else {
+                (1. - (1. - t).powi(3)) * 30.
+            };
+            let fade = if t > 0.6 { 1. - (t - 0.6) / 0.4 } else { 1. };
+            // Grows in with a little overshoot, then holds.
+            let grow = if self.calm {
+                1.
+            } else {
+                back_out((p.age / 0.22).min(1.))
+            };
+            let size = (if p.big { 20. } else { 14. }) * (0.6 + 0.4 * grow);
+            let (bg, fg) = if p.big {
+                (
+                    grad(180., rgb(lighten(p.color, 0.6)), rgb(p.color)),
+                    0x4a2a00,
+                )
+            } else {
+                (
+                    grad(180., rgb(lighten(p.color, 0.8)), rgb(darken(p.color, 0.82))),
+                    0xffffff,
+                )
+            };
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(px(p.x - 80.))
+                    .w(px(160.))
+                    .top(px(p.y - rise - 12.))
+                    .flex()
+                    .justify_center()
+                    .opacity(fade)
+                    .child(
+                        div()
+                            .px(px(if p.big { 12. } else { 7. }))
+                            .py(px(1.))
+                            .rounded_full()
+                            .bg(bg)
+                            .border_1()
+                            .border_color(alpha(0xffffff, 0.7))
+                            .shadow(vec![soft(0x000000, 0.25, 6., 2.)])
+                            .text_size(px(size))
+                            .font_weight(FontWeight::BLACK)
+                            .text_color(rgb(fg))
+                            .whitespace_nowrap()
+                            .child(p.text.clone()),
+                    ),
+            );
+        }
+        layer
+    }
+
+    /// Spark flies through a dusk (or daytime) sky over rolling hills.
+    fn spark_field(&self) -> Div {
+        let dark = is_dark();
+        let scroll = self.spark.scroll;
+        let (top, bottom) = if dark {
+            (0x16123d, 0x4a2f6e)
+        } else {
+            (0x7fcbff, 0xffe0c2)
+        };
+        let mut field = div().bg(grad(180., rgb(top), rgb(bottom)));
+        // The moon, or the sun.
+        let orb = if dark { 0xfff0c2 } else { 0xfff4c4 };
+        field = field.child(
+            div()
+                .absolute()
+                .left(px(356.))
+                .top(px(26.))
+                .size(px(44.))
+                .rounded_full()
+                .bg(grad(135., rgb(0xffffff), rgb(orb)))
+                .shadow(glow(if dark { 0xffe6a0 } else { 0xffc24a }, 0.7, 36.)),
+        );
+        // Stars at night, clouds by day, drifting slower than the gates.
+        for i in 0..10u32 {
+            let y = 16. + (i * 41 % 150) as f32;
+            let x = ((i * 157 % 520) as f32 - scroll * (0.08 + 0.02 * (i % 3) as f32))
+                .rem_euclid(W + 80.)
+                - 40.;
+            field = field.child(if dark {
+                let s = 2. + (i % 3) as f32;
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .size(px(s))
+                    .rounded_full()
+                    .bg(alpha(0xffffff, 0.55 + 0.15 * (i % 3) as f32))
+                    .shadow(glow(0xffffff, 0.5, 4.))
+            } else if i % 2 == 0 {
+                let w = 46. + (i % 4) as f32 * 8.;
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(w))
+                    .h(px(16.))
+                    .rounded_full()
+                    .bg(alpha(0xffffff, 0.85))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(w * 0.25))
+                            .top(px(-9.))
+                            .size(px(22.))
+                            .rounded_full()
+                            .bg(alpha(0xffffff, 0.85)),
+                    )
+            } else {
+                div()
+            });
+        }
+        // Two rows of hills, the nearer one quicker.
+        let hills = if dark {
+            [
+                (0.2, 0x2b2258, H - 66., 200.),
+                (0.4, 0x33286a, H - 40., 150.),
+            ]
+        } else {
+            [
+                (0.2, 0xb6e3a8, H - 66., 200.),
+                (0.4, 0x8fd481, H - 40., 150.),
+            ]
+        };
+        for (speed, color, top, d) in hills {
+            let step = d * 0.78;
+            let mut x = -(scroll * speed).rem_euclid(step) - d * 0.3;
             while x < W {
                 field = field.child(
                     div()
                         .absolute()
-                        .left(px(x - 1.))
-                        .top(px(y - 1.))
-                        .size(px(2.))
+                        .left(px(x))
+                        .top(px(top))
+                        .size(px(d))
                         .rounded_full()
-                        .bg(dot),
+                        .bg(rgb(color)),
                 );
                 x += step;
             }
-            y += step;
         }
-        field
-    }
-
-    fn spark_field(&self) -> Div {
-        let mut field = div().child(Self::dots(self.spark.scroll * 0.4));
-        let gate = mix(c_blue(), c_canvas(), if is_dark() { 0.28 } else { 0.22 });
-        let rim = mix(c_blue(), c_canvas(), 0.55);
+        // The gates: green pillars with a lip at the gap, lit from the left.
+        let (light, base, edge) = (0x7ff09c, 0x2fbf5f, 0x1b8a43);
         for g in &self.spark.gates {
-            for (top, h) in [(-12., g.gap + 12.), (g.gap + GAP, H - g.gap - GAP + 12.)] {
-                field = field.child(
-                    div()
-                        .absolute()
-                        .left(px(g.x))
-                        .top(px(top))
-                        .w(px(GATE_W))
-                        .h(px(h))
-                        .rounded(px(12.))
-                        .bg(rgb(gate))
-                        .border_1()
-                        .border_color(rgb(rim)),
-                );
+            for (top, h, lip) in [
+                (-12., g.gap + 12., g.gap - 14.),
+                (g.gap + GAP, H - g.gap - GAP + 12., g.gap + GAP),
+            ] {
+                field = field
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(g.x + 3.))
+                            .top(px(top))
+                            .w(px(GATE_W - 6.))
+                            .h(px(h))
+                            .rounded(px(6.))
+                            .bg(grad(90., rgb(light), rgb(edge)))
+                            .border_1()
+                            .border_color(rgb(darken(edge, 0.8)))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(7.))
+                                    .top_0()
+                                    .bottom_0()
+                                    .w(px(5.))
+                                    .rounded_full()
+                                    .bg(alpha(0xffffff, 0.35)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(g.x))
+                            .top(px(lip))
+                            .w(px(GATE_W))
+                            .h(px(14.))
+                            .rounded(px(5.))
+                            .bg(grad(90., rgb(lighten(light, 0.7)), rgb(base)))
+                            .border_1()
+                            .border_color(rgb(darken(edge, 0.8)))
+                            .shadow(vec![soft(0x000000, 0.25, 6., 3.)])
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(7.))
+                                    .top(px(2.))
+                                    .w(px(GATE_W - 14.))
+                                    .h(px(3.))
+                                    .rounded_full()
+                                    .bg(alpha(0xffffff, 0.45)),
+                            ),
+                    );
             }
         }
-        // The spark leans into its motion, and leaves a short fading trail.
+        // A glowing trail behind the spark.
         let tilt = (self.spark.vy / 600.).clamp(-1., 1.);
-        for (i, a) in [0.28, 0.16, 0.08].into_iter().enumerate() {
-            let back = (i as f32 + 1.) * 9.;
-            let r = SPARK_R * (1. - 0.18 * (i as f32 + 1.));
+        for (i, a) in [0.42, 0.26, 0.14, 0.06].into_iter().enumerate() {
+            let back = (i as f32 + 1.) * 8.;
+            let r = SPARK_R * (1. - 0.16 * (i as f32 + 1.));
             field = field.child(
                 div()
                     .absolute()
@@ -927,114 +1638,252 @@ impl Arcade {
                     .top(px(self.spark.y - tilt * back * 0.5 - r))
                     .size(px(r * 2.))
                     .rounded_full()
-                    .bg(alpha(EMBER, a)),
+                    .bg(alpha(mix(GOLD, 0xff6a2b, 1. - i as f32 * 0.25), a)),
             );
         }
+        // The spark stretches as it falls and squashes as it lifts.
+        let (mut sx, mut sy) = (1., 1.);
+        if !self.calm {
+            let stretch = (self.spark.vy.abs() / 900.).min(0.18);
+            sx -= stretch * 0.6;
+            sy += stretch;
+            let q = self.fx.squash / SQUASH;
+            sx += 0.3 * q;
+            sy -= 0.25 * q;
+        }
+        let (w, h) = (SPARK_R * 2. * sx, SPARK_R * 2. * sy);
+        let eye = |dx: f32| {
+            div()
+                .absolute()
+                .left(px(w / 2. + dx))
+                .top(px(h * 0.32))
+                .w(px(2.5))
+                .h(px(3.5))
+                .rounded_full()
+                .bg(rgb(0x3a1a08))
+        };
         field.child(
             div()
                 .absolute()
-                .left(px(SPARK_X - SPARK_R))
-                .top(px(self.spark.y - SPARK_R))
-                .size(px(SPARK_R * 2.))
+                .left(px(SPARK_X - w / 2.))
+                .top(px(self.spark.y - h / 2.))
+                .w(px(w))
+                .h(px(h))
                 .rounded_full()
-                .bg(rgb(mix(0xffffff, EMBER, 0.25)))
-                .border_2()
-                .border_color(rgb(EMBER))
-                .shadow(glow(EMBER, 0.7, 18.)),
+                .bg(grad(150., rgb(0xffe08a), rgb(0xff5a1f)))
+                .border_1()
+                .border_color(rgb(0xd9440f))
+                .shadow(vec![
+                    soft(0xff7a2f, 0.75, 18., 0.),
+                    soft(0x000000, 0.25, 4., 2.),
+                ])
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(w * 0.18))
+                        .top(px(h * 0.12))
+                        .w(px(w * 0.34))
+                        .h(px(h * 0.24))
+                        .rounded_full()
+                        .bg(alpha(0xffffff, 0.8)),
+                )
+                .child(eye(0.5))
+                .child(eye(4.5)),
         )
     }
 
+    /// Commits: a snake in a moonlit (or sunny) garden, a glowing commit to chase.
     fn commits_field(&self) -> Div {
-        let ox = (W - COLS as f32 * CELL) / 2.;
-        let oy = (H - ROWS as f32 * CELL) / 2.;
-        let mut field = div().child(Self::dots(0.));
-        let (fc, fr) = self.commits.food;
-        // The commit: a ring with a dot, as in a git graph.
+        let dark = is_dark();
+        let (top, bottom, check) = if dark {
+            (0x0d2b29, 0x113d31, alpha(0xffffff, 0.035))
+        } else {
+            (0xe6f9ee, 0xcdf0dc, alpha(0x0f6b3c, 0.06))
+        };
+        let mut field = div().bg(grad(180., rgb(top), rgb(bottom)));
+        // A checkered lawn.
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                if (r + c) % 2 == 0 {
+                    field = field.child(
+                        div()
+                            .absolute()
+                            .left(px(c as f32 * CELL))
+                            .top(px(r as f32 * CELL))
+                            .size(px(CELL))
+                            .bg(check),
+                    );
+                }
+            }
+        }
+        // The commit: a gem that breathes while the round runs.
+        let (fx, fy) = cell_centre(self.commits.food);
+        let pulse = if self.calm {
+            0.
+        } else {
+            (self.fx.time * 5.).sin() * 0.5 + 0.5
+        };
+        let s = CELL - 5. + pulse * 2.;
         field = field.child(
             div()
                 .absolute()
-                .left(px(ox + fc as f32 * CELL + 3.))
-                .top(px(oy + fr as f32 * CELL + 3.))
-                .size(px(CELL - 6.))
+                .left(px(fx - s / 2.))
+                .top(px(fy - s / 2.))
+                .size(px(s))
                 .rounded_full()
+                .bg(grad(150., rgb(0xffe27a), rgb(0xff8a3d)))
                 .border_2()
-                .border_color(rgb(c_green()))
-                .shadow(glow(c_green(), 0.55, 12.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(div().size(px(4.)).rounded_full().bg(rgb(c_green()))),
+                .border_color(rgb(0xffffff))
+                .shadow(glow(0xffb03d, 0.55 + 0.3 * pulse, 14.))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(s * 0.2))
+                        .top(px(s * 0.14))
+                        .size(px(s * 0.28))
+                        .rounded_full()
+                        .bg(alpha(0xffffff, 0.85)),
+                ),
         );
-        // The snake is a branch in a git graph: a line through its commits, with the
-        // newest commit at its head.
-        let n = self.commits.body.len().max(1) as f32;
-        let centre = |(c, r): (i32, i32)| {
-            (
-                ox + c as f32 * CELL + CELL / 2.,
-                oy + r as f32 * CELL + CELL / 2.,
-            )
-        };
+        // The snake: glossy green segments joined into one body, a head with eyes.
         let body: Vec<(i32, i32)> = self.commits.body.iter().copied().collect();
-        const LINE: f32 = 4.;
-        for (i, pair) in body.windows(2).enumerate() {
-            let ((x1, y1), (x2, y2)) = (centre(pair[0]), centre(pair[1]));
-            let t = i as f32 / n;
+        let n = body.len().max(2) as f32 - 1.;
+        let shade = |i: usize| mix(0x1aa38a, 0x5ef08f, i as f32 / n);
+        for (i, pair) in body.windows(2).enumerate().rev() {
+            let ((x1, y1), (x2, y2)) = (cell_centre(pair[0]), cell_centre(pair[1]));
+            const THICK: f32 = CELL - 6.;
             field = field.child(
                 div()
                     .absolute()
-                    .left(px(x1.min(x2) - LINE / 2.))
-                    .top(px(y1.min(y2) - LINE / 2.))
-                    .w(px((x1 - x2).abs() + LINE))
-                    .h(px((y1 - y2).abs() + LINE))
-                    .rounded_full()
-                    .bg(alpha(mix(c_blue(), lit(), t * 0.6), 1. - t * 0.5)),
+                    .left(px(x1.min(x2) - THICK / 2.))
+                    .top(px(y1.min(y2) - THICK / 2.))
+                    .w(px((x1 - x2).abs() + THICK))
+                    .h(px((y1 - y2).abs() + THICK))
+                    .rounded(px(6.))
+                    .bg(rgb(shade(i))),
             );
         }
         for (i, &cell) in body.iter().enumerate().rev() {
-            let (x, y) = centre(cell);
-            let t = i as f32 / n;
-            let color = mix(c_blue(), lit(), t * 0.6);
-            let seg = if i == 0 {
-                div()
-                    .absolute()
-                    .left(px(x - 8.))
-                    .top(px(y - 8.))
-                    .size(px(16.))
-                    .rounded(px(5.))
-                    .bg(rgb(lit()))
-                    .shadow(glow(c_blue(), 0.7, 14.))
+            let (x, y) = cell_centre(cell);
+            let color = shade(i);
+            if i == 0 {
+                let swell = if self.calm {
+                    0.
+                } else {
+                    4. * self.fx.squash / SQUASH
+                };
+                let s = CELL + swell;
+                let (dx, dy) = (self.commits.dir.0 as f32, self.commits.dir.1 as f32);
+                // Eyes sit forward, either side of the way it faces.
+                let eye = |side: f32| {
+                    let ex = s / 2. + dx * 3. - dy * side * 4.5;
+                    let ey = s / 2. + dy * 3. + dx * side * 4.5;
+                    div()
+                        .absolute()
+                        .left(px(ex - 3.))
+                        .top(px(ey - 3.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(rgb(0xffffff))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(1.5 + dx * 1.2))
+                                .top(px(1.5 + dy * 1.2))
+                                .size(px(3.))
+                                .rounded_full()
+                                .bg(rgb(0x10261b)),
+                        )
+                };
+                field = field.child(
+                    div()
+                        .absolute()
+                        .left(px(x - s / 2.))
+                        .top(px(y - s / 2.))
+                        .size(px(s))
+                        .rounded(px(7.))
+                        .bg(grad(150., rgb(lighten(color, 0.6)), rgb(color)))
+                        .border_1()
+                        .border_color(rgb(darken(color, 0.7)))
+                        .shadow(vec![
+                            soft(0x2fe08a, 0.6, 12., 0.),
+                            soft(0x000000, 0.25, 4., 2.),
+                        ])
+                        .child(eye(-1.))
+                        .child(eye(1.)),
+                );
             } else {
-                div()
-                    .absolute()
-                    .left(px(x - 5.))
-                    .top(px(y - 5.))
-                    .size(px(10.))
-                    .rounded_full()
-                    .border_2()
-                    .border_color(alpha(color, 1. - t * 0.5))
-                    .bg(rgb(c_canvas()))
-            };
-            field = field.child(seg);
+                let s = CELL - 4.;
+                field = field.child(
+                    div()
+                        .absolute()
+                        .left(px(x - s / 2.))
+                        .top(px(y - s / 2.))
+                        .size(px(s))
+                        .rounded(px(6.))
+                        .bg(grad(150., rgb(lighten(color, 0.75)), rgb(color)))
+                        .border_1()
+                        .border_color(rgb(darken(color, 0.75)))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(3.))
+                                .top(px(2.))
+                                .w(px(s * 0.4))
+                                .h(px(3.))
+                                .rounded_full()
+                                .bg(alpha(0xffffff, 0.4)),
+                        ),
+                );
+            }
         }
         field
     }
 
+    /// Merge: candy tiles on a chunky board, over a warm glow.
     fn merge_field(&self) -> Div {
-        const SIDE: f32 = 270.;
-        const GAPS: f32 = 8.;
-        let tile = (SIDE - GAPS * 5.) / 4.;
+        let dark = is_dark();
+        let (top, bottom) = if dark {
+            (0x2a1840, 0x431f3f)
+        } else {
+            (0xfff1de, 0xffdcea)
+        };
+        let mut field = div().bg(grad(160., rgb(top), rgb(bottom)));
+        // Soft lights behind the board.
+        for (x, y, d, c) in [
+            (20., 30., 90., 0xff9a5c),
+            (350., 180., 110., 0xec4f9b),
+            (40., 210., 70., 0x8e55f0),
+        ] {
+            field = field.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .size(px(d))
+                    .rounded_full()
+                    .bg(alpha(c, if dark { 0.16 } else { 0.2 }))
+                    .shadow(glow(c, 0.25, 40.)),
+            );
+        }
+        let tile = merge_tile();
+        let (ox, oy) = merge_origin();
+        let frame = if dark { 0x24142f } else { 0xc98f6a };
         let mut board = div()
             .absolute()
-            .left(px((W - SIDE) / 2.))
-            .top(px((H - SIDE) / 2.))
-            .size(px(SIDE))
-            .rounded(px(14.))
-            .bg(alpha(c_text(), if is_dark() { 0.05 } else { 0.06 }));
+            .left(px(ox))
+            .top(px(oy))
+            .size(px(M_SIDE))
+            .rounded(px(18.))
+            .bg(alpha(frame, if dark { 0.85 } else { 0.55 }))
+            .border_b_4()
+            .border_color(alpha(darken(frame, 0.7), if dark { 0.9 } else { 0.6 }))
+            .shadow(vec![soft(0x000000, if dark { 0.4 } else { 0.18 }, 18., 6.)]);
         for r in 0..4 {
             for c in 0..4 {
                 let v = self.merge.cells[r][c];
-                let left = GAPS + c as f32 * (tile + GAPS);
-                let top = GAPS + r as f32 * (tile + GAPS);
+                let left = M_GAP + c as f32 * (tile + M_GAP);
+                let top = M_GAP + r as f32 * (tile + M_GAP);
                 if v == 0 {
                     board = board.child(
                         div()
@@ -1042,75 +1891,113 @@ impl Arcade {
                             .left(px(left))
                             .top(px(top))
                             .size(px(tile))
-                            .rounded(px(10.))
-                            .bg(alpha(c_text(), 0.04)),
+                            .rounded(px(12.))
+                            .bg(alpha(0xffffff, if dark { 0.06 } else { 0.28 })),
                     );
                     continue;
                 }
-                // 2 is a quiet tile; the accent comes in by 32, and ember takes over past 256.
-                let level = (v as f32).log2();
-                let (bg, fg) = if level <= 1. {
-                    (mix(c_blue(), c_canvas(), 0.14), c_text())
-                } else if level < 5. {
-                    (mix(c_blue(), c_canvas(), 0.14 + level * 0.12), c_text())
-                } else if level < 8. {
-                    (mix(EMBER, c_blue(), (level - 5.) / 3.), 0xffffff)
-                } else {
-                    (EMBER, 0xffffff)
-                };
+                let (bg, fg) = tile_colors(v);
                 let size = match v {
                     v if v >= 1024 => 20.,
                     v if v >= 128 => 24.,
                     _ => 28.,
                 };
-                let mut el = div()
+                let el = div()
                     .absolute()
                     .left(px(left))
                     .top(px(top))
                     .size(px(tile))
-                    .rounded(px(10.))
-                    .bg(rgb(bg))
+                    .rounded(px(12.))
+                    .bg(grad(180., rgb(lighten(bg, 0.7)), rgb(bg)))
+                    .border_b_4()
+                    .border_color(rgb(darken(bg, 0.74)))
+                    .shadow(if v >= 32 {
+                        vec![soft(bg, 0.55, 16., 0.), soft(0x000000, 0.2, 4., 3.)]
+                    } else {
+                        vec![soft(0x000000, 0.18, 4., 3.)]
+                    })
                     .flex()
                     .items_center()
                     .justify_center()
                     .text_size(px(size))
-                    .font_weight(FontWeight::BOLD)
+                    .font_weight(FontWeight::BLACK)
                     .text_color(rgb(fg))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(8.))
+                            .top(px(4.))
+                            .w(px(tile - 16.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(alpha(0xffffff, 0.35)),
+                    )
                     .child(v.to_string());
-                if level >= 5. {
-                    el = el.shadow(glow(bg, 0.5, 16.));
-                }
-                if self.merge.fresh == Some((r, c)) {
-                    board = board.child(el.animated(
-                        ElementId::Name(format!("merge-{}-{r}-{c}", self.merge.moves).into()),
-                        Animation::new(Duration::from_millis(160)).with_easing(ease_out_quint()),
-                        |el, t| el.opacity(t),
-                    ));
+                let fresh = self.merge.fresh == Some((r, c));
+                let bumped = self.merge.merged.contains(&(r, c));
+                let moves = self.merge.moves;
+                board = board.child(if (fresh || bumped) && !self.calm {
+                    let id = format!("merge-{moves}-{r}-{c}");
+                    let ms = if fresh { 200 } else { 240 };
+                    el.animated(
+                        ElementId::Name(id.into()),
+                        Animation::new(Duration::from_millis(ms)),
+                        move |el, t| {
+                            // A new tile grows in; a merged one swells and settles.
+                            let grow = if fresh {
+                                -tile * 0.5 * (1. - back_out(t))
+                            } else {
+                                7. * (t * std::f32::consts::PI).sin()
+                            };
+                            el.left(px(left - grow / 2.))
+                                .top(px(top - grow / 2.))
+                                .size(px(tile + grow))
+                                .opacity(if fresh { t.min(1.) } else { 1. })
+                        },
+                    )
                 } else {
-                    board = board.child(el.into_any_element());
-                }
+                    el.into_any_element()
+                });
             }
         }
-        div().child(board)
+        field.child(board)
     }
 
-    /// One block of a tetromino, `left`/`top` in pixels within its parent.
+    /// One block of a tetromino, glossy, `left`/`top` in pixels within its parent.
     fn block(left: f32, top: f32, color: u32) -> Div {
         div()
             .absolute()
-            .left(px(left + 1.))
-            .top(px(top + 1.))
-            .size(px(BLOCK - 2.))
+            .left(px(left + 0.5))
+            .top(px(top + 0.5))
+            .size(px(BLOCK - 1.))
             .rounded(px(3.))
-            .bg(rgb(color))
+            .bg(grad(150., rgb(lighten(color, 0.55)), rgb(color)))
             .border_1()
-            .border_color(rgb(mix(0xffffff, color, 0.3)))
+            .border_b_2()
+            .border_color(rgb(darken(color, 0.65)))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(2.))
+                    .top(px(1.5))
+                    .w(px(BLOCK - 8.))
+                    .h(px(2.5))
+                    .rounded_full()
+                    .bg(alpha(0xffffff, 0.55)),
+            )
     }
 
+    /// Stack: classic pieces in a glass well, under a night sky.
     fn stack_field(&self) -> Div {
+        let dark = is_dark();
+        let (top, bottom) = if dark {
+            (0x0e1230, 0x231a52)
+        } else {
+            (0xe3e8ff, 0xf1e4ff)
+        };
         let (ww, wh) = (WELL_W as f32 * BLOCK, WELL_H as f32 * BLOCK);
-        let ox = (W - ww) / 2. - 40.;
-        let oy = (H - wh) / 2.;
+        let (ox, oy) = well_origin();
+        let glass = 0x0a0c22;
         let mut well = div()
             .absolute()
             .left(px(ox))
@@ -1118,7 +2005,22 @@ impl Arcade {
             .w(px(ww))
             .h(px(wh))
             .rounded(px(6.))
-            .bg(alpha(c_text(), if is_dark() { 0.05 } else { 0.06 }));
+            .bg(grad(180., rgb(glass), rgb(0x151a3d)))
+            .shadow(vec![
+                soft(0x7b5cff, if dark { 0.45 } else { 0.3 }, 18., 0.),
+                soft(0x000000, 0.3, 8., 4.),
+            ]);
+        for c in 1..WELL_W {
+            well = well.child(
+                div()
+                    .absolute()
+                    .left(px(c as f32 * BLOCK))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(1.))
+                    .bg(alpha(0xffffff, 0.04)),
+            );
+        }
         for (r, row) in self.stack.well.iter().enumerate() {
             for (c, cell) in row.iter().enumerate() {
                 if let Some(kind) = cell {
@@ -1141,8 +2043,9 @@ impl Arcade {
                         .top(px(r as f32 * BLOCK + 1.))
                         .size(px(BLOCK - 2.))
                         .rounded(px(3.))
+                        .bg(alpha(color, 0.16))
                         .border_1()
-                        .border_color(alpha(color, 0.5)),
+                        .border_color(alpha(color, 0.7)),
                 );
             }
         }
@@ -1155,12 +2058,29 @@ impl Arcade {
         {
             well = well.child(
                 Self::block(c as f32 * BLOCK, r as f32 * BLOCK, color)
-                    .shadow(glow(color, 0.45, 8.)),
+                    .shadow(glow(color, 0.55, 10.)),
             );
+        }
+        // Rows that just cleared glow white and fade.
+        if self.fx.flash > 0. {
+            let t = self.fx.flash / FLASH;
+            for &r in &self.fx.flash_rows {
+                well = well.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(px(r as f32 * BLOCK - 2.))
+                        .w(px(ww))
+                        .h(px(BLOCK + 4.))
+                        .rounded(px(4.))
+                        .bg(alpha(0xffffff, 0.85 * t))
+                        .shadow(glow(0x22d3ee, 0.9 * t, 18.)),
+                );
+            }
         }
         // Beside the well: the next piece, then the level and lines.
         let next = self.stack.next;
-        let box_side = 4. * BLOCK;
+        let box_side = 4. * BLOCK + 8.;
         // Centre the piece's own cells in the box, not the box it turns in.
         let cells = next.cells();
         let span = |f: fn(&(i32, i32)) -> i32| {
@@ -1173,8 +2093,11 @@ impl Arcade {
             div()
                 .relative()
                 .size(px(box_side))
-                .rounded(px(6.))
-                .bg(alpha(c_text(), 0.04)),
+                .rounded(px(10.))
+                .bg(grad(180., rgb(glass), rgb(0x151a3d)))
+                .border_1()
+                .border_color(alpha(next.color(), 0.5))
+                .shadow(glow(next.color(), 0.35, 12.)),
             |el, (c, r)| {
                 el.child(Self::block(
                     pad_x + c as f32 * BLOCK,
@@ -1183,58 +2106,215 @@ impl Arcade {
                 ))
             },
         );
-        let stat = |label: &'static str, value: String| {
+        let label = |text: &'static str| {
+            div()
+                .text_size(px(10.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(if dark { 0xb8b4e8 } else { 0x4b3f9e }))
+                .child(text)
+        };
+        let stat = |text: &'static str, value: String| {
             div()
                 .v_flex()
-                .gap(px(1.))
-                .text_size(px(11.))
-                .text_color(rgb(c_muted()))
-                .child(label)
+                .w(px(box_side))
+                .px(px(8.))
+                .py(px(4.))
+                .rounded(px(10.))
+                .bg(alpha(
+                    if dark { 0xffffff } else { 0x5b3fdc },
+                    if dark { 0.07 } else { 0.1 },
+                ))
+                .border_b_2()
+                .border_color(alpha(0x5b3fdc, 0.3))
+                .child(label(text))
                 .child(
                     div()
-                        .text_size(px(15.))
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(18.))
+                        .font_weight(FontWeight::BLACK)
                         .text_color(rgb(c_text()))
                         .child(value),
                 )
         };
         let side = div()
             .absolute()
-            .left(px(ox + ww + 24.))
+            .left(px(ox + ww + 22.))
             .top(px(oy))
             .v_flex()
-            .gap_3()
+            .gap(px(10.))
             .child(
                 div()
                     .v_flex()
-                    .gap_1()
-                    .text_size(px(11.))
-                    .text_color(rgb(c_muted()))
-                    .child("Next")
+                    .gap(px(4.))
+                    .child(label("NEXT"))
                     .child(preview),
             )
-            .child(stat("Level", self.stack.level().to_string()))
-            .child(stat("Lines", self.stack.lines.to_string()));
-        div().child(Self::dots(0.)).child(well).child(side)
+            .child(stat("LEVEL", self.stack.level().to_string()))
+            .child(stat("LINES", self.stack.lines.to_string()));
+        div()
+            .bg(grad(180., rgb(top), rgb(bottom)))
+            .child(well)
+            .child(side)
+    }
+
+    /// A line that bobs gently, for the prompt on a card.
+    fn bobbing(&self, el: Div, id: String) -> AnyElement {
+        if self.calm {
+            return el.into_any_element();
+        }
+        el.relative().animated(
+            ElementId::Name(id.into()),
+            Animation::new(Duration::from_millis(1100)).repeat(),
+            |el, t| el.top(px(-3.5 * (t * std::f32::consts::TAU).sin().abs())),
+        )
     }
 
     /// The card over the field before a round, when paused and after a crash.
-    fn banner(&self) -> Option<Div> {
-        let (title, line) = match self.phase {
+    fn banner(&self) -> Option<AnyElement> {
+        if self.phase == Phase::Playing {
+            return None;
+        }
+        let game = self.game;
+        let prompt = |what: &str| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(px(12.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(c_secondary()))
+                .child(keycap("Space"))
+                .child(what.to_string())
+        };
+        let badge = |name: IconName| {
+            div()
+                .size(px(44.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(14.))
+                .bg(grad(150., rgb(lighten(game.hue(), 0.7)), rgb(game.deep())))
+                .border_b_4()
+                .border_color(rgb(darken(game.deep(), 0.7)))
+                .shadow(glow(game.hue(), 0.5, 16.))
+                .child(icon(name, 22., 0xffffff))
+        };
+        let title = |text: String, size: f32| {
+            div()
+                .text_size(px(size))
+                .font_weight(FontWeight::BLACK)
+                .text_color(rgb(c_text()))
+                .child(text)
+        };
+        let mut card = div().v_flex().items_center().gap(px(8.));
+        let id = format!("arcade-card-{:?}-{}", self.phase, self.rounds);
+        card = match self.phase {
             Phase::Playing => return None,
-            Phase::Ready => (
-                self.game.name().to_string(),
-                format!("{} · Space to start", self.game.hint()),
-            ),
-            Phase::Paused => ("Paused".into(), "Space to carry on".into()),
-            Phase::Over if self.record => (
-                format!("New best · {}", self.score),
-                "Space to play again".into(),
-            ),
-            Phase::Over => (
-                format!("Score {}", self.score),
-                format!("Best {} · Space to play again", self.best()),
-            ),
+            Phase::Ready => card
+                .child(badge(game.glyph()))
+                .child(title(game.name().to_string(), 24.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(c_muted()))
+                        .child(game.hint()),
+                )
+                .child(self.bobbing(prompt("to start"), format!("{id}-bob"))),
+            Phase::Paused => card
+                .child(badge(IconName::Pause))
+                .child(title("Paused".into(), 24.))
+                .child(self.bobbing(prompt("to carry on"), format!("{id}-bob"))),
+            Phase::Over => {
+                let stat = |label: &'static str, value: u32, color: u32| {
+                    div()
+                        .v_flex()
+                        .items_center()
+                        .min_w(px(84.))
+                        .px(px(12.))
+                        .py(px(6.))
+                        .rounded(px(12.))
+                        .bg(tint(c_subtle()))
+                        .border_b_2()
+                        .border_color(divider())
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(c_muted()))
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(26.))
+                                .font_weight(FontWeight::BLACK)
+                                .text_color(rgb(color))
+                                .child(value.to_string()),
+                        )
+                };
+                let best_ink = if is_dark() { GOLD } else { 0x9a5b00 };
+                let card = card.child(title("Game over!".into(), 30.)).child(
+                    div()
+                        .flex()
+                        .gap(px(10.))
+                        .child(stat("SCORE", self.score, c_text()))
+                        .child(stat(
+                            "BEST",
+                            self.best(),
+                            if self.record { best_ink } else { c_text() },
+                        )),
+                );
+                let card = if self.record {
+                    card.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .px(px(12.))
+                            .h(px(26.))
+                            .rounded_full()
+                            .bg(grad(180., rgb(0xffe48a), rgb(GOLD)))
+                            .border_b_2()
+                            .border_color(rgb(0xc98a00))
+                            .shadow(glow(GOLD, 0.6, 14.))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::BLACK)
+                            .text_color(rgb(0x4a2a00))
+                            .child(icon(IconName::Trophy, 13., 0x4a2a00))
+                            .child("NEW BEST!"),
+                    )
+                } else {
+                    card
+                };
+                card.child(self.bobbing(prompt("to play again"), format!("{id}-bob")))
+            }
+        };
+        let hue = game.hue();
+        let panel = div()
+            .p(px(3.))
+            .rounded(px(22.))
+            .bg(grad(135., rgb(lighten(hue, 0.6)), rgb(game.deep())))
+            .shadow(vec![
+                soft(0x000000, 0.35, 28., 10.),
+                soft(hue, 0.35, 24., 0.),
+            ])
+            .child(
+                card.px(px(26.))
+                    .py(px(16.))
+                    .rounded(px(19.))
+                    .bg(float(c_raised())),
+            );
+        let panel = if self.calm {
+            panel.into_any_element()
+        } else {
+            panel.relative().animated(
+                ElementId::Name(id.into()),
+                Animation::new(Duration::from_millis(380)),
+                |el, t| el.opacity(t.min(1.)).top(px(14. * (1. - back_out(t)))),
+            )
+        };
+        let dim = if is_dark() {
+            hsla(0., 0., 0., 0.35)
+        } else {
+            hsla(0., 0., 1., 0.35)
         };
         Some(
             div()
@@ -1243,44 +2323,163 @@ impl Arcade {
                 .flex()
                 .items_center()
                 .justify_center()
+                .bg(dim)
+                .child(panel)
+                .into_any_element(),
+        )
+    }
+
+    /// The cartridges, one per game.
+    fn tabs(&self, cx: &mut Context<Self>) -> Div {
+        let lift = if self.calm { 0. } else { -2. };
+        Game::ALL
+            .into_iter()
+            .enumerate()
+            .fold(div().flex().gap(px(8.)), |row, (i, game)| {
+                let on = game == self.game;
+                let (hue, deep) = (game.hue(), game.deep());
+                let glyph = div()
+                    .flex_none()
+                    .size(px(22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(7.))
+                    .bg(if on {
+                        grad(180., alpha(0xffffff, 0.35), alpha(0xffffff, 0.15))
+                    } else {
+                        grad(150., rgb(lighten(hue, 0.7)), rgb(deep))
+                    })
+                    .child(icon(game.glyph(), 13., 0xffffff));
+                let tab = div()
+                    .id(("arcade-tab", i))
+                    .relative()
+                    .flex_1()
+                    .h(px(38.))
+                    .pl(px(8.))
+                    .pr(px(10.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(7.))
+                    .rounded(px(12.))
+                    .border_b_4()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::BOLD)
+                    .cursor_pointer()
+                    .map(|el| {
+                        if on {
+                            el.bg(grad(180., rgb(lighten(hue, 0.85)), rgb(deep)))
+                                .border_color(rgb(darken(deep, 0.65)))
+                                .text_color(rgb(0xffffff))
+                                .shadow(vec![soft(hue, 0.5, 14., 2.)])
+                        } else {
+                            el.bg(alpha(hue, if is_dark() { 0.14 } else { 0.1 }))
+                                .border_color(alpha(hue, 0.35))
+                                .text_color(rgb(c_text()))
+                                .hover(|el| {
+                                    el.bg(alpha(hue, if is_dark() { 0.24 } else { 0.18 }))
+                                        .top(px(lift))
+                                })
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.pick(game);
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    }))
+                    .child(glyph)
+                    .child(game.name());
+                row.child(if on && !self.calm {
+                    tab.animated(
+                        ElementId::Name(format!("arcade-pick-{}", self.picks).into()),
+                        Animation::new(Duration::from_millis(420)),
+                        |el, t| el.top(px(-7. * (1. - back_out(t)).abs() * (1. - t))),
+                    )
+                } else {
+                    tab.into_any_element()
+                })
+            })
+    }
+
+    /// The marquee over the field: the game's name, then Score and Best.
+    fn marquee(&self) -> Div {
+        let game = self.game;
+        let counter = |label: &'static str, value: u32, color: u32, bump: f32| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .h(px(26.))
+                .px(px(10.))
+                .rounded(px(9.))
+                .bg(alpha(0x000000, 0.24))
                 .child(
                     div()
-                        .v_flex()
-                        .items_center()
-                        .gap_1()
-                        .px_5()
-                        .py_3()
-                        .rounded(px(12.))
-                        .border_1()
-                        .border_color(float_edge())
-                        .bg(float(c_raised()))
-                        .shadow_lg()
-                        .child(
-                            div()
-                                .text_size(px(17.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(if self.record && self.phase == Phase::Over {
-                                    EMBER
-                                } else {
-                                    c_text()
-                                }))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(c_muted()))
-                                .child(line),
-                        ),
-                ),
-        )
+                        .text_size(px(9.5))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(alpha(0xffffff, 0.82))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .min_w(px(22.))
+                        .text_size(px(16. + 4. * bump))
+                        .font_weight(FontWeight::BLACK)
+                        .text_color(rgb(color))
+                        .child(value.to_string()),
+                )
+        };
+        let bump = if self.calm { 0. } else { self.fx.bump };
+        let cheer = if self.calm { 0. } else { self.fx.cheer / CHEER };
+        let best = self.fx.shown_best.round() as u32;
+        let best_color = if self.record { GOLD } else { 0xffffff };
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .h(px(36.))
+            .px(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pl(px(2.))
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::BLACK)
+                    .text_color(rgb(0xffffff))
+                    .child(icon(game.glyph(), 15., 0xffffff))
+                    .child(game.name().to_uppercase()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(counter(
+                        "SCORE",
+                        self.fx.shown.round() as u32,
+                        0xffffff,
+                        bump,
+                    ))
+                    .child(
+                        counter("BEST", best, best_color, cheer * 0.5)
+                            .when(self.record, |el| {
+                                el.shadow(glow(GOLD, 0.35 + 0.5 * cheer, 12.))
+                            })
+                            .child(icon(IconName::Trophy, 12., best_color)),
+                    ),
+            )
     }
 }
 
 impl Render for Arcade {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.advance();
-        if self.phase == Phase::Playing && self.game != Game::Merge {
+        self.advance_fx();
+        let clocked = self.phase == Phase::Playing && self.game != Game::Merge;
+        if clocked || self.fx.busy(self.score, self.best()) {
             window.request_animation_frame();
         }
         let field = match self.game {
@@ -1289,118 +2488,100 @@ impl Render for Arcade {
             Game::Merge => self.merge_field(),
             Game::Stack => self.stack_field(),
         };
-        let tabs = Game::ALL.into_iter().enumerate().fold(
-            div()
-                .flex()
-                .p(px(3.))
-                .gap(px(2.))
-                .rounded(px(9.))
-                .bg(tint(c_subtle())),
-            |row, (i, game)| {
-                let on = game == self.game;
-                row.child(
-                    div()
-                        .id(("arcade-tab", i))
-                        .h(px(26.))
-                        .px(px(12.))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .rounded(px(7.))
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .cursor_pointer()
-                        .text_color(rgb(if on { c_text() } else { c_muted() }))
-                        .when(on, |el| el.bg(rgb(c_raised())).shadow_sm())
-                        .hover(|el| el.text_color(rgb(c_text())))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.pick(game);
-                            window.focus(&this.focus, cx);
-                            cx.notify();
-                        }))
-                        .child(game.name()),
-                )
-            },
+        // A crash shakes the field, fading out.
+        let (dx, dy) = if self.fx.shake > 0. {
+            let amp = 6. * self.fx.shake / SHAKE;
+            let t = self.fx.time;
+            ((t * 71.).sin() * amp, (t * 53.).cos() * amp * 0.5)
+        } else {
+            (0., 0.)
+        };
+        let game = self.game;
+        let footer = game.keys().iter().fold(
+            div().flex().items_center().gap(px(10.)),
+            |row, (keys, what)| row.child(key_hint(keys, what)),
         );
-        let score = div()
+        let footer_right = div()
             .flex()
             .items_center()
-            .gap_3()
-            .text_size(px(12.))
-            .text_color(rgb(c_muted()))
-            .child(
-                div().flex().items_baseline().gap_1().child("Score").child(
-                    div()
-                        .text_size(px(16.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(c_text()))
-                        .child(self.score.to_string()),
-                ),
-            )
-            .child(
-                div().flex().items_baseline().gap_1().child("Best").child(
-                    div()
-                        .text_size(px(16.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(if self.record { EMBER } else { c_secondary() }))
-                        .child(self.best().to_string()),
-                ),
-            );
+            .gap(px(10.))
+            .child(key_hint(&["1–4"], "switch"))
+            .child(key_hint(&["P"], "pause"))
+            .child(key_hint(&["R"], "restart"));
         div()
             .id("arcade")
             .track_focus(&self.focus)
             .key_context("Arcade")
             .v_flex()
-            .gap_3()
+            .gap(px(12.))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                if this.key(e.keystroke.key.as_str()) {
+                if this.press(e.keystroke.key.as_str()) {
                     cx.stop_propagation();
                     cx.notify();
                 }
             }))
+            .child(self.tabs(cx))
+            .child(
+                // The cabinet: a bezel in the game's colour, its marquee over the field.
+                div()
+                    .v_flex()
+                    .p(px(6.))
+                    .pt_0()
+                    .rounded(px(18.))
+                    .bg(grad(100., rgb(lighten(game.hue(), 0.9)), rgb(game.deep())))
+                    .border_b_4()
+                    .border_color(rgb(darken(game.deep(), 0.7)))
+                    .shadow(vec![
+                        soft(game.hue(), if is_dark() { 0.35 } else { 0.25 }, 22., 4.),
+                        soft(0x000000, 0.2, 6., 3.),
+                    ])
+                    .child(self.marquee())
+                    .child(
+                        div()
+                            .id("arcade-field")
+                            .relative()
+                            .w(px(W))
+                            .h(px(H))
+                            .overflow_hidden()
+                            .rounded(px(12.))
+                            .bg(rgb(c_canvas()))
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    window.focus(&this.focus, cx);
+                                    let before = this.before();
+                                    if this.game == Game::Spark {
+                                        this.lift();
+                                    } else if this.phase != Phase::Playing {
+                                        this.start();
+                                    }
+                                    this.react(before);
+                                    cx.notify();
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(dx))
+                                    .top(px(dy))
+                                    .w(px(W))
+                                    .h(px(H))
+                                    .child(field.absolute().inset_0())
+                                    .child(self.fx_layer()),
+                            )
+                            .children(self.banner()),
+                    ),
+            )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(tabs)
-                    .child(score),
-            )
-            .child(
-                div()
-                    .id("arcade-field")
-                    .relative()
-                    .w(px(W))
-                    .h(px(H))
-                    .overflow_hidden()
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(divider())
-                    .bg(alpha(c_canvas(), if glass_on() { 0.55 } else { 1. }))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            window.focus(&this.focus, cx);
-                            if this.game == Game::Spark {
-                                this.lift();
-                            } else if this.phase != Phase::Playing {
-                                this.start();
-                            }
-                            cx.notify();
-                        }),
-                    )
-                    .child(field.absolute().inset_0())
-                    .children(self.banner()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
                     .text_size(px(11.5))
                     .text_color(rgb(c_muted()))
-                    .child(self.game.hint())
-                    .child("1–4 switch · P pause · R restart"),
+                    .child(footer)
+                    .child(footer_right),
             )
     }
 }
@@ -1412,6 +2593,7 @@ impl RunoApp {
             .arcade
             .get_or_insert_with(|| cx.new(Arcade::new))
             .clone();
+        arcade.update(cx, |a, cx| a.refresh_motion(cx));
         // Remember who was working when it opened, so it can say when they are done.
         self.arcade_open = true;
         self.arcade_waiting = self.working_count();
@@ -1454,9 +2636,47 @@ impl RunoApp {
             .cursor_pointer()
             .hover(|el| el.text_color(rgb(c_text())).bg(tint(c_subtle())))
             .on_click(cx.listener(|this, _, window, cx| this.open_arcade(window, cx)))
-            .child(icon(IconName::Gamepad2, 12., c_muted()))
+            .child(icon(IconName::Gamepad2, 12., c_blue()))
             .child("Play while you wait")
             .into_any_element()
+    }
+
+    /// "ARCADE", each letter in a game's colour, hopping in as the Arcade opens.
+    fn arcade_title(calm: bool) -> Div {
+        let colors = [
+            Game::Spark,
+            Game::Commits,
+            Game::Merge,
+            Game::Stack,
+            Game::Spark,
+            Game::Commits,
+        ];
+        "ARCADE".chars().zip(colors).enumerate().fold(
+            div().flex().items_end().gap(px(1.)),
+            |row, (i, (ch, game))| {
+                let letter = div()
+                    .relative()
+                    .text_size(px(22.))
+                    .line_height(px(26.))
+                    .font_weight(FontWeight::BLACK)
+                    .text_color(rgb(game.ink()))
+                    .child(ch.to_string());
+                row.child(if calm {
+                    letter.into_any_element()
+                } else {
+                    // Each letter starts a beat after the one before.
+                    let lead = i as f32 * 0.09;
+                    letter.animated(
+                        ElementId::Name(format!("arcade-letter-{i}").into()),
+                        Animation::new(Duration::from_millis(900)),
+                        move |el, t| {
+                            let u = ((t - lead) / (1. - lead)).clamp(0., 1.);
+                            el.top(px(-8. * (u * std::f32::consts::PI).sin() * (1. - u)))
+                        },
+                    )
+                })
+            },
+        )
     }
 
     pub(crate) fn arcade_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1464,18 +2684,44 @@ impl RunoApp {
             return None;
         }
         let arcade = self.arcade.clone()?;
+        let (game, calm) = {
+            let a = arcade.read(cx);
+            (a.game, a.calm)
+        };
         let working = self.working_count();
         let done = self.arcade_waiting > 0 && working == 0;
+        let chip = |color: u32| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(28.))
+                .px(px(10.))
+                .rounded_full()
+                .bg(alpha(color, if is_dark() { 0.14 } else { 0.1 }))
+                .border_1()
+                .border_color(alpha(color, 0.35))
+        };
         let status = if done {
             div()
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().size(px(7.)).rounded_full().bg(rgb(c_green())))
                 .child(
-                    div()
-                        .text_color(rgb(c_text()))
-                        .child("Your agents are done"),
+                    chip(c_green())
+                        .child(
+                            div()
+                                .size(px(8.))
+                                .rounded_full()
+                                .bg(rgb(c_green()))
+                                .shadow(glow(c_green(), 0.7, 8.)),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(c_text()))
+                                .child("Your agents are done"),
+                        ),
                 )
                 .child(
                     self.button("arcade-back", "Back to work", false)
@@ -1487,24 +2733,41 @@ impl RunoApp {
                         })),
                 )
         } else if working > 0 {
-            div().child(working_indicator(Some(format!(
+            chip(c_blue()).child(working_indicator(Some(format!(
                 "{working} agent{}",
                 if working == 1 { "" } else { "s" }
             ))))
         } else {
-            div().text_color(rgb(c_muted())).child("No agents running")
+            chip(c_muted())
+                .text_color(rgb(c_muted()))
+                .child("No agents running")
         };
+        let accent = c_blue();
+        let hue = game.hue();
+        let r = crate::shell::ISLAND_R + 4.;
         let card = div()
             .id("arcade-card")
+            .relative()
             .p_5()
             .v_flex()
             .gap_4()
-            .rounded(px(crate::shell::ISLAND_R))
-            .border_1()
-            .border_color(float_edge())
+            .rounded(px(r))
             .bg(float(c_sheet()))
-            .shadow_2xl()
-            .on_click(|_, _, cx| cx.stop_propagation())
+            .overflow_hidden()
+            // A wash of the accent and the game's colour across the top.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(140.))
+                    .bg(grad(
+                        180.,
+                        alpha(mix(accent, hue, 0.5), if is_dark() { 0.22 } else { 0.14 }),
+                        alpha(hue, 0.),
+                    )),
+            )
             .child(
                 div()
                     .flex()
@@ -1515,30 +2778,44 @@ impl RunoApp {
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .child(icon(IconName::Gamepad2, 16., c_blue()))
+                            .gap(px(10.))
                             .child(
                                 div()
-                                    .text_size(px(15.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Arcade"),
+                                    .size(px(34.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(11.))
+                                    .bg(grad(150., rgb(lighten(accent, 0.75)), rgb(game.deep())))
+                                    .border_b_4()
+                                    .border_color(rgb(darken(game.deep(), 0.7)))
+                                    .shadow(glow(mix(accent, hue, 0.5), 0.5, 14.))
+                                    .child(icon(IconName::Gamepad2, 18., 0xffffff)),
+                            )
+                            .child(
+                                div().v_flex().child(Self::arcade_title(calm)).child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(c_muted()))
+                                        .child("Play while your agents work"),
+                                ),
                             ),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap_3()
+                            .gap_2()
                             .text_size(px(12.))
                             .child(status)
                             .child(
                                 div()
                                     .id("arcade-close")
-                                    .size(px(24.))
+                                    .size(px(28.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded(px(6.))
+                                    .rounded_full()
                                     .cursor_pointer()
                                     .hover(|el| el.bg(tint(c_subtle())))
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1549,10 +2826,27 @@ impl RunoApp {
                     ),
             )
             .child(arcade);
+        // A ring that runs from the accent to the game's colour, with a glow of both.
+        let frame = div()
+            .id("arcade-frame")
+            .p(px(3.))
+            .rounded(px(r + 3.))
+            .bg(grad(135., rgb(accent), rgb(hue)))
+            .shadow(vec![
+                soft(0x000000, if is_dark() { 0.5 } else { 0.2 }, 48., 18.),
+                soft(
+                    mix(accent, hue, 0.5),
+                    if is_dark() { 0.4 } else { 0.28 },
+                    40.,
+                    0.,
+                ),
+            ])
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(card);
         let backdrop = if is_dark() {
-            hsla(0., 0., 0., 0.45)
+            hsla(0., 0., 0., 0.5)
         } else {
-            hsla(0., 0., 0., 0.22)
+            hsla(0., 0., 0., 0.26)
         };
         Some(fade(
             div()
@@ -1565,7 +2859,7 @@ impl RunoApp {
                 .bg(backdrop)
                 .occlude()
                 .on_click(cx.listener(|this, _, window, cx| this.close_arcade(window, cx)))
-                .child(rise(card, "arcade-rise", 300)),
+                .child(rise(frame, "arcade-rise", 300)),
             "arcade-fade",
             200,
         ))
@@ -1591,6 +2885,7 @@ mod tests {
         let mut m = Merge {
             cells: [[2, 2, 0, 0], [0; 4], [0; 4], [0; 4]],
             fresh: None,
+            merged: Vec::new(),
             moves: 0,
         };
         assert_eq!(m.shift((0, 1), &mut rng), Some(4));
@@ -1599,6 +2894,7 @@ mod tests {
         let mut full = Merge {
             cells: [[2, 4, 2, 4], [4, 2, 4, 2], [2, 4, 2, 4], [4, 2, 4, 2]],
             fresh: None,
+            merged: Vec::new(),
             moves: 0,
         };
         assert_eq!(full.shift((0, -1), &mut rng), None);
