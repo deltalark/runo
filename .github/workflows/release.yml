@@ -27,14 +27,30 @@ jobs:
             arch: arm64
           - target: x86_64-apple-darwin
             arch: x86_64
-    env:
-      APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
-      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    # The Apple secrets are set on the steps that need them, never on the job, so build
+    # scripts and third-party actions can't read them.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check which signing secrets are set
+        id: secrets
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          sign=false; notarize=false
+          if [ -n "$APPLE_CERT_P12" ] && [ -n "$APPLE_CERT_PASSWORD" ]; then sign=true; fi
+          if [ "$sign" = true ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then notarize=true; fi
+          # A release must be signed and notarized, or macOS users get a build Gatekeeper can't check.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]] && [ "$notarize" != true ]; then
+            echo "::error::Release builds need the Apple signing and notarization secrets."
+            exit 1
+          fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
 
       - name: Check the tag matches the version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -51,7 +67,7 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -78,7 +94,10 @@ jobs:
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Import the signing certificate
-        if: env.APPLE_CERT_P12 != '' && env.APPLE_CERT_PASSWORD != ''
+        if: steps.secrets.outputs.sign == 'true'
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
         run: |
           keychain="$RUNNER_TEMP/runo.keychain-db"
           echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
@@ -91,7 +110,7 @@ jobs:
           rm "$RUNNER_TEMP/cert.p12"
 
       - name: Sign the app
-        if: env.APPLE_CERT_P12 != '' && env.APPLE_CERT_PASSWORD != ''
+        if: steps.secrets.outputs.sign == 'true'
         run: |
           identity=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
           test -n "$identity"
@@ -99,13 +118,17 @@ jobs:
           codesign --verify --deep --strict "${{ steps.app.outputs.path }}"
 
       - name: Sign the app without a certificate
-        if: env.APPLE_CERT_P12 == '' || env.APPLE_CERT_PASSWORD == ''
+        if: steps.secrets.outputs.sign != 'true'
         run: |
           echo "::warning::No signing certificate is set, so this build is signed ad hoc and macOS will ask before opening it."
           codesign --force --deep --sign - "${{ steps.app.outputs.path }}"
 
       - name: Notarize the app
-        if: env.APPLE_CERT_P12 != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        if: steps.secrets.outputs.notarize == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           ditto -c -k --keepParent "${{ steps.app.outputs.path }}" "$RUNNER_TEMP/notarize.zip"
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
@@ -120,15 +143,23 @@ jobs:
           hdiutil create -volname Runo -srcfolder dmg -ov -format UDZO "dist/${{ steps.app.outputs.name }}.dmg"
 
       - name: Sign and notarize the disk image
-        if: env.APPLE_CERT_P12 != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        if: steps.secrets.outputs.notarize == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
           identity=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
           codesign --force --timestamp --sign "$identity" "dist/${{ steps.app.outputs.name }}.dmg"
           xcrun notarytool submit "dist/${{ steps.app.outputs.name }}.dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
           xcrun stapler staple "dist/${{ steps.app.outputs.name }}.dmg"
 
+      - name: Remove the signing keychain
+        if: always() && steps.secrets.outputs.sign == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/runo.keychain-db" || true
+
       - name: Upload the build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.app.outputs.name }}
           path: dist/*
@@ -136,7 +167,7 @@ jobs:
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           generate_release_notes: true
@@ -152,7 +183,7 @@ jobs:
           - runner: ubuntu-22.04-arm
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Check the tag matches the version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -177,7 +208,7 @@ jobs:
           rustup update stable
           rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: linux-${{ matrix.arch }}
 
@@ -223,7 +254,7 @@ jobs:
           tar -C "$RUNNER_TEMP" -czf "dist/${{ steps.build.outputs.name }}.tar.gz" "${{ steps.build.outputs.name }}"
 
       - name: Upload the build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.build.outputs.name }}
           path: dist/*
@@ -231,7 +262,7 @@ jobs:
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           generate_release_notes: true
@@ -242,7 +273,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Check the tag matches the version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -258,7 +289,7 @@ jobs:
           rustup update stable
           rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: windows-x86_64
 
@@ -286,7 +317,7 @@ jobs:
           Compress-Archive -Path $dir -DestinationPath "dist/${{ steps.build.outputs.name }}.zip"
 
       - name: Upload the build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.build.outputs.name }}
           path: dist/*
@@ -294,7 +325,7 @@ jobs:
 
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           generate_release_notes: true
