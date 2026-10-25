@@ -848,10 +848,6 @@ pub(crate) fn unheld_limits(provider: &str, permissions: &[String]) -> Vec<&'sta
     }
     let may = |what: &str| permissions.iter().any(|p| p == what);
     let mut out = Vec::new();
-    // Read-only runs in each agent's plan or read-only mode; Grok's CLI has none.
-    if !may("edit") && provider == "grok" {
-        out.push("change files");
-    }
     // Shell: Claude Code and OpenCode turn it off, Copilot denies it, and Gemini and
     // Qwen ask for every command, which a run nobody watches refuses.
     if !may("shell")
@@ -994,7 +990,6 @@ mod tests {
         assert!(unheld_limits("claude", &read).is_empty());
         assert!(unheld_limits("codex", &read).contains(&"run commands"));
         assert!(!unheld_limits("codex", &read).contains(&"use the network"));
-        assert!(unheld_limits("grok", &read).contains(&"change files"));
         assert_eq!(
             unheld_limits("claude", &may(&["read", "edit", "shell"])),
             ["use the network"]

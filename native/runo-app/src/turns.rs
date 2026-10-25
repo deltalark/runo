@@ -206,6 +206,9 @@ impl RunoApp {
         }
         let has = session.has_conversation();
         let provider = session.provider.clone();
+        if !agent::can_resume(&provider, &session.agent_session) {
+            session.agent_session.clear();
+        }
         // Resume the CLI's own conversation when its id is known (Claude Code and Codex can
         // also pick up the newest one in the folder). Otherwise the history goes in the prompt.
         let native = has

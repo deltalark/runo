@@ -254,6 +254,10 @@ fn judge(
             }
             Some(false)
         }
+        "grok" => {
+            // `grok login` keeps its sign-in here and `grok logout` removes it.
+            Some(read(".grok/auth.json").contains("\"key\""))
+        }
         _ => None,
     }
 }

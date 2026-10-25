@@ -2519,12 +2519,6 @@ impl RunoApp {
                 if agent::waits_for_sign_in(&line) {
                     self.sign_in_wait(id, &line);
                 }
-                // Grok names its conversation on stderr; the next turn continues it.
-                if let Some(session) = self.state.session_mut(id) {
-                    if let Some(found) = agent::stderr_conversation(&session.provider, &line) {
-                        session.agent_session = found;
-                    }
-                }
                 let log = self.stderr.entry(id).or_default();
                 log.push(line);
                 if log.len() > 200 {

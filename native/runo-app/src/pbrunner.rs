@@ -751,7 +751,7 @@ mod tests {
             ("All good.".to_string(), None, "t-1".to_string())
         );
         assert_eq!(
-            read_output("grok", "/w", " Plain reply \n"),
+            read_output("gemini", "/w", " Plain reply \n"),
             ("Plain reply".to_string(), None, String::new())
         );
     }
