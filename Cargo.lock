@@ -5880,6 +5880,7 @@ name = "runo"
 version = "0.5.8"
 dependencies = [
  "anyhow",
+ "async-channel",
  "base64",
  "block2 0.6.2",
  "chrono",
