@@ -36,12 +36,9 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shm0-dev libxcb-xkb-dev \
             libwayland-dev libvulkan-dev
 
-      # The repository pins no toolchain, so CI uses the latest stable release.
+      # rust-toolchain.toml names the release; rustup installs it with rustfmt and clippy.
       - name: Install Rust
-        run: |
-          rustup update stable
-          rustup default stable
-          rustup component add rustfmt clippy
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
