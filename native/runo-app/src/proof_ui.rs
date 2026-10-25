@@ -13,6 +13,29 @@ fn last_turn(session: &Session) -> Option<usize> {
 }
 
 impl RunoApp {
+    /// What the session's project runs after a turn, as Runo plans it.
+    fn check_plan(&self, session: &Session, cx: &Context<Self>) -> proof::Plan {
+        let default = proof::Level::parse(&cx.global::<AppSettings>().check_level);
+        self.state
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .map(|p| proof::plan(p.check_level.as_deref(), &p.checks, default))
+            .unwrap_or(proof::Plan::Off)
+    }
+
+    /// The commands to run on the session's turn: the person's own, or those Runo finds
+    /// in the session's folder at the project's level.
+    fn turn_checks(&self, session: &Session, cx: &Context<Self>) -> Vec<String> {
+        match self.check_plan(session, cx) {
+            proof::Plan::Off => Vec::new(),
+            proof::Plan::Custom(commands) => commands,
+            proof::Plan::Detect(level) => {
+                proof::detect_at(std::path::Path::new(&session.dir), level)
+            }
+        }
+    }
+
     /// Run the project's checks on the session's last turn. `auto` is set when a turn
     /// just finished, so failures may go back to the agent on their own.
     pub(crate) fn prove_turn(&mut self, id: u64, auto: bool, cx: &mut Context<Self>) {
@@ -26,17 +49,16 @@ impl RunoApp {
         let Some(turn) = last_turn(session) else {
             return;
         };
-        let checks = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            .map(|p| proof::commands(&p.checks))
-            .unwrap_or_default();
+        let remote = session.connection != 0;
+        // Runo can't look for checks in a folder on a connection, so only the person's
+        // own commands show there, as skipped.
+        let checks = match self.check_plan(session, cx) {
+            proof::Plan::Detect(_) if remote => Vec::new(),
+            _ => self.turn_checks(session, cx),
+        };
         if checks.is_empty() {
             return;
         }
-        let remote = session.connection != 0;
         let Some(session) = self.state.session_mut(id) else {
             return;
         };
@@ -88,13 +110,7 @@ impl RunoApp {
             return false;
         };
         let turn = session.proof.as_ref().map(|p| p.turn);
-        let checks = self
-            .state
-            .projects
-            .iter()
-            .find(|p| p.id == session.project_id)
-            .map(|p| proof::commands(&p.checks))
-            .unwrap_or_default();
+        let checks = self.turn_checks(session, cx);
         let Some(turn) = turn.filter(|t| last_turn(session) == Some(*t) && !checks.is_empty())
         else {
             self.proving.remove(&id);
@@ -167,11 +183,15 @@ impl RunoApp {
         let key = proof::failure_key(&verdict.results);
         let passed = verdict.passed();
         let failed = verdict.failed().len();
+        // Checks the computer stopped, such as on a full disk, say nothing about the code:
+        // no fix turn, and the rounds and last failure stay as they were.
+        let couldnt = verdict.couldnt_run().join(", ");
         let mut fix = None;
         if passed {
             verdict.rounds = 0;
             verdict.last_failure.clear();
-        } else if auto
+        } else if failed > 0
+            && auto
             && !busy
             && session.queue.is_empty()
             && verdict.rounds < rounds_allowed
@@ -180,7 +200,7 @@ impl RunoApp {
             verdict.rounds += 1;
             fix = Some(proof::fix_prompt(&verdict.results));
         }
-        if !passed {
+        if failed > 0 {
             verdict.last_failure = key;
         }
         let round = verdict.rounds;
@@ -191,15 +211,23 @@ impl RunoApp {
             id,
             if passed {
                 format!("Checks passed: {title}")
-            } else {
+            } else if failed > 0 {
                 format!("Checks failed ({failed}): {title}")
+            } else {
+                format!("Couldn't run checks ({couldnt}): {title}")
             },
         );
         crate::applog::info(
             "proof",
             format!(
                 "session #{id}: checks {}",
-                if passed { "passed" } else { "failed" }
+                if passed {
+                    "passed".to_string()
+                } else if failed > 0 {
+                    "failed".to_string()
+                } else {
+                    format!("couldn't run: {couldnt}")
+                }
             ),
         );
         self.save();
@@ -219,7 +247,7 @@ impl RunoApp {
         let Some(session) = self.state.session(id) else {
             return;
         };
-        let Some(p) = session.proof.as_ref().filter(|p| !p.passed()) else {
+        let Some(p) = session.proof.as_ref().filter(|p| !p.failed().is_empty()) else {
             return;
         };
         let prompt = proof::fix_prompt(&p.results);
@@ -379,6 +407,8 @@ impl RunoApp {
             if !found.is_empty() {
                 form.sync_checks = Some(found.join("\n"));
             }
+            // Checks were off or left empty: Runo picks them at the Settings level.
+            form.check_level = proof::LEVEL_DEFAULT.into();
         }
         cx.notify();
     }
@@ -389,7 +419,27 @@ impl RunoApp {
             return div().into_any_element();
         };
         let rounds = form.fix_rounds;
-        let path = form.path.clone();
+        let level = form.check_level.clone();
+        let custom = level == proof::LEVEL_CUSTOM;
+        let path = form.path.clone().filter(|_| custom);
+        let default = match proof::Level::parse(&cx.global::<AppSettings>().check_level) {
+            proof::Level::Quick => "Default (Quick)",
+            proof::Level::Full => "Default (Full)",
+        };
+        let levels = [
+            (proof::LEVEL_DEFAULT, default),
+            (proof::LEVEL_QUICK, "Quick"),
+            (proof::LEVEL_FULL, "Full"),
+            (proof::LEVEL_CUSTOM, "Custom"),
+            (proof::LEVEL_OFF, "Off"),
+        ];
+        let about = match level.as_str() {
+            proof::LEVEL_CUSTOM => "One command per line, such as tests, lint and build. They run in the session's folder after every turn that changes files, and a failure can go straight back to the agent.",
+            proof::LEVEL_OFF => "No checks run after turns in this project.",
+            proof::LEVEL_FULL => "Runo runs the project's tests, lint and build scripts it finds (such as cargo test, npm test, go test or pytest) after every turn that changes files.",
+            proof::LEVEL_QUICK => "Runo runs each language's fast check it finds (such as cargo check, a typecheck or lint script, go vet or ruff), no tests, after every turn that changes files. CI can run the rest.",
+            _ => "Follows Settings → Safety. Quick runs each language's fast check (a compile, type check or lint); Full runs the tests too.",
+        };
         div()
             .v_flex()
             .gap_1p5()
@@ -433,12 +483,31 @@ impl RunoApp {
                         )
                     }),
             )
-            .child(Textarea::new(&self.project_checks).bordered(true).h(px(72.)))
+            .child(div().flex().flex_wrap().items_center().gap_1p5().children(
+                levels.into_iter().enumerate().map(|(i, (key, label))| {
+                    self.chip(("project-check-level", i), label.to_string(), level == key)
+                        .h(px(24.))
+                        .text_size(px(11.5))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(form) = this.project_form.as_mut() {
+                                form.check_level = key.to_string();
+                            }
+                            cx.notify();
+                        }))
+                }),
+            ))
+            .when(custom, |el| {
+                el.child(
+                    Textarea::new(&self.project_checks)
+                        .bordered(true)
+                        .h(px(72.)),
+                )
+            })
             .child(
                 div()
                     .text_size(px(11.5))
                     .text_color(rgb(c_muted()))
-                    .child("One command per line, such as tests, lint and build. They run in the session's folder after every turn that changes files, and a failure can go straight back to the agent."),
+                    .child(about),
             )
             .child(
                 div()
@@ -496,7 +565,15 @@ impl RunoApp {
             .projects
             .iter()
             .find(|p| p.id == session.project_id)?;
-        let has_checks = !proof::commands(&project.checks).is_empty();
+        let has_checks = match proof::plan(
+            project.check_level.as_deref(),
+            &project.checks,
+            proof::Level::Quick,
+        ) {
+            proof::Plan::Off => false,
+            proof::Plan::Custom(commands) => !commands.is_empty(),
+            proof::Plan::Detect(_) => true,
+        };
         if verdict.is_none() && !proving && reviewer.is_none() && !changed {
             return None;
         }
@@ -529,6 +606,11 @@ impl RunoApp {
                     n => format!("All {n} checks passed"),
                 },
             ),
+            Some(v) if v.failed().is_empty() && !v.couldnt_run().is_empty() => (
+                c_muted(),
+                IconName::Info,
+                format!("Couldn't run checks: {}", v.couldnt_run().join(", ")),
+            ),
             Some(v) if !v.results.is_empty() => {
                 let failed = v.failed().len();
                 (
@@ -552,7 +634,7 @@ impl RunoApp {
                 "Prove this turn: set up checks, or ask another agent".to_string(),
             ),
         };
-        let red = verdict.is_some_and(|v| !v.results.is_empty() && !v.passed());
+        let red = verdict.is_some_and(|v| !v.failed().is_empty());
         let rounds = verdict.map(|v| v.rounds).unwrap_or(0);
         let border = if red {
             c_red()
@@ -661,11 +743,13 @@ impl RunoApp {
                             .items_center()
                             .gap_2()
                             .text_size(px(12.))
-                            .child(icon(
-                                if r.ok { IconName::Check } else { IconName::X },
-                                12.,
-                                if r.ok { c_green() } else { c_red() },
-                            ))
+                            .child(if r.ok {
+                                icon(IconName::Check, 12., c_green())
+                            } else if !r.infra.is_empty() {
+                                icon(IconName::Info, 12., c_muted())
+                            } else {
+                                icon(IconName::X, 12., c_red())
+                            })
                             .child(
                                 div()
                                     .flex_1()
