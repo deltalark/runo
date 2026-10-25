@@ -88,6 +88,7 @@ impl TurnLog {
             return TurnLog::off();
         };
         let path = path(root, session);
+        drain();
         if std::fs::metadata(&path).is_ok_and(|m| m.len() >= ROTATE_AT) {
             let _ = std::fs::rename(&path, path.with_file_name("events.1.jsonl"));
         }
@@ -172,30 +173,104 @@ impl TurnLog {
             return;
         };
         line.push('\n');
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let written = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut f| f.write_all(line.as_bytes()));
-        if let Err(e) = written {
-            crate::applog::error_once("events", format!("could not write {}: {e}", path.display()));
-            // One failure is enough to report; the turn goes on without its log.
-            self.path = None;
-        }
+        append(path.clone(), line);
     }
 }
 
 impl Drop for TurnLog {
     fn drop(&mut self) {
         self.flush();
+        if let Some(path) = self.path.take() {
+            let _ = writer().send(Job::Close(path));
+        }
+    }
+}
+
+/// What the log writer is asked to do.
+enum Job {
+    Append(PathBuf, String),
+    /// A turn's log is done with: close its file.
+    Close(PathBuf),
+    /// Reply once everything sent before is written, with the files closed.
+    Drain(std::sync::mpsc::Sender<()>),
+}
+
+/// The thread that writes every turn's events, so a busy agent's output never waits on the
+/// disk on the way to the screen. A running turn's file stays open between its events. A
+/// file that fails to write is left alone until the next drain, which every turn's start
+/// does, so one failure costs the rest of that turn's log as it did when writing inline.
+fn writer() -> &'static std::sync::mpsc::Sender<Job> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("runo-events".into())
+            .spawn(move || {
+                let mut open: std::collections::HashMap<PathBuf, std::fs::File> =
+                    Default::default();
+                let mut failed = std::collections::HashSet::new();
+                for job in rx {
+                    match job {
+                        Job::Append(path, line) => {
+                            if failed.contains(&path) {
+                                continue;
+                            }
+                            let file = match open.entry(path.clone()) {
+                                std::collections::hash_map::Entry::Occupied(f) => Ok(f.into_mut()),
+                                std::collections::hash_map::Entry::Vacant(v) => {
+                                    if let Some(dir) = path.parent() {
+                                        let _ = std::fs::create_dir_all(dir);
+                                    }
+                                    std::fs::OpenOptions::new()
+                                        .create(true)
+                                        .append(true)
+                                        .open(&path)
+                                        .map(|f| v.insert(f))
+                                }
+                            };
+                            if let Err(e) = file.and_then(|f| f.write_all(line.as_bytes())) {
+                                crate::applog::error_once(
+                                    "events",
+                                    format!("could not write {}: {e}", path.display()),
+                                );
+                                // One failure is enough to report; the turn goes on without its log.
+                                open.remove(&path);
+                                failed.insert(path);
+                            }
+                        }
+                        Job::Close(path) => {
+                            open.remove(&path);
+                        }
+                        Job::Drain(done) => {
+                            open.clear();
+                            failed.clear();
+                            let _ = done.send(());
+                        }
+                    }
+                }
+            })
+            .expect("start the event log writer");
+        tx
+    })
+}
+
+/// Append `line` to the log at `path`, on the writer thread.
+fn append(path: PathBuf, line: String) {
+    let _ = writer().send(Job::Append(path, line));
+}
+
+/// Wait until every event recorded so far is in its file, and close the files: before
+/// reading or moving a log, and before Runo quits.
+pub fn drain() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if writer().send(Job::Drain(tx)).is_ok() {
+        let _ = rx.recv();
     }
 }
 
 /// The highest event number the log holds for `turn`.
 fn last_seq(path: &Path, turn: usize) -> Option<u64> {
+    drain();
     let file = std::fs::File::open(path).ok()?;
     std::io::BufReader::new(file)
         .lines()
@@ -209,6 +284,7 @@ fn last_seq(path: &Path, turn: usize) -> Option<u64> {
 /// Every event in a session's log, oldest first (the set-aside file, then the current
 /// one). Lines that don't parse, such as one cut short by a crash, are skipped.
 pub fn read(root: &Path, session: u64) -> Vec<Record> {
+    drain();
     let current = path(root, session);
     [current.with_file_name("events.1.jsonl"), current]
         .iter()
@@ -391,6 +467,33 @@ mod tests {
             read(&dir, 7).len(),
             1,
             "the zeros don't parse; the new start does"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_log_that_failed_to_write_is_tried_again_by_the_next_turn() {
+        let dir = root("retry");
+        // A folder where the file should be: every write of this turn fails.
+        let file = path(&dir, 7);
+        std::fs::create_dir_all(&file).unwrap();
+        let mut log = TurnLog::start(Some(&dir), 7, 0, "claude", "");
+        turn(&mut log);
+        drop(log);
+        drain();
+        std::fs::remove_dir_all(&file).unwrap();
+        let mut log = TurnLog::start(Some(&dir), 7, 1, "claude", "");
+        log.end(true);
+        drop(log);
+        assert_eq!(
+            events(&dir),
+            vec![
+                AgentEvent::TurnStarted {
+                    provider: "claude".into(),
+                    model: String::new()
+                },
+                AgentEvent::TurnEnded { ok: true },
+            ]
         );
         let _ = std::fs::remove_dir_all(dir);
     }

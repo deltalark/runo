@@ -676,29 +676,29 @@ impl RunoApp {
         cx.global::<AppSettings>().show_deleted_threads
     }
 
-    /// Whether message `index` of Crew's chat is left out: news about a thread an earlier
-    /// card already shows (those cards are live, so the thread shows once), or a card
-    /// whose threads were all deleted while deleted threads are hidden.
-    pub(crate) fn crew_card_hidden(&self, chat: &Session, index: usize, cx: &App) -> bool {
+    /// For each message of Crew's chat, whether it is left out: news about a thread an
+    /// earlier card already shows (those cards are live, so the thread shows once), or a
+    /// card whose threads were all deleted while deleted threads are hidden. One pass over
+    /// the chat, not one over the messages before each.
+    pub(crate) fn crew_cards_hidden(&self, chat: &Session, cx: &App) -> Vec<bool> {
+        let show_deleted = Self::show_deleted(cx);
         let gone = |t: &u64| self.state.session(*t).is_none();
-        let thread = match chat.messages.get(index).and_then(|m| m.crew.as_ref()) {
-            Some(Card::News { thread }) => thread,
-            Some(Card::Started { threads }) => {
-                return !Self::show_deleted(cx) && threads.iter().all(gone);
-            }
-            _ => return false,
-        };
-        if gone(thread) && !Self::show_deleted(cx) {
-            return true;
-        }
-        chat.messages[..index]
+        let mut shown = std::collections::HashSet::new();
+        chat.messages
             .iter()
-            .filter_map(|m| m.crew.as_ref())
-            .any(|c| match c {
-                Card::Started { threads } => threads.contains(thread),
-                Card::News { thread: t } => t == thread,
-                Card::Held { .. } => false,
+            .map(|m| match m.crew.as_ref() {
+                Some(Card::News { thread }) => {
+                    let hidden = (gone(thread) && !show_deleted) || shown.contains(thread);
+                    shown.insert(*thread);
+                    hidden
+                }
+                Some(Card::Started { threads }) => {
+                    shown.extend(threads.iter().copied());
+                    !show_deleted && threads.iter().all(gone)
+                }
+                _ => false,
             })
+            .collect()
     }
 
     /// A card drawn with message `index` of Crew's chat `chat`.
@@ -850,7 +850,8 @@ impl RunoApp {
         Some(body.into_any_element())
     }
 
-    /// Over Crew's composer: where the next message goes.
+    /// Over Crew's composer, inside its column so the two share a left edge: where the next
+    /// message goes.
     pub(crate) fn crew_route_bar(
         &self,
         session: &Session,
@@ -878,13 +879,6 @@ impl RunoApp {
         }
         Some(
             div()
-                .w_full()
-                .when_some(cx.global::<AppSettings>().content_max_width(), |el, w| {
-                    el.max_w(px(w))
-                })
-                .mx_auto()
-                .px_8()
-                .pt_2()
                 .flex()
                 .items_center()
                 .gap_2()

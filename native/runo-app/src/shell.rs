@@ -1163,7 +1163,7 @@ pub(crate) fn turn_usage(messages: &[store::Message]) -> store::Usage {
 }
 
 /// Totals shown in the top bar and on Home.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct Counts {
     pub running: usize,
     /// Sessions blocked on the person, or finished or failed unseen.
@@ -1324,7 +1324,25 @@ impl RunoApp {
         self.home_all || Some(s.project_id) == self.current_project()
     }
 
+    /// The totals, worked out once per frame of the main window, where the sidebar, the
+    /// top bar and Home each ask for them.
     pub(crate) fn counts(&self) -> Counts {
+        thread_local! {
+            static FRAME: std::cell::Cell<Option<(std::time::Instant, Counts)>> =
+                const { std::cell::Cell::new(None) };
+        }
+        let Some(frame) = motion::frame() else {
+            return self.count();
+        };
+        if let Some((_, counts)) = FRAME.get().filter(|(at, _)| *at == frame) {
+            return counts;
+        }
+        let counts = self.count();
+        FRAME.set(Some((frame, counts)));
+        counts
+    }
+
+    fn count(&self) -> Counts {
         let mut counts = Counts::default();
         for s in &self.state.sessions {
             match self.bucket(s) {
@@ -1907,7 +1925,7 @@ impl RunoApp {
         );
         for project in &self.state.projects {
             let pid = project.id;
-            let missing = !std::path::Path::new(&project.path).is_dir();
+            let missing = !checks::is_dir(&project.path);
             let sessions = self
                 .state
                 .sessions
@@ -3032,7 +3050,7 @@ impl RunoApp {
         for project in &self.state.projects {
             let pid = project.id;
             let root = std::path::Path::new(&project.path);
-            let missing = !root.is_dir();
+            let missing = !checks::is_dir(&project.path);
             let summary = if missing {
                 "Folder missing".to_string()
             } else {
@@ -3696,12 +3714,16 @@ impl RunoApp {
                     .id("canvas-chat-body")
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.chat_scroll)
                     .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, _| {
                         this.chat_wheel(e, window)
                     }))
-                    .child(self.chat_list(session, working, true, cx)),
+                    .child({
+                        self.chat_shown[1].set(Some(session.id));
+                        self.part(
+                            panes::Part::CanvasChat,
+                            StyleRefinement::default().size_full(),
+                        )
+                    }),
             )
             .children(self.new_messages_pill(session, cx));
         let (top, right, bottom) = inset;

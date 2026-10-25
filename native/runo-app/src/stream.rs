@@ -41,14 +41,25 @@ impl Parser {
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+        self.feed_parsed(line, parse_line(line))
+    }
+
+    /// `feed` for a line already parsed as JSON off the main thread (see `parse_line`).
+    pub fn feed_parsed(&mut self, line: &str, parsed: Option<Value>) -> Vec<AgentEvent> {
         match self {
-            Parser::Claude(p) => p.feed(line),
-            Parser::Json(p) => p.feed(line),
-            Parser::Acp(p) => p.feed(line),
-            Parser::Codex(p) => p.feed(line),
-            Parser::Pi(p) => p.feed(line),
+            Parser::Claude(p) => p.feed_parsed(line, parsed),
+            Parser::Json(p) => p.feed_parsed(line, parsed),
+            Parser::Acp(p) => p.feed_parsed(line, parsed),
+            Parser::Codex(p) => p.feed_parsed(line, parsed),
+            Parser::Pi(p) => p.feed_parsed(line, parsed),
         }
     }
+}
+
+/// A line of an agent's output as JSON, when it is JSON. Agents' reader threads call this,
+/// so the parsing is done before the line reaches the main thread.
+pub fn parse_line(line: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(line.trim()).ok()
 }
 
 /// The conversation id a JSON event names, under any of the keys the CLIs use.
@@ -87,8 +98,15 @@ impl ClaudeStream {
     }
 
     /// Feed one stdout line. Lines that are not JSON pass through as text.
+    /// Tests feed lines unparsed; the app hands them over parsed (see `feed_parsed`).
+    #[cfg(test)]
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        let Ok(event) = serde_json::from_str::<Value>(line) else {
+        self.feed_parsed(line, parse_line(line))
+    }
+
+    /// `feed`, with the line already parsed if it is JSON.
+    pub fn feed_parsed(&mut self, line: &str, parsed: Option<Value>) -> Vec<AgentEvent> {
+        let Some(event) = parsed else {
             return if line.trim().is_empty() {
                 vec![]
             } else {
@@ -714,7 +732,12 @@ impl JsonStream {
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        let Ok(event) = serde_json::from_str::<Value>(line.trim()) else {
+        self.feed_parsed(line, parse_line(line))
+    }
+
+    /// `feed`, with the line already parsed if it is JSON.
+    pub fn feed_parsed(&mut self, line: &str, parsed: Option<Value>) -> Vec<AgentEvent> {
+        let Some(event) = parsed else {
             return if line.trim().is_empty() {
                 vec![]
             } else {
