@@ -16,16 +16,17 @@ Paths are relative to `native/runo-app/src/`.
 ## Done
 | # | Slice | Gap | PR |
 |---|---|---|---|
-| 1 | Poison-tolerant locks in `browser_engine.rs` and `harness/host.rs`; this plan | 9 | refactor step 1 |
+| 1 | Poison-tolerant locks in `browser_engine.rs` and `harness/host.rs`; this plan | 9 | #282 |
+| 2 | File editor state (`open_file`, `pending_file`, `file_*`, 8 fields) → `self.file: fileview::FileEditor` | 1 | #283 |
+| 3 | Browser tab state (`browser*`, `address`, 9 fields) → `self.browser: browser::BrowserTab` | 1 | #285 |
 
 ## Next, in order
 Each line is one PR. Items marked *waits* depend on another PR merging first.
 
-1. **File editor state → `FileEditor` sub-struct** (gap 1). `file_*` fields (9) become
-   `self.file.*`. Touches `files.rs`, `fileview.rs`, `shell.rs`, `idle.rs` and the
-   struct in `main.rs`. Mechanical.
-2. **Browser tab state → `BrowserTab` sub-struct** (gap 1). `browser_*` fields (7),
-   used in `browser.rs`, `shell.rs`, `main.rs`.
+1. **Files tab search → into the Files tab's struct** (`file_query`, `file_hits`,
+   `file_searching`; `files.rs`, `shell.rs`).
+2. **Notes view → `NotesView`** (`notes_*`, 4 fields; `notes.rs`, `home.rs`, `ctxmenu.rs`,
+   `workspace.rs`, `projects.rs`). *Waits for #277*, which changes `projects.rs`.
 3. **Durable saves** (gap 8). *Waits for #272*, which replaces `persist::write_text` and
    `store::write_json` with `store::write_private`. Then add `file.sync_all()` before
    the rename there, plus a best-effort fsync of the folder on unix. One function.
