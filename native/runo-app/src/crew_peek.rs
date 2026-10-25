@@ -130,6 +130,24 @@ impl RunoApp {
         }
         let links = self.thread_links(cx);
         for (i, message) in session.messages.iter().enumerate() {
+            if message.role == Role::User && !message.images.is_empty() {
+                let mut row = div().flex().flex_wrap().justify_end().gap_1();
+                for (k, path) in message.images.iter().enumerate() {
+                    row = row.child(
+                        self.viewable(
+                            SharedString::from(format!("peek-img-{thread}-{i}-{k}")),
+                            thread,
+                            crate::lightbox::Pick::Message(i, k),
+                            img(std::path::PathBuf::from(path))
+                                .size(px(56.))
+                                .rounded_md()
+                                .object_fit(ObjectFit::Cover),
+                            cx,
+                        ),
+                    );
+                }
+                list = list.child(row);
+            }
             list = list.child(peek_message(thread, i, message, links.as_ref()));
         }
         if working {
