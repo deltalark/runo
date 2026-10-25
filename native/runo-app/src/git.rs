@@ -32,6 +32,9 @@ fn git_with(
         .args(args)
         // Never wait on a password prompt nobody can see.
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Reads such as `status` leave the index alone, so they never hold its lock
+        // while the person or an agent commits.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(if input.is_some() {
             std::process::Stdio::piped()
         } else {
@@ -175,6 +178,29 @@ pub fn recent_commits(dir: &str, n: usize) -> String {
         &["log", &format!("-{n}"), "--oneline", "--no-decorate"],
     )
     .unwrap_or_default()
+}
+
+/// The same folder in the repository's main checkout, when `dir` is in a linked
+/// worktree; None in the main checkout itself or a bare repository's worktree.
+pub fn main_checkout_dir(dir: &str) -> Option<std::path::PathBuf> {
+    let out = git(
+        dir,
+        &[
+            "rev-parse",
+            "--git-common-dir",
+            "--git-dir",
+            "--show-prefix",
+        ],
+    )
+    .ok()?;
+    let mut lines = out.lines().map(str::trim);
+    let common = Path::new(dir).join(lines.next()?).canonicalize().ok()?;
+    let own = Path::new(dir).join(lines.next()?).canonicalize().ok()?;
+    let prefix = lines.next().unwrap_or("");
+    if common == own || common.file_name()? != ".git" {
+        return None;
+    }
+    Some(common.parent()?.join(prefix))
 }
 
 pub fn is_repo(dir: &str) -> bool {
@@ -1725,35 +1751,93 @@ fn temp_index(dir: &str) -> std::path::PathBuf {
     let git_dir = git(dir, &["rev-parse", "--absolute-git-dir"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into_owned());
+    temp_index_in(&git_dir)
+}
+
+/// Where a folder's repository keeps things, from one `git rev-parse`.
+struct Layout {
+    git_dir: String,
+    /// The user's index file.
+    index: std::path::PathBuf,
+    /// The folder is the top of its working tree.
+    top: bool,
+}
+
+fn layout(dir: &str) -> Result<Layout, String> {
+    let out = git(
+        dir,
+        &[
+            "rev-parse",
+            "--absolute-git-dir",
+            "--git-path",
+            "index",
+            "--show-prefix",
+        ],
+    )?;
+    let mut lines = out.lines();
+    let git_dir = lines.next().unwrap_or("").trim().to_string();
+    let index = Path::new(dir).join(lines.next().unwrap_or("").trim());
+    let top = lines.next().unwrap_or("").trim().is_empty();
+    Ok(Layout {
+        git_dir,
+        index,
+        top,
+    })
+}
+
+fn temp_index_in(git_dir: &str) -> std::path::PathBuf {
+    // Snapshots run side by side on background threads; each gets its own file.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    Path::new(&git_dir).join(format!("runo-index-{}-{nanos}", std::process::id()))
+    Path::new(git_dir).join(format!("runo-index-{}-{nanos}-{n}", std::process::id()))
+}
+
+/// A private index to snapshot from, removed when dropped.
+struct TempIndex(std::path::PathBuf);
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A private copy of the user's index, so `git add` reuses its saved file times and
+/// hashes only the files that changed. Its `write-tree` is the user's staging. In a
+/// folder below the top of the working tree the snapshot starts from HEAD, as it always
+/// has, so files outside the folder don't move between snapshots.
+fn index_copy(dir: &str) -> Result<(TempIndex, Option<String>), String> {
+    let layout = layout(dir)?;
+    let copy = TempIndex(temp_index_in(&layout.git_dir));
+    // No index yet stands for an empty one, whose tree is the empty tree.
+    if layout.index.exists() {
+        std::fs::copy(&layout.index, &copy.0)
+            .map_err(|e| format!("could not copy the index: {e}"))?;
+    }
+    let staged = git_index(dir, &copy.0, &["write-tree"])
+        .ok()
+        .map(|t| t.trim().to_string());
+    if !layout.top {
+        let _ = std::fs::remove_file(&copy.0);
+        let _ = git_index(dir, &copy.0, &["read-tree", "HEAD"]);
+    }
+    Ok((copy, staged))
+}
+
+/// Tree id of the whole working tree (tracked and untracked, minus ignored files) from
+/// a private index.
+fn tree_from(dir: &str, index: &Path) -> Result<String, String> {
+    git_index(dir, index, &["add", "-A", "--", "."])?;
+    git_index(dir, index, &["write-tree"]).map(|t| t.trim().to_string())
 }
 
 /// Tree id of the whole working tree (tracked and untracked, minus ignored files).
 fn snapshot_tree(dir: &str) -> Result<String, String> {
-    let index = temp_index(dir);
-    // Start from HEAD's index when there is one, so unchanged files cost nothing.
-    let _ = git_index(dir, &index, &["read-tree", "HEAD"]);
-    let tree = git_index(dir, &index, &["add", "-A", "--", "."])
-        .and_then(|_| git_index(dir, &index, &["write-tree"]));
-    let _ = std::fs::remove_file(&index);
-    Ok(tree?.trim().to_string())
-}
-
-/// Tree id of the user's index, read from a copy so the real one is never rewritten.
-fn index_tree(dir: &str) -> Option<String> {
-    let real = git(dir, &["rev-parse", "--git-path", "index"]).ok()?;
-    let real = Path::new(dir).join(real.trim());
-    let copy = temp_index(dir);
-    if real.exists() {
-        std::fs::copy(&real, &copy).ok()?;
-    }
-    let tree = git_index(dir, &copy, &["write-tree"]);
-    let _ = std::fs::remove_file(&copy);
-    tree.ok().map(|t| t.trim().to_string())
+    let (index, _) = index_copy(dir)?;
+    tree_from(dir, &index.0)
 }
 
 fn commit_tree(dir: &str, tree: &str, parents: &[&str], message: &str) -> Result<String, String> {
@@ -1774,9 +1858,12 @@ fn commit_tree(dir: &str, tree: &str, parents: &[&str], message: &str) -> Result
 /// undone (or an undo redone). Its first parent is HEAD at the time and its second a
 /// commit of the index, so both come back too. Kept alive by a ref under `refs/runo/`.
 pub fn checkpoint(dir: &str) -> Result<String, String> {
-    let tree = snapshot_tree(dir)?;
+    // One copy of the index gives both the staging (before `add`) and the folder.
+    let (copy, staged) = index_copy(dir)?;
+    let tree = tree_from(dir, &copy.0)?;
+    drop(copy);
     let head = rev(dir, "HEAD");
-    let index = index_tree(dir)
+    let index = staged
         .map(|t| commit_tree(dir, &t, &[], "runo index"))
         .transpose()?;
     let mut parents: Vec<&str> = Vec::new();
@@ -3597,6 +3684,53 @@ mod tests {
             .is_empty());
         assert!(patch_for_message(dir, 10_000).contains("draft.txt"));
         assert!(file_diff_context(dir, "a.txt", true, "HEAD").contains("+two"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn snapshots_from_the_index_copy_match_and_leave_the_index_alone() {
+        let repo = repo("index-copy");
+        let dir = repo.to_str().unwrap();
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("top.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("sub/a.txt"), "one\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join("top.txt"), "staged\n").unwrap();
+        sh(&repo, &["add", "top.txt"]);
+        let index = repo.join(".git/index");
+        let before = std::fs::read(&index).unwrap();
+        // The folder's snapshot is the working tree, the same as a fresh `add -A` gives.
+        let tree = snapshot_tree(dir).unwrap();
+        let fresh = repo.join(".git/fresh-index");
+        let fresh_tree = {
+            git_index(dir, &fresh, &["add", "-A"]).unwrap();
+            git_index(dir, &fresh, &["write-tree"]).unwrap()
+        };
+        let _ = std::fs::remove_file(&fresh);
+        assert_eq!(tree, fresh_tree.trim());
+        // The checkpoint's second parent keeps the staging.
+        let cp = checkpoint(dir).unwrap();
+        let (_, staged) = checkpoint_parts(dir, &cp);
+        let staged = git(dir, &["show", &format!("{}:top.txt", staged.unwrap())]).unwrap();
+        assert_eq!(staged, "staged\n");
+        assert_eq!(std::fs::read(&index).unwrap(), before);
+        // A session in a subfolder: files outside it come from HEAD, as before.
+        let sub = repo.join("sub");
+        let sub = sub.to_str().unwrap();
+        let cp = checkpoint(sub).unwrap();
+        std::fs::write(repo.join("sub/a.txt"), "agent\n").unwrap();
+        std::fs::write(repo.join("top.txt"), "later\n").unwrap();
+        assert_eq!(changed_since(sub, &cp), ["sub/a.txt"]);
+        restore(sub, &cp, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("sub/a.txt")).unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("top.txt")).unwrap(),
+            "later\n"
+        );
         let _ = std::fs::remove_dir_all(&repo);
     }
 
