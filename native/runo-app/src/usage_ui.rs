@@ -578,6 +578,7 @@ impl RunoApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::prelude::v1::test;
 
     fn limits(used: &[f32]) -> Usage {
         Usage {
