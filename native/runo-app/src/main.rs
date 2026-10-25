@@ -14,6 +14,7 @@ mod assistant_act;
 mod assistant_cmds;
 mod assistant_deck;
 mod assistant_mem;
+mod bench;
 mod branches;
 mod browser;
 mod browser_engine;
@@ -9117,6 +9118,9 @@ impl Render for RunoApp {
         motion::begin(self.window_active, ticker.entity_id(), cx);
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| {
+            if bench::on() {
+                self.bench_start(window, cx);
+            }
             startup::mark("first render");
             window.on_next_frame(|_, cx| {
                 startup::mark("first frame painted");

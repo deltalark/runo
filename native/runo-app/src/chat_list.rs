@@ -77,7 +77,13 @@ pub(crate) fn hash(value: impl Hash) -> u64 {
     h.finish()
 }
 
+/// How many chat rows were drawn since the last call, for `bench`.
+pub(crate) fn take_rows_drawn() -> u32 {
+    ROWS_DRAWN.replace(0)
+}
+
 thread_local! {
+    static ROWS_DRAWN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Set while a row that was shown before is drawn again, so its one-shot animations
     /// show their end instead of playing again (see `page_settling`).
     pub(crate) static ROW_SETTLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -330,6 +336,7 @@ impl RunoApp {
 
     /// Row `ix` of the chat drawn last by `chat_list`, padded like the column it sits in.
     fn chat_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        ROWS_DRAWN.set(ROWS_DRAWN.get() + 1);
         let (row, fresh, count, working, compact, sid) = {
             let st = self.chat_rows.borrow();
             let Some(r) = st.rows.get(ix) else {
