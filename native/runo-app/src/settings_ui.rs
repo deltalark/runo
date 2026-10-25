@@ -416,6 +416,19 @@ fn assistant_models(st: &AppSettings) -> Vec<(String, String)> {
     out
 }
 
+/// A concurrency setting's choices: Auto, showing what it comes to on this computer, the
+/// given numbers, and `none` for no limit.
+fn limit_options(auto: usize, numbers: &[usize], none: &str) -> Vec<(String, String)> {
+    let auto = format!(
+        "Auto ({auto} at a time on {})",
+        hardware::describe(hardware::here())
+    );
+    std::iter::once(("auto".to_string(), auto))
+        .chain(numbers.iter().map(|n| (n.to_string(), n.to_string())))
+        .chain([("0".to_string(), none.to_string())])
+        .collect()
+}
+
 fn options(items: &[(&str, &str)]) -> Vec<(String, String)> {
     items
         .iter()
@@ -867,8 +880,9 @@ fn page_sections(page: SettingsPage, st: &AppSettings, data: &Discovered) -> Vec
                 row("Turns per day", "Across every session and every agent. New turns wait once this many have started today.", Ctl::Dropdown(options(&[("0", "No limit"), ("25", "25"), ("50", "50"), ("100", "100"), ("200", "200"), ("500", "500")]), st.daily_turn_limit.to_string(), Rc::new(|s, v| s.daily_turn_limit = v.parse().unwrap_or(0)))),
                 row("Tokens per day", "Across every session. Counts the input and output tokens agents report, not cached ones; agents that report no tokens, such as Grok, don't count toward it. New turns wait once today's count reaches it.", Ctl::Dropdown(options(&[("0", "No limit"), ("1000", "1M"), ("5000", "5M"), ("10000", "10M"), ("25000", "25M"), ("50000", "50M"), ("100000", "100M")]), st.daily_token_limit_k.to_string(), Rc::new(|s, v| s.daily_token_limit_k = v.parse().unwrap_or(0)))),
                 row("Agents running at once", "Turns past this many wait for a free slot, shown as Waiting for a slot, and start in order.", Ctl::Dropdown(options(&[("0", "No cap"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("6", "6"), ("8", "8")]), st.max_running.to_string(), Rc::new(|s, v| s.max_running = v.parse().unwrap_or(0)))),
-                switch_row("Run checks in the background, one at a time", "The checks Runo runs after each turn (set in a project's Edit dialog) get low CPU and disk priority, and only one session's checks run at once; the others show Waiting for another check and start in order. Off runs them right away at normal priority.", st.background_checks, |s, v| s.background_checks = v),
-                row("Crew threads running at once", "Threads Crew starts past this many wait for a slot and start in order as others finish; Start now on a waiting thread lets it go ahead. Sessions you start yourself never wait for it. Each thread is a full agent, often with subagents of its own, so a few at once keep a plan's usage window from running out.", Ctl::Dropdown(options(&[("0", "No cap"), ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("6", "6"), ("8", "8")]), st.crew_running.to_string(), Rc::new(|s, v| s.crew_running = v.parse().unwrap_or(3)))),
+                row("Checks running at once", "The checks Runo runs after each turn (set in a project's Edit dialog) across every session. Past this many, the others show Waiting for another check and start in order as running ones finish. Auto allows one set per 4 cores and per 6 GB of memory, from 1 to 6, since each is usually a full build and test run.", Ctl::Dropdown(limit_options(hardware::checks_auto(hardware::here()), &[1, 2, 4], "No limit"), st.checks_at_once.clone(), Rc::new(|s, v| s.checks_at_once = v))),
+                switch_row("Run checks at low priority", "Checks and everything they start get low CPU and disk priority, so the app, the agents and your own tools stay quick while they run. Off runs them at normal priority.", st.checks_low_priority, |s, v| s.checks_low_priority = v),
+                row("Crew threads running at once", "Threads Crew starts past this many wait for a slot and start in order as others finish; Start now on a waiting thread lets it go ahead. Sessions you start yourself never wait for it. Each thread is a full agent, often with subagents of its own, so a few at once keep a plan's usage window from running out. Auto allows one per 3 cores and per 4 GB of memory, from 2 to 8, for the builds and tests the agents run.", Ctl::Dropdown(limit_options(hardware::crew_auto(hardware::here()), &[1, 2, 3, 4, 6, 8], "No cap"), st.crew_threads.clone(), Rc::new(|s, v| s.crew_threads = v))),
                 row("Hold threads and playbooks past", "Once an agent's plan has used this share of its 5-hour or weekly window, new turns of Crew threads and playbook runs wait until it resets, so what you start yourself still has room. A used-up window always holds every turn of that agent until it resets, whatever this says.", Ctl::Dropdown(options(&[("0", "Never"), ("70", "70%"), ("80", "80%"), ("90", "90%"), ("95", "95%")]), st.plan_hold_percent.to_string(), Rc::new(|s, v| s.plan_hold_percent = v.parse().unwrap_or(0)))),
             ]),
             section("Permissions", "What agents may do without asking you first.", vec![

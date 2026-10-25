@@ -7,6 +7,7 @@ All notable changes to Runo are documented here.
 ### Changed
 
 - Runo does much less while you aren't using it. The Browser tab's frame timer runs only while a page is on screen, and agents' output and background results wake the app when they arrive instead of being checked 50 times a second. While the window is hidden, minimized or covered, git rescans, dev-server port scans, pull request and GitHub checks, plan usage and update checks pause until it is back; saves, queued turns, Crew, the menu bar and the Dock count keep going at a slower pace. Pull request lookups, and git scans of a session nobody is working in, come less and less often while nothing changes. Freeing build output and finding dev-server ports no longer scan every process on the Mac with `lsof`, and a quiet terminal no longer wakes the app 100 times a second.
+- Post-turn checks and Crew threads scale with the computer. Settings > Safety > Limits > Checks running at once is Auto by default: one check set per 4 cores and per 6 GB of memory, from 1 to 6, instead of one at a time. Crew threads running at once is Auto too: one per 3 cores and per 4 GB, from 2 to 8. Each shows what Auto comes to, such as "Auto (4 at a time on this Mac: 16 cores, 64 GB)", and the fixed numbers and No limit are still there. Low priority for checks is its own switch, Run checks at low priority, on by default. The old background checks switch carries over: on becomes Auto, off becomes No limit at normal priority; a Crew cap left at the old default of 3 becomes Auto.
 
 ## [0.5.8] - 2026-10-25
 

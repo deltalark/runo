@@ -64,17 +64,12 @@ impl RunoApp {
             ..Default::default()
         });
         self.proving.insert(id);
-        if !cx.global::<AppSettings>().background_checks {
-            self.check_queue.drop_waiting(id);
-            self.start_checks(id, auto, false, cx);
-        } else if self.check_queue.join(id, auto) {
-            if !self.start_checks(id, auto, true, cx) {
-                self.next_checks(id, cx);
-            }
-        } else {
+        self.check_queue.join(id, auto);
+        self.fill_checks(cx);
+        if self.check_queue.is_waiting(id) {
             crate::applog::info(
                 "proof",
-                format!("session #{id}: checks wait for another session's checks"),
+                format!("session #{id}: checks wait for other sessions' checks"),
             );
         }
         cx.notify();
@@ -117,15 +112,21 @@ impl RunoApp {
         true
     }
 
-    /// The session's checks are over: start the next session's waiting in line.
-    fn next_checks(&mut self, id: u64, cx: &mut Context<Self>) {
-        let mut next = self.check_queue.done(id);
-        while let Some((id, auto)) = next {
-            let low = cx.global::<AppSettings>().background_checks;
-            if self.start_checks(id, auto, low, cx) {
-                break;
+    /// Start checks waiting in line while there is room for them, as many as Settings
+    /// allows at once. Ones with nothing left to run give their place straight on.
+    fn fill_checks(&mut self, cx: &mut Context<Self>) {
+        loop {
+            let settings = cx.global::<AppSettings>();
+            let (limit, low) = (settings.checks_limit(), settings.checks_low_priority);
+            let next = self.check_queue.fill(limit);
+            if next.is_empty() {
+                return;
             }
-            next = self.check_queue.done(id);
+            for (id, auto) in next {
+                if !self.start_checks(id, auto, low, cx) {
+                    self.check_queue.done(id);
+                }
+            }
         }
     }
 
@@ -146,7 +147,8 @@ impl RunoApp {
         cx: &mut Context<Self>,
     ) {
         self.proving.remove(&id);
-        self.next_checks(id, cx);
+        self.check_queue.done(id);
+        self.fill_checks(cx);
         let busy = self.handles.contains_key(&Target::Session(id));
         let rounds_allowed = self
             .state

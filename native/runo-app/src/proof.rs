@@ -134,36 +134,45 @@ pub fn detect(dir: &Path) -> Vec<String> {
     out
 }
 
-/// Post-turn check sets, one at a time across every session and project. The rest wait
-/// in order; the time limit only starts once a set leaves the queue.
+/// Post-turn check sets across every session and project, at most a set number at once
+/// (see `AppSettings::checks_limit`). The rest wait in order; the time limit only starts
+/// once a set leaves the queue.
 #[derive(Default, Debug)]
 pub struct CheckQueue {
-    running: Option<u64>,
+    running: Vec<u64>,
     /// Sessions waiting, first in line first, each with whether its turn just finished.
     waiting: VecDeque<(u64, bool)>,
 }
 
 impl CheckQueue {
-    /// Line up a session's checks. True when they may start now.
-    pub fn join(&mut self, id: u64, auto: bool) -> bool {
-        if self.running.is_none() {
-            self.running = Some(id);
-            return true;
-        }
-        if self.running != Some(id) && !self.is_waiting(id) {
+    /// Line up a session's checks, unless they are already waiting or running. `fill`
+    /// says when they start.
+    pub fn join(&mut self, id: u64, auto: bool) {
+        if !self.running.contains(&id) && !self.is_waiting(id) {
             self.waiting.push_back((id, auto));
         }
-        false
     }
 
-    /// The session's running checks finished: the next in line, now running.
-    pub fn done(&mut self, id: u64) -> Option<(u64, bool)> {
-        if self.running != Some(id) {
-            return None;
+    /// Move sessions from the front of the line to running while fewer than `limit` run
+    /// (0 for no limit): the ones to start now, in order.
+    pub fn fill(&mut self, limit: usize) -> Vec<(u64, bool)> {
+        let mut out = Vec::new();
+        while limit == 0 || self.running.len() < limit {
+            let Some((id, auto)) = self.waiting.pop_front() else {
+                break;
+            };
+            self.running.push(id);
+            out.push((id, auto));
         }
-        let next = self.waiting.pop_front();
-        self.running = next.map(|(id, _)| id);
-        next
+        out
+    }
+
+    /// The session's running checks finished, freeing their place. False when they
+    /// weren't running.
+    pub fn done(&mut self, id: u64) -> bool {
+        let before = self.running.len();
+        self.running.retain(|r| *r != id);
+        self.running.len() != before
     }
 
     /// Take a waiting session out of the line. True when it was waiting.
@@ -653,34 +662,76 @@ mod tests {
     #[test]
     fn checks_wait_their_turn_in_order() {
         let mut q = CheckQueue::default();
-        assert!(q.join(1, true));
-        assert!(!q.join(2, true));
-        assert!(!q.join(3, false));
+        q.join(1, true);
+        assert_eq!(q.fill(1), [(1, true)]);
+        q.join(2, true);
+        q.join(3, false);
+        assert!(q.fill(1).is_empty());
         // Asking again while waiting or running keeps its place.
-        assert!(!q.join(2, false));
-        assert!(!q.join(1, true));
+        q.join(2, false);
+        q.join(1, true);
         assert!(q.is_waiting(2) && q.is_waiting(3) && !q.is_waiting(1));
-        // Only the running set's end moves the line on.
-        assert_eq!(q.done(3), None);
-        assert_eq!(q.done(1), Some((2, true)));
+        // Only a running set's end moves the line on.
+        assert!(!q.done(3));
+        assert!(q.fill(1).is_empty());
+        assert!(q.done(1));
+        assert_eq!(q.fill(1), [(2, true)]);
         assert!(!q.is_waiting(2));
-        assert_eq!(q.done(2), Some((3, false)));
-        assert_eq!(q.done(3), None);
-        assert!(q.join(4, true));
+        assert!(q.done(2));
+        assert_eq!(q.fill(1), [(3, false)]);
+        assert!(q.done(3));
+        q.join(4, true);
+        assert_eq!(q.fill(1), [(4, true)]);
+    }
+
+    #[test]
+    fn several_check_sets_run_at_once_and_the_rest_keep_their_order() {
+        let mut q = CheckQueue::default();
+        for id in 1..=5 {
+            q.join(id, id % 2 == 0);
+        }
+        assert_eq!(q.fill(2), [(1, false), (2, true)]);
+        assert!(q.fill(2).is_empty());
+        assert!(q.is_waiting(3) && q.is_waiting(4) && q.is_waiting(5));
+        // Whichever finishes first, the next in line takes its place.
+        assert!(q.done(2));
+        assert_eq!(q.fill(2), [(3, false)]);
+        assert!(q.done(1));
+        assert!(q.done(3));
+        assert_eq!(q.fill(2), [(4, true), (5, false)]);
+        // A higher limit starts more at once; none starts everything waiting.
+        for id in 6..=9 {
+            q.join(id, true);
+        }
+        assert_eq!(q.fill(3), [(6, true)]);
+        assert_eq!(q.fill(0).len(), 3);
+        assert!(!q.is_waiting(9));
+        // A lower limit lets running sets finish but starts none until it's met again.
+        q.join(10, true);
+        assert!(q.fill(1).is_empty());
+        for id in [4, 5, 6, 7, 8] {
+            q.done(id);
+        }
+        assert!(q.fill(1).is_empty());
+        q.done(9);
+        assert_eq!(q.fill(1), [(10, true)]);
     }
 
     #[test]
     fn a_cancelled_session_leaves_the_line() {
         let mut q = CheckQueue::default();
-        q.join(1, true);
-        q.join(2, true);
-        q.join(3, true);
-        assert!(q.drop_waiting(2));
-        assert!(!q.drop_waiting(2));
-        // The running set isn't dropped; it finishes and hands on.
+        for id in 1..=4 {
+            q.join(id, true);
+        }
+        assert_eq!(q.fill(2).len(), 2);
+        assert!(q.drop_waiting(3));
+        assert!(!q.drop_waiting(3));
+        // Running sets aren't dropped; they finish and hand on.
         assert!(!q.drop_waiting(1));
-        assert_eq!(q.done(1), Some((3, true)));
-        assert_eq!(q.done(3), None);
+        assert!(q.done(1));
+        assert_eq!(q.fill(2), [(4, true)]);
+        assert!(q.done(2) && q.done(4));
+        assert!(q.fill(2).is_empty());
     }
 
     /// The limit is each check's own, counted from when it starts: two checks that each
@@ -693,12 +744,26 @@ mod tests {
         let limit = Duration::from_millis(1500);
         // Time spent waiting in the queue before the run doesn't count either.
         let mut q = CheckQueue::default();
-        q.join(1, true);
-        q.join(2, true);
+        for id in 1..=3 {
+            q.join(id, true);
+        }
+        assert_eq!(q.fill(2).len(), 2);
         std::thread::sleep(Duration::from_millis(1600));
-        assert_eq!(q.done(1), Some((2, true)));
-        let runs = run_all(&d, &["sleep 1".into(), "sleep 1".into()], limit, true);
-        assert!(runs.iter().all(|r| r.ok && !r.timed_out), "{runs:?}");
+        assert!(q.done(1));
+        assert_eq!(q.fill(2), [(3, true)]);
+        // Two sets running side by side each keep their own limit.
+        let sets: Vec<_> = (0..2)
+            .map(|_| {
+                let d = d.clone();
+                std::thread::spawn(move || {
+                    run_all(&d, &["sleep 1".into(), "sleep 1".into()], limit, true)
+                })
+            })
+            .collect();
+        for set in sets {
+            let runs = set.join().unwrap();
+            assert!(runs.iter().all(|r| r.ok && !r.timed_out), "{runs:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
