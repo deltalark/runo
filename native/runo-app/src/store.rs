@@ -381,6 +381,10 @@ pub struct Project {
     /// How many times in a row failing checks go back to the agent on their own; 0 asks.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub fix_rounds: u32,
+    /// What the person last let the checks run (`proof::fingerprint`), for sessions whose
+    /// mode asks before shell commands: they run on their own while it stays the same.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checks_ok: String,
     /// How the person works here: `crew` through Crew's chat, empty directly in
     /// sessions. See `crew::is_crew`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -469,6 +473,10 @@ pub struct Session {
     /// so Undo can leave alone what changed after it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub snapshot: String,
+    /// The branch is a pull request from someone else's fork: its scripts are theirs, so
+    /// Runo never runs its checks on its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fork: bool,
     /// Told to the agent with the next prompt, such as that its last turn was undone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub undo_note: String,
