@@ -84,6 +84,11 @@ pub struct ClaudeStream {
     usage: Usage,
     /// Whether the conversation id was already reported.
     named: bool,
+    /// Subagent calls started in the background: their tool result only says they started,
+    /// so they stay running until a `task_notification` says they ended.
+    background: Vec<String>,
+    /// Background tasks' ids and the calls that started them.
+    tasks: Vec<(String, String)>,
 }
 
 impl ClaudeStream {
@@ -94,6 +99,56 @@ impl ClaudeStream {
             any_text: false,
             usage: Usage::default(),
             named: false,
+            background: Vec::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    /// The call that started background task `event` names, by its own id or the task's.
+    /// With one background subagent running, it's that one.
+    fn task_call(&self, event: &Value) -> Option<String> {
+        if let Some(id) = event["tool_use_id"].as_str().filter(|id| !id.is_empty()) {
+            return Some(id.to_string());
+        }
+        let task = event["task_id"].as_str().unwrap_or("");
+        self.tasks
+            .iter()
+            .find(|(t, _)| !task.is_empty() && t == task)
+            .map(|(_, call)| call.clone())
+            .or_else(|| match self.background.as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            })
+    }
+
+    /// A background task started, moved on or ended.
+    fn task_event(&mut self, event: &Value) -> Option<AgentEvent> {
+        match event["subtype"].as_str().unwrap_or("") {
+            "task_started" => {
+                let (task, call) = (event["task_id"].as_str()?, event["tool_use_id"].as_str()?);
+                self.tasks.push((task.to_string(), call.to_string()));
+                None
+            }
+            "task_progress" => {
+                let label = event["last_tool_name"]
+                    .as_str()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| format!("Used {t}"))?;
+                Some(AgentEvent::SubStep {
+                    parent: self.task_call(event)?,
+                    label,
+                })
+            }
+            "task_notification" => {
+                let id = self.task_call(event)?;
+                self.background.retain(|b| *b != id);
+                Some(AgentEvent::ToolDone {
+                    ok: !matches!(event["status"].as_str(), Some("failed")),
+                    output: event["summary"].as_str().unwrap_or("").to_string(),
+                    id,
+                })
+            }
+            _ => None,
         }
     }
 
@@ -122,6 +177,7 @@ impl ClaudeStream {
             }
         }
         match kind {
+            "system" => out.extend(self.task_event(&event)),
             "stream_event" => {
                 if !event["parent_tool_use_id"].is_null() {
                     return out;
@@ -145,8 +201,17 @@ impl ClaudeStream {
                 }
             }
             "assistant" => {
-                // Subagent traffic is summarised by its parent's Task step.
-                if !event["parent_tool_use_id"].is_null() {
+                // Of a subagent's traffic only its latest step shows, on its parent's step.
+                if let Some(parent) = event["parent_tool_use_id"].as_str() {
+                    for block in event["message"]["content"].as_array().into_iter().flatten() {
+                        if block["type"] == "tool_use" {
+                            let tool = block["name"].as_str().unwrap_or("tool");
+                            out.push(AgentEvent::SubStep {
+                                parent: parent.to_string(),
+                                label: self.step_label(tool, &block["input"]),
+                            });
+                        }
+                    }
                     return out;
                 }
                 let u = &event["message"]["usage"];
@@ -203,6 +268,13 @@ impl ClaudeStream {
                         "tool_use" => {
                             let tool = block["name"].as_str().unwrap_or("tool");
                             let label = self.step_label(tool, &block["input"]);
+                            if ToolKind::of(tool) == ToolKind::Subagent
+                                && block["input"]["run_in_background"] == true
+                            {
+                                if let Some(id) = block["id"].as_str() {
+                                    self.background.push(id.to_string());
+                                }
+                            }
                             out.push(AgentEvent::Tool(
                                 match block["id"].as_str().filter(|id| !id.is_empty()) {
                                     Some(id) => ToolStep::running(id, tool, label),
@@ -224,9 +296,17 @@ impl ClaudeStream {
                         continue;
                     }
                     if let Some(id) = block["tool_use_id"].as_str().filter(|id| !id.is_empty()) {
+                        let ok = block["is_error"].as_bool() != Some(true);
+                        // A background subagent has only started; it ends later.
+                        if self.background.iter().any(|b| b == id) {
+                            if ok {
+                                continue;
+                            }
+                            self.background.retain(|b| b != id);
+                        }
                         out.push(AgentEvent::ToolDone {
                             id: id.to_string(),
-                            ok: block["is_error"].as_bool() != Some(true),
+                            ok,
                             output: result_text(&block["content"]),
                         });
                     }
@@ -1353,6 +1433,63 @@ mod tests {
                 AgentEvent::Error("error_max_turns".into())
             ]
         );
+    }
+
+    #[test]
+    fn subagent_steps_show_on_their_parent_step() {
+        let out = feed_all(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Task","input":{"description":"Find the parser"}}]}}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"text","text":"Looking"},{"type":"tool_use","id":"toolu_s1","name":"Read","input":{"file_path":"/work/app/src/stream.rs"}}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_s1","content":"…"}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Found it"}]}}"#,
+        ]);
+        assert_eq!(
+            out,
+            [
+                started("toolu_1", "Ran a subagent: Find the parser"),
+                AgentEvent::SubStep {
+                    parent: "toolu_1".into(),
+                    label: "Read src/stream.rs".into()
+                },
+                AgentEvent::ToolDone {
+                    id: "toolu_1".into(),
+                    ok: true,
+                    output: String::new()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn background_subagents_run_until_their_task_ends() {
+        let out = feed_all(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_b","name":"Agent","input":{"description":"Review","run_in_background":true}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_b","content":"Async agent launched"}]}}"#,
+            r#"{"type":"system","subtype":"task_started","task_id":"t9","tool_use_id":"toolu_b","description":"Review"}"#,
+            r#"{"type":"system","subtype":"task_progress","task_id":"t9","last_tool_name":"Grep"}"#,
+            r#"{"type":"system","subtype":"task_notification","task_id":"t9","status":"failed","summary":"Stopped"}"#,
+        ]);
+        assert_eq!(
+            &out[1..],
+            [
+                AgentEvent::SubStep {
+                    parent: "toolu_b".into(),
+                    label: "Used Grep".into()
+                },
+                AgentEvent::ToolDone {
+                    id: "toolu_b".into(),
+                    ok: false,
+                    output: String::new()
+                },
+            ],
+            "the launch result doesn't end the step"
+        );
+        // One that couldn't start ends at once.
+        let out = feed_all(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_c","name":"Agent","input":{"description":"x","run_in_background":true}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_c","is_error":true,"content":"No"}]}}"#,
+        ]);
+        assert!(matches!(&out[1], AgentEvent::ToolDone { ok: false, .. }));
     }
 
     #[test]
