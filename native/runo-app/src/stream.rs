@@ -1446,11 +1446,7 @@ mod tests {
         assert_eq!(
             out,
             [
-                AgentEvent::Tool(ToolStep::running(
-                    "toolu_1",
-                    "Task",
-                    "Ran a subagent: Find the parser"
-                )),
+                started("toolu_1", "Ran a subagent: Find the parser"),
                 AgentEvent::SubStep {
                     parent: "toolu_1".into(),
                     label: "Read src/stream.rs".into()
@@ -1458,7 +1454,7 @@ mod tests {
                 AgentEvent::ToolDone {
                     id: "toolu_1".into(),
                     ok: true,
-                    output: "Found it".into()
+                    output: String::new()
                 },
             ]
         );
@@ -1483,7 +1479,7 @@ mod tests {
                 AgentEvent::ToolDone {
                     id: "toolu_b".into(),
                     ok: false,
-                    output: "Stopped".into()
+                    output: String::new()
                 },
             ],
             "the launch result doesn't end the step"
