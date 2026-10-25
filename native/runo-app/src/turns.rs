@@ -29,6 +29,60 @@ const CONTEXT_CHARS: usize = 1500;
 const EARLIER_REQUESTS: usize = 10;
 const EARLIER_CHARS: usize = 120;
 
+/// Tells a sent turn's checkpoint from one sent after it was stopped.
+static START_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// What a sent turn does once its checkpoint is in.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Gate {
+    /// The turn was deleted, or stopped and sent again: this checkpoint is no one's.
+    Stale,
+    /// Stopped before the agent started: it ends without running.
+    Stopped,
+    /// The agent starts now, after the checkpoint, so Undo finds the folder as it was.
+    Run,
+}
+
+/// `waiting` is the session's sent turn still waiting, as (token, stopped).
+pub(crate) fn gate(waiting: Option<(u64, bool)>, token: u64) -> Gate {
+    match waiting {
+        Some((t, _)) if t != token => Gate::Stale,
+        None => Gate::Stale,
+        Some((_, true)) => Gate::Stopped,
+        Some((_, false)) => Gate::Run,
+    }
+}
+
+/// The background half of sending a turn: whether the folder is in git, and the
+/// checkpoint of it that Undo goes back to (empty outside git or when it fails).
+pub(crate) fn take_checkpoint(dir: &str) -> (bool, String) {
+    let in_git = git::is_repo(dir);
+    let checkpoint = if in_git {
+        git::checkpoint(dir).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    (in_git, checkpoint)
+}
+
+/// A sent turn whose checkpoint is being taken: everything its agent starts with.
+pub(crate) struct Starting {
+    token: u64,
+    /// Stop was pressed before the agent started.
+    pub(crate) stopped: bool,
+    provider: String,
+    prompt: String,
+    sent: String,
+    native: bool,
+    sel: HashMap<String, String>,
+    opts: AgentOptions,
+    agent_session: String,
+    sandbox: Option<crate::connections::Sandbox>,
+    attached: Vec<String>,
+    dir: String,
+    thread: u64,
+}
+
 impl RunoApp {
     /// Start one agent turn: snapshot the worktree, then launch the CLI.
     pub(crate) fn start_turn(
@@ -38,9 +92,8 @@ impl RunoApp {
         images: Vec<String>,
         opts: &AgentOptions,
     ) {
-        // The agent is found on the login shell's PATH; in the first moment after launch
-        // that may still be on its way.
-        crate::shellenv::ready();
+        // The agent is found on the login shell's PATH, which may still be on its way in
+        // the first moment after launch: the checkpoint's background thread waits for it.
         // Whatever goes to a Crew thread next answers the decision it waits on: a choice,
         // a reply typed in the thread, or a message from Crew.
         if let Some(info) = self.state.session_mut(id).and_then(|s| s.crew.as_mut()) {
@@ -65,7 +118,7 @@ impl RunoApp {
         }
         // One run per session: a prompt that arrives while the agent or the worktree setup
         // command is running waits its turn, unless the agent takes it as it works.
-        if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+        if self.turn_running(id) || self.pending_start.contains_key(&id) {
             if images.is_empty() && self.steer(id, &prompt) {
                 return;
             }
@@ -152,7 +205,6 @@ impl RunoApp {
         }
         let resume = has;
         let dir = session.dir.clone();
-        let in_git = git::is_repo(&dir);
         // Agents that cannot resume their own conversation get it written into the prompt.
         let handoff = std::mem::take(&mut session.handoff);
         // Once a message goes out the switch is final.
@@ -207,9 +259,7 @@ impl RunoApp {
         let mut user = Message::now(Role::User, prompt.clone());
         user.images = images.clone();
         user.playbook = playbook.unwrap_or_default();
-        if in_git {
-            user.checkpoint = git::checkpoint(&dir).unwrap_or_default();
-        }
+        // The checkpoint goes on this message once it is taken, before the agent runs.
         session.messages.push(user);
         session.messages.push(Message::now(Role::Agent, ""));
         let sel = session.selections();
@@ -222,15 +272,6 @@ impl RunoApp {
             let at = session.messages.len() - 1;
             session.messages.insert(at, hint);
         }
-        crate::connections::prepare_run(
-            Some((provider.clone(), agent_session.clone())),
-            crate::settings::sync_backup(),
-        );
-        // On a connection the agent reaches Runo's memory server through a relay.
-        let exe = std::env::current_exe()
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .filter(|_| memory_server() && crate::connections::mcp_reachable(sandbox.as_ref()));
         // Images inside the session folder go by their place in it, which is the same on
         // a connection; others by their full path.
         let attached: Vec<String> = images
@@ -242,32 +283,148 @@ impl RunoApp {
                     .unwrap_or_else(|_| path.clone())
             })
             .collect();
+        let thread = if session.crew.is_some() && sandbox.is_none() {
+            id
+        } else {
+            0
+        };
+        // Working from now on; the agent starts once the checkpoint is taken.
+        session.status = Status::Working;
+        let token = START_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.starting.insert(
+            id,
+            Starting {
+                token,
+                stopped: false,
+                provider,
+                prompt,
+                sent,
+                native,
+                sel,
+                opts: opts.clone(),
+                agent_session,
+                sandbox,
+                attached,
+                dir: dir.clone(),
+                thread,
+            },
+        );
+        // Counted as it starts, so turns running side by side can't pass the limit.
+        self.state.add_turn(&store::today());
+        // Git takes the checkpoint off the UI thread: 0.1 s in a small repository, a
+        // second or more in a large one. Undo needs it to hold the folder as it was
+        // before the agent changed anything, so the agent starts only after it.
+        self.bg(
+            move || take_checkpoint(&dir),
+            move |this, (in_git, checkpoint), cx| {
+                this.launch_turn(id, token, in_git, checkpoint, cx);
+                cx.notify();
+            },
+        );
+        self.save();
+        if self.selected == Some(id) {
+            self.follow_bottom();
+        }
+        self.keep_awake_update();
+    }
+
+    /// The checkpoint for a sent turn is taken: record it on the prompt, then start the
+    /// agent. A turn stopped meanwhile ends here without running.
+    pub(crate) fn launch_turn(
+        &mut self,
+        id: u64,
+        token: u64,
+        in_git: bool,
+        checkpoint: String,
+        cx: &mut Context<Self>,
+    ) {
+        let waiting = self.starting.get(&id).map(|s| (s.token, s.stopped));
+        if gate(waiting, token) == Gate::Stale {
+            return;
+        }
+        let Some(start) = self.starting.remove(&id) else {
+            return;
+        };
+        let Some(session) = self.state.session_mut(id) else {
+            return;
+        };
+        let user = session.messages.iter().rposition(|m| m.role == Role::User);
+        if let Some(m) = user.map(|i| &mut session.messages[i]) {
+            m.checkpoint = checkpoint;
+        }
+        if start.stopped {
+            if let Some(at) = session
+                .messages
+                .iter()
+                .rposition(|m| m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty())
+            {
+                session.messages.remove(at);
+            }
+            session.status = Status::Stopped;
+            let mut m = Message::new(Role::System, "Stopped.");
+            m.meta = "stopped".into();
+            session.messages.push(m);
+            crate::applog::info(
+                "turn",
+                format!("session #{id}: stopped before the agent started"),
+            );
+            self.finish_turn(id, false, true, false, cx);
+            self.design_turn_done(id, true, cx);
+            self.playbook_turn_done(id, false);
+            self.save();
+            return;
+        }
+        let Starting {
+            provider,
+            prompt,
+            sent,
+            native,
+            sel,
+            opts,
+            agent_session,
+            sandbox,
+            attached,
+            dir,
+            thread,
+            ..
+        } = start;
+        crate::connections::prepare_run(
+            Some((provider.clone(), agent_session.clone())),
+            crate::settings::sync_backup(),
+        );
+        // On a connection the agent reaches Runo's memory server through a relay.
+        let exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|_| memory_server() && crate::connections::mcp_reachable(sandbox.as_ref()));
         let spec = agent::RunSpec {
             provider: &provider,
             prompt: &sent,
             resume: native,
             sel: &sel,
-            opts,
+            opts: &opts,
             in_git,
             session_id: &agent_session,
             images: &attached,
             memory: exe.as_deref().map(|exe| (exe, dir.as_str())),
             local: sandbox.is_none(),
-            thread: if session.crew.is_some() && sandbox.is_none() {
-                id
-            } else {
-                0
-            },
+            thread,
         };
-        match agent::run_agent(
+        let result = agent::run_agent(
             Target::Session(id),
             &spec,
             &dir,
             sandbox.as_ref(),
             self.tx.clone(),
-        ) {
+        );
+        let Some(session) = self.state.session_mut(id) else {
+            if let Ok(handle) = result {
+                handle.kill();
+            }
+            return;
+        };
+        match result {
             Ok(handle) => {
-                session.status = Status::Working;
                 session.remote_turn =
                     matches!(sandbox, Some(crate::connections::Sandbox::Remote(_)));
                 let turn = session
@@ -284,8 +441,6 @@ impl RunoApp {
                 self.turns.insert(id, running);
                 self.handles.insert(Target::Session(id), handle);
                 self.turn_files.remove(&id);
-                // Counted as it starts, so turns running side by side can't pass the limit.
-                self.state.add_turn(&store::today());
                 crate::applog::info(
                     "turn",
                     format!(
@@ -311,7 +466,13 @@ impl RunoApp {
                     format!("session #{id} ({provider}): could not start the agent: {error}"),
                 );
                 session.status = Status::Failed;
-                session.messages.pop();
+                if let Some(at) = session
+                    .messages
+                    .iter()
+                    .rposition(|m| m.role == Role::Agent && m.text.is_empty() && m.steps.is_empty())
+                {
+                    session.messages.remove(at);
+                }
                 session.messages.push(Message::new(Role::System, error));
             }
         }
@@ -362,7 +523,7 @@ impl RunoApp {
             return;
         }
         // The person sent something else meanwhile; that turn speaks for itself.
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             return;
         }
         let Some(session) = self.state.session_mut(id) else {
@@ -598,7 +759,7 @@ impl RunoApp {
     /// Send queued prompt `index` of a session now. While the agent works it is stopped
     /// first, and the prompt goes out once it has exited.
     pub(crate) fn send_queued(&mut self, id: u64, index: usize, cx: &mut Context<Self>) {
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             if let Some(s) = self.state.session_mut(id) {
                 if index < s.queue.len() {
                     let item = s.queue.remove(index);
@@ -625,7 +786,7 @@ impl RunoApp {
 
     /// Send the last prompt again, with its images, after a failed or stopped turn.
     pub(crate) fn retry_last(&mut self, id: u64, cx: &mut Context<Self>) {
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             return;
         }
         let last = self.state.session(id).and_then(|s| {
@@ -648,7 +809,7 @@ impl RunoApp {
             .sessions
             .iter()
             .filter(|s| !s.queue.is_empty() && !s.cli && !s.archived)
-            .filter(|s| !self.handles.contains_key(&Target::Session(s.id)))
+            .filter(|s| !self.turn_running(s.id))
             .map(|s| s.id)
             .collect();
         for id in ids {
@@ -710,7 +871,7 @@ impl RunoApp {
         }
         // While the agent or its setup command runs, the prompt and its images wait,
         // unless the agent takes messages as it works.
-        if self.handles.contains_key(&Target::Session(id)) || self.pending_start.contains_key(&id) {
+        if self.turn_running(id) || self.pending_start.contains_key(&id) {
             self.editing = None;
             if images.is_empty() && playbook.is_none() && self.steer(id, &text) {
                 return;
@@ -783,7 +944,7 @@ impl RunoApp {
     /// staging, and the branch if the agent committed. A snapshot taken first makes it
     /// redoable, and files changed after the agent's last turn are left alone.
     pub(crate) fn undo_to(&mut self, id: u64, index: usize) {
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             self.fail("turn", "Stop the agent before undoing its changes.".into());
             return;
         }
@@ -859,7 +1020,7 @@ impl RunoApp {
 
     /// Bring back what an Undo removed, from the snapshot it took.
     pub(crate) fn redo_turn(&mut self, id: u64, index: usize) {
-        if self.handles.contains_key(&Target::Session(id)) || self.git_busy.contains_key(&id) {
+        if self.turn_running(id) || self.git_busy.contains_key(&id) {
             return;
         }
         let Some(session) = self.state.session(id) else {
@@ -929,7 +1090,7 @@ impl RunoApp {
     /// Answer the agent: a follow-up prompt, optionally with tools allowed for this turn.
     pub(crate) fn answer(&mut self, prompt: String, allow: Vec<String>, cx: &mut Context<Self>) {
         let Some(id) = self.selected else { return };
-        if self.handles.contains_key(&Target::Session(id)) {
+        if self.turn_running(id) {
             return;
         }
         let Some(provider) = self.current().map(|s| s.provider.clone()) else {
@@ -2617,6 +2778,77 @@ mod tests {
     use super::*;
     // `super::*` brings in gpui's own `test` attribute; use the built-in one.
     use std::prelude::v1::test;
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn the_agent_starts_only_after_its_checkpoint_so_undo_restores_the_folder() {
+        let repo = std::env::temp_dir().join(format!("runo-turn-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let dir = repo.to_str().unwrap().to_string();
+        git_in(&repo, &["init", "-q"]);
+        git_in(&repo, &["config", "user.email", "t@t"]);
+        git_in(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "one\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "init"]);
+        let head = git_in(&repo, &["rev-parse", "HEAD"]);
+        // The person's own work before sending: one change staged, one not.
+        std::fs::write(repo.join("b.txt"), "staged\n").unwrap();
+        git_in(&repo, &["add", "b.txt"]);
+        std::fs::write(repo.join("a.txt"), "draft\n").unwrap();
+        // As when sending: the checkpoint runs on a background thread, and the agent is
+        // started from its completion, never before.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bg = dir.clone();
+        std::thread::spawn(move || tx.send(take_checkpoint(&bg)).unwrap());
+        let (in_git, checkpoint) = rx.recv().unwrap();
+        assert!(in_git && !checkpoint.is_empty());
+        // The "agent": edits, deletes, creates, and commits.
+        std::fs::write(repo.join("a.txt"), "agent\n").unwrap();
+        std::fs::remove_file(repo.join("b.txt")).unwrap();
+        std::fs::write(repo.join("c.txt"), "new\n").unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "agent"]);
+        // Turn end takes its snapshot; Undo puts the folder back as it was when sent.
+        let end = git::checkpoint(&dir).unwrap();
+        git::restore(&dir, &checkpoint, Some(&end)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "draft\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("b.txt")).unwrap(),
+            "staged\n"
+        );
+        assert!(!repo.join("c.txt").exists());
+        assert_eq!(git_in(&repo, &["rev-parse", "HEAD"]), head);
+        assert_eq!(git_in(&repo, &["diff", "--cached", "--name-only"]), "b.txt");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_checkpoint_starts_its_own_turn_only() {
+        assert_eq!(gate(Some((4, false)), 4), Gate::Run);
+        // Stop pressed while the checkpoint was taken: the agent never starts.
+        assert_eq!(gate(Some((4, true)), 4), Gate::Stopped);
+        // Stopped and sent again: the first checkpoint must not start the second turn.
+        assert_eq!(gate(Some((5, false)), 4), Gate::Stale);
+        // The session was deleted meanwhile.
+        assert_eq!(gate(None, 4), Gate::Stale);
+    }
 
     #[test]
     fn messages_the_agent_never_read_go_back_to_the_queue() {

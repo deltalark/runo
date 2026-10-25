@@ -666,10 +666,7 @@ impl RunoApp {
             }
             Act::Diff(path) => {
                 self.right_tab = RightTab::Changes;
-                if let Some(dir) = self.current().map(|s| s.dir.clone()) {
-                    self.diff = self.load_diff(&dir, &path);
-                }
-                self.selected_file = Some(path);
+                self.open_change(&path);
             }
             Act::Preview(path) => self.open_preview(&path),
             Act::Edit(path) => self.edit_path(&path),
