@@ -250,10 +250,14 @@ impl RunoApp {
         self.refresh();
     }
 
-    /// Note a scan of `id` starting now, with its git marks, for `idle_scan`.
-    pub(crate) fn scan_started(&mut self, id: u64, dir: &str) {
-        self.idle.scan_marks = Some((id, Marks::of(dir)));
+    /// Note a scan starting now, for `idle_scan`.
+    pub(crate) fn scan_started(&mut self) {
         self.idle.scan_at = Some(Instant::now());
+    }
+
+    /// A scan of `id` finished: its git marks as the scan left them, for `idle_scan`.
+    pub(crate) fn scan_done(&mut self, id: u64, dir: &str) {
+        self.idle.scan_marks = Some((id, Marks::of(dir)));
     }
 
     fn pr_due(&self, id: u64) -> bool {
@@ -281,13 +285,17 @@ impl RunoApp {
     }
 
     /// After a batch of events: draw what they changed now, or within `BACKGROUND_WAIT`
-    /// for output from sessions not on screen, and bring the Dock's count up to date.
+    /// for output from sessions not on screen, and bring the Dock's count up to date
+    /// unless only output streamed (it doesn't change what needs the person).
     pub(crate) fn after_events(&mut self, at_once: bool, streamed: bool, cx: &mut Context<Self>) {
         let waited = *self.idle.unshown_since.get_or_insert_with(Instant::now);
         if at_once || waited.elapsed() >= BACKGROUND_WAIT {
             self.idle.unshown_since = None;
             self.idle.unshown_flush = None;
             cx.notify();
+            if at_once {
+                self.show_dock(cx);
+            }
         } else {
             if streamed {
                 self.notify_chat(cx);
@@ -304,7 +312,6 @@ impl RunoApp {
                 }));
             }
         }
-        self.show_dock(cx);
     }
 
     /// The Dock icon's count, the same number as the corner mark's badge.

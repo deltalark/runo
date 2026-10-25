@@ -1958,8 +1958,7 @@ impl RunoApp {
         });
         app._subscriptions.push(activation_sub);
         // Hidden, minimized or covered: periodic work that only changes the window stops
-        // until it is on screen again (see `idle`).
-        wake::set_shown(window.is_visible());
+        // until it is on screen again (see `idle`). Taken as shown until told otherwise.
         wake::set_active(window.is_window_active());
         let visibility_sub = cx.observe_window_visibility(window, |this, visibility, _, cx| {
             this.window_shown(visibility.is_visible(), cx);
@@ -2244,7 +2243,7 @@ impl RunoApp {
             self.files.clear();
             return;
         };
-        self.scan_started(id, &dir);
+        self.scan_started();
         let Some(session) = self.current() else {
             return;
         };
@@ -2259,7 +2258,7 @@ impl RunoApp {
             Vec::new()
         };
         let request = ship::ScanRequest {
-            dir,
+            dir: dir.clone(),
             touched: session.touched(),
             base: session.base.clone(),
             since_base: self.diff_base,
@@ -2274,6 +2273,9 @@ impl RunoApp {
         self.bg(
             move || ship::scan(request),
             move |this, scan, _| {
+                // git's files as the scan left them: `git status` may have rewritten the
+                // index, and that isn't a change to look at again.
+                this.scan_done(id, &dir);
                 if this.refresh_seq == seq && this.selected == Some(id) {
                     this.apply_scan(id, scan, asked);
                 }
