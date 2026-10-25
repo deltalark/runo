@@ -62,6 +62,19 @@ pub struct ThreadInfo {
     /// turn (`prwatch.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch: Option<crate::prwatch::Watch>,
+    /// The last decision Crew answered for the person, shown on the thread's card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew_answer: Option<CrewAnswer>,
+}
+
+/// A thread's decision that Crew answered itself instead of passing it to the person.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+pub struct CrewAnswer {
+    pub question: String,
+    pub answer: String,
+    /// Seconds since the epoch.
+    #[serde(default)]
+    pub at: u64,
 }
 
 /// Who started a thread.
@@ -365,12 +378,28 @@ pub fn apply(info: &mut ThreadInfo, kind: &EventKind, at: u64) -> bool {
             Ok(decision) => {
                 info.decision = Some(decision);
                 info.attention = Some(Attention::NeedsYou);
+                info.crew_answer = None;
                 true
             }
             Err(_) => false,
         },
         EventKind::Message { .. } => false,
     }
+}
+
+/// Crew sent `text` to a thread: when the thread waits on a decision, that answers it, and
+/// the answer is kept as Crew's. The decision itself closes when the message starts the
+/// thread's turn. Returns whether it answered one.
+pub fn answer_by_crew(info: &mut ThreadInfo, text: &str, at: u64) -> bool {
+    let Some(d) = &info.decision else {
+        return false;
+    };
+    info.crew_answer = Some(CrewAnswer {
+        question: clip(&d.question, MAX_LINE),
+        answer: clip(text, MAX_TEXT),
+        at,
+    });
+    true
 }
 
 /// A thread's turn ended cleanly with nothing asked of the person, so its agent is done:
@@ -565,6 +594,74 @@ pub fn parse_wake(text: &str) -> Option<(u64, &str)> {
     let rest = rest[digits..].strip_prefix(" (")?;
     let at = rest.find(") says: ")?;
     Some((thread, &rest[at + ") says: ".len()..]))
+}
+
+/// What a thread sent Crew in one look at its events, ready to wake Crew with.
+pub enum Wake {
+    Message(String),
+    Decision(Decision),
+}
+
+/// The words a decision wakes Crew with: the question, its options, and that Crew may
+/// answer it itself when it doesn't need the person.
+pub fn decision_wake(d: &Decision) -> String {
+    let options: Vec<String> = d
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, o)| {
+            let mut line = format!("{}. {}", i + 1, o.label);
+            if !o.consequence.is_empty() {
+                line.push_str(&format!(": {}", o.consequence));
+            }
+            if i == d.recommended {
+                line.push_str(" (recommended)");
+            }
+            line
+        })
+        .collect();
+    format!(
+        "Decision: {}\n{}\nIf you can answer this from what you know (the brief, the plan, other threads), send the choice with message_thread. If it needs the person, leave it: they see it.",
+        d.question,
+        options.join("\n")
+    )
+}
+
+/// One prompt per thread for what threads sent in one look, in the order they first
+/// spoke: a thread's messages in order, exact repeats dropped, then its decision. Items
+/// are `(chat, thread, title, wake)`; out come `(chat, thread, prompt)`.
+pub fn wake_prompts(items: Vec<(u64, u64, String, Wake)>) -> Vec<(u64, u64, String)> {
+    let mut batches: Vec<(u64, u64, String, Vec<String>)> = Vec::new();
+    for (chat, thread, title, wake) in items {
+        let said = match wake {
+            Wake::Message(text) => text,
+            Wake::Decision(d) => decision_wake(&d),
+        };
+        match batches.iter_mut().find(|b| b.0 == chat && b.1 == thread) {
+            Some(b) => {
+                b.2 = title;
+                if !b.3.contains(&said) {
+                    b.3.push(said);
+                }
+            }
+            None => batches.push((chat, thread, title, vec![said])),
+        }
+    }
+    batches
+        .into_iter()
+        .map(|(chat, thread, title, said)| {
+            (chat, thread, wake_text(thread, &title, &said.join("\n\n")))
+        })
+        .collect()
+}
+
+/// The heading Crew's prompt puts above what this turn says: a thread's words under
+/// their own, so Crew never takes them for the person's.
+pub fn prompt_heading(prompt: &str) -> String {
+    match parse_wake(prompt) {
+        Some((thread, _)) => format!("## From thread #{thread} (not the person)"),
+        None => "## The person says".into(),
+    }
 }
 
 /// What Crew asks Runo to do, from the `runo-actions` block that ends its reply.
@@ -1112,6 +1209,8 @@ Actions:
 - read_thread: thread. Its latest replies come back with the next message.
 - resolve_thread: thread. Use it once its work is merged or no longer needed.
 
+Threads' messages and decisions come under their own heading, From thread #N, never as the person's words. When a thread asks for a decision you can make from what you know (the brief, the plan, what the person already said, other threads), answer it with message_thread and say so in a sentence; leave the ones that change what the person gets, or can't be undone, for the person.
+
 Limits: at most {MAX_NEW_THREADS} new threads and one message per thread per reply. Never start a thread for something you can answer. Say in your reply what you started and why, in a sentence.
 
 Cost: every thread is a full agent session that reads the code afresh, and the person's plan has a usage window shared by all of them. Split work into threads by independent area, not by item: one thread for related fixes beats one per fix. When the work has an order (the riskiest first), start those threads first and the rest once they report. Only a few threads run at once; the others wait for a slot and start on their own, so don't start a thread again because it is waiting.
@@ -1136,6 +1235,100 @@ pub fn thread_rules(tools: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quit_decision() -> Decision {
+        Decision {
+            question: "Which version to tag?".into(),
+            options: vec![
+                Choice {
+                    label: "v0.5.9".into(),
+                    consequence: "Ships with the watcher".into(),
+                },
+                Choice {
+                    label: "v0.6.0".into(),
+                    consequence: String::new(),
+                },
+            ],
+            recommended: 0,
+        }
+    }
+
+    #[test]
+    fn messages_and_decisions_both_wake_crew() {
+        let wakes = wake_prompts(vec![
+            (
+                1,
+                5,
+                "Docs".into(),
+                Wake::Message("Done with the guide".into()),
+            ),
+            (1, 6, "Release".into(), Wake::Decision(quit_decision())),
+        ]);
+        assert_eq!(wakes.len(), 2);
+        assert_eq!(wakes[0].1, 5);
+        assert_eq!(parse_wake(&wakes[0].2), Some((5, "Done with the guide")));
+        let (thread, said) = parse_wake(&wakes[1].2).unwrap();
+        assert_eq!(thread, 6);
+        assert!(said.starts_with("Decision: Which version to tag?"));
+        assert!(said.contains("1. v0.5.9: Ships with the watcher (recommended)"));
+        assert!(said.contains("2. v0.6.0\n"));
+        assert!(said.contains("message_thread"));
+    }
+
+    #[test]
+    fn several_messages_from_a_thread_wake_crew_once_in_order() {
+        let msg =
+            |thread, text: &str| (1, thread, format!("T{thread}"), Wake::Message(text.into()));
+        let wakes = wake_prompts(vec![
+            msg(5, "First"),
+            msg(7, "Other thread"),
+            msg(5, "Second"),
+            msg(5, "First"),
+            (1, 5, "T5".into(), Wake::Decision(quit_decision())),
+            (2, 5, "T5".into(), Wake::Message("Another chat".into())),
+        ]);
+        assert_eq!(wakes.len(), 3);
+        assert_eq!((wakes[0].0, wakes[0].1), (1, 5));
+        let (_, said) = parse_wake(&wakes[0].2).unwrap();
+        let parts: Vec<&str> = said.split("\n\n").collect();
+        assert_eq!(parts[0], "First");
+        assert_eq!(parts[1], "Second");
+        assert!(parts[2].starts_with("Decision: "));
+        assert_eq!(said.matches("First").count(), 1);
+        assert_eq!(parse_wake(&wakes[1].2), Some((7, "Other thread")));
+        assert_eq!((wakes[2].0, wakes[2].1), (2, 5));
+    }
+
+    #[test]
+    fn a_threads_words_get_their_own_heading() {
+        let wake = wake_text(12, "Docs", "Ready");
+        assert_eq!(prompt_heading(&wake), "## From thread #12 (not the person)");
+        assert_eq!(prompt_heading("Ship it"), "## The person says");
+        // A person quoting a thread's words loosely is still the person.
+        assert_eq!(
+            prompt_heading("Thread #12 said it's ready"),
+            "## The person says"
+        );
+    }
+
+    #[test]
+    fn crew_answering_a_decision_is_kept_until_the_next_one() {
+        let mut info = ThreadInfo::default();
+        assert!(!answer_by_crew(&mut info, "Tag v0.5.9", 10));
+        assert!(info.crew_answer.is_none());
+        assert!(apply(&mut info, &EventKind::Decision(quit_decision()), 5));
+        assert!(answer_by_crew(&mut info, "On it: tag v0.5.9.", 10));
+        let a = info.crew_answer.clone().unwrap();
+        assert_eq!(a.question, "Which version to tag?");
+        assert_eq!(a.answer, "On it: tag v0.5.9.");
+        assert_eq!(a.at, 10);
+        // A new decision clears it, so the card doesn't claim Crew answered that one.
+        assert!(apply(&mut info, &EventKind::Decision(quit_decision()), 20));
+        assert!(info.crew_answer.is_none());
+        // Saved threads from before load without it.
+        let old: ThreadInfo = serde_json::from_str("{}").unwrap();
+        assert!(old.crew_answer.is_none());
+    }
 
     #[test]
     fn wake_text_reads_back() {

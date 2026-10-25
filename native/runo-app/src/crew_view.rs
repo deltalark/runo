@@ -937,6 +937,10 @@ impl RunoApp {
             _ => line,
         };
         let watch = self.watch_chip(s, key, cx);
+        // Crew answered the thread's last decision, and the thread hasn't reported since.
+        let crew_answered = info.crew_answer.as_ref().is_some_and(|a| {
+            status != "needs you" && info.reports.last().is_none_or(|r| r.at <= a.at)
+        });
         let selected = (self.selected == Some(thread) && self.view == View::Session)
             || self.peek == Some(thread);
         // A finished row says what changed with a chip; its outcome shows when it is open.
@@ -995,6 +999,9 @@ impl RunoApp {
                 })
                 .children(result)
                 .children(watch)
+                .when(crew_answered, |el| {
+                    el.child(small("Crew answered").flex_none().text_color(rgb(c_blue())))
+                })
                 .when(!meta.is_empty(), |el| {
                     el.child(
                         small(meta)
@@ -1273,6 +1280,7 @@ impl RunoApp {
         let thread = session.id;
         let pid = session.project_id;
         let decision = info.decision.clone();
+        let crew_answer = info.crew_answer.clone().filter(|_| decision.is_none());
         Some(
             div()
                 .p_3()
@@ -1335,6 +1343,22 @@ impl RunoApp {
                             })),
                     )
                 })
+                .children(crew_answer.map(|a| {
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap_2()
+                        .text_size(px(12.5))
+                        .text_color(rgb(c_secondary()))
+                        .child(icon(CREW_ICON, 12., c_blue()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .line_clamp(3)
+                                .child(format!("Crew answered \"{}\": {}", a.question, a.answer)),
+                        )
+                }))
                 .children(decision.map(|d| {
                     div()
                         .v_flex()
