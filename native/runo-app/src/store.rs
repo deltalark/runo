@@ -389,6 +389,12 @@ pub struct Project {
     /// sessions. See `crew::is_crew`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode: String,
+    /// Let agent CLIs use settings committed in the repository that start programs
+    /// (Cursor and Gemini MCP servers, hooks, tool commands): Runo trusts the folder
+    /// for them and approves the servers up front. Off, Runo trusts a folder only when
+    /// it holds no such settings.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trust_agent_config: bool,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
