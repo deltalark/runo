@@ -606,6 +606,11 @@ impl Panel {
     /// The assistant's chat, with Runo's mark beside each answer.
     fn chat(&mut self, app: &Entity<RunoApp>, acts: bool, cx: &mut Context<Self>) -> Div {
         let (messages, empty) = app.update(cx, |this, cx| {
+            // Answers read here are read in the window too.
+            if this.assistant.unread > 0 {
+                this.assistant.unread = 0;
+                cx.notify();
+            }
             (this.assistant_messages(cx), this.assistant.chat.is_empty())
         });
         if messages.len() != self.seen {

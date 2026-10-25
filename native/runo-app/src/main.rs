@@ -2013,6 +2013,10 @@ impl RunoApp {
         let activation_sub = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
             if this.window_active {
+                // An answer that came in behind the window is read once it's back in front.
+                if this.assistant.open {
+                    this.assistant.unread = 0;
+                }
                 this.refresh();
                 cx.notify();
             }
@@ -9863,7 +9867,7 @@ impl Render for RunoApp {
                 el.child(self.new_session_modal(f32::from(window.viewport_size().height) - 96., cx))
             })
             .children(self.alerts_view(cx))
-            .children(self.assistant_view(cx))
+            .children(self.assistant_view(window, cx))
             .children(self.switch_modal(cx))
             .children(palette)
             .children(self.ctx_menu_view(cx))

@@ -1269,7 +1269,7 @@ impl RunoApp {
         out
     }
 
-    /// How many things need the person, for the corner mark's badge and the Dock icon:
+    /// How many things need the person, for the Dock icon:
     /// sessions and threads waiting on them or finished unseen, permission requests,
     /// unread Crew replies, and Reviews' review requests and failed checks. Each session
     /// counts once, and the one on screen in the focused window counts as seen.

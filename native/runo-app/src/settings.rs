@@ -204,7 +204,7 @@ pub struct AppSettings {
     pub assistant_nudges: bool,
     /// Show Runo in the macOS menu bar with what agents are doing.
     pub menu_bar: bool,
-    /// Count what needs the person on the Dock icon, as the corner mark does.
+    /// Count what needs the person on the Dock icon.
     pub dock_badge: bool,
     /// With the menu bar on, ⌘Q and closing the window hide Runo to it instead of quitting.
     pub run_in_background: bool,

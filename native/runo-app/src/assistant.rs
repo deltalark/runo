@@ -340,7 +340,7 @@ impl Msg {
 
 pub(crate) struct Assistant {
     pub open: bool,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     pub(crate) chat: Vec<Msg>,
     /// The question being answered by the agent, by its run key.
     pub(crate) asking: Option<String>,
@@ -364,15 +364,23 @@ pub(crate) struct Assistant {
     pub(crate) chats_open: bool,
     /// Whether the panel is the big command deck in the middle of the window.
     pub(crate) deck: bool,
+    /// Answers that came in while the panel was closed or the window was in the
+    /// background, not read yet: the count on the corner mark.
+    pub(crate) unread: usize,
 }
 
 impl Assistant {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<RunoApp>) -> (Self, Vec<Subscription>) {
-        let input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("Ask how to do something in Runo…"));
+        // A long question wraps and the box grows with it; Shift+Enter starts a new line.
+        let input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Ask how to do something in Runo…")
+                .submit_on_enter(true)
+                .auto_grow(1, 6)
+        });
         let subs = vec![
             cx.subscribe_in(&input, window, |this, input, event, window, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     let question = input.read(cx).value().trim().to_string();
                     if !question.is_empty() {
                         input.update(cx, |i, cx| i.set_value("", window, cx));
@@ -404,6 +412,7 @@ impl Assistant {
                 chat_id,
                 chats_open: false,
                 deck: false,
+                unread: 0,
                 asking: None,
                 asked: 0,
                 answerer: "",
@@ -564,6 +573,7 @@ impl RunoApp {
         }
         self.assistant.open = !self.assistant.open;
         if self.assistant.open {
+            self.assistant.unread = 0;
             if self.view == View::Settings {
                 self.view = View::Home;
             }
@@ -797,6 +807,9 @@ impl RunoApp {
         self.assistant.asking = None;
         self.assistant.stopper = None;
         self.assistant.streamed.clear();
+        if !self.assistant.open || !self.window_active {
+            self.assistant.unread += 1;
+        }
         let question = self
             .assistant
             .chat
@@ -1027,7 +1040,8 @@ impl RunoApp {
         Some(
             div()
                 .absolute()
-                .bottom(px(40.))
+                .bottom(relative(1.))
+                .mb_1()
                 .left_0()
                 .right_0()
                 .child(menu_box("assistant-suggest", list))
@@ -1046,18 +1060,22 @@ impl RunoApp {
     }
 
     /// The mark in the corner, and the panel above it while it is open.
-    pub(crate) fn assistant_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn assistant_view(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.assistant_shown(cx) {
             return None;
         }
-        let waiting = self.approvals.len() + self.waiting_sessions().len();
-        // The same count as the Dock icon's, so the two agree.
-        let badge = self.attention();
+        // Only the assistant's own answers, not yet read; everything else that needs the
+        // person is counted on the Dock icon.
+        let unread = self.assistant.unread;
         let state = if self.assistant.asking.is_some() {
             Mood::Thinking
         } else if self.assistant.open {
             Mood::Listening
-        } else if waiting > 0 {
+        } else if unread > 0 {
             Mood::NeedsYou
         } else {
             Mood::Idle
@@ -1074,20 +1092,20 @@ impl RunoApp {
                 this.assistant.hover = Some((*hovered, std::time::Instant::now()));
                 cx.notify();
             }))
-            .tooltip(|window, cx| {
+            .tooltip(move |window, cx| {
                 let keys = keymap::label(cx, "ask-runo");
-                gpui_kit::component::tooltip::Tooltip::new(format!("Ask Runo  {keys}"))
+                gpui_kit::component::tooltip::Tooltip::new(format!("{}  {keys}", mark_tip(unread)))
                     .build(window, cx)
             })
             .on_click(cx.listener(|this, _, window, cx| this.toggle_assistant(window, cx)))
             .child(live_mark(
                 state,
-                (badge > 0).then_some(badge),
+                (unread > 0).then_some(unread),
                 self.assistant.hover,
             ));
         let mut layer = div().absolute().top_0().left_0().size_full().child(mark);
         if self.assistant.open {
-            layer = layer.child(self.assistant_panel(cx));
+            layer = layer.child(self.assistant_panel(window, cx));
         } else if let Some(nudge) = self.assistant_nudge_view(cx) {
             layer = layer.child(nudge);
         }
@@ -1212,7 +1230,7 @@ impl RunoApp {
         out
     }
 
-    fn assistant_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn assistant_panel(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let thinking = self.assistant.asking.is_some();
         let mood = if thinking {
             Mood::Thinking
@@ -1391,15 +1409,53 @@ impl RunoApp {
                 "Answers from the guide".to_string()
             }
         };
+        // The input sits in a box like the session composer's: one soft rounded frame on
+        // the raised surface, its edge taking the accent, with a faint ring, while focused.
+        let focused = self
+            .assistant
+            .input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let accent = c_blue();
         let footer = div()
             .px_4()
+            .pt_1()
             .pb_3()
             .v_flex()
-            .gap_2()
+            .gap(px(6.))
             .child(
                 div()
                     .relative()
-                    .child(Input::new(&self.assistant.input).bordered(true).h(px(36.)))
+                    .child(
+                        div()
+                            .px_3()
+                            .py(px(8.))
+                            .rounded(px(12.))
+                            .border_1()
+                            .border_color(if focused {
+                                glow(accent, 0.6)
+                            } else {
+                                divider()
+                            })
+                            .bg(raised())
+                            .when(focused, |el| {
+                                el.shadow(vec![halo(
+                                    accent,
+                                    if is_dark() { 0.22 } else { 0.14 },
+                                    0.,
+                                    3.,
+                                    0.,
+                                )])
+                            })
+                            .text_size(px(13.))
+                            .line_height(px(19.))
+                            .child(
+                                Textarea::new(&self.assistant.input)
+                                    .appearance(false)
+                                    .bordered(false),
+                            ),
+                    )
                     .children(self.assistant_suggest_view(cx)),
             )
             .child(
@@ -1407,6 +1463,9 @@ impl RunoApp {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap_3()
+                    // In line with the text in the box above.
+                    .px(px(13.))
                     .text_size(px(11.))
                     .text_color(rgb(c_muted()))
                     .child(answers)
@@ -1622,7 +1681,16 @@ fn live_mark(
     layer.into_any_element()
 }
 
-/// The count of things waiting, on the mark's corner.
+/// The corner mark's tooltip: what it opens, and how many answers wait in it.
+fn mark_tip(unread: usize) -> String {
+    match unread {
+        0 => "Ask Runo".into(),
+        1 => "Runo answered".into(),
+        n => format!("{n} answers from Runo"),
+    }
+}
+
+/// The count of the assistant's unread answers, on the mark's corner.
 fn badge_dot(n: usize) -> Div {
     div()
         .absolute()
@@ -1953,6 +2021,13 @@ impl RunoApp {
 mod tests {
     use super::*;
     use std::prelude::v1::test;
+
+    #[test]
+    fn mark_tip_counts_unread_answers() {
+        assert_eq!(mark_tip(0), "Ask Runo");
+        assert_eq!(mark_tip(1), "Runo answered");
+        assert_eq!(mark_tip(3), "3 answers from Runo");
+    }
 
     #[test]
     fn every_guide_file_is_built_in() {
