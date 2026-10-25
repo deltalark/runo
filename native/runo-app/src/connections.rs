@@ -208,6 +208,21 @@ impl Default for Connection {
     }
 }
 
+/// A connection's SSH host, ready to pass to ssh: set, and not starting with `-`, which
+/// ssh would read as one of its options (`-oProxyCommand=…` runs a command here).
+pub(crate) fn ssh_host<'a>(host: &'a str, name: &str) -> Result<&'a str, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(format!("{name} has no host set."));
+    }
+    if host.starts_with('-') || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "{name}'s host “{host}” isn't a host name: it can't start with - or contain spaces."
+        ));
+    }
+    Ok(host)
+}
+
 impl Connection {
     pub fn new_cove(id: u64) -> Self {
         Connection {
@@ -410,21 +425,15 @@ impl Connection {
                 Ok((c, None))
             }
             Kind::Ssh => {
-                if self.host.trim().is_empty() {
-                    return Err(format!("{} has no host set.", self.name));
-                }
+                let host = ssh_host(&self.host, &self.name)?;
                 let mut c = self.ssh_base();
                 if pty {
                     c.arg("-tt");
-                    c.args([
-                        self.host.trim(),
-                        "--",
-                        &format!("bash -lc {}", quote(script)),
-                    ]);
+                    c.args([host, "--", &format!("bash -lc {}", quote(script))]);
                     return Ok((c, None));
                 }
                 c.arg("-T");
-                c.args([self.host.trim(), "--", "bash -l -s"]);
+                c.args([host, "--", "bash -l -s"]);
                 // The script, with its environment, goes over stdin.
                 let mut body = String::new();
                 for (k, v) in env {
@@ -513,7 +522,7 @@ impl Connection {
                     .collect::<Vec<_>>()
                     .join(" ");
                 Ok((
-                    format!("{}:{dir}", self.host.trim()),
+                    format!("{}:{dir}", ssh_host(&self.host, &self.name)?),
                     vec![("GIT_SSH_COMMAND".into(), ssh)],
                 ))
             }
@@ -2715,9 +2724,7 @@ impl Connection {
     /// `ssh -L` from a local port to `port` on the server, once it's up. It runs on its
     /// own connection, so closing it ends the tunnel.
     fn ssh_forward(&self, port: u16) -> Result<Forward, String> {
-        if self.host.trim().is_empty() {
-            return Err(format!("{} has no host set.", self.name));
-        }
+        let host = ssh_host(&self.host, &self.name)?;
         let local = free_port(port)?
             .local_addr()
             .map_err(|e| e.to_string())?
@@ -2731,7 +2738,7 @@ impl Connection {
             "ExitOnForwardFailure=yes",
             "-L",
             &format!("127.0.0.1:{local}:127.0.0.1:{port}"),
-            self.host.trim(),
+            host,
         ]);
         let mut child = c
             .stdin(Stdio::null())
@@ -3350,6 +3357,17 @@ pub fn cleanup_session(session: &crate::store::Session) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ssh_host_cant_be_an_option() {
+        assert_eq!(
+            ssh_host(" ubuntu@203.0.113.7 ", "box"),
+            Ok("ubuntu@203.0.113.7")
+        );
+        assert!(ssh_host("-oProxyCommand=touch /tmp/x", "box").is_err());
+        assert!(ssh_host("host -oX", "box").is_err());
+        assert!(ssh_host("", "box").unwrap_err().contains("no host"));
+    }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")

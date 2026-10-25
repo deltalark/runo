@@ -402,7 +402,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
         "pi" => {
             args.extend([s("--mode"), s("json")]);
             args.extend(pi_args(spec, &model, &effort, &mode));
-            args.push(spec.prompt.to_string());
+            args.push(prompt_arg(spec.prompt));
         }
         "codex" => {
             args.extend([s("exec"), s("--json")]);
@@ -465,7 +465,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                     args.extend([s("-i"), image.clone()]);
                 }
             }
-            args.push(spec.prompt.to_string());
+            args.push(prompt_arg(spec.prompt));
         }
         "cursor" => {
             args.extend([s("-p"), s("--output-format"), s("stream-json")]);
@@ -562,7 +562,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
                 for image in spec.images {
                     args.extend([s("--attachment"), image.clone()]);
                 }
-                args.extend([s("-p"), spec.prompt.to_string()]);
+                args.extend([s("-p"), prompt_arg(spec.prompt)]);
             } else {
                 args.extend([s("-p"), with_images(spec)]);
             }
@@ -657,7 +657,7 @@ fn provider_args(spec: &RunSpec) -> Vec<String> {
             }
             args.extend(split_args(&opts.extra_args));
             // `-f` takes several files, so it goes after the prompt.
-            args.push(spec.prompt.to_string());
+            args.push(prompt_arg(spec.prompt));
             for image in spec.images {
                 args.extend([s("-f"), image.clone()]);
             }
@@ -886,7 +886,7 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
             }
             let mut args = with_model(args, "--model");
             if !spec.prompt.is_empty() {
-                args.push(spec.prompt.to_string());
+                args.push(prompt_arg(spec.prompt));
             }
             return args;
         }
@@ -896,7 +896,7 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
                 args.extend([s("-s"), id]);
             } else if !spec.prompt.is_empty() {
                 // The interactive CLI takes its opening message as its argument.
-                args.push(spec.prompt.to_string());
+                args.push(prompt_arg(spec.prompt));
             }
             return args;
         }
@@ -932,7 +932,7 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
                 out.extend([s("-c"), format!("approval_policy=\"{approval}\"")]);
             }
             if !spec.prompt.is_empty() {
-                out.push(spec.prompt.to_string());
+                out.push(prompt_arg(spec.prompt));
             }
             out
         }
@@ -967,6 +967,15 @@ pub fn interactive_args(spec: &RunSpec) -> Vec<String> {
 #[cfg(test)]
 mod interactive_tests {
     use super::*;
+
+    #[test]
+    fn a_prompt_starting_with_a_dash_is_never_a_flag() {
+        assert_eq!(
+            prompt_arg("--dangerously-bypass-approvals-and-sandbox"),
+            " --dangerously-bypass-approvals-and-sandbox"
+        );
+        assert_eq!(prompt_arg("fix the -x flag"), "fix the -x flag");
+    }
 
     #[test]
     fn interactive_args_drop_print_mode_and_keep_the_conversation() {
@@ -1030,11 +1039,23 @@ fn cove_server() -> Option<String> {
 pub const MEMORY_SERVER: &str = "runo";
 
 /// The prompt with attached image paths listed, for CLIs that read images from disk.
+/// The prompt as a command-line argument. Most agent CLIs take it as a positional
+/// argument without a `--` before it, so a prompt starting with `-` (a Crew message that
+/// is exactly `--dangerously-bypass-approvals-and-sandbox`, say) would be read as a flag.
+/// A leading space keeps it text and changes nothing for the agent.
+fn prompt_arg(prompt: &str) -> String {
+    if prompt.starts_with('-') {
+        format!(" {prompt}")
+    } else {
+        prompt.to_string()
+    }
+}
+
 fn with_images(spec: &RunSpec) -> String {
     if spec.images.is_empty() {
-        return spec.prompt.to_string();
+        return prompt_arg(spec.prompt);
     }
-    let mut prompt = spec.prompt.to_string();
+    let mut prompt = prompt_arg(spec.prompt);
     prompt.push_str("\n\nAttached images (read them):");
     for image in spec.images {
         prompt.push_str(&format!("\n- {image}"));
