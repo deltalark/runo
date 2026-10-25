@@ -2007,7 +2007,12 @@ pub(crate) mod tests {
         let loaded = State::load_from(&dir.join("state.json"));
         let session = loaded.session(id).expect("kept in the sidebar");
         assert_eq!(session.title, state.sessions[0].title);
-        assert_eq!(session.messages.len(), state.sessions[0].messages.len());
+        // A session saved mid-turn also gets the "Interrupted" note on load.
+        let interrupted = usize::from(state.sessions[0].status == Status::Working);
+        assert_eq!(
+            session.messages.len(),
+            state.sessions[0].messages.len() + interrupted
+        );
         assert!(!session.pinned);
         assert_eq!(
             aside_copies(file.parent().unwrap(), "session.json.corrupt-"),

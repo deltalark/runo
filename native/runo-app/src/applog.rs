@@ -542,10 +542,24 @@ fn diagnostics_text(agents: &[(String, String)], settings: &str, log: &str) -> S
         .map(|l| redact(l))
         .collect::<Vec<_>>()
         .join("\n");
+    // `hide_secrets` already replaced secret fields with a note; `redact` would mask the
+    // note too, so lines that end in one are kept as they are.
+    let settings = settings
+        .lines()
+        .map(|line| {
+            let value = line.trim_end().trim_end_matches(',');
+            if value.ends_with("\"(empty)\"") || value.ends_with("\"(set, hidden)\"") {
+                line.to_string()
+            } else {
+                redact(line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "{}\nAgent CLIs: {agents}\n\nSettings (secrets left out):\n```json\n{}\n```\n\nLast {} log lines:\n```\n{tail}\n```\n",
         about(),
-        redact(settings),
+        settings,
         lines.len().min(DIAGNOSTIC_LINES),
     )
 }
