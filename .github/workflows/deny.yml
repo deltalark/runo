@@ -1,0 +1,40 @@
+# Checks dependencies for known vulnerabilities (RustSec), licenses that can't ship in
+# an MIT app, and sources other than crates.io. Settings are in deny.toml.
+#
+# Pull requests run it only when they change dependencies, so a new advisory doesn't
+# block unrelated work. The Monday run finds new advisories against main.
+name: Dependencies
+
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/deny.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deny-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
