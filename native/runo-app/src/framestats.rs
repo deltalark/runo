@@ -177,6 +177,7 @@ fn pct(v: &mut [Duration], q: f64) -> f64 {
 }
 
 /// CPU time this process has used, user and system.
+#[cfg(unix)]
 fn cpu_time() -> Duration {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: getrusage fills the struct it is given.
@@ -186,4 +187,10 @@ fn cpu_time() -> Duration {
     };
     let tv = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
     tv(usage.ru_utime) + tv(usage.ru_stime)
+}
+
+/// Not measured off Unix, so the summary's CPU reads 0%.
+#[cfg(not(unix))]
+fn cpu_time() -> Duration {
+    Duration::ZERO
 }
