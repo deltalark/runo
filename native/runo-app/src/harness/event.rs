@@ -116,11 +116,12 @@ impl ToolKind {
 #[serde(rename_all = "snake_case")]
 pub enum StepState {
     Running,
-    /// Also any state saved by a newer Runo that this one doesn't know.
+    Failed,
+    /// Also any state saved by a newer Runo that this one doesn't know. Serde needs
+    /// the `other` variant last.
     #[default]
     #[serde(other)]
     Done,
-    Failed,
 }
 
 impl StepState {

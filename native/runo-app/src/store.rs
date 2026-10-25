@@ -18,14 +18,16 @@ pub enum Role {
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Status {
-    #[default]
-    #[serde(other)]
-    Idle,
     Working,
     Done,
     Failed,
     /// The person stopped the turn on purpose: not an error.
     Stopped,
+    /// Also any status saved by a newer Runo that this one doesn't know. Serde needs
+    /// the `other` variant last.
+    #[default]
+    #[serde(other)]
+    Idle,
 }
 
 impl Status {
