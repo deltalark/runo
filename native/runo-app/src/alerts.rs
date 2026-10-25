@@ -1168,7 +1168,7 @@ impl RunoApp {
                             .session(id)
                             .map(|s| (s.provider.clone(), s.project_id))
                         {
-                            self.allow_tools_for(&provider, project, &[rule.clone()], cx);
+                            self.allow_tools_for(&provider, project, std::slice::from_ref(&rule), cx);
                         }
                         self.state.log(id, format!("Always allowed {rule} in this project"));
                     }
