@@ -319,7 +319,9 @@ impl Shell {
                 Arc::clone(&wake),
             );
             std::thread::spawn(move || {
-                let mut buf = [0u8; 8192];
+                // Large reads, so a flood of output takes the parser's lock (which the
+                // view needs to draw) fewer times.
+                let mut buf = vec![0u8; 64 * 1024];
                 let mut queries = Queries::default();
                 loop {
                     match reader.read(&mut buf) {
@@ -915,6 +917,10 @@ pub fn mouse_report(
 
 /// Web links in a line of terminal text, as character columns `[start, end)` and the URL.
 pub fn links(line: &str) -> Vec<(usize, usize, String)> {
+    // Most lines have none: say so before collecting the line's characters.
+    if !line.contains("://") {
+        return Vec::new();
+    }
     let chars: Vec<char> = line.chars().collect();
     let text: String = chars.iter().collect();
     let mut found = Vec::new();

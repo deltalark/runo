@@ -126,6 +126,64 @@ impl RunoApp {
         self.terminal.get(&session).is_some_and(|l| !l.is_empty())
     }
 
+    /// What a shell calls when it has new output or exits: see `pty_woke`.
+    pub(crate) fn pty_wake(&self) -> impl Fn(u64) + Send + 'static {
+        let tx = self.pty_tx.clone();
+        move |id| {
+            let _ = tx.try_send(id);
+        }
+    }
+
+    /// Shells `ids` printed or exited. Output draws only what shows the shell: the terminal
+    /// pane for a terminal tab, the window's frame for an agent's CLI. An exit can change
+    /// anything (a setup finishing starts its agent), so it draws the window.
+    pub(crate) fn pty_woke(&mut self, ids: Vec<u64>, cx: &mut Context<Self>) {
+        let mut exited = false;
+        let mut panel = false;
+        let mut cli = false;
+        for id in ids {
+            let mut gone = false;
+            if let Some(shell) = self.shells.iter().find(|s| s.id == id) {
+                panel = true;
+                gone = shell.exited();
+            } else if let Some(run) = self.cli_runs.values().find(|r| r.shell.id == id) {
+                cli = true;
+                gone = run.shell.exited();
+            }
+            if !gone {
+                continue;
+            }
+            exited = true;
+            self.cli_exited(id);
+            self.sign_in_exited(id);
+            if self.setups.contains_key(&id) {
+                self.setup_exited(id, cx);
+            }
+            // A quick command's tab says how it went in its own words.
+            self.task_exited(id);
+            if let Some(shell) = self.shells.iter().find(|s| s.id == id && s.exited()) {
+                if self.shell_tab == Some(id) && !self.tasks.contains_key(&id) {
+                    self.info = Some((
+                        format!("{} exited.", shell.title),
+                        std::time::Instant::now(),
+                    ));
+                }
+            }
+        }
+        if exited || self.tour.is_some() {
+            cx.notify();
+            return;
+        }
+        if panel {
+            self.notify_parts(&[panes::Part::Terminal], cx);
+        }
+        if cli {
+            if let Some(panes) = &self.panes {
+                cx.notify(panes.ticker.entity_id());
+            }
+        }
+    }
+
     pub(crate) fn new_shell(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.selected else {
             return;
@@ -157,11 +215,9 @@ impl RunoApp {
         });
         self.next_shell += 1;
         let id = self.next_shell;
-        let tx = self.tx.clone();
         let (rows, cols) = self.term_grid();
-        match pty::Shell::spawn_program(id, session, &dir, rows, cols, program, move |id| {
-            let _ = tx.send(Event::Pty(id));
-        }) {
+        let wake = self.pty_wake();
+        match pty::Shell::spawn_program(id, session, &dir, rows, cols, program, wake) {
             Ok(mut shell) => {
                 // Numbered among the shells, leaving out quick commands' tabs.
                 let tasks = &self.tasks;
@@ -191,7 +247,7 @@ impl RunoApp {
 
     /// Run a command line in a new terminal tab of session `id`, on its connection when it
     /// has one. Returns the tab's shell id.
-    fn spawn_line_tab(&mut self, id: u64, line: &str, title: String) -> Result<u64, String> {
+    pub(crate) fn spawn_line_tab(&mut self, id: u64, line: &str, title: String) -> Result<u64, String> {
         let session = self.state.session(id).ok_or("The session is gone.")?;
         let dir = session.dir.clone();
         let mut command = shell_line(line);
@@ -201,7 +257,6 @@ impl RunoApp {
         }
         self.next_shell += 1;
         let shell_id = self.next_shell;
-        let tx = self.tx.clone();
         let (rows, cols) = self.term_grid();
         let mut shell = pty::Shell::spawn_program(
             shell_id,
@@ -210,9 +265,7 @@ impl RunoApp {
             rows,
             cols,
             Some(pty::Program::of(&command)),
-            move |sid| {
-                let _ = tx.send(Event::Pty(sid));
-            },
+            self.pty_wake(),
         )
         .map_err(|e| e.to_string())?;
         shell.title = title;
@@ -772,18 +825,18 @@ impl RunoApp {
             let scrolled = screen.scrollback();
             let (cur_row, cur_col) = screen.cursor_position();
             let show_cursor = !screen.hide_cursor() && scrolled == 0 && !shell.exited();
+            // Each row's text, built in one string reused for every row.
+            let mut text = String::with_capacity(cols as usize);
             for row in 0..rows {
                 let back = scrolled + (rows - 1 - row) as usize;
                 // One character per column, so links and matches map onto cells.
-                let text: Vec<String> = (0..cols)
-                    .map(|col| match screen.cell(row, col) {
-                        Some(cell) if !cell.is_wide_continuation() => {
-                            cell.contents().chars().next().unwrap_or(' ').to_string()
-                        }
-                        _ => " ".to_string(),
-                    })
-                    .collect();
-                let text = text.concat();
+                text.clear();
+                text.extend((0..cols).map(|col| match screen.cell(row, col) {
+                    Some(cell) if !cell.is_wide_continuation() => {
+                        cell.first_char().unwrap_or(' ')
+                    }
+                    _ => ' ',
+                }));
                 let links = pty::links(&text);
                 let found = query
                     .as_deref()
@@ -873,8 +926,11 @@ impl RunoApp {
                         line = flush(line, &mut run, style);
                         style = next;
                     }
-                    let text = cell.contents();
-                    run.push_str(if text.is_empty() { " " } else { &text });
+                    if cell.has_contents() {
+                        cell.push_contents(&mut run);
+                    } else {
+                        run.push(' ');
+                    }
                     if cursor {
                         line = flush(line, &mut run, style);
                         style = None;

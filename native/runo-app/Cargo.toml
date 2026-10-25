@@ -72,6 +72,8 @@ percent-encoding = "2"
 # The SQL editor's completions speak the editor's LSP types.
 lsp-types = { version = "0.97", features = ["proposed"] }
 anyhow = "1"
+# Wakes the window when a shell prints, without polling.
+async-channel = "2"
 
 [build-dependencies]
 embed-resource = "3.0.11"

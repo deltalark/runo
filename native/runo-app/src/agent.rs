@@ -1054,8 +1054,6 @@ pub enum Event {
     Output(String, Result<String, String>),
     /// The reply so far of a command started with `oneshot_streamed`, by its key.
     Partial(String, String),
-    /// An interactive shell has new output, or exited.
-    Pty(u64),
 }
 
 /// Run a command to completion on a background thread and send its stdout back.
@@ -2134,7 +2132,7 @@ mod tests {
                     assert!(ok);
                     break;
                 }
-                Event::Output(..) | Event::Partial(..) | Event::Pty(_) => {}
+                Event::Output(..) | Event::Partial(..) => {}
             }
         }
         lines.sort();
@@ -2511,7 +2509,7 @@ mod arg_tests {
                     assert!(!ok);
                     break;
                 }
-                Event::Output(..) | Event::Partial(..) | Event::Pty(_) => unreachable!(),
+                Event::Output(..) | Event::Partial(..) => unreachable!(),
             }
         }
         assert_eq!(out[0], "env=from-env");
