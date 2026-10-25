@@ -129,6 +129,24 @@ impl Usage {
     pub fn context(&self) -> u64 {
         self.input + self.cached + self.output
     }
+
+    /// The context window to measure this against. Claude reports it only with a turn's
+    /// result, so the usage seen mid-turn has none: then the window `known` from the
+    /// session's other turns, else 200k, unless more than that is already in use, which
+    /// only a 1M window holds.
+    pub fn window_or(&self, known: u64) -> u64 {
+        match (self.window, known) {
+            (0, 0) if self.context() > 200_000 => 1_000_000,
+            (0, 0) => 200_000,
+            (0, known) => known,
+            (window, _) => window,
+        }
+    }
+}
+
+/// The largest context window any of `messages` reported, or 0.
+pub fn known_window(messages: &[Message]) -> u64 {
+    messages.iter().map(|m| m.usage.window).max().unwrap_or(0)
 }
 
 /// A multiple-choice question the agent asked (Claude's AskUserQuestion tool).
@@ -1560,6 +1578,32 @@ impl State {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn context_is_measured_against_the_window_the_session_reported() {
+        let mid_turn = Usage {
+            input: 10,
+            cached: 290_000,
+            ..Usage::default()
+        };
+        // No window yet, but 300k in use: only a 1M window holds that, not "150%".
+        assert_eq!(mid_turn.window_or(0), 1_000_000);
+        // A window an earlier turn reported wins.
+        let mut done = Message::new(Role::Agent, "");
+        done.usage.window = 1_000_000;
+        let known = known_window(&[Message::new(Role::User, "go"), done]);
+        let small = Usage {
+            input: 50_000,
+            ..Usage::default()
+        };
+        assert_eq!(small.window_or(known), 1_000_000);
+        assert_eq!(small.window_or(0), 200_000);
+        let reported = Usage {
+            window: 272_000,
+            ..small
+        };
+        assert_eq!(reported.window_or(known), 272_000);
+    }
 
     #[test]
     fn thread_messages_saved_as_playbooks_are_recognised() {
