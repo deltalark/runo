@@ -114,6 +114,7 @@ impl<T> Future for Wait<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testwait::wait_until;
 
     /// Polls `fut` once with a waker that records whether it was woken.
     fn poll_once<F: Future + Unpin>(fut: &mut F, woken: &Arc<AtomicBool>) -> bool {
@@ -136,23 +137,15 @@ mod tests {
         assert!(!poll_once(&mut inbox.wait(), &woken));
         tx.send(1).unwrap();
         tx.send(2).unwrap();
-        for _ in 0..200 {
-            if woken.load(Ordering::SeqCst) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(woken.load(Ordering::SeqCst));
-        while inbox.shared.lock().unwrap().queue.len() < 2 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("the waker", || woken.load(Ordering::SeqCst));
+        wait_until("both messages", || {
+            inbox.shared.lock().unwrap().queue.len() == 2
+        });
         assert!(poll_once(&mut inbox.wait(), &woken));
         assert_eq!(inbox.take(), Some(vec![1, 2]));
         assert_eq!(inbox.take(), Some(vec![]));
         drop(tx);
-        while !inbox.shared.lock().unwrap().closed {
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        wait_until("the inbox to close", || inbox.shared.lock().unwrap().closed);
         assert!(poll_once(&mut inbox.wait(), &woken));
         assert_eq!(inbox.take(), None);
     }

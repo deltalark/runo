@@ -114,6 +114,8 @@ mod startup;
 mod store;
 mod stream;
 mod terminal;
+#[cfg(test)]
+mod testwait;
 mod themes;
 mod thread_refs;
 mod thumb;

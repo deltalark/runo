@@ -658,12 +658,7 @@ mod tests {
                 )
             })
         };
-        let request = loop {
-            if let Some(r) = pending(&base).pop() {
-                break r;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
+        let request = crate::testwait::wait_for("the request", || pending(&base).pop());
         assert_eq!(request.dir, "/work/app");
         assert_eq!(request.tool, "Bash");
         assert_eq!(describe(&request.tool, &request.input), "run `cargo test`");
@@ -708,12 +703,7 @@ mod tests {
                 ask(&base, "/w", "Write", &json!({}), Duration::from_secs(20))
             })
         };
-        let request = loop {
-            if let Some(r) = pending(&base).pop() {
-                break r;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
+        let request = crate::testwait::wait_for("the request", || pending(&base).pop());
         withdraw(&base, &request.id);
         assert!(
             matches!(asker.join().unwrap(), Answer::Deny { message } if message.contains("withdrawn"))
