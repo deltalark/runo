@@ -134,6 +134,90 @@ pub fn detect(dir: &Path) -> Vec<String> {
     out
 }
 
+/// What the card says when a turn changed only docs and the checks didn't run.
+pub const DOCS_ONLY: &str = "Checks skipped: only docs changed.";
+
+/// Whether a changed file can't affect any project's checks: prose, images and media,
+/// and git or editor settings. Anything else, such as code, manifests, lockfiles and
+/// build or tool configuration, counts as code.
+pub fn is_docs(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    let lower = name.to_ascii_lowercase();
+    // A top-level folder of documentation.
+    let first = path.split('/').next().unwrap_or("").to_ascii_lowercase();
+    if path.contains('/') && matches!(first.as_str(), "docs" | "doc") {
+        return true;
+    }
+    if path.starts_with(".github/") && !path.starts_with(".github/actions/") {
+        return true;
+    }
+    let stem = lower.split('.').next().unwrap_or("");
+    if matches!(
+        stem,
+        "license" | "licence" | "copying" | "notice" | "authors" | "contributors" | "codeowners"
+    ) || matches!(
+        lower.as_str(),
+        ".gitignore" | ".gitattributes" | ".mailmap" | ".editorconfig"
+    ) {
+        return true;
+    }
+    let Some((_, ext)) = lower.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) else {
+        return false;
+    };
+    matches!(
+        ext,
+        "md" | "markdown"
+            | "mdown"
+            | "txt"
+            | "rst"
+            | "adoc"
+            | "asciidoc"
+            | "org"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "avif"
+            | "bmp"
+            | "ico"
+            | "icns"
+            | "tif"
+            | "tiff"
+            | "heic"
+            | "psd"
+            | "pdf"
+            | "mp4"
+            | "mov"
+            | "webm"
+            | "mp3"
+            | "wav"
+    )
+}
+
+/// Whether a turn's changed files are all docs, so its checks can be skipped. A turn
+/// with no changes recorded doesn't count: its checks run.
+pub fn only_docs(changed: &[String]) -> bool {
+    !changed.is_empty() && changed.iter().all(|p| is_docs(p))
+}
+
+/// Where Cargo should build a linked worktree's checks: the main checkout's own target
+/// folder, so each new worktree reuses its compiled dependencies instead of building
+/// every one again into a target of its own. None when the person set a target already,
+/// outside a worktree, or when the main checkout has no Rust project there.
+pub fn shared_target(dir: &str, commands: &[String]) -> Option<std::path::PathBuf> {
+    if !commands.iter().any(|c| c.contains("cargo"))
+        || std::env::var_os("CARGO_TARGET_DIR").is_some()
+    {
+        return None;
+    }
+    let main = crate::git::main_checkout_dir(dir)?;
+    main.join("Cargo.toml")
+        .is_file()
+        .then(|| main.join("target"))
+}
+
 /// Post-turn check sets, one at a time across every session and project. The rest wait
 /// in order; the time limit only starts once a set leaves the queue.
 #[derive(Default, Debug)]
@@ -265,14 +349,27 @@ fn low_prefix_here() -> &'static [String] {
 
 /// Run each check in turn in `dir`. Every check runs, so one card shows all that failed.
 /// `low` runs them at low CPU and disk priority, with everything they start.
-pub fn run_all(dir: &str, commands: &[String], limit: Duration, low: bool) -> Vec<CheckRun> {
+/// `env` is added to each check's environment.
+pub fn run_all(
+    dir: &str,
+    commands: &[String],
+    limit: Duration,
+    low: bool,
+    env: &[(String, String)],
+) -> Vec<CheckRun> {
     commands
         .iter()
-        .map(|c| run_one(dir, c, limit, low))
+        .map(|c| run_one(dir, c, limit, low, env))
         .collect()
 }
 
-fn run_one(dir: &str, command: &str, limit: Duration, low: bool) -> CheckRun {
+fn run_one(
+    dir: &str,
+    command: &str,
+    limit: Duration,
+    low: bool,
+    env: &[(String, String)],
+) -> CheckRun {
     let started = Instant::now();
     let prefix = if low { low_prefix_here() } else { &[] };
     let argv = check_argv(command, prefix);
@@ -288,7 +385,8 @@ fn run_one(dir: &str, command: &str, limit: Duration, low: bool) -> CheckRun {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("CI", "1")
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .envs(env.iter().map(|(k, v)| (k, v)));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -640,12 +738,13 @@ mod tests {
             &["echo fine".into(), "echo broke >&2; exit 3".into()],
             Duration::from_secs(20),
             false,
+            &[],
         );
         assert!(runs[0].ok);
         assert_eq!(runs[0].tail, "fine");
         assert!(!runs[1].ok);
         assert_eq!(runs[1].tail, "broke");
-        let timed = run_one(&d, "sleep 5", Duration::from_millis(300), true);
+        let timed = run_one(&d, "sleep 5", Duration::from_millis(300), true, &[]);
         assert!(!timed.ok && timed.timed_out);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -697,7 +796,7 @@ mod tests {
         q.join(2, true);
         std::thread::sleep(Duration::from_millis(1600));
         assert_eq!(q.done(1), Some((2, true)));
-        let runs = run_all(&d, &["sleep 1".into(), "sleep 1".into()], limit, true);
+        let runs = run_all(&d, &["sleep 1".into(), "sleep 1".into()], limit, true, &[]);
         assert!(runs.iter().all(|r| r.ok && !r.timed_out), "{runs:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -733,6 +832,7 @@ mod tests {
             "sh -c 'ps -o pri= -p $$'",
             Duration::from_secs(20),
             true,
+            &[],
         );
         assert_eq!(run.tail.trim(), "4", "{run:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -766,6 +866,7 @@ mod tests {
             "sh -c nice",
             Duration::from_secs(20),
             true,
+            &[],
         );
         assert_eq!(run.tail.trim(), "10", "{run:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -776,6 +877,47 @@ mod tests {
     fn windows_checks_start_below_normal() {
         assert!(low_prefix(|_, _| Some("x".into())).is_empty());
         assert_eq!(BELOW_NORMAL_PRIORITY_CLASS, 0x4000);
+    }
+
+    #[test]
+    fn turns_that_change_only_docs_skip_their_checks() {
+        let files = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(only_docs(&files(&["README.md"])));
+        assert!(only_docs(&files(&[
+            "docs/perf-audit.md",
+            "docs/guide/setup.html",
+            "CHANGELOG.md",
+            "notes.txt",
+            "assets/logo.png",
+            "public/Shot.JPG",
+            "LICENSE",
+            "NOTICE",
+            ".gitignore",
+            ".github/workflows/ci.yml",
+            "native\\app\\docs.rst",
+        ])));
+        // Any code, manifest, lockfile or tool configuration runs them, in any language.
+        for code in [
+            "src/main.rs",
+            "app/views.py",
+            "web/index.ts",
+            "cmd/main.go",
+            "Cargo.toml",
+            "Cargo.lock",
+            "package.json",
+            "pnpm-lock.yaml",
+            "tsconfig.json",
+            "Makefile",
+            ".eslintrc",
+            "src/docs/mod.rs",
+            "README",
+            ".github/actions/setup/action.yml",
+            "assets/icon.svg",
+        ] {
+            assert!(!only_docs(&files(&["README.md", code])), "{code}");
+        }
+        // Nothing recorded as changed: the checks run, as before.
+        assert!(!only_docs(&[]));
     }
 
     #[test]
