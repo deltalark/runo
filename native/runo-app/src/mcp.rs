@@ -359,13 +359,8 @@ pub fn write_project(dir: &Path, provider: &str, servers: &[(String, McpSpec)]) 
     }
     let created_dir = path.parent().filter(|p| !p.exists()).map(Path::to_path_buf);
     let written = serde_json::to_string_pretty(&value).unwrap_or_default() + "\n";
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            crate::applog::warn("mcp", format!("could not create {}: {e}", parent.display()));
-            return false;
-        }
-    }
-    if let Err(e) = std::fs::write(&path, &written) {
+    // The folder may be shared with a VM, so nothing on the way may be a link.
+    if let Err(e) = crate::safefs::write(dir, rel, written.as_bytes()) {
         crate::applog::warn("mcp", format!("could not write {}: {e}", path.display()));
         return false;
     }
@@ -382,12 +377,12 @@ pub fn write_project(dir: &Path, provider: &str, servers: &[(String, McpSpec)]) 
             "created_dir": created_dir.is_some(),
         }),
     );
-    let record_path = added_record(dir);
-    if let Some(parent) = record_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     crate::git::exclude_path(&folder, ".runo/");
-    let _ = std::fs::write(&record_path, Value::Object(record).to_string());
+    let _ = crate::safefs::write(
+        dir,
+        ".runo/mcp-added.json",
+        Value::Object(record).to_string().as_bytes(),
+    );
     true
 }
 
@@ -399,9 +394,19 @@ pub fn clean_project(dir: &Path) {
         return;
     };
     for (rel, entry) in record.as_object().into_iter().flatten() {
+        // The record sits in the folder, where a VM could rewrite it: only the files
+        // Runo writes are touched, and never through a link.
+        if !["cursor", "gemini", "droid"]
+            .iter()
+            .any(|p| project_file(p) == Some(rel.as_str()))
+        {
+            continue;
+        }
         let path = dir.join(rel);
         let original = entry["original"].as_str();
-        let Ok(current) = std::fs::read_to_string(&path) else {
+        let Ok(current) =
+            crate::safefs::read(dir, rel).map(|b| String::from_utf8_lossy(&b).into_owned())
+        else {
             continue;
         };
         let restored = if Some(current.as_str()) == entry["written"].as_str() {
@@ -428,10 +433,10 @@ pub fn clean_project(dir: &Path) {
         };
         match restored {
             Some(text) => {
-                let _ = std::fs::write(&path, text);
+                let _ = crate::safefs::write(dir, rel, text.as_bytes());
             }
             None => {
-                let _ = std::fs::remove_file(&path);
+                let _ = crate::safefs::remove(dir, rel);
                 if entry["created_dir"].as_bool() == Some(true) {
                     if let Some(parent) = path.parent() {
                         // Only goes when empty.
@@ -441,7 +446,7 @@ pub fn clean_project(dir: &Path) {
             }
         }
     }
-    let _ = std::fs::remove_file(record_path);
+    let _ = crate::safefs::remove(dir, ".runo/mcp-added.json");
 }
 
 /// The name Runo's own servers are listed under.
