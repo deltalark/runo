@@ -13,3 +13,5 @@ tokyo-night dark). `./render.sh` renders the PNGs with headless Chrome.
 | B: two-line, details always | ![](b-light.png) | ![](b-dark.png) |
 
 The light images show "13 done" folded and the dark images show it open.
+
+**Chosen: variant A** (one-line Crew thread rows; details when selected or on hover). Decided 2026-10-25.
