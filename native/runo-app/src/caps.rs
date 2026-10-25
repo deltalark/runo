@@ -116,6 +116,21 @@ pub fn version(provider: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Every CLI found so far with its version, by id, for diagnostics.
+pub fn versions() -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = store()
+        .read()
+        .map(|m| {
+            m.iter()
+                .filter(|(_, c)| !c.version.is_empty())
+                .map(|(id, c)| (id.clone(), c.version.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
 pub fn get(provider: &str) -> Caps {
     store()
         .read()

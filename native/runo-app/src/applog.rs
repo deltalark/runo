@@ -1,14 +1,21 @@
 //! Runo's own log file, crash reports, and the check for a newer Runo release.
 //!
 //! Each launch writes what used to go to stderr into `~/.runo/logs/runo-<time>.log`,
-//! keeping the latest few. A panic writes `crash-<time>.txt` there too, which the next
-//! launch offers to show.
+//! keeping the latest few. A log that grows past `LOG_LIMIT` (a Runo left open for weeks)
+//! moves to `runo-<time>.log.1` and a fresh file starts, keeping `PARTS_KEPT` pieces. A
+//! panic writes `crash-<time>.txt` there too, which the next launch offers to show.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Launch logs kept; older ones are deleted.
 const LOGS_KEPT: usize = 10;
+/// Size a launch's log may reach before it moves aside and a fresh one starts.
+const LOG_LIMIT: u64 = 10 << 20;
+/// Pieces of one launch's log kept, the current one included: at most about 30 MB.
+const PARTS_KEPT: usize = 3;
+/// How often the log's size is looked at.
+const SIZE_CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// Crash reports kept.
 const CRASHES_KEPT: usize = 20;
 /// Where Runo's releases are published.
@@ -291,49 +298,167 @@ fn redact_word(word: &str) -> String {
     word
 }
 
+/// This launch's log file, once `init` made it.
+static CURRENT_LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 /// Start this launch's log file and send stderr to it (and still to the terminal, when
 /// Runo was started from one), then install the crash reporter.
 pub fn init() {
     let dir = logs_dir();
     let _ = std::fs::create_dir_all(&dir);
-    prune(&dir, "runo-", LOGS_KEPT - 1);
+    prune_launches(&dir, LOGS_KEPT - 1);
     let path = dir.join(format!("runo-{}.log", stamp()));
     if let Ok(mut file) = std::fs::File::create(&path) {
+        let _ = START.set(now());
         let _ = writeln!(
             file,
-            "Runo {} on {} {}, started {}",
-            env!("CARGO_PKG_VERSION"),
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            "{}, started {}",
+            about(),
+            START.get().map_or("", |s| s.as_str())
         );
-        redirect_stderr(file);
+        let sink = redirect_stderr(file);
+        let _ = CURRENT_LOG.set(path.clone());
+        watch_size(path, sink);
     }
     install_panic_hook();
 }
 
+/// "Runo 0.5.9 on macos aarch64".
+fn about() -> String {
+    format!(
+        "Runo {} on {} {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+fn now() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Delete all but the newest `keep` launch logs in `dir`, with their older pieces.
+fn prune_launches(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("runo-"))
+        .collect();
+    let mut launches: Vec<&str> = names
+        .iter()
+        .map(|n| n.split_once(".log").map_or(n.as_str(), |(base, _)| base))
+        .collect();
+    // Names carry the time, so they sort oldest first.
+    launches.sort_unstable();
+    launches.dedup();
+    let extra = launches.len().saturating_sub(keep);
+    for old in &launches[..extra] {
+        for name in names
+            .iter()
+            .filter(|n| n.split_once(".log").is_some_and(|(b, _)| b == *old))
+        {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+    }
+}
+
+/// Move `path` to `<path>.1`, `.1` to `.2` and so on, so that with the fresh file about
+/// to start at `path` there are `parts` pieces; the oldest goes.
+fn shift_parts(path: &Path, parts: usize) {
+    let piece = |n: usize| PathBuf::from(format!("{}.{n}", path.display()));
+    let _ = std::fs::remove_file(piece(parts.saturating_sub(1)));
+    for n in (1..parts.saturating_sub(1)).rev() {
+        let _ = std::fs::rename(piece(n), piece(n + 1));
+    }
+    if parts > 1 {
+        let _ = std::fs::rename(path, piece(1));
+    }
+}
+
+/// Where stderr's lines end up, so a fresh file can take over when the log is full.
+enum Sink {
+    /// Stderr is the file itself.
+    Stderr,
+    /// A thread copies stderr to the terminal and to this file.
+    Shared(std::sync::Arc<std::sync::Mutex<std::fs::File>>),
+    None,
+}
+
+/// Every little while, start a fresh file when the log has grown past `LOG_LIMIT`.
+fn watch_size(path: PathBuf, sink: Sink) {
+    if matches!(sink, Sink::None) {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("runo-log-size".into())
+        .spawn(move || loop {
+            std::thread::sleep(SIZE_CHECK_EVERY);
+            if std::fs::metadata(&path).map_or(0, |m| m.len()) < LOG_LIMIT {
+                continue;
+            }
+            shift_parts(&path, PARTS_KEPT);
+            let Ok(mut file) = std::fs::File::create(&path) else {
+                continue;
+            };
+            let _ = writeln!(
+                file,
+                "{}, started {}, log continued {}",
+                about(),
+                START.get().map_or("", |s| s.as_str()),
+                now()
+            );
+            match &sink {
+                Sink::Stderr => point_stderr_at(file),
+                Sink::Shared(shared) => {
+                    if let Ok(mut current) = shared.lock() {
+                        *current = file;
+                    }
+                }
+                Sink::None => {}
+            }
+        });
+}
+
+/// When this launch started, for the first line of each fresh log piece.
+static START: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 #[cfg(unix)]
-fn redirect_stderr(file: std::fs::File) {
-    use std::os::fd::{FromRawFd, IntoRawFd};
+fn point_stderr_at(file: std::fs::File) {
+    use std::os::fd::IntoRawFd;
+    // SAFETY: replaces descriptor 2 with one owned here, then closes the spare.
+    unsafe {
+        let fd = file.into_raw_fd();
+        libc::dup2(fd, 2);
+        libc::close(fd);
+    }
+}
+
+#[cfg(unix)]
+fn redirect_stderr(file: std::fs::File) -> Sink {
+    use std::os::fd::FromRawFd;
     // SAFETY: plain descriptor calls on stderr and on descriptors owned here.
     unsafe {
         if libc::isatty(2) == 0 {
-            libc::dup2(file.into_raw_fd(), 2);
-            return;
+            point_stderr_at(file);
+            return Sink::Stderr;
         }
         // A terminal is attached: copy everything to both through a pipe.
         let mut fds = [0; 2];
         if libc::pipe(fds.as_mut_ptr()) != 0 {
-            return;
+            return Sink::None;
         }
         let terminal = libc::dup(2);
         if terminal < 0 || libc::dup2(fds[1], 2) < 0 {
-            return;
+            return Sink::None;
         }
         libc::close(fds[1]);
         let mut pipe = std::fs::File::from_raw_fd(fds[0]);
         let mut terminal = std::fs::File::from_raw_fd(terminal);
-        let mut file = file;
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(file));
+        let file = shared.clone();
         std::thread::spawn(move || {
             use std::io::Read;
             let mut buf = [0u8; 4096];
@@ -341,15 +466,18 @@ fn redirect_stderr(file: std::fs::File) {
                 if n == 0 {
                     break;
                 }
-                let _ = file.write_all(&buf[..n]);
+                if let Ok(mut file) = file.lock() {
+                    let _ = file.write_all(&buf[..n]);
+                }
                 let _ = terminal.write_all(&buf[..n]);
             }
         });
+        Sink::Shared(shared)
     }
 }
 
 #[cfg(windows)]
-fn redirect_stderr(file: std::fs::File) {
+fn point_stderr_at(file: std::fs::File) {
     use std::os::windows::io::IntoRawHandle;
     #[link(name = "kernel32")]
     extern "system" {
@@ -357,14 +485,114 @@ fn redirect_stderr(file: std::fs::File) {
     }
     const STD_ERROR_HANDLE: u32 = -12i32 as u32;
     // SAFETY: hands the process a handle it keeps for its lifetime; Rust's stderr looks
-    // the standard handle up on every write.
+    // the standard handle up on every write. The handle it replaces is left open, as a
+    // write may be using it.
     unsafe {
         SetStdHandle(STD_ERROR_HANDLE, file.into_raw_handle() as _);
     }
 }
 
+#[cfg(windows)]
+fn redirect_stderr(file: std::fs::File) -> Sink {
+    point_stderr_at(file);
+    Sink::Stderr
+}
+
 #[cfg(not(any(unix, windows)))]
-fn redirect_stderr(_: std::fs::File) {}
+fn point_stderr_at(_: std::fs::File) {}
+
+#[cfg(not(any(unix, windows)))]
+fn redirect_stderr(_: std::fs::File) -> Sink {
+    Sink::None
+}
+
+/// Lines from the end of this launch's log kept in the diagnostics.
+const DIAGNOSTIC_LINES: usize = 300;
+
+/// What a bug report needs, to paste: Runo's version and system, the agent CLIs it found,
+/// the settings with anything secret left out, and the end of this launch's log. Every
+/// line goes through `redact` again, since child processes write to the log unmasked.
+pub fn diagnostics() -> String {
+    let settings = std::fs::read_to_string(crate::store::data_dir().join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .map(hide_secrets)
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| "(none saved)".into());
+    let log = CURRENT_LOG
+        .get()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    diagnostics_text(&crate::caps::versions(), &settings, &log)
+}
+
+fn diagnostics_text(agents: &[(String, String)], settings: &str, log: &str) -> String {
+    let agents = if agents.is_empty() {
+        "(none found yet)".to_string()
+    } else {
+        agents
+            .iter()
+            .map(|(id, version)| format!("{id} {version}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let lines: Vec<&str> = log.lines().collect();
+    let tail = lines[lines.len().saturating_sub(DIAGNOSTIC_LINES)..]
+        .iter()
+        .map(|l| redact(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{}\nAgent CLIs: {agents}\n\nSettings (secrets left out):\n```json\n{}\n```\n\nLast {} log lines:\n```\n{tail}\n```\n",
+        about(),
+        redact(settings),
+        lines.len().min(DIAGNOSTIC_LINES),
+    )
+}
+
+/// Settings fields whose names say they hold something secret, such as `api_key`,
+/// `figma_token` or `env` lines, replaced with a note of whether they were set.
+fn hide_secrets(value: serde_json::Value) -> serde_json::Value {
+    const SECRET: [&str; 7] = [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "env",
+        "auth",
+        "credential",
+    ];
+    match value {
+        serde_json::Value::Object(map) => map
+            .into_iter()
+            .map(|(name, v)| {
+                let lower = name.to_lowercase();
+                let hidden = SECRET.iter().any(|w| lower.contains(w))
+                    && !matches!(v, serde_json::Value::Bool(_) | serde_json::Value::Number(_));
+                let v = if !hidden {
+                    hide_secrets(v)
+                } else if is_blank(&v) {
+                    "(empty)".into()
+                } else {
+                    "(set, hidden)".into()
+                };
+                (name, v)
+            })
+            .collect(),
+        serde_json::Value::Array(items) => items.into_iter().map(hide_secrets).collect(),
+        other => other,
+    }
+}
+
+fn is_blank(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.trim().is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        serde_json::Value::Object(o) => o.is_empty(),
+        _ => false,
+    }
+}
 
 /// Write a crash report for every panic, then let the usual message print to the log.
 fn install_panic_hook() {
@@ -843,6 +1071,107 @@ mod tests {
             ["crash-1.txt", "runo-20261003.log", "runo-20261004.log"]
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn logs_temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("runo-applog-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_full_log_moves_aside_keeping_a_few_pieces() {
+        let dir = logs_temp("parts");
+        let path = dir.join("runo-20261025-100000.log");
+        for n in 0..5 {
+            std::fs::write(&path, format!("piece {n}")).unwrap();
+            shift_parts(&path, 3);
+        }
+        std::fs::write(&path, "current").unwrap();
+        assert_eq!(
+            names_in(&dir),
+            [
+                "runo-20261025-100000.log",
+                "runo-20261025-100000.log.1",
+                "runo-20261025-100000.log.2"
+            ]
+        );
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!(read("runo-20261025-100000.log.1"), "piece 4");
+        assert_eq!(read("runo-20261025-100000.log.2"), "piece 3");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_launches_go_with_all_their_pieces() {
+        let dir = logs_temp("launches");
+        for name in [
+            "runo-20261023-090000.log",
+            "runo-20261023-090000.log.1",
+            "runo-20261024-090000.log",
+            "runo-20261025-090000.log",
+            "runo-20261025-090000.log.1",
+            "runo-20261025-090000.log.2",
+            "crash-20261023-090000.txt",
+        ] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        prune_launches(&dir, 2);
+        assert_eq!(
+            names_in(&dir),
+            [
+                "crash-20261023-090000.txt",
+                "runo-20261024-090000.log",
+                "runo-20261025-090000.log",
+                "runo-20261025-090000.log.1",
+                "runo-20261025-090000.log.2"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn diagnostics_leave_secrets_out() {
+        let settings = serde_json::json!({
+            "theme": "dark",
+            "api_key": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz",
+            "figma_token": "",
+            "check_runo_updates": true,
+            "agents": { "claude": { "env": ["ANTHROPIC_API_KEY=sk-ant-x"], "binary": "claude" } },
+            "connections": [{ "host": "box", "password": "hunter2" }],
+        });
+        let settings = serde_json::to_string_pretty(&hide_secrets(settings)).unwrap();
+        let mut log: Vec<String> = (0..400).map(|n| format!("line {n}")).collect();
+        log.push("git push https://x-access-token:ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/a/b".into());
+        let text = diagnostics_text(
+            &[("claude".into(), "2.1.300".into())],
+            &settings,
+            &log.join("\n"),
+        );
+        assert!(text.starts_with(&format!("Runo {}", env!("CARGO_PKG_VERSION"))));
+        assert!(text.contains("Agent CLIs: claude 2.1.300"));
+        assert!(text.contains("\"theme\": \"dark\""));
+        assert!(text.contains("\"check_runo_updates\": true"));
+        assert!(text.contains("\"binary\": \"claude\""));
+        assert!(text.contains("\"figma_token\": \"(empty)\""));
+        for secret in ["abcdefghijklmnopqrstuvwxyz", "sk-ant-x", "hunter2", "ghp_"] {
+            assert!(!text.contains(secret), "{secret} leaked:\n{text}");
+        }
+        // Only the end of the log.
+        assert!(text.contains("Last 300 log lines"));
+        assert!(!text.contains("line 100\n"));
+        assert!(text.contains("line 399"));
     }
 
     #[test]

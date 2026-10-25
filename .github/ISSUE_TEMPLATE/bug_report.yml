@@ -69,3 +69,9 @@ body:
         3.
     validations:
       required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: In Runo, open Settings › General › Updates › Logs and crash reports and click Copy diagnostics, then paste here. It leaves secrets out, but look it over before you post.
