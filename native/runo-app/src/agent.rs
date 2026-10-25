@@ -1044,6 +1044,9 @@ pub enum Target {
 
 pub enum Event {
     Line(Target, String),
+    /// A line of an agent's output that is JSON, parsed on the thread that read it so the
+    /// main thread only has to act on it.
+    Json(Target, String, serde_json::Value),
     /// stderr of an agent run: kept out of the conversation unless the run fails.
     Err(Target, String),
     Done(Target, bool),
@@ -1492,6 +1495,12 @@ pub fn model_hint(provider: &str, log: &str) -> Option<String> {
 /// Whether a line shows the CLI waiting for a browser sign-in, which never finishes in
 /// a run without a terminal.
 pub fn waits_for_sign_in(line: &str) -> bool {
+    // An event of a JSON stream is the agent's own output, such as its reply or a tool's
+    // result, which can quote these very words; a CLI waiting for a sign-in prints a
+    // plain line.
+    if line.trim_start().starts_with('{') {
+        return false;
+    }
     let lower = line.to_lowercase();
     lower.contains("starting login flow")
         || (lower.contains("visit") && lower.contains("/auth/") && lower.contains("login"))
@@ -1924,16 +1933,24 @@ pub fn run_shell(
 fn pump<R: Read + Send + 'static>(reader: R, target: Target, is_err: bool, tx: Sender<Event>) {
     std::thread::spawn(move || {
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
-            let event = if is_err && matches!(target, Target::Session(_)) {
-                Event::Err(target, line)
-            } else {
-                Event::Line(target, line)
-            };
+            let event = line_event(target, is_err, line);
             if tx.send(event).is_err() {
                 break;
             }
         }
     });
+}
+
+/// The event for a line read from a run's stdout or stderr (`is_err`).
+pub(crate) fn line_event(target: Target, is_err: bool, line: String) -> Event {
+    match target {
+        Target::Session(_) if is_err => Event::Err(target, line),
+        Target::Session(_) => match crate::stream::parse_line(&line) {
+            Some(json) => Event::Json(target, line, json),
+            None => Event::Line(target, line),
+        },
+        Target::Terminal(_) => Event::Line(target, line),
+    }
 }
 
 pub(crate) fn spawn(
@@ -2072,6 +2089,32 @@ mod tests {
     }
 
     #[test]
+    fn an_agents_json_lines_arrive_parsed() {
+        let session = Target::Session(1);
+        let json = r#"{"type":"result"}"#.to_string();
+        match line_event(session, false, json.clone()) {
+            Event::Json(target, line, value) => {
+                assert!(target == session && line == json);
+                assert_eq!(value["type"], "result");
+            }
+            _ => panic!("not parsed"),
+        }
+        assert!(matches!(
+            line_event(session, false, "plain words".into()),
+            Event::Line(_, l) if l == "plain words"
+        ));
+        assert!(matches!(
+            line_event(session, true, json.clone()),
+            Event::Err(..)
+        ));
+        // A terminal's output is shown as it is.
+        assert!(matches!(
+            line_event(Target::Terminal(1), false, json),
+            Event::Line(..)
+        ));
+    }
+
+    #[test]
     fn shell_streams_lines_then_done() {
         let (tx, rx) = std::sync::mpsc::channel();
         let dir = std::env::temp_dir();
@@ -2086,7 +2129,7 @@ mod tests {
         let mut lines = vec![];
         loop {
             match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                Event::Line(_, l) | Event::Err(_, l) => lines.push(l),
+                Event::Line(_, l) | Event::Json(_, l, _) | Event::Err(_, l) => lines.push(l),
                 Event::Done(_, ok) => {
                     assert!(ok);
                     break;
@@ -2461,7 +2504,7 @@ mod arg_tests {
         let (mut out, mut err) = (vec![], vec![]);
         loop {
             match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
-                Event::Line(_, l) => out.push(l),
+                Event::Line(_, l) | Event::Json(_, l, _) => out.push(l),
                 Event::Err(_, l) => err.push(l),
                 Event::Done(target, ok) => {
                     assert!(target == Target::Session(5));
@@ -3161,6 +3204,10 @@ mod arg_tests {
         .is_some());
         assert!(waits_for_sign_in(
             "No API key found. Starting login flow..."
+        ));
+        // The same words quoted in a JSON event, such as a tool's result, are not the CLI.
+        assert!(!waits_for_sign_in(
+            &serde_json::json!({ "type": "user", "content": "No API key found. Starting login flow..." }).to_string()
         ));
         assert!(!waits_for_sign_in("Reading src/login.rs"));
     }

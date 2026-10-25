@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::usage::{self, Reading, Usage, Window};
+use std::cell::Cell;
 
 /// Colour for a share used: amber from 75%, red from 90%.
 fn level_color(used: f32) -> u32 {
@@ -12,6 +13,103 @@ fn level_color(used: f32) -> u32 {
     } else {
         c_secondary()
     }
+}
+
+/// From this share used, the status bar shows the number beside an agent's ring.
+const SHOW_NUMBER_FROM: f32 = 75.;
+/// The ring's size across and its stroke.
+const RING: f32 = 18.;
+const RING_STROKE: f32 = 2.;
+
+thread_local! {
+    /// The agent whose mark opened the Usage popover, which it highlights.
+    static FOCUS: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// What one agent shows in the status bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Chip {
+    /// Its mark in a ring filled to `used`, with the number beside it when `number`.
+    Ring { used: f32, number: bool },
+    /// Its mark dimmed, with an amber dot: something to fix, such as signing in.
+    Problem,
+}
+
+/// What the status bar shows for an agent's usage, or nothing for a note or a reading
+/// with no windows.
+fn chip_for(u: &Usage) -> Option<Chip> {
+    match &u.reading {
+        Reading::Limits(_) => {
+            let used = u.headline()?.used;
+            Some(Chip::Ring {
+                used,
+                number: used >= SHOW_NUMBER_FROM,
+            })
+        }
+        Reading::Problem { .. } => Some(Chip::Problem),
+        Reading::Note(_) => None,
+    }
+}
+
+/// The full line a mark's tooltip shows.
+fn chip_tooltip(name: &str, u: &Usage, now: i64) -> String {
+    match &u.reading {
+        Reading::Problem { short, .. } => format!("{name} · {short} · click for details"),
+        _ => match u.headline() {
+            Some(w) => match w.resets_at {
+                Some(r) => format!(
+                    "{name} · {:.0}% used · resets in {}",
+                    w.used,
+                    usage::left(r, now)
+                ),
+                None => format!("{name} · {:.0}% used", w.used),
+            },
+            None => name.to_string(),
+        },
+    }
+}
+
+/// A full circle, or an arc clockwise from twelve o'clock over `share` of it.
+fn ring_path(c: Point<Pixels>, r: f32, share: f32, stroke: f32) -> Option<PathBuilder> {
+    let share = share.clamp(0., 1.);
+    if share <= 0. {
+        return None;
+    }
+    let rr = point(px(r), px(r));
+    let mut b = PathBuilder::stroke(px(stroke));
+    let top = point(c.x, c.y - px(r));
+    if share >= 0.999 {
+        let bottom = point(c.x, c.y + px(r));
+        b.move_to(top);
+        b.arc_to(rr, px(0.), false, true, bottom);
+        b.arc_to(rr, px(0.), false, true, top);
+    } else {
+        let a = share * std::f32::consts::TAU;
+        let end = point(c.x + px(r * a.sin()), c.y - px(r * a.cos()));
+        b.move_to(top);
+        b.arc_to(rr, px(0.), share > 0.5, true, end);
+    }
+    Some(b)
+}
+
+/// A ring `RING` across: a faint track with an arc over it filled to `used` percent.
+fn ring(used: f32) -> impl IntoElement {
+    let color = level_color(used);
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let c = bounds.center();
+            let r = (RING - RING_STROKE) / 2.;
+            if let Some(Ok(p)) = ring_path(c, r, 1., RING_STROKE).map(|b| b.build()) {
+                window.paint_path(p, tint(c_active()));
+            }
+            if let Some(Ok(p)) = ring_path(c, r, used / 100., RING_STROKE).map(|b| b.build()) {
+                window.paint_path(p, rgb(color));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
 }
 
 /// A thin meter filled to `used` percent.
@@ -39,47 +137,74 @@ impl RunoApp {
             .collect()
     }
 
-    /// The status bar's usage chips: one per agent with limits to show or a sign-in to
-    /// fix. Clicking any of them opens the Usage popover.
+    /// The status bar's usage: per agent with limits to show or a sign-in to fix, its
+    /// mark in a ring filled to the headline window's share, with the number from 75%,
+    /// or dimmed with an amber dot for a problem. Each mark's tooltip has the full line.
+    /// Clicking opens the Usage popover, highlighting the agent clicked.
     pub(crate) fn usage_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = usage::now_secs();
+        let open = self.menu.as_deref() == Some("usage");
         let chips: Vec<AnyElement> = self
             .usage_agents()
             .into_iter()
             .filter_map(|p| Some((p, usage::get(p.id)?)))
-            .filter_map(|(p, u)| {
-                let chip = div()
+            .filter_map(|(p, u)| Some((p, chip_for(&u)?, chip_tooltip(p.name, &u, now))))
+            .enumerate()
+            .map(|(i, (p, chip, tip))| {
+                let id = p.id;
+                let badge = div()
+                    .relative()
+                    .size(px(RING))
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(5.))
-                    .child(self.provider_mark(p, 11.));
-                match &u.reading {
-                    Reading::Limits(_) => {
-                        let w = u.headline()?;
-                        let reset = w.resets_at.map(|r| usage::left(r, now));
-                        Some(
-                            chip.child(
-                                div()
-                                    .text_color(rgb(level_color(w.used)))
-                                    .child(format!("{:.0}% used", w.used)),
-                            )
-                            .when_some(reset, |el, r| el.child(r))
-                            .into_any_element(),
-                        )
-                    }
-                    Reading::Problem { short, .. } => Some(
-                        chip.child(icon(IconName::TriangleAlert, 11., c_amber()))
-                            .child(short.clone())
-                            .into_any_element(),
+                    .justify_center();
+                let (badge, number) = match chip {
+                    Chip::Ring { used, number } => (
+                        badge.child(ring(used)).child(self.provider_mark(p, 12.)),
+                        number.then(|| {
+                            div()
+                                .text_color(rgb(level_color(used)))
+                                .child(format!("{used:.0}%"))
+                        }),
                     ),
-                    Reading::Note(_) => None,
-                }
+                    Chip::Problem => (
+                        badge.child(self.provider_mark(p, 12.).opacity(0.45)).child(
+                            div()
+                                .absolute()
+                                .top(px(1.))
+                                .right(px(1.))
+                                .size(px(6.))
+                                .rounded_full()
+                                .bg(rgb(c_amber())),
+                        ),
+                        None,
+                    ),
+                };
+                div()
+                    .id(("usage-chip", i))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(3.))
+                    .child(badge)
+                    .children(number)
+                    .when(!open, |el| {
+                        el.tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                .build(window, cx)
+                        })
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_usage(Some(id), cx);
+                    }))
+                    .into_any_element()
             })
             .collect();
         if chips.is_empty() {
             return None;
         }
-        let open = self.menu.as_deref() == Some("usage");
         Some(
             div()
                 .id("usage-status")
@@ -88,30 +213,30 @@ impl RunoApp {
                 .px_1()
                 .flex()
                 .items_center()
-                .gap_3()
+                .gap(px(7.))
                 .rounded_sm()
                 .cursor_pointer()
                 .hover(|el| el.bg(tint(c_subtle())))
                 .when(open, |el| el.bg(tint(c_active())))
-                .when(!open, |el| {
-                    el.tooltip(|window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new("Plan usage for each agent")
-                            .build(window, cx)
-                    })
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if this.menu.as_deref() == Some("usage") {
-                        this.menu = None;
-                    } else {
-                        this.menu = Some("usage".into());
-                        usage::refresh(false);
-                    }
-                    cx.notify();
-                }))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_usage(None, cx)))
                 .children(chips)
                 .when(open, |el| el.child(self.usage_menu(cx)))
                 .into_any_element(),
         )
+    }
+
+    /// Open or close the Usage popover. `focus`: the agent whose mark was clicked, which
+    /// the popover highlights.
+    fn toggle_usage(&mut self, focus: Option<&'static str>, cx: &mut Context<Self>) {
+        if self.menu.as_deref() == Some("usage") {
+            self.menu = None;
+            FOCUS.set(None);
+        } else {
+            self.menu = Some("usage".into());
+            FOCUS.set(focus);
+            usage::refresh(false);
+        }
+        cx.notify();
     }
 
     /// The popover over the status bar: every installed agent's usage, compact or with
@@ -243,6 +368,7 @@ impl RunoApp {
                                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                                     if this.menu.as_deref() == Some("usage") {
                                         this.menu = None;
+                                        FOCUS.set(None);
                                         cx.notify();
                                     }
                                 }))
@@ -392,10 +518,12 @@ impl RunoApp {
             .v_flex()
             .rounded_md()
             .cursor_pointer()
+            .when(FOCUS.get() == Some(id), |el| el.bg(tint(c_subtle())))
             .hover(|el| el.bg(tint(c_active())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.menu = None;
+                FOCUS.set(None);
                 this.open_settings();
                 this.settings_page = SettingsPage::Agent(id);
                 cx.notify();
@@ -444,5 +572,96 @@ impl RunoApp {
                     .text_color(rgb(c_muted()))
                     .child(reset),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::prelude::v1::test;
+
+    fn limits(used: &[f32]) -> Usage {
+        Usage {
+            reading: Reading::Limits(
+                used.iter()
+                    .map(|&used| Window {
+                        label: "5-hour",
+                        used,
+                        resets_at: Some(3_600 * 44),
+                    })
+                    .collect(),
+            ),
+            at: 0,
+        }
+    }
+
+    #[test]
+    fn ring_alone_below_75() {
+        assert_eq!(
+            chip_for(&limits(&[10.])),
+            Some(Chip::Ring {
+                used: 10.,
+                number: false
+            })
+        );
+        assert_eq!(
+            chip_for(&limits(&[74.9])),
+            Some(Chip::Ring {
+                used: 74.9,
+                number: false
+            })
+        );
+    }
+
+    #[test]
+    fn number_from_75_on_the_headline_window() {
+        assert_eq!(
+            chip_for(&limits(&[75.])),
+            Some(Chip::Ring {
+                used: 75.,
+                number: true
+            })
+        );
+        assert_eq!(
+            chip_for(&limits(&[20., 92.])),
+            Some(Chip::Ring {
+                used: 92.,
+                number: true
+            })
+        );
+    }
+
+    #[test]
+    fn a_dot_for_problems_and_nothing_for_notes() {
+        let problem = Usage {
+            reading: Reading::Problem {
+                short: "Not signed in".into(),
+                long: "Sign in to see usage.".into(),
+            },
+            at: 0,
+        };
+        assert_eq!(chip_for(&problem), Some(Chip::Problem));
+        assert_eq!(
+            chip_tooltip("Gemini", &problem, 0),
+            "Gemini · Not signed in · click for details"
+        );
+        let note = Usage {
+            reading: Reading::Note("Doesn't share usage".into()),
+            at: 0,
+        };
+        assert_eq!(chip_for(&note), None);
+        assert_eq!(chip_for(&limits(&[])), None);
+    }
+
+    #[test]
+    fn tooltip_has_the_full_line() {
+        let line = chip_tooltip("Claude Code", &limits(&[78.]), 0);
+        assert_eq!(
+            line,
+            format!(
+                "Claude Code · 78% used · resets in {}",
+                usage::left(3_600 * 44, 0)
+            )
+        );
     }
 }

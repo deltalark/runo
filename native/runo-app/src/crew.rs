@@ -97,7 +97,7 @@ pub struct Report {
     pub at: u64,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Hash, Debug)]
 pub struct Choice {
     pub label: String,
     /// What happens if the person picks it.
@@ -106,7 +106,7 @@ pub struct Choice {
 }
 
 /// One question for the person, with two to four answers and the one the thread would pick.
-#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Hash, Debug)]
 pub struct Decision {
     pub question: String,
     pub options: Vec<Choice>,
@@ -597,9 +597,32 @@ pub enum Action {
     ResolveThread { thread: u64 },
 }
 
+/// By hand for the dollar budget, which hashes by its bits.
+impl std::hash::Hash for Action {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Action::StartThread {
+                title,
+                brief,
+                agent,
+                isolated,
+                model,
+                effort,
+                budget_usd,
+            } => {
+                (title, brief, agent, isolated, model, effort).hash(state);
+                budget_usd.to_bits().hash(state);
+            }
+            Action::MessageThread { thread, text } => (thread, text).hash(state),
+            Action::ReadThread { thread } | Action::ResolveThread { thread } => thread.hash(state),
+        }
+    }
+}
+
 /// A card shown with a message in Crew's chat. Threads are drawn live from the sessions,
 /// so a card shows where each one stands now, not when it was posted.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Hash, Debug)]
 #[serde(tag = "card", rename_all = "snake_case")]
 pub enum Card {
     /// Threads started together.
