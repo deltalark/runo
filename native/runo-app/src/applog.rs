@@ -828,7 +828,11 @@ pub fn download(release: &Release, dir: &Path) -> Result<PathBuf, String> {
         );
         why
     };
-    let links = [Some(url), release.checksums.as_ref(), release.signature.as_ref()];
+    let links = [
+        Some(url),
+        release.checksums.as_ref(),
+        release.signature.as_ref(),
+    ];
     if links.iter().flatten().any(|l| !release_link(l)) {
         return Err(refuse(
             "The download isn't from Runo's GitHub releases.".into(),
@@ -1111,7 +1115,10 @@ mod tests {
             {"name":"SHA256SUMS.sig","browser_download_url":"https://x/SHA256SUMS.sig"}]}"#;
         let release = newer_release(json, "0.2.9").unwrap();
         assert_eq!(release.checksums.as_deref(), Some("https://x/SHA256SUMS"));
-        assert_eq!(release.signature.as_deref(), Some("https://x/SHA256SUMS.sig"));
+        assert_eq!(
+            release.signature.as_deref(),
+            Some("https://x/SHA256SUMS.sig")
+        );
     }
 
     #[test]
