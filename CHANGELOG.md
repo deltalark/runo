@@ -4,12 +4,26 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-10-25
+
+### Added
+
+- Runo watches the pull requests Crew threads open and wakes a thread only when it has something to do: a failed check, a review or comment from someone else, or a conflict with the base branch. Threads no longer wait for CI inside their turn; when the checks pass, the thread's card turns green and Crew's chat gets a short note.
+
 ### Changed
 
+- Post-turn checks come in two levels. Quick, the default, runs each language's fast check (such as `cargo check`, a typecheck or lint script, `go vet` or `ruff`) and leaves tests to CI; Full runs the tests too. Pick it in Settings > Safety, or per project in its Edit dialog. A check that couldn't run because the disk was full, a tool was missing or it was killed now shows "Couldn't run checks" with the reason instead of failing, and doesn't start a fix turn.
+- Sending a message no longer freezes the window: the undo checkpoint, git, the post-turn checks and the end of a turn's saving run off the UI thread, and the checkpoint is cheaper. A turn that changed only docs skips its post-turn checks.
+- Redraws cost less. A large diff lays out only the lines in view, the terminal draws in its own pane, and agents working in the background redraw only the sidebar, bars and rail rather than the whole window.
+- The working indicator moves at a steady pace, without the hitches other redraws used to cause, and stays smooth however long Runo has been open.
+- The assistant's corner mark counts only its own unread answers, and its input is a composer-style box that grows to six lines; Enter sends, Shift+Enter adds a line.
+- The sidebar sets Crew's block apart from your own sessions with space and a quiet SESSIONS label instead of lines, and Crew's threads are indented under it rather than marked by a guide line.
 - Runo does much less while you aren't using it. The Browser tab's frame timer runs only while a page is on screen, and agents' output and background results wake the app when they arrive instead of being checked 50 times a second. While the window is hidden, minimized or covered, git rescans, dev-server port scans, pull request and GitHub checks, plan usage and update checks pause until it is back; saves, queued turns, Crew, the menu bar and the Dock count keep going at a slower pace. Pull request lookups, and git scans of a session nobody is working in, come less and less often while nothing changes. Freeing build output and finding dev-server ports no longer scan every process on the Mac with `lsof`, and a quiet terminal no longer wakes the app 100 times a second.
 - Post-turn checks and Crew threads scale with the computer. Settings > Safety > Limits > Checks running at once is Auto by default: one check set per 4 cores and per 6 GB of memory, from 1 to 6, instead of one at a time. Crew threads running at once is Auto too: one per 3 cores and per 4 GB, from 2 to 8. Each shows what Auto comes to, such as "Auto (4 at a time on this Mac: 16 cores, 64 GB)", and the fixed numbers and No limit are still there. Low priority for checks is its own switch, Run checks at low priority, on by default. The old background checks switch carries over: on becomes Auto, off becomes No limit at normal priority; a Crew cap left at the old default of 3 becomes Auto.
+
 ### Fixed
 
+- The top bar and status bar stretch across the whole window again; since 0.5.8 their background stopped after their last item.
 - A picture attached to a message no longer spills over the message's text and the rows below it. Thumbnails take their size from the picture before it loads, keep its shape within 220 × 160, and very tall or very wide pictures are cropped rather than shrunk to a sliver. Steps that read an attachment show its file name instead of the `.runo/attachments/…` path.
 
 ## [0.5.8] - 2026-10-25

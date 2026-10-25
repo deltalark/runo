@@ -5877,7 +5877,7 @@ dependencies = [
 
 [[package]]
 name = "runo"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "anyhow",
  "async-channel",
