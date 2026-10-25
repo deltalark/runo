@@ -1025,7 +1025,13 @@ impl RunoApp {
     /// the chat, not one over the messages before each.
     pub(crate) fn crew_cards_hidden(&self, chat: &Session, cx: &App) -> Vec<bool> {
         let show_deleted = Self::show_deleted(cx);
-        let gone = |t: &u64| self.state.session(*t).is_none();
+        // One pass over the sessions too, rather than a search of them per card.
+        let live: std::collections::HashSet<u64> = if show_deleted {
+            Default::default()
+        } else {
+            self.state.sessions.iter().map(|s| s.id).collect()
+        };
+        let gone = |t: &u64| !live.contains(t);
         let mut shown = std::collections::HashSet::new();
         chat.messages
             .iter()

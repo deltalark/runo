@@ -1641,9 +1641,10 @@ fn live_mark(
         Animation::new(Duration::from_millis(MORPH_MS.max(LIFT_MS) as u64))
     };
     let key = format!("runo-mark-{mood:?}-{since:?}-{:?}", hover);
-    let el = div().relative().size(px(46.)).with_animation(
+    let el = div().relative().size(px(46.)).looping(
         ElementId::Name(key.into()),
         animation,
+        0.,
         move |el, d| {
             let mut bars = bars_between(from, target, ms_since(since) / MORPH_MS);
             if thinking {

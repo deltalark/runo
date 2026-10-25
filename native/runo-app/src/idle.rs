@@ -216,14 +216,16 @@ impl RunoApp {
         } else if on_session && clock.marks.due(MARKS) {
             self.idle_scan();
         }
-        // Once a second while agents run, for their elapsed time.
         if repaint
             || pruned
-            || (second
-                && (!self.turns.is_empty() || self.info.is_some() || self.git_toast.is_some()))
+            || (second && (self.info.is_some() || self.git_toast.is_some()))
             || self.update_runs.values().any(|r| r.failed.is_none())
         {
             cx.notify();
+        } else if second && !self.turns.is_empty() {
+            // Once a second while agents run, for their elapsed time: they show where
+            // background output does.
+            self.notify_background(cx);
         }
     }
 
@@ -286,31 +288,45 @@ impl RunoApp {
 
     /// After a batch of events: draw what they changed now, or within `BACKGROUND_WAIT`
     /// for output from sessions not on screen, and bring the Dock's count up to date
-    /// unless only output streamed (it doesn't change what needs the person).
-    pub(crate) fn after_events(&mut self, at_once: bool, streamed: bool, cx: &mut Context<Self>) {
-        let waited = *self.idle.unshown_since.get_or_insert_with(Instant::now);
-        if at_once || waited.elapsed() >= BACKGROUND_WAIT {
+    /// unless only output streamed (it doesn't change what needs the person). Output
+    /// streaming into the open chat (and into the side panel when `peeked`) draws that
+    /// chat at once, and Runo's own `output` the terminal panel.
+    pub(crate) fn after_events(
+        &mut self,
+        at_once: bool,
+        streamed: bool,
+        peeked: bool,
+        output: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if at_once {
             self.idle.unshown_since = None;
             self.idle.unshown_flush = None;
             cx.notify();
-            if at_once {
-                self.show_dock(cx);
-            }
-        } else {
-            if streamed {
-                self.notify_chat(cx);
-            }
-            if self.idle.unshown_flush.is_none() {
-                let wait = BACKGROUND_WAIT.saturating_sub(waited.elapsed());
-                self.idle.unshown_flush = Some(cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(wait).await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.idle.unshown_since = None;
-                        this.idle.unshown_flush = None;
-                        cx.notify();
-                    });
-                }));
-            }
+            self.show_dock(cx);
+            return;
+        }
+        let waited = *self.idle.unshown_since.get_or_insert_with(Instant::now);
+        if waited.elapsed() >= BACKGROUND_WAIT {
+            self.idle.unshown_since = None;
+            self.idle.unshown_flush = None;
+            self.notify_background(cx);
+        } else if self.idle.unshown_flush.is_none() {
+            let wait = BACKGROUND_WAIT.saturating_sub(waited.elapsed());
+            self.idle.unshown_flush = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.idle.unshown_since = None;
+                    this.idle.unshown_flush = None;
+                    this.notify_background(cx);
+                });
+            }));
+        }
+        if streamed {
+            self.notify_chat(peeked, cx);
+        }
+        if output {
+            self.notify_parts(&[panes::Part::Terminal], cx);
         }
     }
 

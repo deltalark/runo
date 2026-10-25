@@ -48,6 +48,7 @@ mod design;
 mod designdraw;
 mod desktop_notify;
 mod detach;
+mod diff_list;
 mod dock;
 mod explain;
 mod files;
@@ -446,6 +447,8 @@ struct RunoApp {
     terminal: HashMap<u64, Vec<String>>,
     handles: HashMap<Target, Handle>,
     tx: Sender<Event>,
+    /// Shells with new output, or that exited, by id; see `pty_woke`.
+    pty_tx: async_channel::Sender<u64>,
     /// The chat as a list that lays out only the rows in view; see `chat_list`.
     chat_list: ListState,
     /// The window's parts as cached views; see `panes`.
@@ -679,6 +682,12 @@ struct RunoApp {
     all_diffs: Vec<(String, String)>,
     /// Folded unchanged runs the person opened, by (path, first row).
     diff_expanded: std::collections::HashSet<(String, usize)>,
+    /// The diff as a list that lays out only the lines in view; see `diff_list`.
+    diff_list: ListState,
+    diff_rows: std::cell::RefCell<diff_list::DiffRows>,
+    /// The Output tab's text, by session, line count and last line; see `output_text`.
+    #[allow(clippy::type_complexity)]
+    output_md: std::cell::RefCell<Option<((u64, usize, u64), SharedString)>>,
     notes_input: Entity<TextareaState>,
     notes_project: Option<u64>,
     /// True while the notes box is filled programmatically, so it is not saved back.
@@ -805,6 +814,27 @@ trait Animate: IntoElement + Sized + 'static {
             .into_any_element()
         } else {
             self.into_any_element()
+        }
+    }
+
+    /// `animated`, for a loop whose content `f` draws: while loops hold still it shows
+    /// the loop's frame at `rest` rather than leaving `f` out.
+    fn looping(
+        self,
+        id: impl Into<ElementId>,
+        animation: Animation,
+        rest: f32,
+        f: impl Fn(Self, f32) -> Self + 'static,
+    ) -> AnyElement {
+        let moves = if motion::drawing() {
+            motion::moving()
+        } else {
+            anim_on()
+        };
+        if moves || animation.oneshot {
+            self.animated(id, animation, f)
+        } else {
+            f(self, rest).into_any_element()
         }
     }
 }
@@ -1172,30 +1202,6 @@ fn usage_label(usage: &store::Usage) -> String {
     format!("{} tokens · {pct}% context", k(usage.context()))
 }
 
-/// Runs of more than 8 unchanged lines, as (first, end) row indexes, keeping 3 lines of
-/// context next to each change so long unchanged stretches can be folded away.
-fn collapsible_runs(rows: &[git::DiffRow]) -> Vec<(usize, usize)> {
-    const KEEP: usize = 3;
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < rows.len() {
-        if rows[i].kind != git::LineKind::Context {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < rows.len() && rows[i].kind == git::LineKind::Context {
-            i += 1;
-        }
-        let lead = if start == 0 { 0 } else { KEEP };
-        let tail = if i == rows.len() { 0 } else { KEEP };
-        if i - start > lead + tail + 2 {
-            out.push((start + lead, i - tail));
-        }
-    }
-    out
-}
-
 fn icon(name: IconName, size: f32, color: u32) -> Icon {
     Icon::new(name).size(px(size)).text_color(rgb(color))
 }
@@ -1231,6 +1237,23 @@ impl RunoApp {
             }
         })
         .detach();
+        // A shell's output draws as it arrives, at most once a frame: the shell wakes this
+        // once after each time it is drawn (see `pty::Shell::take_dirty`).
+        let (pty_tx, pty_rx) = async_channel::unbounded::<u64>();
+        cx.spawn(async move |this, cx| {
+            while let Ok(id) = pty_rx.recv().await {
+                let mut ids = vec![id];
+                while let Ok(id) = pty_rx.try_recv() {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+                if this.update(cx, |this, cx| this.pty_woke(ids, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         // Agents' output and other events: woken when they arrive, then a moment's wait
         // so a busy agent's lines are handled together.
         let rx = wake::Inbox::new(rx);
@@ -1254,10 +1277,20 @@ impl RunoApp {
                     .iter()
                     .any(|e| this.event_shown(e) && !this.event_streamed(e));
                 let streamed = events.iter().any(|e| this.event_streamed(e));
+                // Only the thread beside Crew's chat streams into the side panel.
+                let peeked = events.iter().any(|e| match e {
+                    Event::Line(Target::Session(id), _) | Event::Json(Target::Session(id), ..) => {
+                        this.peeked(*id)
+                    }
+                    _ => false,
+                });
+                let output = events
+                    .iter()
+                    .any(|e| matches!(e, Event::Line(Target::Terminal(_), _)));
                 for event in events {
                     this.handle_event(event, cx);
                 }
-                this.after_events(at_once, streamed, cx);
+                this.after_events(at_once, streamed, peeked, output, cx);
             });
             if alive.is_err() {
                 break;
@@ -1609,6 +1642,7 @@ impl RunoApp {
             terminal,
             handles: HashMap::new(),
             tx,
+            pty_tx,
             chat_list: chat_list::new_list_state(),
             panes: None,
             chat_shown: Default::default(),
@@ -1789,6 +1823,9 @@ impl RunoApp {
             diff_wrap: false,
             all_diffs: Vec::new(),
             diff_expanded: Default::default(),
+            diff_list: diff_list::new_list_state(),
+            diff_rows: Default::default(),
+            output_md: Default::default(),
             _subscriptions: vec![
                 search_sub,
                 peek_sub,
@@ -2378,7 +2415,8 @@ impl RunoApp {
     }
 
     /// Whether `event` changes what is on screen beyond the sidebar and status bar: anything
-    /// but output from an agent whose chat isn't open.
+    /// but output from an agent whose chat isn't open, and Runo's own output, which only
+    /// the terminal panel shows.
     fn event_shown(&self, event: &Event) -> bool {
         match event {
             Event::Line(Target::Session(id), _)
@@ -2386,6 +2424,7 @@ impl RunoApp {
             | Event::Err(Target::Session(id), _) => {
                 self.selected == Some(*id) || self.peek == Some(*id)
             }
+            Event::Line(Target::Terminal(_), _) => false,
             _ => true,
         }
     }
@@ -2783,24 +2822,6 @@ impl RunoApp {
                 self.handle_output(key, result);
             }
             Event::Partial(key, text) => self.assistant_partial(key, text),
-            // A shell printed or exited; repaint it.
-            Event::Pty(id) => {
-                self.cli_exited(id);
-                self.sign_in_exited(id);
-                if self.setups.contains_key(&id) {
-                    self.setup_exited(id, cx);
-                }
-                // A quick command's tab says how it went in its own words.
-                self.task_exited(id);
-                if let Some(shell) = self.shells.iter().find(|s| s.id == id && s.exited()) {
-                    if self.shell_tab == Some(id) && !self.tasks.contains_key(&id) {
-                        self.info = Some((
-                            format!("{} exited.", shell.title),
-                            std::time::Instant::now(),
-                        ));
-                    }
-                }
-            }
             Event::Done(Target::Terminal(id), ok) => {
                 self.handles.remove(&Target::Terminal(id));
                 if !ok {
@@ -4743,7 +4764,9 @@ impl RunoApp {
         let filter = self.search.read(cx).value().to_lowercase();
         let mut projects = div().v_flex().pb_2();
         let mut first = true;
-        for project in &self.state.projects {
+        // Grouped by what needs the person or by status, the list is made another way.
+        let by_project = !self.needs_filter && !cx.global::<AppSettings>().group_by_status;
+        for project in self.state.projects.iter().filter(|_| by_project) {
             let pid = project.id;
             let open = self.expanded.contains(&pid);
             let missing = !checks::is_dir(&project.path);
@@ -4929,7 +4952,7 @@ impl RunoApp {
                 let sessions: Vec<&Session> = sessions
                     .iter()
                     .copied()
-                    .filter(|s| !threads.iter().any(|t| t.id == s.id))
+                    .filter(|s| !crew_on || s.crew.is_none())
                     .collect();
                 if crew_on && !sessions.is_empty() {
                     // Air and a quiet label, not a rule, set Crew's block apart from the
@@ -7825,43 +7848,6 @@ impl RunoApp {
             })
     }
 
-    /// The selected file's diff, or every changed file one after another.
-    fn diff_view(&self, cx: &mut Context<Self>) -> Div {
-        if !self.diff_all {
-            let path = self.selected_file.clone().unwrap_or_default();
-            return self.diff_lines(&path, &self.diff, cx);
-        }
-        let mut col = div().v_flex();
-        for (path, diff) in &self.all_diffs {
-            let id = path.clone();
-            col = col
-                .child(
-                    div()
-                        .id(SharedString::from(format!("all-{path}")))
-                        .h(px(28.))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .border_y_1()
-                        .border_color(divider())
-                        .bg(inset(c_sidebar()))
-                        .cursor_pointer()
-                        .text_size(px(12.))
-                        .font_family(self.mono_font.clone())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.diff_all = false;
-                            this.open_change(&id);
-                            cx.notify();
-                        }))
-                        .child(icon(IconName::File, 12., c_muted()))
-                        .child(path.clone()),
-                )
-                .child(self.diff_lines(path, diff, cx));
-        }
-        col
-    }
-
     fn diff_toggle(
         &self,
         id: &'static str,
@@ -7900,233 +7886,6 @@ impl RunoApp {
         } else {
             Vec::new()
         };
-    }
-
-    fn diff_lines(&self, path: &str, diff: &str, cx: &mut Context<Self>) -> Div {
-        use git::LineKind;
-        let path = path.to_string();
-        let notes: Vec<(usize, Note)> = self
-            .current()
-            .map(|s| {
-                s.notes
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .filter(|(_, n)| n.path == path)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut col = div()
-            .v_flex()
-            .py_1()
-            .font_family(self.mono_font.clone())
-            .text_xs();
-        let rows = git::diff_rows(diff);
-        let hidden = collapsible_runs(&rows);
-        let mut skip_to = 0;
-        // Element ids must stay unique when several files are shown together.
-        let base = self
-            .changes
-            .iter()
-            .position(|c| c.path == path)
-            .unwrap_or(0)
-            * 100_000;
-        const MAX_ROWS: usize = 4000;
-        let more = rows.len().saturating_sub(MAX_ROWS);
-        for (local, row) in rows.into_iter().enumerate().take(MAX_ROWS) {
-            let i = base + local;
-            if local < skip_to {
-                continue;
-            }
-            if let Some(&(start, end)) = hidden.iter().find(|(s, _)| *s == local) {
-                let key = (path.clone(), start);
-                if !self.diff_expanded.contains(&key) {
-                    skip_to = end;
-                    col = col.child(
-                        div()
-                            .id(("dl-fold", i))
-                            .h(px(22.))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .bg(tint(c_subtle()))
-                            .text_color(rgb(c_muted()))
-                            .hover(|el| el.text_color(rgb(c_text())))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.diff_expanded.insert(key.clone());
-                                cx.notify();
-                            }))
-                            .child(icon(IconName::ChevronsUpDown, 12., c_muted()))
-                            .child(format!("{} unchanged lines", end - start)),
-                    );
-                    continue;
-                }
-            }
-            if row.kind == LineKind::Hunk {
-                col = col.child(
-                    div()
-                        .id(("dl", i))
-                        .mt_1()
-                        .px_3()
-                        .py(px(3.))
-                        .text_color(rgb(c_blue()))
-                        .bg(tint(c_selected()))
-                        .whitespace_nowrap()
-                        .child(row.text),
-                );
-                continue;
-            }
-            let (bg, mark, color) = match row.kind {
-                LineKind::Added => (Some(c_add()), "+", c_add()),
-                LineKind::Removed => (Some(c_del()), "−", c_del()),
-                LineKind::Note => (None, "", c_muted()),
-                _ => (None, " ", c_text()),
-            };
-            let line = row.number.unwrap_or(0);
-            let can_note = row.kind != LineKind::Note && row.number.is_some();
-            let code = format!("{mark}{}", row.text);
-            let target = (path.clone(), line, code);
-            let writing = self.note_at.as_ref() == Some(&target);
-            col = col.child(
-                div()
-                    .id(("dl", i))
-                    .group("diff-line")
-                    .flex()
-                    .min_h(px(19.))
-                    .when_some(bg, |el, bg| el.bg(diff_fill(bg)))
-                    .when(can_note, |el| {
-                        el.cursor_pointer()
-                            .hover(|el| el.bg(tint(c_selected())))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.note_at = Some(target.clone());
-                                this.note_input
-                                    .update(cx, |input, cx| input.focus(window, cx));
-                                cx.notify();
-                            }))
-                    })
-                    .child(
-                        div()
-                            .w(px(44.))
-                            .flex_none()
-                            .px_2()
-                            .text_right()
-                            .text_color(rgb(c_muted()))
-                            .child(row.number.map(|n| n.to_string()).unwrap_or_default()),
-                    )
-                    .child(
-                        div()
-                            .w(px(14.))
-                            .flex_none()
-                            .text_color(rgb(color))
-                            .child(mark),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when(!self.diff_wrap, |el| el.whitespace_nowrap())
-                            .when(self.diff_wrap, |el| el.whitespace_normal())
-                            .text_color(rgb(color))
-                            .when(row.kind == LineKind::Note, |el| el.italic())
-                            .child(row.text),
-                    )
-                    .when(can_note, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .px_2()
-                                .opacity(0.)
-                                .group_hover("diff-line", |el| el.opacity(1.))
-                                .child(icon(IconName::MessageSquarePlus, 12., c_blue())),
-                        )
-                    }),
-            );
-            for (index, note) in notes
-                .iter()
-                .filter(|(_, n)| n.line == line && can_note && n.code.starts_with(mark))
-            {
-                let index = *index;
-                col = col.child(
-                    div()
-                        .mx_2()
-                        .my_1()
-                        .ml(px(58.))
-                        .px_3()
-                        .py_2()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(divider())
-                        .bg(rgb(c_canvas()))
-                        .font_family(cx.theme().font_family.clone())
-                        .child(icon(IconName::MessageSquareText, 13., c_blue()))
-                        .child(div().flex_1().text_xs().child(note.text.clone()))
-                        .child(
-                            div()
-                                .id(("note-x", index))
-                                .rounded_sm()
-                                .cursor_pointer()
-                                .hover(|el| el.bg(tint(c_subtle())))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.remove_note(index);
-                                    cx.notify();
-                                }))
-                                .child(icon(IconName::X, 12., c_muted())),
-                        ),
-                );
-            }
-            if writing {
-                col = col.child(
-                    div()
-                        .ml(px(58.))
-                        .mr_2()
-                        .my_1()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .font_family(cx.theme().font_family.clone())
-                        .child(
-                            div()
-                                .flex_1()
-                                .child(Input::new(&self.note_input).bordered(true).h(px(30.))),
-                        )
-                        .child(
-                            div()
-                                .id("note-cancel")
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .text_xs()
-                                .cursor_pointer()
-                                .text_color(rgb(c_secondary()))
-                                .hover(|el| el.bg(tint(c_subtle())))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.note_at = None;
-                                    cx.notify();
-                                }))
-                                .child("Cancel"),
-                        ),
-                );
-            }
-        }
-        if more > 0 {
-            col = col.child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_color(rgb(c_muted()))
-                    .italic()
-                    .child(format!(
-                        "{more} more line{} not shown. Open the file to see all of it.",
-                        if more == 1 { "" } else { "s" }
-                    )),
-            );
-        }
-        col
     }
 
     fn changes_tab(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -8593,8 +8352,9 @@ impl RunoApp {
                             div()
                                 .flex_1()
                                 .min_h_0()
-                                .overflow_y_scrollbar()
-                                .child(self.diff_view(cx)),
+                                .relative()
+                                .child(self.diff_view(cx))
+                                .vertical_scrollbar(&self.diff_list),
                             SharedString::from(format!(
                                 "diff-{}-{}",
                                 self.selected.unwrap_or(0),
@@ -8724,13 +8484,7 @@ impl RunoApp {
                 {
                     self.term_scroll.scroll_to_bottom();
                 }
-                let text: Vec<&str> = self.terminal[&id]
-                    .iter()
-                    .rev()
-                    .take(300)
-                    .rev()
-                    .map(String::as_str)
-                    .collect();
+                let text = self.output_text(id);
                 fade(
                     div()
                         .flex_1()
@@ -8751,10 +8505,7 @@ impl RunoApp {
                                         .child(
                                             TextView::markdown(
                                                 SharedString::from(format!("term-{id}")),
-                                                format!(
-                                                    "```text\n{}\n```",
-                                                    text.join("\n").replace("```", "'''")
-                                                ),
+                                                text,
                                             )
                                             .selectable(true),
                                         ),
@@ -8768,9 +8519,8 @@ impl RunoApp {
             }
             None => self.terminal_empty(cx),
         };
-        let panel = div()
-            .h(px(self.term_height()))
-            .flex_none()
+        div()
+            .size_full()
             .relative()
             .child(tour::anchor(&self.anchors, "terminal"))
             .v_flex()
@@ -8946,25 +8696,56 @@ impl RunoApp {
                             cx.notify();
                         }),
                     ),
-            );
-        // Expand and shrink ease between the two heights.
+            )
+    }
+
+    /// The last 300 lines of what Runo printed for session `id`, as the Markdown the
+    /// Output tab shows, made again only when a line comes.
+    fn output_text(&self, id: u64) -> SharedString {
+        let lines = self
+            .terminal
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let key = (id, lines.len(), chat_list::hash(lines.last()));
+        let mut kept = self.output_md.borrow_mut();
+        if let Some((_, text)) = kept.as_ref().filter(|(k, _)| *k == key) {
+            return text.clone();
+        }
+        let text: Vec<&str> = lines
+            .iter()
+            .rev()
+            .take(300)
+            .rev()
+            .map(String::as_str)
+            .collect();
+        let text = SharedString::from(format!(
+            "```text\n{}\n```",
+            text.join("\n").replace("```", "'''")
+        ));
+        *kept = Some((key, text.clone()));
+        text
+    }
+
+    /// `el` at the terminal panel's height, easing between the two heights as it expands
+    /// or shrinks.
+    fn term_sized(&self, el: Div) -> AnyElement {
+        let el = el.h(px(self.term_height()));
         match self.panel_motion("term") {
             Some((tall, at)) => {
                 let (from, to) = (self.term_from, self.term_h);
-                panel
-                    .animated(
-                        SharedString::from(format!("term-size-{tall}-{at:?}")),
-                        Animation::new(Duration::from_millis(PANEL_MS))
-                            .with_easing(ease_in_out_cubic),
-                        move |el, d| el.h(px(from + (to - from) * d)),
-                    )
-                    .into_any_element()
+                el.animated(
+                    SharedString::from(format!("term-size-{tall}-{at:?}")),
+                    Animation::new(Duration::from_millis(PANEL_MS)).with_easing(ease_in_out_cubic),
+                    move |el, d| el.h(px(from + (to - from) * d)),
+                )
+                .into_any_element()
             }
-            None => panel.into_any_element(),
+            None => el.into_any_element(),
         }
     }
 
-    fn right_pane(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn right_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Switching tabs shows the other tab at once; keyed so each keeps its own state.
         let body = div()
             .id(SharedString::from(format!(
@@ -9040,7 +8821,8 @@ impl RunoApp {
                             .flex_1()
                             .min_h_0(),
                     )
-                    .child(self.terminal_panel(window, cx)),
+                    // Room for the terminal, drawn over it as a pane of its own.
+                    .child(self.term_sized(div().flex_none())),
             )
             .child(
                 // Drag the gutter to make the panel narrower or wider.
@@ -9406,7 +9188,28 @@ impl Render for RunoApp {
             show_right,
             self.panel_width,
             false,
-            || self.part(panes::Part::Right, StyleRefinement::default().size_full()),
+            || {
+                // The terminal is a pane of its own over the side panel's foot, which leaves
+                // room for it, so a shell's output draws only the terminal.
+                div()
+                    .size_full()
+                    .relative()
+                    .child(self.part(panes::Part::Right, StyleRefinement::default().size_full()))
+                    .child(
+                        self.term_sized(
+                            div()
+                                .absolute()
+                                .left(px(shell::GUTTER))
+                                .right_0()
+                                .bottom_0()
+                                .child(self.part(
+                                    panes::Part::Terminal,
+                                    StyleRefinement::default().size_full(),
+                                )),
+                        ),
+                    )
+                    .into_any_element()
+            },
         )
         .map(|el| page_fade(el, "right-page"));
         if self

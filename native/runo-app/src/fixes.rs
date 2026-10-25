@@ -218,7 +218,7 @@ impl RunoApp {
             .unwrap_or_default();
         self.next_shell += 1;
         let shell_id = self.next_shell;
-        let tx = self.tx.clone();
+        let wake = self.pty_wake();
         let (rows, cols) = self.term_grid();
         match pty::Shell::spawn_program(
             shell_id,
@@ -227,9 +227,7 @@ impl RunoApp {
             rows,
             cols,
             Some(pty::Program::of(&command)),
-            move |sid| {
-                let _ = tx.send(Event::Pty(sid));
-            },
+            wake,
         ) {
             Ok(mut shell) => {
                 shell.title = format!("Sign in to {}", p.name);
@@ -282,7 +280,7 @@ impl RunoApp {
         };
         self.next_shell += 1;
         let shell_id = self.next_shell;
-        let tx = self.tx.clone();
+        let wake = self.pty_wake();
         let (rows, cols) = self.term_grid();
         match pty::Shell::spawn_program(
             shell_id,
@@ -291,9 +289,7 @@ impl RunoApp {
             rows,
             cols,
             Some(pty::Program::of(&command)),
-            move |sid| {
-                let _ = tx.send(Event::Pty(sid));
-            },
+            wake,
         ) {
             Ok(mut shell) => {
                 shell.title = format!("Sign in to {} on {}", p.name, conn.name);

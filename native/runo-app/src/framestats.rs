@@ -44,6 +44,11 @@ thread_local! {
     );
 }
 
+/// Whether frame stats are being kept.
+pub(crate) fn on() -> bool {
+    STATS.with(|s| s.borrow().is_some())
+}
+
 /// Add `line` to the stats file as it is.
 pub(crate) fn note(line: &str) {
     STATS.with(|s| {

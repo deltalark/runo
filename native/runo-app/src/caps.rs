@@ -63,7 +63,7 @@ pub struct Control {
     pub choices: Vec<Choice>,
 }
 
-static CAPS: OnceLock<RwLock<HashMap<String, Caps>>> = OnceLock::new();
+static CAPS: OnceLock<RwLock<HashMap<String, std::sync::Arc<Caps>>>> = OnceLock::new();
 static UPDATED: AtomicBool = AtomicBool::new(false);
 /// Binaries set in Settings, by agent, for CLIs installed off PATH.
 static BINARIES: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
@@ -86,7 +86,7 @@ pub fn binary(provider: &'static crate::agent::Provider) -> String {
         .unwrap_or_else(|| provider.bin.to_string())
 }
 
-fn store() -> &'static RwLock<HashMap<String, Caps>> {
+fn store() -> &'static RwLock<HashMap<String, std::sync::Arc<Caps>>> {
     CAPS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
@@ -103,7 +103,7 @@ pub fn mentions(provider: &str, text: &str) -> bool {
 #[cfg(test)]
 pub fn set(provider: &str, caps: Caps) {
     if let Ok(mut map) = store().write() {
-        map.insert(provider.to_string(), caps);
+        map.insert(provider.to_string(), std::sync::Arc::new(caps));
     }
 }
 
@@ -117,6 +117,15 @@ pub fn version(provider: &str) -> String {
 }
 
 pub fn get(provider: &str) -> Caps {
+    store()
+        .read()
+        .ok()
+        .and_then(|m| m.get(provider).map(|c| Caps::clone(c)))
+        .unwrap_or_default()
+}
+
+/// What `get` gives, without copying it: for what reads it every frame.
+fn shared(provider: &str) -> std::sync::Arc<Caps> {
     store()
         .read()
         .ok()
@@ -160,7 +169,7 @@ pub fn detect(provider: &'static crate::agent::Provider) {
         id => generic(id, &bin),
     };
     if let Ok(mut map) = store().write() {
-        map.insert(provider.id.to_string(), caps);
+        map.insert(provider.id.to_string(), std::sync::Arc::new(caps));
     }
 }
 
@@ -756,7 +765,7 @@ fn with_default(label: &str, mut rest: Vec<Choice>) -> Vec<Choice> {
 
 /// The composer dropdowns for a provider, given the session's current selections.
 pub fn controls(provider: &str, sel: &HashMap<String, String>) -> Vec<Control> {
-    controls_for(provider, &get(provider), sel)
+    controls_for(provider, &shared(provider), sel)
 }
 
 fn controls_for(provider: &str, caps: &Caps, sel: &HashMap<String, String>) -> Vec<Control> {

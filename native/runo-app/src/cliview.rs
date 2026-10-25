@@ -265,11 +265,9 @@ impl RunoApp {
         }
         self.next_shell += 1;
         let shell_id = self.next_shell;
-        let tx = self.tx.clone();
         let (rows, cols) = self.cli_grid();
-        match pty::Shell::spawn_program(shell_id, id, &dir, rows, cols, Some(program), move |sid| {
-            let _ = tx.send(Event::Pty(sid));
-        }) {
+        let wake = self.pty_wake();
+        match pty::Shell::spawn_program(shell_id, id, &dir, rows, cols, Some(program), wake) {
             Ok(shell) => {
                 let offset = history::length(transcript.as_deref());
                 self.cli_runs.insert(

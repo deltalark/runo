@@ -574,7 +574,7 @@ impl RunoApp {
                         .size(px(7.))
                         .rounded_full()
                         .bg(rgb(c_amber()))
-                        .with_animation(
+                        .animated(
                             "file-dirty-pulse",
                             Animation::new(Duration::from_millis(900))
                                 .repeat()

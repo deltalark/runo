@@ -1041,8 +1041,15 @@ impl RunoApp {
 
     /// The permission request a session is waiting on now, if any.
     pub(crate) fn approval_for(&self, id: u64) -> Option<&approvals::Request> {
+        if self.approvals.is_empty() {
+            return None;
+        }
+        // Only a request from the session's folder can be its; the rest needn't be traced
+        // back to a session each.
+        let dir = &self.state.session(id)?.dir;
         self.approvals
             .iter()
+            .filter(|r| r.dir == *dir)
             .find(|r| self.approval_session(r) == Some(id))
     }
 
