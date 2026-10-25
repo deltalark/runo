@@ -4,6 +4,8 @@ All notable changes to Runo are documented here.
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-10-26
+
 ### Added
 
 - The Runo assistant knows all of Runo. Each question now carries a reference read from the app itself: its version, every menu and Quick open command with its keys, every shortcut as you have it set, and every page of Settings with what each setting is set to now. Because it is built from the same tables the app draws, it can't fall behind a new feature or setting.
