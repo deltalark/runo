@@ -61,6 +61,7 @@ mod githistory;
 mod github;
 mod gitplace;
 mod handoff;
+mod hardware;
 mod harness;
 mod health;
 mod history;
@@ -628,7 +629,7 @@ struct RunoApp {
     proving: std::collections::HashSet<u64>,
     /// Worktree sizes and build output being freed.
     space: space_ui::Space,
-    /// Post-turn checks taking turns, when they run in the background one at a time.
+    /// Post-turn checks taking turns, as many at once as Settings allows.
     check_queue: crate::proof::CheckQueue,
     /// Sessions waiting on a second opinion, with the agent giving it.
     reviewing: HashMap<u64, &'static str>,
