@@ -1,11 +1,12 @@
 //! The Runo assistant: a mark in the corner of the window that answers questions about
 //! Runo and what is happening in it. It reads a short guide built into the app
-//! (`docs/guide`, one article per feature) and a snapshot of the app's state, and the
-//! person's default agent on a fast model writes the answer. The answer can offer actions
-//! (start or race agents, run a playbook, answer a permission request, message or stop a
-//! session, go somewhere, change a few settings), each a card the person runs with a click
-//! (see `assistant_act`); nothing changes until they do. With Guide only, it answers from
-//! the guide alone. It is off until turned on in Settings > General.
+//! (`docs/guide`, one article per feature), a reference read from the app itself (menus,
+//! commands, shortcuts and settings, see `assistant_ref`) and a snapshot of the app's
+//! state, and the person's default agent on a fast model writes the answer. The answer can
+//! offer actions (start or race agents, run a playbook, answer a permission request,
+//! message or stop a session, go somewhere, run any command, change any setting), each a
+//! card the person runs with a click (see `assistant_act`); nothing changes until they do.
+//! With Guide only, it answers from the guide alone. It is off until turned on in Settings > General.
 
 use super::*;
 use crate::agent_pick::AgentPick;
@@ -116,6 +117,22 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/guide/assistant.md"),
     ),
     ("menu-bar", include_str!("../../../docs/guide/menu-bar.md")),
+    (
+        "quit-update",
+        include_str!("../../../docs/guide/quit-update.md"),
+    ),
+    ("settings", include_str!("../../../docs/guide/settings.md")),
+    ("projects", include_str!("../../../docs/guide/projects.md")),
+    ("design", include_str!("../../../docs/guide/design.md")),
+    (
+        "architecture",
+        include_str!("../../../docs/guide/architecture.md"),
+    ),
+    ("timeline", include_str!("../../../docs/guide/timeline.md")),
+    ("notes", include_str!("../../../docs/guide/notes.md")),
+    ("arcade", include_str!("../../../docs/guide/arcade.md")),
+    ("inbox", include_str!("../../../docs/guide/inbox.md")),
+    ("home", include_str!("../../../docs/guide/home.md")),
 ];
 
 /// Questions offered when the panel opens with nothing asked yet.
@@ -143,6 +160,9 @@ const HISTORY_SENT: usize = 6;
 
 /// How many articles go to the agent with each question.
 const ARTICLES_SENT: usize = 4;
+
+/// How many pages of Settings go to the agent with each question, besides the overview.
+const PAGES_SENT: usize = 2;
 
 /// One guide article: a short header (title, keywords, shortcuts, where it opens) and text.
 pub(crate) struct Article {
@@ -216,41 +236,62 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Articles that match `query`, best first: a keyword phrase in the question counts most,
-/// then words of the title, the keywords and the text.
+/// How well a text matches the words asked: a keyword phrase in the question counts
+/// most, then words of the title, the keywords and the text.
+fn score(lower: &str, asked: &[String], title: &str, keywords: &[String], body: &str) -> u32 {
+    let mut score = 0;
+    for k in keywords {
+        if k.contains(' ') && lower.contains(k.as_str()) {
+            score += 6;
+        }
+    }
+    let title = words(title);
+    let keys: Vec<String> = keywords.iter().flat_map(|k| words(k)).collect();
+    let body = words(body);
+    for w in asked {
+        let stem = |x: &String| x == w || (w.len() > 4 && x.starts_with(&w[..w.len() - 1]));
+        if title.iter().any(stem) {
+            score += 3;
+        }
+        if keys.iter().any(stem) {
+            score += 2;
+        }
+        if body.iter().any(stem) {
+            score += 1;
+        }
+    }
+    score
+}
+
+/// Articles that match `query`, best first.
 pub(crate) fn search(query: &str) -> Vec<&'static Article> {
     let lower = query.to_lowercase();
     let asked = words(query);
     let mut scored: Vec<(u32, &'static Article)> = guide()
         .iter()
-        .map(|a| {
-            let mut score = 0;
-            for k in &a.keywords {
-                if k.contains(' ') && lower.contains(k.as_str()) {
-                    score += 6;
-                }
-            }
-            let title = words(&a.title);
-            let keys: Vec<String> = a.keywords.iter().flat_map(|k| words(k)).collect();
-            let body = words(&a.body);
-            for w in &asked {
-                let stem = |x: &String| x == w || (w.len() > 4 && x.starts_with(&w[..w.len() - 1]));
-                if title.iter().any(stem) {
-                    score += 3;
-                }
-                if keys.iter().any(stem) {
-                    score += 2;
-                }
-                if body.iter().any(stem) {
-                    score += 1;
-                }
-            }
-            (score, a)
-        })
+        .map(|a| (score(&lower, &asked, &a.title, &a.keywords, &a.body), a))
         .filter(|(score, _)| *score > 1)
         .collect();
     scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     scored.into_iter().map(|(_, a)| a).collect()
+}
+
+/// The pages of Settings that match `query` best, at most `max`, best first. A page
+/// counts only when several words of the question are on it.
+fn search_pages(
+    query: &str,
+    pages: Vec<crate::assistant_ref::RefPage>,
+    max: usize,
+) -> Vec<crate::assistant_ref::RefPage> {
+    let lower = query.to_lowercase();
+    let asked = words(query);
+    let mut scored: Vec<(u32, crate::assistant_ref::RefPage)> = pages
+        .into_iter()
+        .map(|p| (score(&lower, &asked, &p.title, &[], &p.body), p))
+        .filter(|(score, _)| *score >= 2)
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.into_iter().take(max).map(|(_, p)| p).collect()
 }
 
 /// An article's text with `{shortcut-id}` filled in with the keys it uses now.
@@ -265,6 +306,56 @@ fn with_live_keys(text: &str, cx: &App) -> String {
     out
 }
 
+/// The places the assistant can take the person, by the names guide articles' `open:`
+/// lines and the agent's `open` actions use, with their button labels. Settings pages
+/// are `settings:<page>` besides these.
+const PLACES: &[(&str, &str, Jump)] = &[
+    ("new-session", "Open New session", Jump::Action),
+    ("home", "Go to Home", Jump::View(View::Home)),
+    ("inbox", "Go to Inbox", Jump::View(View::Inbox)),
+    ("sessions", "Go to Sessions", Jump::View(View::AllSessions)),
+    (
+        "isolated",
+        "Go to Isolated sessions",
+        Jump::View(View::Worktrees),
+    ),
+    ("review", "Go to Git", Jump::View(View::Review)),
+    (
+        "git-history",
+        "Go to Git: History",
+        Jump::View(View::GitHistory),
+    ),
+    (
+        "branches",
+        "Go to Git: Branches",
+        Jump::View(View::Branches),
+    ),
+    ("github", "Go to GitHub", Jump::View(View::GitHub)),
+    (
+        "playbooks",
+        "Go to Playbooks",
+        Jump::View(View::Automations),
+    ),
+    ("history", "Go to History", Jump::View(View::History)),
+    ("timeline", "Go to Timeline", Jump::View(View::Activity)),
+    ("notes", "Go to Project notes", Jump::View(View::Notes)),
+    ("design", "Go to Design", Jump::View(View::Design)),
+    (
+        "architecture",
+        "Go to Architecture",
+        Jump::View(View::Architecture),
+    ),
+    ("data", "Go to Data", Jump::View(View::Data)),
+    (
+        "settings",
+        "Open Settings",
+        Jump::Settings(SettingsPage::Overview),
+    ),
+    ("tour", "Start the tour", Jump::Tour),
+    ("arcade", "Open the Arcade", Jump::Arcade),
+    ("add-project", "Add a project", Jump::AddProject),
+];
+
 /// Where an article's `open:` value leads.
 pub(crate) fn jump_for(open: &str) -> Option<Jump> {
     if let Some(page) = open.strip_prefix("settings:") {
@@ -272,21 +363,10 @@ pub(crate) fn jump_for(open: &str) -> Option<Jump> {
             .find(|p| p.label().eq_ignore_ascii_case(page))
             .map(Jump::Settings);
     }
-    Some(match open {
-        "new-session" => Jump::Action,
-        "home" => Jump::View(View::Home),
-        "inbox" => Jump::View(View::Inbox),
-        "sessions" => Jump::View(View::AllSessions),
-        "review" => Jump::View(View::Review),
-        "git-history" => Jump::View(View::GitHistory),
-        "branches" => Jump::View(View::Branches),
-        "github" => Jump::View(View::GitHub),
-        "playbooks" => Jump::View(View::Automations),
-        "history" => Jump::View(View::History),
-        "data" => Jump::View(View::Data),
-        "tour" => Jump::Tour,
-        _ => return None,
-    })
+    PLACES
+        .iter()
+        .find(|(id, _, _)| *id == open)
+        .map(|(_, _, jump)| jump.clone())
 }
 
 /// The label of an article's "Take me there" button.
@@ -298,19 +378,37 @@ pub(crate) fn open_label(open: &str) -> String {
             .unwrap_or("Settings");
         return format!("Open Settings → {name}");
     }
-    match open {
-        "new-session" => "Open New session".into(),
-        "tour" => "Start the tour".into(),
-        "playbooks" => "Go to Playbooks".into(),
-        "github" => "Go to GitHub".into(),
-        "history" => "Go to History".into(),
-        "data" => "Go to Data".into(),
-        "review" => "Go to Git".into(),
-        "git-history" => "Go to Git: History".into(),
-        "branches" => "Go to Git: Branches".into(),
-        "inbox" => "Go to Inbox".into(),
-        "sessions" => "Go to Sessions".into(),
-        _ => "Go to Home".into(),
+    PLACES
+        .iter()
+        .find(|(id, _, _)| *id == open)
+        .map(|(_, label, _)| label.to_string())
+        .unwrap_or_else(|| "Go to Home".into())
+}
+
+/// The guide article about each place, so every place in Runo has one: a new place
+/// doesn't build until it is given an article, and the tests check the article exists.
+pub(crate) fn view_article(view: View) -> &'static str {
+    match view {
+        View::Home => "home",
+        View::Design => "design",
+        View::Architecture => "architecture",
+        View::Data => "data",
+        View::Session => "composer",
+        View::NewSession => "new-session",
+        View::Inbox => "inbox",
+        View::AllSessions => "navigation",
+        View::History => "history",
+        View::Worktrees => "worktrees",
+        View::WorktreeSpace => "worktrees",
+        View::Settings => "settings",
+        View::Notes => "notes",
+        View::Activity => "timeline",
+        View::Automations => "playbooks",
+        View::GitHub => "github",
+        View::Editor => "files-terminal",
+        View::Review => "git",
+        View::Branches => "git",
+        View::GitHistory => "git",
     }
 }
 
@@ -428,35 +526,50 @@ impl Assistant {
 }
 
 /// How the answering agent offers to do something, and what it can offer.
-const ACTIONS_HELP: &str = "You can also act in Runo. To offer an action, add a line that starts \
-with ACTION: followed by one JSON object on the same line. The person sees each action as a card \
-and runs it with a click, so also say in your text what you're offering. Offer at most 3, and \
-only when the person asks for something to be done or one clearly helps. Use only the session \
-ids, request ids, agent ids, project and playbook names in the state above. The actions:\n\
-ACTION: {\"do\":\"start\",\"task\":\"...\",\"agent\":\"codex\",\"isolated\":true,\"project\":\"...\"} \
+fn actions_help() -> String {
+    let places: Vec<&str> = PLACES.iter().map(|(id, _, _)| *id).collect();
+    format!(
+        "You can also act in Runo. To offer an action, add a line that starts with ACTION: \
+followed by one JSON object on the same line. The person sees each action as a card and runs it \
+with a click, so also say in your text what you're offering. Offer at most 3, and only when the \
+person asks for something to be done or one clearly helps; when they ask you to do something \
+Runo can do, offer it rather than only explaining. Use only the session ids, request ids, agent \
+ids, project and playbook names in the state above, and only command ids and setting names from \
+the reference. The actions:\n\
+ACTION: {{\"do\":\"start\",\"task\":\"...\",\"agent\":\"codex\",\"isolated\":true,\"project\":\"...\"}} \
 start one agent on a task; agent, isolated (own worktree, the default) and project are optional\n\
-ACTION: {\"do\":\"race\",\"task\":\"...\",\"agents\":[\"claude\",\"codex\"]} several agents on \
+ACTION: {{\"do\":\"race\",\"task\":\"...\",\"agents\":[\"claude\",\"codex\"]}} several agents on \
 the same task, each in its own worktree\n\
-ACTION: {\"do\":\"playbook\",\"name\":\"...\"} run a playbook\n\
-ACTION: {\"do\":\"send\",\"session\":12,\"text\":\"...\"} send a message to a session's agent\n\
-ACTION: {\"do\":\"stop\",\"session\":12} stop a running agent\n\
-ACTION: {\"do\":\"approve\",\"request\":\"id\"} or {\"do\":\"deny\",\"request\":\"id\"} answer a \
+ACTION: {{\"do\":\"playbook\",\"name\":\"...\"}} run a playbook\n\
+ACTION: {{\"do\":\"send\",\"session\":12,\"text\":\"...\"}} send a message to a session's agent\n\
+ACTION: {{\"do\":\"stop\",\"session\":12}} stop a running agent\n\
+ACTION: {{\"do\":\"approve\",\"request\":\"id\"}} or {{\"do\":\"deny\",\"request\":\"id\"}} answer a \
 permission request once\n\
-ACTION: {\"do\":\"session\",\"id\":12} open a session\n\
-ACTION: {\"do\":\"project\",\"name\":\"...\"} switch project\n\
-ACTION: {\"do\":\"open\",\"place\":\"inbox\"} go to home, inbox, sessions, review, git-history, \
-branches, github, playbooks, history, new-session, tour or settings:<page>\n\
-ACTION: {\"do\":\"setting\",\"key\":\"theme\",\"value\":\"dark\"} keys: theme (light, dark, \
-system), animations (true or false), default_agent (an agent id)\n\
-ACTION: {\"do\":\"remember\",\"note\":\"...\"} keep a preference or fact the person states \
+ACTION: {{\"do\":\"session\",\"id\":12}} open a session\n\
+ACTION: {{\"do\":\"project\",\"name\":\"...\"}} switch project\n\
+ACTION: {{\"do\":\"command\",\"id\":\"quit\"}} run any command from the reference's Quick open \
+list by its id, such as quit (quits Runo for real, after the usual warning if agents are \
+running), arcade, toggle-terminal or go-design\n\
+ACTION: {{\"do\":\"open\",\"place\":\"inbox\"}} go to {} or settings:<page>\n\
+ACTION: {{\"do\":\"setting\",\"page\":\"Appearance\",\"name\":\"Theme\",\"value\":\"Dark\"}} \
+change any setting the reference lists, by its page and its name exactly as listed: true or false \
+for a switch, one of the listed choices for the rest. For a button, leave out value to press it, \
+such as {{\"do\":\"setting\",\"page\":\"General\",\"name\":\"Check for updates\"}}. Text \
+settings can't be changed this way.\n\
+ACTION: {{\"do\":\"remember\",\"note\":\"...\"}} keep a preference or fact the person states \
 for later chats in this project, like how they like work started; offer it when they say \
-\"always\", \"never\" or \"remember\"\n";
+\"always\", \"never\" or \"remember\"\n",
+        places.join(", ")
+    )
+}
 
 /// The prompt the answering agent gets: what is happening in the app, what is on screen,
 /// the guide articles that match, how to answer, and what it can offer to do.
+#[allow(clippy::too_many_arguments)]
 fn prompt(
     question: &str,
     articles: &[&Article],
+    reference: &str,
     context: &str,
     state: &str,
     history: &str,
@@ -466,17 +579,21 @@ fn prompt(
     let titles: Vec<&str> = guide().iter().map(|a| a.title.as_str()).collect();
     let mut text = String::from(
         "You are Runo's assistant, inside Runo, a desktop app that runs coding agents side by \
-         side. You answer how to use Runo from the guide below, and what is happening in the app \
+         side. You know all of Runo: its reference below is read from the app itself (its menus, \
+         every command, every shortcut and every setting with its value now), and the guide \
+         articles below explain how its features work. You answer what is happening in the app \
          from the state below, and you can offer to do things in it. Reply in a few short \
-         sentences or numbered steps, plain Markdown, no headings. Name buttons and settings \
-         exactly as the guide does, and sessions by their title. If neither the guide nor the \
-         state covers it, say so in one sentence. Don't run tools or look at files. On the last \
-         line, write OPEN: and the id of the one guide article whose place in the app would \
-         help most, or OPEN: none.\n\n",
+         sentences or numbered steps, plain Markdown, no headings. Name menus, buttons, commands, \
+         shortcuts and settings exactly as the reference and the guide do, with the keys the \
+         reference gives, and sessions by their title. Answer from the reference and the guide; \
+         only when neither covers something, say so in one sentence rather than guessing. Don't \
+         run tools or look at files. On the last line, write OPEN: and the id of the one guide \
+         article whose place in the app would help most, or OPEN: none.\n\n",
     );
     text.push_str(&format!("What is on screen now: {context}\n\n"));
     text.push_str(&format!("State of the app now:\n{state}\n"));
-    text.push_str(ACTIONS_HELP);
+    text.push_str(&format!("Runo's reference:\n{reference}\n"));
+    text.push_str(&actions_help());
     text.push('\n');
     if !notes.is_empty() {
         text.push_str(&format!("{notes}\n"));
@@ -589,6 +706,18 @@ impl RunoApp {
         window.focus(&self.focus, cx);
     }
 
+    /// Runo's reference sent with a question: always the overview, then the pages of
+    /// Settings that match the question best.
+    fn assistant_reference(&self, question: &str, cx: &App) -> String {
+        let data = self.discovered.clone().unwrap_or_default();
+        let mut out = crate::assistant_ref::overview(cx);
+        let pages = crate::assistant_ref::pages(&data, cx);
+        for page in search_pages(question, pages, PAGES_SENT) {
+            out.push_str(&format!("\n## {}\n{}", page.title, page.body));
+        }
+        out
+    }
+
     /// A short description of what is on screen, sent with each question. No file
     /// contents and no conversations.
     fn assistant_context(&self) -> String {
@@ -690,14 +819,16 @@ impl RunoApp {
         let provider = &agent::PROVIDERS[assistant_provider(st)];
         let model = assistant_model(st, provider.id);
         self.assistant.answerer = provider.name;
+        // With nothing matching, the article about the place on screen.
         let articles: Vec<&Article> = if found.is_empty() {
-            guide().iter().take(ARTICLES_SENT).collect()
+            article(view_article(self.view)).into_iter().collect()
         } else {
             found.iter().take(ARTICLES_SENT).copied().collect()
         };
         let text = prompt(
             &question,
             &articles,
+            &self.assistant_reference(&question, cx),
             &self.assistant_context(),
             &format!(
                 "{}{}",
@@ -2194,23 +2325,78 @@ mod tests {
 
     #[test]
     fn every_place_the_agent_is_told_of_exists() {
-        for place in [
-            "home",
-            "inbox",
-            "sessions",
-            "review",
-            "git-history",
-            "branches",
-            "github",
-            "playbooks",
-            "history",
-            "new-session",
-            "tour",
-            "settings:general",
-        ] {
-            assert!(ACTIONS_HELP.contains(place.split(':').next().unwrap()));
+        let help = actions_help();
+        for (place, _, _) in PLACES {
+            assert!(help.contains(place), "the agent isn't told of {place}");
             assert!(jump_for(place).is_some(), "{place} leads nowhere");
         }
+        assert!(jump_for("settings:general").is_some());
+    }
+
+    #[test]
+    fn every_place_in_runo_has_an_article() {
+        for view in [
+            View::Home,
+            View::Design,
+            View::Architecture,
+            View::Data,
+            View::Session,
+            View::NewSession,
+            View::Inbox,
+            View::AllSessions,
+            View::History,
+            View::Worktrees,
+            View::Settings,
+            View::Notes,
+            View::Activity,
+            View::Automations,
+            View::GitHub,
+            View::Editor,
+            View::Review,
+            View::Branches,
+            View::GitHistory,
+        ] {
+            let id = view_article(view);
+            assert!(article(id).is_some(), "there's no guide article {id}");
+        }
+    }
+
+    #[test]
+    fn every_command_has_an_article() {
+        let mut ids = Vec::new();
+        for c in crate::commands::COMMANDS {
+            assert!(
+                article(c.guide).is_some(),
+                "{} points at guide article {}, which doesn't exist",
+                c.id,
+                c.guide
+            );
+            assert!(!ids.contains(&c.id), "two commands are called {}", c.id);
+            ids.push(c.id);
+            assert_eq!(crate::commands::find(c.id).map(|f| f.id), Some(c.id));
+            assert_eq!(crate::commands::find(c.label).map(|f| f.id), Some(c.id));
+        }
+    }
+
+    #[test]
+    fn questions_about_every_part_find_it() {
+        let top = |q: &str| search(q).first().map(|a| a.id);
+        assert_eq!(top("exit runo"), Some("quit-update"));
+        assert_eq!(top("how do I quit"), Some("quit-update"));
+        assert_eq!(top("Is there a new version of Runo?"), Some("quit-update"));
+        assert_eq!(
+            top("how do I draw an architecture diagram"),
+            Some("architecture")
+        );
+        assert_eq!(
+            top("how do I design a screen and hand it off"),
+            Some("design")
+        );
+        assert_eq!(top("where are the games"), Some("arcade"));
+        assert_eq!(top("how do I add a project folder"), Some("projects"));
+        assert_eq!(top("where are my project notes"), Some("notes"));
+        assert_eq!(top("show me the timeline"), Some("timeline"));
+        assert_eq!(top("how do I search settings"), Some("settings"));
     }
 
     #[test]

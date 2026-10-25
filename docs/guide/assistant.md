@@ -1,19 +1,20 @@
 ---
 title: The Runo assistant
-keywords: assistant, avatar, ask runo, help, runo, what needs me, do it for me, slash commands, mention, nudge, remember, chat history, briefing, command deck
+keywords: assistant, avatar, ask runo, what can the assistant do, help, runo, what needs me, do it for me, slash commands, mention, nudge, remember, chat history, briefing, command deck
 shortcuts: ask-runo
 open: settings:general
 ---
 The Runo mark in the corner answers questions about Runo and about what is happening in it. Press {ask-runo} or click it, then ask how to do something, ask what needs you, or tell it what to do.
 
-It knows your projects, sessions and how each is doing, permission requests and questions waiting on you, your playbooks and the clash radar. It can offer to:
+It knows all of Runo: every menu, command and shortcut, and every setting with what it is set to now, read from the app itself, so it always matches the version you have. It also knows your projects, sessions and how each is doing, permission requests and questions waiting on you, your playbooks and the clash radar. It can offer to:
 
 - start an agent on a task, or race several on it, each in its own worktree
 - run a playbook
 - send a message to a session, or stop its agent
 - allow or deny a permission request once
 - open a session, switch project or go to any place in the app
-- change the theme, animations or the default agent
+- run any command in Quick open, such as quitting Runo or opening the Terminal
+- change any switch or choice in Settings, or press a button there such as **Check now** for updates
 
 Each offer is a card that says exactly what it will do; nothing happens until you click **Run** or **Go**, and **×** dismisses it. Follow-ups like "do that" or "and the other one?" work, as it remembers the conversation until you start a new chat.
 

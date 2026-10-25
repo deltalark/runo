@@ -191,9 +191,17 @@ impl SettingsPage {
     }
 }
 
-type SetBool = Rc<dyn Fn(&mut AppSettings, bool)>;
-type SetStr = Rc<dyn Fn(&mut AppSettings, String)>;
-type Action = Rc<dyn Fn(&mut RunoApp, &mut Context<RunoApp>)>;
+/// The window glass styles: the setting's value, its name, a note and how opaque it is.
+const GLASS_STYLES: [(&str, &str, &str, f32); 4] = [
+    ("off", "Off", "Solid", 1.),
+    ("subtle", "Subtle", "A hint of the desktop", 0.82),
+    ("frosted", "Frosted", "Blurred", 0.6),
+    ("clear", "Clear", "The most see-through", 0.38),
+];
+
+pub(crate) type SetBool = Rc<dyn Fn(&mut AppSettings, bool)>;
+pub(crate) type SetStr = Rc<dyn Fn(&mut AppSettings, String)>;
+pub(crate) type Action = Rc<dyn Fn(&mut RunoApp, &mut Context<RunoApp>)>;
 type Listener = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 enum Ctl {
@@ -1510,6 +1518,219 @@ fn agent_login_rows(c: &Connection) -> Vec<Row> {
         .collect()
 }
 
+/// A setting as the Runo assistant sees it: what it is now, and how to change it the
+/// way its control in Settings does.
+pub(crate) enum Knob {
+    Switch(bool, SetBool),
+    /// One of these choices, as (value, label), and the value now.
+    Choice(Vec<(String, String)>, String, SetStr),
+    /// Whether it's filled in. What's typed is never shown: it may be a token.
+    Text(bool),
+    /// A button's label, and what pressing it does.
+    Button(String, Action),
+}
+
+impl Ctl {
+    fn knob(self) -> Option<Knob> {
+        Some(match self {
+            Ctl::Switch(on, set) => Knob::Switch(on, set),
+            Ctl::Segment(opts, now, set) | Ctl::Dropdown(opts, now, set) => {
+                Knob::Choice(opts, now, set)
+            }
+            Ctl::Text { value, .. } => Knob::Text(!value.trim().is_empty()),
+            Ctl::Accent(now) => Knob::Choice(
+                settings::ACCENTS
+                    .iter()
+                    .map(|(id, name, _)| (id.to_string(), name.to_string()))
+                    .collect(),
+                now,
+                Rc::new(|s, v| s.accent = v),
+            ),
+            Ctl::Glass(now) => Knob::Choice(
+                GLASS_STYLES
+                    .iter()
+                    .map(|(value, name, _, _)| (value.to_string(), name.to_string()))
+                    .collect(),
+                now,
+                Rc::new(|s, v| s.glass = v),
+            ),
+            Ctl::Button(label, act) => Knob::Button(label, act),
+            _ => return None,
+        })
+    }
+
+    /// What the row shows, for the assistant, when it isn't a setting it can change.
+    fn shown(&self, cx: &App) -> Option<String> {
+        match self {
+            Ctl::Chip(text, _) | Ctl::Open(text) | Ctl::Keys(text) if !text.is_empty() => {
+                Some(text.clone())
+            }
+            Ctl::Shortcut(id) => Some(match keymap::label(cx, id) {
+                keys if keys.is_empty() => "no keys".to_string(),
+                keys => keys,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A setting the assistant named, found by the words Settings shows.
+pub(crate) struct Found {
+    pub page: SettingsPage,
+    /// The title of the section it sits in.
+    pub section: String,
+    pub title: String,
+    pub knob: Knob,
+}
+
+/// Every page of Settings, each agent's included, with the tab it sits under.
+pub(crate) fn every_page() -> Vec<(&'static str, SettingsPage)> {
+    SettingsPage::all()
+        .filter(|p| *p != SettingsPage::Overview)
+        .map(|p| (SettingsTab::of(p).label(), p))
+        .collect()
+}
+
+/// The titles of a page's sections, in order.
+pub(crate) fn section_titles(page: SettingsPage, st: &AppSettings) -> Vec<String> {
+    page_sections(page, st, &Discovered::default())
+        .into_iter()
+        .filter(|s| !s.rows.is_empty() && !s.title.is_empty())
+        .map(|s| s.title)
+        .collect()
+}
+
+/// Where a page is, as people find it: "Settings → Look → Appearance".
+pub(crate) fn place(page: SettingsPage) -> String {
+    let tab = SettingsTab::of(page).label();
+    if tab == page.label() {
+        format!("Settings → {tab}")
+    } else {
+        format!("Settings → {tab} → {}", page.label())
+    }
+}
+
+/// A page of Settings written out for the assistant: each section, and each row's name,
+/// what it is set to now and what it does. Built from the same rows the page draws, so
+/// it is always the page as it is.
+pub(crate) fn describe_page(page: SettingsPage, data: &Discovered, cx: &App) -> String {
+    let st = cx.global::<AppSettings>();
+    // Phone and Connections rows carry pairing links, hosts and keys in their text, so
+    // only their names go to the agent.
+    let private = private_page(page);
+    let mut out = format!("{}: {}\n", place(page), page.subtitle());
+    for sec in page_sections(page, st, data) {
+        if sec.rows.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("### {}", sec.title));
+        if !sec.desc.is_empty() {
+            out.push_str(&format!(": {}", sec.desc));
+        }
+        out.push('\n');
+        for r in sec.rows {
+            if r.title.trim().is_empty() {
+                continue;
+            }
+            let shown = r.ctl.shown(cx).filter(|_| !private).map(|t| redact(&t));
+            let now = match r.ctl.knob() {
+                Some(Knob::Switch(on, _)) => format!("switch, {}", if on { "on" } else { "off" }),
+                Some(Knob::Choice(opts, now, _)) => {
+                    let names: Vec<String> = opts
+                        .iter()
+                        .map(|(v, l)| {
+                            if *v == now {
+                                format!("{l} (now)")
+                            } else {
+                                l.clone()
+                            }
+                        })
+                        .collect();
+                    format!("one of: {}", names.join(", "))
+                }
+                Some(Knob::Text(filled)) => {
+                    format!("text, {}", if filled { "filled in" } else { "empty" })
+                }
+                Some(Knob::Button(label, _)) => format!("button \"{label}\""),
+                None => match (shown, r.open) {
+                    (_, Some(p)) => format!("opens {}", p.label()),
+                    (Some(text), None) => format!("shows {text}"),
+                    (None, None) => "a list or form".to_string(),
+                },
+            };
+            out.push_str(&format!("- {} [{now}]", redact(&r.title)));
+            if !r.desc.is_empty() && !private {
+                out.push_str(&format!(": {}", redact(&r.desc)));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Pages whose rows show pairing links, hosts or keys: the assistant sees only their names.
+pub(crate) fn private_page(page: SettingsPage) -> bool {
+    matches!(page, SettingsPage::Phone | SettingsPage::Connections)
+}
+
+/// `text` with anything that looks like a token or key, and any link that carries one,
+/// replaced by "[hidden]", so a row that shows one can't hand it to the agent.
+pub(crate) fn redact(text: &str) -> String {
+    let secret = |word: &str| {
+        let w = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let run = w
+            .split(|c: char| !(c.is_ascii_alphanumeric() || "-_+=".contains(c)))
+            .any(|part| {
+                part.len() >= 24
+                    && part.chars().any(|c| c.is_ascii_digit())
+                    && part.chars().any(|c| c.is_ascii_alphabetic())
+            });
+        let link = w.contains("://") && (w.contains('?') || w.contains('#') || w.contains('@'));
+        run || link
+    };
+    text.split(' ')
+        .map(|word| if secret(word) { "[hidden]" } else { word })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The setting called `name` on the page called `page` (any page when that's empty), by
+/// the row's title or its button's label, ignoring case.
+pub(crate) fn find_setting(page: &str, name: &str, data: &Discovered, cx: &App) -> Option<Found> {
+    let st = cx.global::<AppSettings>();
+    let want = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    let page = page
+        .trim()
+        .trim_start_matches("Settings")
+        .trim_start_matches(['→', '>', ' ']);
+    // "General → Alerts" names the page by its first part.
+    let page = page.split(['→', '>']).next().unwrap_or("").trim();
+    for (tab, p) in every_page() {
+        if !page.is_empty() && !want(p.label(), page) && !want(tab, page) {
+            continue;
+        }
+        for sec in page_sections(p, st, data) {
+            for r in sec.rows {
+                let title = r.title.clone();
+                let Some(knob) = r.ctl.knob() else {
+                    continue;
+                };
+                let hit = want(&title, name)
+                    || matches!(&knob, Knob::Button(label, _) if want(label, name));
+                if hit && !title.trim().is_empty() {
+                    return Some(Found {
+                        page: p,
+                        section: sec.title.clone(),
+                        title,
+                        knob,
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
 fn connection_sections(st: &AppSettings) -> Vec<Section> {
     let mut out = Vec::new();
     let mut list: Vec<Row> = vec![row(
@@ -2394,15 +2615,7 @@ impl RunoApp {
             }
             Ctl::Glass(current) => {
                 let mut cards = div().flex().gap(px(10.));
-                for (j, (value, name, note, alpha)) in [
-                    ("off", "Off", "Solid", 1.),
-                    ("subtle", "Subtle", "A hint of the desktop", 0.82),
-                    ("frosted", "Frosted", "Blurred", 0.6),
-                    ("clear", "Clear", "The most see-through", 0.38),
-                ]
-                .into_iter()
-                .enumerate()
-                {
+                for (j, (value, name, note, alpha)) in GLASS_STYLES.into_iter().enumerate() {
                     let on = value == current;
                     let key = format!("setting-glass-{ix}-{j}");
                     let window_fill = |c: u32| {
