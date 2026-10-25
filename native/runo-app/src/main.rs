@@ -517,6 +517,8 @@ struct RunoApp {
     refused: HashMap<u64, Vec<String>>,
     /// Sessions whose turn failed with a sign-in error, while Runo checks the sign-in.
     sign_in_checks: std::collections::HashSet<u64>,
+    /// Turns sent whose agent waits for the checkpoint being taken off the UI thread.
+    starting: HashMap<u64, turns::Starting>,
     /// Sessions whose running turn is the one retry after a sign-in error.
     sign_in_retried: std::collections::HashSet<u64>,
     /// Switching agents, waiting for the person to confirm.
@@ -1723,6 +1725,7 @@ impl RunoApp {
             always_allowed: Default::default(),
             refused: HashMap::new(),
             sign_in_checks: Default::default(),
+            starting: Default::default(),
             sign_in_retried: Default::default(),
             switch_plan: None,
             switch_preview: false,
@@ -2341,10 +2344,34 @@ impl RunoApp {
     }
 
     fn open_change(&mut self, path: &str) {
-        if let Some(dir) = self.current().map(|s| s.dir.clone()) {
-            self.diff = self.load_diff(&dir, path);
+        if self.selected_file.as_deref() != Some(path) {
+            self.diff.clear();
         }
         self.selected_file = Some(path.to_string());
+        if let Some(dir) = self.current().map(|s| s.dir.clone()) {
+            self.load_diff_bg(dir, path.to_string());
+        }
+    }
+
+    /// Read one file's diff off the UI thread (a few git commands each); it shows if the
+    /// file is still the one picked.
+    fn load_diff_bg(&self, dir: String, path: String) {
+        let whole = self.diff_whole;
+        let against = self.diff_against.clone();
+        let (d, p, a) = (dir.clone(), path.clone(), against.clone());
+        self.bg(
+            move || git::file_diff_context(&d, &p, whole, &a),
+            move |this, diff, cx| {
+                let same = this.diff_whole == whole && this.diff_against == against;
+                if same
+                    && this.selected_file.as_deref() == Some(path.as_str())
+                    && this.current().is_some_and(|s| s.dir == dir)
+                {
+                    this.diff = diff;
+                    cx.notify();
+                }
+            },
+        );
     }
 
     fn close_tab(&mut self, id: u64) {
@@ -2946,6 +2973,10 @@ impl RunoApp {
     /// Stop a session's agent, and everything it started.
     pub(crate) fn stop_session(&mut self, id: u64) {
         self.cancel_checks(id);
+        // Not started yet: it ends once its checkpoint is in, without running the agent.
+        if let Some(start) = self.starting.get_mut(&id) {
+            start.stopped = true;
+        }
         if let Some(handle) = self.handles.get(&Target::Session(id)) {
             if let Some(turn) = self.turns.get_mut(&id) {
                 turn.stopping = true;
@@ -4139,6 +4170,7 @@ impl RunoApp {
         self.pending_start.remove(&id);
         self.preparing.remove(&id);
         self.pr_status.remove(&id);
+        self.starting.remove(&id);
         connections::cleanup_session(&session);
         // The worktree, the branch when nothing in it is unmerged, and Undo snapshots.
         self.remove_session_files(&session, false);
@@ -7915,26 +7947,44 @@ impl RunoApp {
             }))
     }
 
-    fn load_diff(&self, dir: &str, path: &str) -> String {
-        git::file_diff_context(dir, path, self.diff_whole, &self.diff_against)
-    }
-
-    /// Re-read the diff after a view option changed.
+    /// Re-read the diff after a view option changed, off the UI thread: with every file
+    /// shown that is a few git commands per changed file.
     fn reload_diff(&mut self) {
         let Some(dir) = self.current().map(|s| s.dir.clone()) else {
             return;
         };
         if let Some(path) = self.selected_file.clone() {
-            self.diff = self.load_diff(&dir, &path);
+            self.load_diff_bg(dir.clone(), path);
         }
-        self.all_diffs = if self.diff_all {
-            self.changes
-                .iter()
-                .map(|c| (c.path.clone(), self.load_diff(&dir, &c.path)))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        if !self.diff_all {
+            self.all_diffs = Vec::new();
+            return;
+        }
+        let paths: Vec<String> = self.changes.iter().map(|c| c.path.clone()).collect();
+        let whole = self.diff_whole;
+        let against = self.diff_against.clone();
+        let (d, a) = (dir.clone(), against.clone());
+        self.bg(
+            move || {
+                paths
+                    .into_iter()
+                    .map(|p| {
+                        let diff = git::file_diff_context(&d, &p, whole, &a);
+                        (p, diff)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            move |this, diffs, cx| {
+                if this.diff_all
+                    && this.diff_whole == whole
+                    && this.diff_against == against
+                    && this.current().is_some_and(|s| s.dir == dir)
+                {
+                    this.all_diffs = diffs;
+                    cx.notify();
+                }
+            },
+        );
     }
 
     fn diff_lines(&self, path: &str, diff: &str, cx: &mut Context<Self>) -> Div {
@@ -8216,9 +8266,8 @@ impl RunoApp {
                     .when(selected, |el| el.bg(tint(c_active())))
                     .when(!selected, |el| el.hover(|el| el.bg(tint(c_subtle()))))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(dir) = this.current().map(|s| s.dir.clone()) {
-                            this.diff = this.load_diff(&dir, &path);
-                            this.selected_file = Some(path.clone());
+                        if this.current().is_some() {
+                            this.open_change(&path);
                         }
                         cx.notify();
                     }))

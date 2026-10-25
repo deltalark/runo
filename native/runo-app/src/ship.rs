@@ -403,7 +403,7 @@ impl RunoApp {
 
     /// Whether the session's agent is running a turn now.
     pub(crate) fn turn_running(&self, id: u64) -> bool {
-        self.handles.contains_key(&Target::Session(id))
+        self.handles.contains_key(&Target::Session(id)) || self.starting.contains_key(&id)
     }
 
     /// Mark a git step as running for a session, or say why it can't start. Returns
