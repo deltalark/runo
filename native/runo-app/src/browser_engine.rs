@@ -15,8 +15,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+
+/// Lock a mutex, taking its data even when a thread panicked while holding it, rather
+/// than panicking in turn. The page map and reply table stay usable after a failed reader.
+trait Locked<T> {
+    fn locked(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> Locked<T> for Mutex<T> {
+    fn locked(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 /// A Chromium-based browser Runo can drive: its macOS app (and the executable inside it,
 /// which has the same name), its macOS bundle id, and its command names on Linux.
@@ -548,7 +560,7 @@ impl Engine {
     }
 
     pub fn alive(&self) -> bool {
-        !self.shared.lock().unwrap().dead
+        !self.shared.locked().dead
     }
 
     /// Fire a command; `session` targets a page, `None` the browser.
@@ -566,20 +578,20 @@ impl Engine {
         if std::env::var_os("RUNO_CDP_LOG").is_some() {
             eprintln!("cdp> {msg}");
         }
-        let _ = self.writer.lock().unwrap().write_all(&frame_message(&msg));
+        let _ = self.writer.locked().write_all(&frame_message(&msg));
     }
 
     /// Send a command and wait for its result.
     fn call(&self, method: &str, params: Value, session: Option<&str>) -> Option<Value> {
         let (tx, rx) = channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.shared.lock().unwrap().replies.insert(id, tx);
+        self.shared.locked().replies.insert(id, tx);
         self.write(id, method, params, session);
         rx.recv_timeout(Duration::from_secs(10)).ok()
     }
 
     fn session_of(&self, key: u64) -> Option<String> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.locked();
         shared
             .pages
             .get(&key)
@@ -588,7 +600,7 @@ impl Engine {
     }
 
     pub fn has_page(&self, key: u64) -> bool {
-        self.shared.lock().unwrap().pages.contains_key(&key)
+        self.shared.locked().pages.contains_key(&key)
     }
 
     /// Open `url` in the session's page, creating the page the first time.
@@ -600,7 +612,7 @@ impl Engine {
         if self.has_page(key) {
             return;
         }
-        self.shared.lock().unwrap().pages.insert(
+        self.shared.locked().pages.insert(
             key,
             Page {
                 target: String::new(),
@@ -636,7 +648,7 @@ impl Engine {
             return;
         };
         let viewport = {
-            let mut shared = self.shared.lock().unwrap();
+            let mut shared = self.shared.locked();
             let Some(page) = shared.pages.get_mut(&key) else {
                 return;
             };
@@ -661,7 +673,7 @@ impl Engine {
         );
         self.metrics(&session, viewport);
         self.send("Page.navigate", json!({"url": url}), s);
-        if self.shared.lock().unwrap().active == Some(key) {
+        if self.shared.locked().active == Some(key) {
             self.screencast(&session, viewport);
         }
     }
@@ -694,7 +706,7 @@ impl Engine {
     /// Stream the session's page, and stop streaming the one before.
     pub fn show(&self, key: Option<u64>) {
         let (old, new) = {
-            let mut shared = self.shared.lock().unwrap();
+            let mut shared = self.shared.locked();
             if shared.active == key {
                 return;
             }
@@ -720,7 +732,7 @@ impl Engine {
     /// Match the page to the panel: CSS size and device pixel ratio.
     pub fn resize(&self, key: u64, viewport: (u32, u32, f32)) {
         let (session, active) = {
-            let mut shared = self.shared.lock().unwrap();
+            let mut shared = self.shared.locked();
             let active = shared.active == Some(key);
             let Some(page) = shared.pages.get_mut(&key) else {
                 return;
@@ -744,11 +756,11 @@ impl Engine {
 
     /// The newest frame of the page on screen, if one came since the last call.
     pub fn take_frame(&self) -> Option<Frame> {
-        self.shared.lock().unwrap().frame.take()
+        self.shared.locked().frame.take()
     }
 
     pub fn info(&self, key: u64) -> Option<PageInfo> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.locked();
         shared.pages.get(&key).map(|p| p.info.clone())
     }
 
@@ -772,7 +784,7 @@ impl Engine {
     }
 
     pub fn answer_dialog(&self, key: u64, accept: bool) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.locked();
         if let Some(page) = shared.pages.get_mut(&key) {
             page.info.dialog = None;
         }
@@ -786,12 +798,12 @@ impl Engine {
 
     /// Download messages since the last call, to show the person.
     pub fn take_notes(&self) -> Vec<String> {
-        std::mem::take(&mut self.shared.lock().unwrap().notes)
+        std::mem::take(&mut self.shared.locked().notes)
     }
 
     /// Forget the page's console errors.
     pub fn clear_console(&self, key: u64) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.locked();
         if let Some(page) = shared.pages.get_mut(&key) {
             page.info.console.clear();
         }
@@ -847,7 +859,7 @@ impl Engine {
         let Some(session) = self.session_of(key) else {
             return false;
         };
-        if let Some(page) = self.shared.lock().unwrap().pages.get_mut(&key) {
+        if let Some(page) = self.shared.locked().pages.get_mut(&key) {
             page.viewport = viewport;
         }
         self.call("Page.bringToFront", json!({}), Some(&session));
@@ -950,7 +962,7 @@ impl Engine {
 
     /// Close the session's page.
     pub fn close(&self, key: u64) {
-        let page = self.shared.lock().unwrap().pages.remove(&key);
+        let page = self.shared.locked().pages.remove(&key);
         if let Some(page) = page.filter(|p| !p.target.is_empty()) {
             self.send("Target.closeTarget", json!({"targetId": page.target}), None);
         }
@@ -1025,7 +1037,7 @@ fn read_loop(
                 continue;
             };
             if let Some(id) = msg["id"].as_u64() {
-                let reply = shared.lock().unwrap().replies.remove(&id);
+                let reply = shared.locked().replies.remove(&id);
                 if let Some(tx) = reply {
                     let _ = tx.send(msg["result"].clone());
                 }
@@ -1056,7 +1068,7 @@ fn read_loop(
                         "params": {"sessionId": params["sessionId"]}});
                     let _ = writer.write_all(&frame_message(&ack));
                     let active = {
-                        let s = shared.lock().unwrap();
+                        let s = shared.locked();
                         s.active
                             .and_then(|k| s.pages.get(&k))
                             .is_some_and(|p| p.session == session)
@@ -1070,7 +1082,7 @@ fn read_loop(
                         meta["deviceHeight"].as_f64().unwrap_or(0.) as f32,
                     );
                     if let Some(image) = params["data"].as_str().and_then(decode_frame) {
-                        shared.lock().unwrap().frame = Some(Frame { image, css });
+                        shared.locked().frame = Some(Frame { image, css });
                         seq.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -1079,7 +1091,7 @@ fn read_loop(
                 "Target.targetInfoChanged" => {
                     let info = &params["targetInfo"];
                     let target = info["targetId"].as_str().unwrap_or_default();
-                    let mut s = shared.lock().unwrap();
+                    let mut s = shared.locked();
                     if let Some(page) = s.pages.values_mut().find(|p| p.target == target) {
                         page.info.url = info["url"].as_str().unwrap_or_default().to_string();
                         seq.fetch_add(1, Ordering::Relaxed);
@@ -1088,7 +1100,7 @@ fn read_loop(
                 "Browser.downloadWillBegin" => {
                     let name = params["suggestedFilename"].as_str().unwrap_or("file");
                     let guid = params["guid"].as_str().unwrap_or_default().to_string();
-                    let mut s = shared.lock().unwrap();
+                    let mut s = shared.locked();
                     s.downloads.insert(guid, name.to_string());
                     s.notes.push(format!("Downloading {name}…"));
                     seq.fetch_add(1, Ordering::Relaxed);
@@ -1099,7 +1111,7 @@ fn read_loop(
                         continue;
                     }
                     let guid = params["guid"].as_str().unwrap_or_default();
-                    let mut s = shared.lock().unwrap();
+                    let mut s = shared.locked();
                     let name = s.downloads.remove(guid).unwrap_or_else(|| "file".into());
                     s.notes.push(if state == "completed" {
                         format!("Downloaded {name} to your Downloads folder.")
@@ -1114,7 +1126,7 @@ fn read_loop(
                     let Some(line) = console_error(method, params) else {
                         continue;
                     };
-                    let mut s = shared.lock().unwrap();
+                    let mut s = shared.locked();
                     if let Some(page) = s.pages.values_mut().find(|p| p.session == session) {
                         page.info.console.push(line);
                         let extra = page.info.console.len().saturating_sub(MAX_CONSOLE);
@@ -1125,7 +1137,7 @@ fn read_loop(
                 method @ ("Page.frameStartedLoading"
                 | "Page.loadEventFired"
                 | "Page.javascriptDialogOpening") => {
-                    let mut s = shared.lock().unwrap();
+                    let mut s = shared.locked();
                     if let Some(page) = s.pages.values_mut().find(|p| p.session == session) {
                         match method {
                             "Page.frameStartedLoading" => page.info.loading = true,
@@ -1144,7 +1156,7 @@ fn read_loop(
             }
         }
     }
-    let mut s = shared.lock().unwrap();
+    let mut s = shared.locked();
     s.dead = true;
     s.replies.clear();
     seq.fetch_add(1, Ordering::Relaxed);
@@ -1161,7 +1173,7 @@ fn adopt_popup(
 ) -> bool {
     let target = info["targetId"].as_str().unwrap_or_default().to_string();
     let url = info["url"].as_str().unwrap_or_default();
-    let mut s = shared.lock().unwrap();
+    let mut s = shared.locked();
     let opener = info["openerId"].as_str().unwrap_or_default();
     let key = match s.popups.get(&target) {
         Some(key) => *key,
@@ -1222,6 +1234,22 @@ fn decode_image(data: &str, format: image::ImageFormat) -> Option<Arc<RenderImag
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_poisoned_lock_still_hands_out_its_data() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let poisoner = shared.clone();
+        let _ = std::thread::spawn(move || {
+            let mut s = poisoner.locked();
+            s.notes.push("kept".into());
+            panic!("reader failed while holding the lock");
+        })
+        .join();
+        assert!(shared.is_poisoned());
+        assert_eq!(shared.locked().notes, vec!["kept".to_string()]);
+        shared.locked().dead = true;
+        assert!(shared.locked().dead);
+    }
 
     #[test]
     fn the_offer_names_applications_only_on_a_mac() {
